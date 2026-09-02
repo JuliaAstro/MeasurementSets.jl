@@ -26,7 +26,8 @@ struct ColumnDesc
     keywords::CasaRecord
     default::Any               # scalar columns only
     # filled in from ColumnSet: data-manager instance sequence number
-    seqnr::Int
+    # (`nothing` until the column is bound to a data manager)
+    seqnr::Union{Int,Nothing}
     fixedshape::Vector{Int}    # per-column stored shape (array cols)
 end
 
@@ -61,7 +62,7 @@ function read_columndesc(a::AipsIO)
     end
 
     ColumnDesc(name, comment, datamanager, datagroup, dtype, isarray, nrdim,
-               shape, option, maxlen, keywords, default, -1, Int[])
+               shape, option, maxlen, keywords, default, nothing, Int[])
 end
 
 # --- table description --------------------------------------------
@@ -191,7 +192,7 @@ function readtable(path::AbstractString)
     for (i, c) in enumerate(desc.columns)
         push!(cols, ColumnDesc(c.name, c.comment, c.datamanager, c.datagroup,
             c.type, c.isarray, c.ndim, c.shape, c.option, c.maxlength,
-            c.keywords, c.default, get(colseq, i, -1), get(colshape, i, Int[])))
+            c.keywords, c.default, get(colseq, i, nothing), get(colshape, i, Int[])))
     end
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.keywords,
                       desc.privatekeywords, cols)

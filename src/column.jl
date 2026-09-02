@@ -3,6 +3,10 @@
 # cache opened data-manager instances on the table
 const _DM_CACHE = IdDict{CTDSTable,Dict{Int,Any}}()
 
+function _dm_instance(t::CTDSTable, seqnr::Nothing)
+    error("column is not bound to a data manager")
+end
+
 function _dm_instance(t::CTDSTable, seqnr::Int)
     cache = get!(() -> Dict{Int,Any}(), _DM_CACHE, t)
     haskey(cache, seqnr) && return cache[seqnr]

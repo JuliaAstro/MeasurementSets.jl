@@ -18,11 +18,11 @@ import Mmap
 struct TSMCube
     cubeshape::Vector{Int}
     tileshape::Vector{Int}
-    fileseqnr::Int              # -1 => no data (undefined cells)
+    fileseqnr::Union{Int,Nothing}   # nothing => no data (undefined cells)
     fileoffset::Int
 end
 
-isnull(c::TSMCube) = c.fileseqnr < 0 || isempty(c.cubeshape)
+isnull(c::TSMCube) = c.fileseqnr === nothing || isempty(c.cubeshape)
 
 mutable struct TiledStMan
     path::String
@@ -43,10 +43,6 @@ end
 
 # --- header parsing -------------------------------------------------
 
-function _read_iposition_be(a::AipsIO)          # always big-endian in the header
-    read_iposition(a)
-end
-
 function _read_tsmcube(a::AipsIO)
     version = read_u32(a)
     read_record(a)                              # values_p (id values; empty here)
@@ -54,7 +50,8 @@ function _read_tsmcube(a::AipsIO)
     nrdim = Int(read_u32(a))
     cubeshape = read_iposition(a)
     tileshape = read_iposition(a)
-    fileseqnr = Int(read_i32(a))
+    fs = Int(read_i32(a))
+    fileseqnr = fs < 0 ? nothing : fs
     fileoffset = version == 1 ? Int(read_u32(a)) : Int(read_scalar(a, UInt64))
     return TSMCube(cubeshape, tileshape, fileseqnr, fileoffset)
 end
