@@ -1,0 +1,248 @@
+# CTDS table metadata: `table.dat`, `table.info`, column descriptions and
+# data-manager bindings.  (casacore/tables/Tables/PlainTable.cc,
+# TableDesc.cc, ColumnDesc.cc, BaseColDesc.cc, ColumnSet.cc, PlainColumn.cc)
+
+# --- ValType scalar default -----------------------------------------
+
+function read_valtype(a::AipsIO, t::CasaType)
+    isscalartype(t) || return nothing
+    t == TpString && return read_string(a)
+    return read_scalar(a, juliatype(t))
+end
+
+# --- column description --------------------------------------------
+
+struct ColumnDesc
+    name::String
+    comment::String
+    datamanager::String        # data-manager *type* the column is bound to
+    datagroup::String          # data-manager *group* (instance) name
+    type::CasaType             # scalar or array CasaType
+    isarray::Bool
+    ndim::Int                  # 0 => unknown/scalar; -1 kept as-is
+    shape::Vector{Int}         # fixed cell shape, empty if not fixed
+    option::Int32
+    maxlength::UInt32
+    keywords::CasaRecord
+    default::Any               # scalar columns only
+    # filled in from ColumnSet: data-manager instance sequence number
+    seqnr::Int
+    fixedshape::Vector{Int}    # per-column stored shape (array cols)
+end
+
+Base.show(io::IO, c::ColumnDesc) = print(io, "ColumnDesc(", c.name, "::",
+    c.type, c.isarray && !isempty(c.shape) ? string(Tuple(c.shape)) : "",
+    " @", c.datamanager, "/", c.datagroup, ")")
+
+function read_columndesc(a::AipsIO)
+    ntoh(read(a.io, UInt32))                 # ColumnDesc wrapper version
+    classname = read_string(a)               # e.g. "ScalarColumnDesc<Int>"
+    isarray = startswith(classname, "Array")
+    isrecord = startswith(classname, "ScalarRecord")
+
+    ntoh(read(a.io, UInt32))                  # BaseColumnDesc version
+    name        = read_string(a)
+    comment     = read_string(a)
+    datamanager = read_string(a)
+    datagroup   = read_string(a)
+    dtype       = casatype(ntoh(read(a.io, Int32)))
+    option      = ntoh(read(a.io, Int32))
+    nrdim       = Int(ntoh(read(a.io, Int32)))
+    shape       = isarray ? read_iposition(a) : Int[]
+    maxlen      = ntoh(read(a.io, UInt32))
+    keywords    = read_record(a)
+
+    default = nothing
+    ntoh(read(a.io, UInt32))                  # getDesc version
+    if isarray
+        read(a.io, UInt8)                     # obsolete "has default" switch
+    elseif !isrecord
+        default = read_valtype(a, dtype)
+    end
+
+    ColumnDesc(name, comment, datamanager, datagroup, dtype, isarray, nrdim,
+               shape, option, maxlen, keywords, default, -1, Int[])
+end
+
+# --- table description --------------------------------------------
+
+struct TableDesc
+    name::String
+    version::String
+    comment::String
+    keywords::CasaRecord
+    privatekeywords::CasaRecord
+    columns::Vector{ColumnDesc}
+end
+
+function read_tabledesc(a::AipsIO)
+    tvers = getstart(a, "TableDesc")
+    name = read_string(a)
+    version = read_string(a)
+    comment = read_string(a)
+    keywords = read_record(a)
+    privkw = tvers != 1 ? read_record(a) : CasaRecord()
+
+    ncol = Int(ntoh(read(a.io, UInt32)))
+    cols = ColumnDesc[read_columndesc(a) for _ in 1:ncol]
+    getend(a)
+    return TableDesc(name, version, comment, keywords, privkw, cols)
+end
+
+# --- data manager info -------------------------------------------
+
+struct DataManagerInfo
+    name::String               # instance name, e.g. "SSM" or "TiledData"
+    seqnr::Int
+    header::Vector{UInt8}      # raw AipsIO header block (decoded in later phases)
+end
+
+# --- the table ---------------------------------------------------
+
+struct CTDSTable
+    path::String
+    info_type::String
+    info_subtype::String
+    readme::String
+    version::Int
+    nrow::Int
+    bigendian::Bool
+    desc::TableDesc
+    datamanagers::Vector{DataManagerInfo}
+end
+
+nrow(t::CTDSTable) = t.nrow
+columnnames(t::CTDSTable) = [c.name for c in t.desc.columns]
+Base.getindex(t::CTDSTable, name::AbstractString) = columndesc(t, name)
+function columndesc(t::CTDSTable, name::AbstractString)
+    i = findfirst(c -> c.name == name, t.desc.columns)
+    i === nothing && throw(KeyError(name))
+    t.desc.columns[i]
+end
+keywords(t::CTDSTable) = t.desc.keywords
+
+function Base.show(io::IO, t::CTDSTable)
+    print(io, "CTDSTable(\"", basename(t.path), "\", ", t.nrow, " rows, ",
+          length(t.desc.columns), " columns")
+    isempty(t.info_type) || print(io, ", type=\"", t.info_type, "\"")
+    print(io, ")")
+end
+
+"""
+    subtables(t::CTDSTable) -> Vector{Pair{String,String}}
+
+Keyword name => subtable directory path, for every `TpTable` keyword.
+"""
+function subtables(t::CTDSTable)
+    out = Pair{String,String}[]
+    for (n, v) in t.desc.keywords
+        v isa SubTable && push!(out, n => _subtable_path(t.path, v.name))
+    end
+    return out
+end
+
+# Stored form is usually "Table: /abs/path" or a path relative to the table.
+function _subtable_path(parent::String, stored::String)
+    s = strip(stored)
+    startswith(s, "Table:") && (s = strip(s[7:end]))
+    normpath(isabspath(s) ? String(s) : joinpath(parent, s))
+end
+
+# --- readers ----------------------------------------------------
+
+function read_tableinfo(dir::String)
+    p = joinpath(dir, "table.info")
+    isfile(p) || return ("", "", "")
+    lines = readlines(p)
+    gettype(prefix, i) = length(lines) >= i && startswith(lines[i], prefix) ?
+        strip(lines[i][length(prefix)+1:end]) : ""
+    tp = gettype("Type = ", 1)
+    st = gettype("SubType = ", 2)
+    readme = length(lines) > 3 ? join(lines[4:end], "\n") : ""
+    return (String(tp), String(st), String(readme))
+end
+
+"""
+    readtable(path) -> CTDSTable
+
+Read the metadata (description, keywords, data-manager bindings, row count)
+of the casacore table directory at `path`.  Column *data* is not read.
+"""
+function readtable(path::AbstractString)
+    dir = String(rstrip(path, '/'))
+    isdir(dir) || throw(ArgumentError("not a table directory: $dir"))
+    tp, st, readme = read_tableinfo(dir)
+
+    a = AipsIO(read(joinpath(dir, "table.dat")))
+    version = Int(getstart(a, "Table"))
+    version <= 3 || error("Table version $version not supported")
+    nr = version > 2 ? Int(ntoh(read(a.io, UInt64))) : Int(ntoh(read(a.io, UInt32)))
+    format = ntoh(read(a.io, UInt32))
+    bigendian = format == 0
+    read_string(a)                                  # "PlainTable"
+
+    desc = read_tabledesc(a)
+    version == 1 && read_record(a)                  # legacy separate keyword set
+
+    dms, colseq, colshape = read_columnset(a, desc.columns)
+
+    # merge sequence numbers / stored shapes into the column descriptions
+    cols = ColumnDesc[]
+    for (i, c) in enumerate(desc.columns)
+        push!(cols, ColumnDesc(c.name, c.comment, c.datamanager, c.datagroup,
+            c.type, c.isarray, c.ndim, c.shape, c.option, c.maxlength,
+            c.keywords, c.default, get(colseq, i, -1), get(colshape, i, Int[])))
+    end
+    desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.keywords,
+                      desc.privatekeywords, cols)
+
+    return CTDSTable(dir, tp, st, readme, version, nr, bigendian, desc2, dms)
+end
+
+function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})
+    ncol = length(columns)
+    v = Int(ntoh(read(a.io, Int32)))
+    local setversion
+    if v < 0
+        setversion = -v
+        if setversion <= 2
+            ntoh(read(a.io, UInt32))
+        else
+            ntoh(read(a.io, UInt64))
+        end
+    else
+        setversion = 1
+    end
+    if setversion >= 3
+        ntoh(read(a.io, Int32)); ntoh(read(a.io, Int32))   # StorageOption
+    end
+    ntoh(read(a.io, UInt32))                               # nrman (seq counter)
+    ndm = Int(ntoh(read(a.io, UInt32)))
+    dmnames = String[]
+    dmseq = Int[]
+    for _ in 1:ndm
+        push!(dmnames, read_string(a))
+        push!(dmseq, Int(ntoh(read(a.io, UInt32))))
+    end
+
+    colseq = Dict{Int,Int}()
+    colshape = Dict{Int,Vector{Int}}()
+    for (i, col) in enumerate(columns)
+        ntoh(read(a.io, UInt32))                           # PlainColumn version
+        # version==1 would embed a keyword record here; unsupported (pre-2000)
+        read_string(a)                                     # originalName
+        ntoh(read(a.io, UInt32))                           # derived version
+        colseq[i] = Int(ntoh(read(a.io, UInt32)))          # data-manager seqnr
+        if col.isarray
+            shapedef = read(a.io, UInt8) != 0x00
+            shapedef && (colshape[i] = read_iposition(a))
+        end
+    end
+
+    dms = DataManagerInfo[]
+    for i in 1:ndm
+        n = Int(ntoh(read(a.io, UInt32)))
+        push!(dms, DataManagerInfo(dmnames[i], dmseq[i], read(a.io, n)))
+    end
+    return dms, colseq, colshape
+end
