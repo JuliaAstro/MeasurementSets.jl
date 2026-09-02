@@ -35,7 +35,6 @@ struct ColumnDesc{T<:CellShape}
     manager::String            # data-manager *type* the column is bound to
     group::String              # data-manager *group* (instance) name
     type::CasaType             # scalar or array CasaType
-    isarray::Bool
     shape::T                   # () scalar / Dims fixed / VariableShape / VariableDims
     option::Int32
     maxlength::UInt32
@@ -45,6 +44,10 @@ struct ColumnDesc{T<:CellShape}
     # (`nothing` until the column is bound to a data manager)
     sequ::Union{Int,Nothing}
 end
+
+"Whether column `c` holds arrays (`shape` other than `()`)."
+isarray(::ColumnDesc{Tuple{}}) = false
+isarray(::ColumnDesc) = true
 
 function Base.show(io::IO, c::ColumnDesc)
     s = c.shape isa Dims && !isempty(c.shape) ? string(c.shape) :
@@ -81,7 +84,7 @@ function read_columndesc(a::AipsIO)
     end
 
     shape = _cellshape(isarray, nrdim, schemashape)
-    ColumnDesc(name, comment, manager, group, dtype, isarray,
+    ColumnDesc(name, comment, manager, group, dtype,
                shape, option, maxlen, keywords, default, nothing)
 end
 
@@ -218,7 +221,7 @@ function readtable(path::AbstractString)
     for (i, c) in enumerate(desc.columns)
         shape = haskey(colshape, i) ? colshape[i] : c.shape   # column shape wins
         push!(cols, ColumnDesc(c.name, c.comment, c.manager, c.group,
-            c.type, c.isarray, shape, c.option, c.maxlength,
+            c.type, shape, c.option, c.maxlength,
             c.keywords, c.default, get(colseq, i, nothing)))
     end
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.public,
@@ -261,7 +264,7 @@ function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})
         read_string(a)                                     # originalName
         read_u32(a)                           # derived version
         colseq[i] = Int(read_u32(a))          # data-manager seqnr
-        if col.isarray
+        if isarray(col)
             shapedef = read(a.io, UInt8) != 0x00
             shapedef && (colshape[i] = read_iposition(a))
         end

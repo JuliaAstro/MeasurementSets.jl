@@ -18,17 +18,17 @@
 
     time = columndesc(t, "TIME")
     @test time.type == MSv2.TpDouble
-    @test !time.isarray
+    @test !isarray(time)
     @test time.manager == "StandardStMan"
 
     data = columndesc(t, "DATA")
     @test data.type == MSv2.TpComplex
-    @test data.isarray
+    @test isarray(data)
     @test data.manager == "TiledShapeStMan"
     @test data.shape isa VariableShape          # 2-D, per-row-variable shape
 
     uvw = columndesc(t, "UVW")
-    @test uvw.isarray && uvw.shape == (3,)
+    @test isarray(uvw) && uvw.shape == (3,)
     @test columndesc(t, "TIME").shape == ()     # scalar
 
     # QuantumUnits / MEASINFO nested keyword records decode
@@ -58,7 +58,7 @@ end
         @test c in columnnames(spw)
     end
     @test columndesc(spw, "CHAN_FREQ").type == MSv2.TpDouble
-    @test columndesc(spw, "CHAN_FREQ").isarray
+    @test isarray(columndesc(spw, "CHAN_FREQ"))
 
     ant = subtable(ms, "ANTENNA")
     @test columndesc(ant, "NAME").type == MSv2.TpString
