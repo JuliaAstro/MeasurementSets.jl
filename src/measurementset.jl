@@ -49,5 +49,5 @@ subtablenames(ms::MeasurementSet) = first.(subtables(getfield(ms, :main)))
 function Base.show(io::IO, ms::MeasurementSet)
     m = getfield(ms, :main)
     print(io, "MeasurementSet(\"", basename(getfield(ms, :path)), "\", ",
-          m.nrow, " rows, ", length(subtablenames(ms)), " subtables)")
+          m.rows, " rows, ", length(subtablenames(ms)), " subtables)")
 end

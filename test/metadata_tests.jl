@@ -2,9 +2,9 @@
 
 @testset "MAIN metadata" begin
     t = readtable(SAMPLE_MS)
-    @test t.info_type == "Measurement Set"
+    @test t.type == "Measurement Set"
     @test t.version == 2
-    @test t.bigendian isa Bool          # storage-manager endianness flag
+    @test t.endian in (:big, :little)
     @test nrow(t) == 9_817_600
     @test length(t.desc.columns) == 23
 

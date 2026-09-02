@@ -26,7 +26,7 @@ isnull(c::TSMCube) = c.sequ === nothing || isempty(c.cubeshape)
 
 mutable struct TiledStMan
     path::String
-    bigendian::Bool
+    endian::Symbol                 # :big or :little
     kind::Symbol                   # :column or :shape
     sequ::Int                      # this data manager's sequence number
     type::CasaType                 # element type of the tiled column
@@ -85,9 +85,9 @@ function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::CTDSTable)
 end
 
 function open_tiledstman(t::CTDSTable, dm::DataManagerInfo)
-    path = joinpath(t.path, "table.f$(dm.seqnr)")
+    path = joinpath(t.path, "table.f$(dm.sequ)")
     a = AipsIO(read(path); endian=:big)             # header file is big-endian
-    tsm = TiledStMan(path, t.bigendian, :column, dm.seqnr, TpOther, "", 0,
+    tsm = TiledStMan(path, t.endian, :column, dm.sequ, TpOther, "", 0,
                      Dict{Int,String}(), Dict{Int,Vector{UInt8}}(),
                      TSMCube[], Int[], Int[], Int[])
 
@@ -174,7 +174,7 @@ function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int)
 
     bytes = _tsmbytes(tsm, cube.sequ)
     bbytes = _bucketbytes(tsm, cube)
-    swap = tsm.bigendian ? ntoh : ltoh
+    swap = tsm.endian === :big ? ntoh : ltoh
 
     tlast_tile = lastpos ÷ ts[nd]
     tlast_in   = lastpos % ts[nd]
@@ -236,7 +236,7 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function, nrow:
     rowspertile = ts[nd]
     bytes = _tsmbytes(tsm, cube.sequ)
     bbytes = _bucketbytes(tsm, cube)
-    swap = tsm.bigendian ? ntoh : ltoh
+    swap = tsm.endian === :big ? ntoh : ltoh
 
     backing = Vector{T}(undef, nrow * planelen)
     for r in 1:nrow

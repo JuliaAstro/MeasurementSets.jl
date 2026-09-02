@@ -92,8 +92,8 @@ function read_ssm_header!(hdr::AipsIO)
 end
 
 function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
-    bytes = read(joinpath(t.path, "table.f$(dm.seqnr)"))
-    endian = t.bigendian ? :big : :little
+    bytes = read(joinpath(t.path, "table.f$(dm.sequ)"))
+    endian = t.endian
 
     # header lives in the first 512 bytes
     h = read_ssm_header!(AipsIO(IOBuffer(bytes); endian))

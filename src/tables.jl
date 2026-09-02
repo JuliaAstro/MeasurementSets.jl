@@ -27,7 +27,7 @@ struct ColumnDesc
     default::Any               # scalar columns only
     # filled in from ColumnSet: data-manager instance sequence number
     # (`nothing` until the column is bound to a data manager)
-    seqnr::Union{Int,Nothing}
+    sequ::Union{Int,Nothing}
     fixedshape::Dims           # per-column stored shape (array cols)
 end
 
@@ -71,8 +71,8 @@ struct TableDesc
     name::String
     version::String
     comment::String
-    keywords::CasaRecord
-    privatekeywords::CasaRecord
+    public::CasaRecord         # public keyword set
+    private::CasaRecord        # private (internal) keyword set
     columns::Vector{ColumnDesc}
 end
 
@@ -81,20 +81,20 @@ function read_tabledesc(a::AipsIO)
     name = read_string(a)
     version = read_string(a)
     comment = read_string(a)
-    keywords = read_record(a)
-    privkw = tvers != 1 ? read_record(a) : CasaRecord()
+    public = read_record(a)
+    private = tvers != 1 ? read_record(a) : CasaRecord()
 
     ncol = Int(read_u32(a))
     cols = ColumnDesc[read_columndesc(a) for _ in 1:ncol]
     getend(a)
-    return TableDesc(name, version, comment, keywords, privkw, cols)
+    return TableDesc(name, version, comment, public, private, cols)
 end
 
 # --- data manager info -------------------------------------------
 
 struct DataManagerInfo
     name::String               # instance name, e.g. "SSM" or "TiledData"
-    seqnr::Int
+    sequ::Int                  # sequence number
     header::Vector{UInt8}      # raw AipsIO header block (decoded in later phases)
 end
 
@@ -102,17 +102,17 @@ end
 
 struct CTDSTable
     path::String
-    info_type::String
-    info_subtype::String
+    type::String               # table.info Type
+    subtype::String            # table.info SubType
     readme::String
     version::Int
-    nrow::Int
-    bigendian::Bool
+    rows::Int                  # number of rows
+    endian::Symbol             # :big or :little (storage-manager files)
     desc::TableDesc
-    datamanagers::Vector{DataManagerInfo}
+    managers::Vector{DataManagerInfo}
 end
 
-nrow(t::CTDSTable) = t.nrow
+nrow(t::CTDSTable) = t.rows
 columnnames(t::CTDSTable) = [c.name for c in t.desc.columns]
 Base.getindex(t::CTDSTable, name::AbstractString) = columndesc(t, name)
 function columndesc(t::CTDSTable, name::AbstractString)
@@ -120,12 +120,12 @@ function columndesc(t::CTDSTable, name::AbstractString)
     i === nothing && throw(KeyError(name))
     t.desc.columns[i]
 end
-keywords(t::CTDSTable) = t.desc.keywords
+keywords(t::CTDSTable) = t.desc.public
 
 function Base.show(io::IO, t::CTDSTable)
-    print(io, "CTDSTable(\"", basename(t.path), "\", ", t.nrow, " rows, ",
+    print(io, "CTDSTable(\"", basename(t.path), "\", ", t.rows, " rows, ",
           length(t.desc.columns), " columns")
-    isempty(t.info_type) || print(io, ", type=\"", t.info_type, "\"")
+    isempty(t.type) || print(io, ", type=\"", t.type, "\"")
     print(io, ")")
 end
 
@@ -136,7 +136,7 @@ Keyword name => subtable directory path, for every `TpTable` keyword.
 """
 function subtables(t::CTDSTable)
     out = Pair{String,String}[]
-    for (n, v) in t.desc.keywords
+    for (n, v) in t.desc.public
         v isa SubTable && push!(out, n => _subtable_path(t.path, v.name))
     end
     return out
@@ -179,7 +179,7 @@ function readtable(path::AbstractString)
     version <= 3 || error("Table version $version not supported")
     nr = version > 2 ? Int(read_scalar(a, UInt64)) : Int(read_u32(a))
     format = read_u32(a)
-    bigendian = format == 0
+    endian = format == 0 ? :big : :little
     read_string(a)                                  # "PlainTable"
 
     desc = read_tabledesc(a)
@@ -194,10 +194,10 @@ function readtable(path::AbstractString)
             c.type, c.isarray, c.ndim, c.shape, c.option, c.maxlength,
             c.keywords, c.default, get(colseq, i, nothing), get(colshape, i, ())))
     end
-    desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.keywords,
-                      desc.privatekeywords, cols)
+    desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.public,
+                      desc.private, cols)
 
-    return CTDSTable(dir, tp, st, readme, version, nr, bigendian, desc2, dms)
+    return CTDSTable(dir, tp, st, readme, version, nr, endian, desc2, dms)
 end
 
 function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})

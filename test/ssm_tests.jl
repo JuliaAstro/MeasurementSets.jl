@@ -31,7 +31,7 @@ if _HAVE_CASACORE
             for name in cols
                 ours = getcolumn(t, name)
                 col = ct[Symbol(name)]
-                match = all(1:t.nrow) do i
+                match = all(1:nrow(t)) do i
                     tv = ndims(col) == 1 ? col[i] :
                          col[ntuple(_ -> Colon(), ndims(col) - 1)..., i]
                     _flat(ours[i]) == _flat(tv)
