@@ -1,13 +1,13 @@
 # Phase 5: standard MS v2 schema + validation.
 
 @testset "schema" begin
-    @test haskey(MS_SCHEMA, "MAIN")
-    @test length(MS_SCHEMA) == 18          # MAIN + 17 standard subtables
+    @test haskey(SCHEMAVER2, "MAIN")
+    @test length(SCHEMAVER2) == 18          # MAIN + 17 standard subtables
     main = stdtable("MAIN")
     @test "ANTENNA" in main.subtables
     @test any(c -> c.name == "DATA" && !c.required, main.columns)
     @test any(c -> c.name == "TIME" && c.required, main.columns)
-    @test stdtable("antenna") === MS_SCHEMA["ANTENNA"]   # case-insensitive
+    @test stdtable("antenna") === SCHEMAVER2["ANTENNA"]   # case-insensitive
 
     # the sample MS is conformant
     @test isempty(validate(MeasurementSet(SAMPLE_MS)))

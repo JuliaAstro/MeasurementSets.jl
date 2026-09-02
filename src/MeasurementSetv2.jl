@@ -23,6 +23,6 @@ export MeasurementSet, subtable, subtablenames
 export CasaRecord, SubTable, ColumnDesc, TableDesc, CasaType
 export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
-export StdColumn, StdTable, MS_SCHEMA, stdtable, stdcolumns, validate
+export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 
 end
