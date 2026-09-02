@@ -3,10 +3,6 @@
 
 Pure-Julia reader (and, in later phases, writer) for the Measurement Set
 version 2 data format — casacore Table Data System tables.
-
-Phase 1: CTDS metadata — table descriptions, keywords, data-manager
-bindings, row counts, and the MS subtable tree.  Column *data* decoding
-(StandardStMan / TiledStMan / IncrementalStMan) is added in later phases.
 """
 module MeasurementSetv2
 
@@ -19,11 +15,14 @@ include("datamanagers/standard.jl")
 include("datamanagers/tiled.jl")
 include("datamanagers/incremental.jl")
 include("column.jl")
+include("schema.jl")
+include("tables_interface.jl")
 
 export CTDSTable, readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames
 export CasaRecord, SubTable, ColumnDesc, TableDesc, CasaType
 export VariableShape, VariableDims, isarray
-export getcolumn, getcell
+export Column, column, getcolumn, getcell
+export StdColumn, StdTable, MS_SCHEMA, stdtable, stdcolumns, validate
 
 end

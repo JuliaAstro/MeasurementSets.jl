@@ -17,6 +17,9 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
         include("ssm_tests.jl")
         include("tsm_tests.jl")
         include("ism_tests.jl")
+        include("api_tests.jl")
+        include("tables_tests.jl")
+        include("schema_tests.jl")
     else
         @info "SAMPLE_MS not found; skipping data-dependent tests" SAMPLE_MS
     end

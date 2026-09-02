@@ -30,39 +30,45 @@ never-written columns (`WEIGHT_SPECTRUM`).  Single-column tiled managers
 only.
 
 **Phase 4 — IncrementalStMan column data (read).**
-`getcolumn` / `getcell` for the "store-on-change" manager behind most MAIN
-metadata columns (`TIME`, `INTERVAL`, `EXPOSURE`, `FIELD_ID`, …).  Header,
-`ISMIndex`, per-bucket per-column run-length index, and value decoding.
-With this every column of a typical MAIN table is readable except ones
-that were never written.  Scalar + direct-array + scalar-string values;
-ISM indirect arrays and string arrays are not yet supported.
+The "store-on-change" manager behind most MAIN metadata columns (`TIME`,
+`INTERVAL`, `EXPOSURE`, `FIELD_ID`, …).  With this every column of a
+typical MAIN table is readable except ones that were never written.
+
+**Phase 5 — high-level API, `Tables.jl`, standard schema.**
+Lazy `Column <: AbstractVector` (`t[:DATA]`, `col[i]`, `col[1:5]`,
+`col[:]`), `Tables.jl` column *and* row access (subtables drop straight
+into `DataFrame`, `Tables.rowtable`, …), and a machine-readable encoding of
+the MS v2 standard schema (`MS_SCHEMA`, `stdtable`, `validate`).
 
 Not yet implemented: SSM/ISM indirect arrays and string arrays;
-multi-column tiled managers; the high-level typed MS API; `Tables.jl`
-integration; all writers.
+multi-column tiled managers; all writers.
 
 ## Usage
 
 ```julia
 using MeasurementSetv2
 
-t = readtable("/path/to/my.ms")          # the MAIN table
-nrow(t)                                   # 9_817_600
-columnnames(t)                            # ["UVW", "FLAG", …, "DATA", …]
-columndesc(t, "DATA")                     # ColumnDesc(DATA::TpComplex @TiledShapeStMan/TiledDATA)
-keywords(t)["MS_VERSION"]                 # 2.0f0
-
 ms = MeasurementSet("/path/to/my.ms")
-subtablenames(ms)                         # ["ANTENNA", "SPECTRAL_WINDOW", …]
-spw = subtable(ms, "SPECTRAL_WINDOW")
-columndesc(spw, "CHAN_FREQ")
+subtablenames(ms)                        # ["ANTENNA", "SPECTRAL_WINDOW", …]
 
-ant = subtable(ms, "ANTENNA")
-getcolumn(ant, "NAME")                    # ["ea01", "ea02", …]  (SSM)
-getcolumn(ant, "POSITION")               # Vector of 3-element Float64 arrays
-getcell(t, "ANTENNA1", 1)                # Int32           (SSM)
-getcell(t, "DATA", 42)                   # 4×64 ComplexF32 (TiledShapeStMan)
-getcell(t, "UVW", 42)                    # 3-element Float64 (TiledColumnStMan)
+# lazy columns
+ms[:DATA][42]                            # 4×64 ComplexF32   (one cell)
+ms[:UVW][1:100]                          # first 100 baselines' UVW
+column(ms.data, "TIME")[:]               # whole column (fast path)
+
+t = readtable("/path/to/my.ms")          # the MAIN table directly
+nrow(t); columnnames(t)
+columndesc(t, "DATA")                    # schema of one column
+keywords(t)["MS_VERSION"]                # 2.0f0
+
+# Tables.jl — subtables interoperate with the data ecosystem
+using DataFrames
+DataFrame(subtable(ms, "ANTENNA"))       # 26×8
+Tables.schema(subtable(ms, "SPECTRAL_WINDOW"))
+
+# standard-schema check
+validate(ms)                             # String[]  (conformant)
+stdtable("SPECTRAL_WINDOW").columns
 ```
 
 ## Tests

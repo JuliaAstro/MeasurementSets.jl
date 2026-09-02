@@ -45,6 +45,10 @@ end
 
 subtablenames(ms::MeasurementSet) = first.(subtables(getfield(ms, :data)))
 
+# `ms[:DATA]` / `ms["DATA"]` -> a lazy column of the MAIN table
+Base.getindex(ms::MeasurementSet, name::AbstractString) = getfield(ms, :data)[name]
+Base.getindex(ms::MeasurementSet, name::Symbol) = getfield(ms, :data)[name]
+
 function Base.show(io::IO, ms::MeasurementSet)
     print(io, "MeasurementSet(\"", basename(getfield(ms, :path)), "\", ",
           getfield(ms, :data).rows, " rows, ",

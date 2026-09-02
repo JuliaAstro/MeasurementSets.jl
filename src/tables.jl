@@ -143,7 +143,6 @@ end
 
 nrow(t::CTDSTable) = t.rows
 columnnames(t::CTDSTable) = [c.name for c in t.desc.columns]
-Base.getindex(t::CTDSTable, name::AbstractString) = columndesc(t, name)
 function columndesc(t::CTDSTable, name::AbstractString)
     i = findfirst(c -> c.name == name, t.desc.columns)
     i === nothing && throw(KeyError(name))
