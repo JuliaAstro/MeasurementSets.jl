@@ -12,18 +12,19 @@
 #   * Strings are [n::UInt32][n bytes] with no terminator.
 #
 # `table.dat` is always "canonical" (big-endian).  Storage-manager files
-# follow the table's endian flag, so `AipsIO` carries a `bigendian` field.
+# follow the table's endian flag, so `AipsIO` carries an `endian` field
+# (`:big` or `:little`).
 
 const AIPS_MAGIC = 0xbebebebe
 
 mutable struct AipsIO
     io::IO
-    bigendian::Bool
+    endian::Symbol           # :big or :little
     level::Int
     ends::Vector{Int}     # recorded end offset for each open nesting level
 end
 
-AipsIO(io::IO; bigendian::Bool=true) = AipsIO(io, bigendian, 0, Int[])
+AipsIO(io::IO; endian::Symbol=:big) = AipsIO(io, endian, 0, Int[])
 AipsIO(data::Vector{UInt8}; kw...) = AipsIO(IOBuffer(data); kw...)
 
 Base.position(a::AipsIO) = position(a.io)
@@ -32,7 +33,7 @@ Base.eof(a::AipsIO) = eof(a.io)
 
 # --- primitive scalar reads (honouring endianness) ---------------------
 
-_ord(a::AipsIO, x) = a.bigendian ? ntoh(x) : ltoh(x)
+_ord(a::AipsIO, x) = a.endian === :big ? ntoh(x) : ltoh(x)
 
 read_scalar(a::AipsIO, ::Type{T}) where {T} = _ord(a, read(a.io, T))
 read_scalar(a::AipsIO, ::Type{Bool}) = read(a.io, UInt8) != 0x00

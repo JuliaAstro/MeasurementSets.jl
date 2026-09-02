@@ -96,10 +96,10 @@ function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
     endian = t.bigendian ? :big : :little
 
     # header lives in the first 512 bytes
-    h = read_ssm_header!(AipsIO(IOBuffer(bytes); bigendian=t.bigendian))
+    h = read_ssm_header!(AipsIO(IOBuffer(bytes); endian))
 
     # the SSM record embedded in table.dat (always big-endian there)
-    blk = AipsIO(copy(dm.header); bigendian=true)
+    blk = AipsIO(copy(dm.header); endian=:big)
     getstart(blk, "SSM")
     read_string(blk)                                       # data-manager name
     offset = Int.(read_block(blk, UInt32))
@@ -111,7 +111,7 @@ function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
 
     # assemble and parse the index buckets
     idxbytes = _read_index_bytes(ssm, h)
-    ia = AipsIO(IOBuffer(idxbytes); bigendian=t.bigendian)
+    ia = AipsIO(IOBuffer(idxbytes); endian)
     ssm.indices = SSMIndex[read_ssmindex(ia) for _ in 1:h.nrinx]
     return ssm
 end

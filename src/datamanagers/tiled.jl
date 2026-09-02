@@ -86,7 +86,7 @@ end
 
 function open_tiledstman(t::CTDSTable, dm::DataManagerInfo)
     path = joinpath(t.path, "table.f$(dm.seqnr)")
-    a = AipsIO(read(path); bigendian=true)          # header file is big-endian
+    a = AipsIO(read(path); endian=:big)             # header file is big-endian
     tsm = TiledStMan(path, t.bigendian, :column, dm.seqnr, TpOther, "", 0,
                      Dict{Int,String}(), Dict{Int,Vector{UInt8}}(),
                      TSMCube[], Int[], Int[], Int[])
