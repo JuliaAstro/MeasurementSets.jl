@@ -17,16 +17,22 @@ column descriptions, keyword sets incl. nested `Record`s / `QuantumUnits`
 subtable tree.
 
 **Phase 2 — StandardStMan (SSM) column data (read).**
-`getcolumn(t, name)` / `getcell(t, name, row)` for SSM-backed columns:
-scalar numerics, `Bool` (bit-unpacked), variable-length `String`
-(incl. multi-bucket string buckets), and direct fixed-shape numeric/`Bool`
-arrays.  Little- and big-endian tables.  Verified column-by-column
-against `Casacore.jl`.
+`getcolumn` / `getcell` for SSM-backed columns: scalar numerics, `Bool`
+(bit-unpacked), variable-length `String` (incl. multi-bucket string
+buckets), and direct fixed-shape numeric/`Bool` arrays.
 
-Not yet implemented: SSM indirect arrays and string arrays;
-`TiledStMan`/`TiledShapeStMan` (visibility cubes) and `IncrementalStMan`
-(most MAIN metadata columns); the high-level typed MS API; `Tables.jl`
-integration; all writers.
+**Phase 3 — TiledStMan column data (read).**
+`getcolumn` / `getcell` for `TiledShapeStMan` and `TiledColumnStMan`
+columns — the visibility cubes (`DATA`, `FLAG`, `WEIGHT`, `SIGMA`,
+`UVW`, …).  Header parsing, `row → hypercube` mapping, and tile
+de-interleaving from the `table.f<n>_TSM<m>` files (mmapped).  Detects
+never-written columns (`WEIGHT_SPECTRUM`).  Single-column tiled managers
+only.
+
+Not yet implemented: SSM indirect arrays and string arrays; multi-column
+tiled managers; `IncrementalStMan` (most MAIN metadata columns —
+`TIME`, `INTERVAL`, `FIELD_ID`, …); the high-level typed MS API;
+`Tables.jl` integration; all writers.
 
 ## Usage
 
@@ -47,7 +53,9 @@ columndesc(spw, "CHAN_FREQ")
 ant = subtable(ms, "ANTENNA")
 getcolumn(ant, "NAME")                    # ["ea01", "ea02", …]  (SSM)
 getcolumn(ant, "POSITION")               # Vector of 3-element Float64 arrays
-getcell(readtable("/path/to/my.ms"), "ANTENNA1", 1)   # Int32
+getcell(t, "ANTENNA1", 1)                # Int32           (SSM)
+getcell(t, "DATA", 42)                   # 4×64 ComplexF32 (TiledShapeStMan)
+getcell(t, "UVW", 42)                    # 3-element Float64 (TiledColumnStMan)
 ```
 
 ## Tests

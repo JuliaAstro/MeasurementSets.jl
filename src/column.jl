@@ -9,6 +9,8 @@ function _dm_instance(t::CTDSTable, seqnr::Int)
     dm = t.datamanagers[findfirst(d -> d.seqnr == seqnr, t.datamanagers)]
     inst = if dm.name in ("StandardStMan", "SSM")
         open_standardstman(t, dm)
+    elseif dm.name in ("TiledShapeStMan", "TiledColumnStMan", "TiledStMan")
+        open_tiledstman(t, dm)
     else
         error("data manager \"$(dm.name)\" not yet supported (column data)")
     end
@@ -34,9 +36,13 @@ Read an entire column's data.
 function getcolumn(t::CTDSTable, name::AbstractString)
     c = columndesc(t, name)
     inst = _dm_instance(t, c.seqnr)
-    inst isa StandardStMan ||
+    if inst isa StandardStMan
+        ssm_getcolumn(inst, _dm_local_index(t, c), c, t.nrow)
+    elseif inst isa TiledStMan
+        tsm_getcolumn(inst, c, t.nrow)
+    else
         error("column \"$name\" uses $(typeof(inst)); not supported yet")
-    ssm_getcolumn(inst, _dm_local_index(t, c), c, t.nrow)
+    end
 end
 
 """
@@ -47,9 +53,13 @@ Read one cell (`row` is 1-based).
 function getcell(t::CTDSTable, name::AbstractString, row::Integer)
     c = columndesc(t, name)
     inst = _dm_instance(t, c.seqnr)
-    inst isa StandardStMan ||
+    if inst isa StandardStMan
+        ssm_getcell(inst, _dm_local_index(t, c), c, row)
+    elseif inst isa TiledStMan
+        tsm_getcell(inst, c, row)
+    else
         error("column \"$name\" uses $(typeof(inst)); not supported yet")
-    ssm_getcell(inst, _dm_local_index(t, c), c, row)
+    end
 end
 
 getcolumn(ms::MeasurementSet, sub::AbstractString, name::AbstractString) =

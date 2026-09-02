@@ -3,6 +3,9 @@ uuid = "3e921475-4ab2-4f24-819a-e54722cb9848"
 authors = ["Paul Barrett <pebarrett@gmail.com> and contributors"]
 version = "1.0.0-DEV"
 
+[deps]
+Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
+
 [compat]
 julia = "1.10.10"
 

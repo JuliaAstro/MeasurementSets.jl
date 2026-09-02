@@ -16,6 +16,7 @@ include("record.jl")
 include("tables.jl")
 include("measurementset.jl")
 include("datamanagers/standard.jl")
+include("datamanagers/tiled.jl")
 include("column.jl")
 
 export CTDSTable, readtable, columnnames, columndesc, keywords, subtables, nrow
