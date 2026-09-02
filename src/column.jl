@@ -15,6 +15,8 @@ function _dm_instance(t::CTDSTable, sequ::Int)
         open_standardstman(t, dm)
     elseif dm.name in ("TiledShapeStMan", "TiledColumnStMan", "TiledStMan")
         open_tiledstman(t, dm)
+    elseif dm.name in ("IncrementalStMan", "ISM")
+        open_incrementalstman(t, dm)
     else
         error("data manager \"$(dm.name)\" not yet supported (column data)")
     end
@@ -22,14 +24,19 @@ function _dm_instance(t::CTDSTable, sequ::Int)
     return inst
 end
 
-# 1-based position of a column among those bound to the same DM instance
-function _dm_local_index(t::CTDSTable, c::ColumnDesc)
-    i = 1
+# 1-based position of column `c` among those bound to the same DM instance,
+# and the total number bound to it
+function _dm_local(t::CTDSTable, c::ColumnDesc)
+    idx = 0
+    n = 0
     for x in t.desc.columns
-        x === c && return i
-        x.sequ == c.sequ && (i += 1)
+        if x.sequ == c.sequ
+            n += 1
+            x === c && (idx = n)
+        end
     end
-    error("column not found")
+    idx == 0 && error("column not found")
+    return idx, n
 end
 
 """
@@ -41,9 +48,12 @@ function getcolumn(t::CTDSTable, name::AbstractString)
     c = columndesc(t, name)
     inst = _dm_instance(t, c.sequ)
     if inst isa StandardStMan
-        ssm_getcolumn(inst, _dm_local_index(t, c), c, t.rows)
+        ssm_getcolumn(inst, first(_dm_local(t, c)), c, t.rows)
     elseif inst isa TiledStMan
         tsm_getcolumn(inst, c, t.rows)
+    elseif inst isa IncrementalStMan
+        idx, n = _dm_local(t, c)
+        ism_getcolumn(inst, idx, c, t.rows, n)
     else
         error("column \"$name\" uses $(typeof(inst)); not supported yet")
     end
@@ -58,9 +68,12 @@ function getcell(t::CTDSTable, name::AbstractString, row::Integer)
     c = columndesc(t, name)
     inst = _dm_instance(t, c.sequ)
     if inst isa StandardStMan
-        ssm_getcell(inst, _dm_local_index(t, c), c, row)
+        ssm_getcell(inst, first(_dm_local(t, c)), c, row)
     elseif inst isa TiledStMan
         tsm_getcell(inst, c, row)
+    elseif inst isa IncrementalStMan
+        idx, n = _dm_local(t, c)
+        ism_getcell(inst, idx, c, row, n)
     else
         error("column \"$name\" uses $(typeof(inst)); not supported yet")
     end

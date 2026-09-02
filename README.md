@@ -29,10 +29,17 @@ de-interleaving from the `table.f<n>_TSM<m>` files (mmapped).  Detects
 never-written columns (`WEIGHT_SPECTRUM`).  Single-column tiled managers
 only.
 
-Not yet implemented: SSM indirect arrays and string arrays; multi-column
-tiled managers; `IncrementalStMan` (most MAIN metadata columns —
-`TIME`, `INTERVAL`, `FIELD_ID`, …); the high-level typed MS API;
-`Tables.jl` integration; all writers.
+**Phase 4 — IncrementalStMan column data (read).**
+`getcolumn` / `getcell` for the "store-on-change" manager behind most MAIN
+metadata columns (`TIME`, `INTERVAL`, `EXPOSURE`, `FIELD_ID`, …).  Header,
+`ISMIndex`, per-bucket per-column run-length index, and value decoding.
+With this every column of a typical MAIN table is readable except ones
+that were never written.  Scalar + direct-array + scalar-string values;
+ISM indirect arrays and string arrays are not yet supported.
+
+Not yet implemented: SSM/ISM indirect arrays and string arrays;
+multi-column tiled managers; the high-level typed MS API; `Tables.jl`
+integration; all writers.
 
 ## Usage
 

@@ -16,6 +16,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
         include("casacore_crosscheck.jl")   # defines _HAVE_CASACORE / CCT
         include("ssm_tests.jl")
         include("tsm_tests.jl")
+        include("ism_tests.jl")
     else
         @info "SAMPLE_MS not found; skipping data-dependent tests" SAMPLE_MS
     end
