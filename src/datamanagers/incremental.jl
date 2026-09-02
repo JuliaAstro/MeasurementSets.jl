@@ -18,17 +18,18 @@
 # Rows and column numbers are 1-based in this file's API.
 
 struct ISMIndex
-    nused::Int
-    rows::Vector{Int}      # nused+1 entries: first (0-based) row of each bucket
-    bucket::Vector{Int}    # nused entries: physical bucket number
+    used::Int
+    rows::Vector{Int}      # used+1 entries: first (1-based) row of each bucket,
+                           # with rows[used+1] == nrow+1
+    bucket::Vector{Int}    # used entries: physical bucket number
 end
 
-# bucket index i with rows[i] <= row0 < rows[i+1]
-function _ism_bucket(ix::ISMIndex, row0::Integer)
-    for i in 1:ix.nused
-        ix.rows[i+1] > row0 && return i
+# bucket index i whose row range [rows[i], rows[i+1]) contains `row` (1-based)
+function _ism_bucket(ix::ISMIndex, row::Integer)
+    for i in 1:ix.used
+        ix.rows[i+1] > row && return i
     end
-    error("ISMIndex: row $row0 out of range")
+    error("ISMIndex: row $row out of range")
 end
 
 mutable struct IncrementalStMan
@@ -60,13 +61,14 @@ function open_incrementalstman(t::CTDSTable, dm::DataManagerInfo)
     idxpos = 512 + nbucket * bucketsize
     ia = AipsIO(IOBuffer(@view bytes[idxpos+1:end]); endian)
     iv = getstart(ia, "ISMIndex")
-    nused = Int(read_u32(ia))
-    rows = iv > 1 ? Int.(read_block(ia, UInt64)) : Int.(read_block(ia, UInt32))
+    used = Int(read_u32(ia))
+    ondisk = iv > 1 ? read_block(ia, UInt64) : read_block(ia, UInt32)
+    rows = Int[Int(x) + 1 for x in ondisk]       # on-disk row starts are 0-based
     bucket = Int.(read_block(ia, UInt32))
     getend(ia)
 
     return IncrementalStMan(bytes, endian, bucketsize, nbucket,
-                            ISMIndex(nused, rows, bucket))
+                            ISMIndex(used, rows, bucket))
 end
 
 # --- bucket index parsing -----------------------------------------
@@ -139,12 +141,11 @@ ISM instance.
 """
 function ism_getcell(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
                      row::Integer, ncol::Int)
-    row0 = Int(row) - 1
-    bi = _ism_bucket(ism.index, row0)
+    bi = _ism_bucket(ism.index, Int(row))
     bucketnr = ism.index.bucket[bi]
-    bstart = ism.index.rows[bi]
+    bstart = ism.index.rows[bi]                  # 1-based first row of the bucket
     rownrs, offsets, database = _ism_colindex(ism, bucketnr, colnr, ncol)
-    inx = _le_index(rownrs, row0 - bstart)
+    inx = _le_index(rownrs, Int(row) - bstart)   # bucket-relative (0-based) row
     return _ism_decode(ism, c, database + offsets[inx])
 end
 
@@ -161,16 +162,16 @@ function ism_getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
           Vector{Any}(undef, nrow)
 
     ix = ism.index
-    for bi in 1:ix.nused
-        bstart = ix.rows[bi]
-        bend = ix.rows[bi+1]                 # exclusive, 0-based
+    for bi in 1:ix.used
+        bstart = ix.rows[bi]                 # 1-based first row of the bucket
+        bend = ix.rows[bi+1]                 # 1-based, exclusive
         rownrs, offsets, database = _ism_colindex(ism, ix.bucket[bi], colnr, ncol)
         for k in 1:length(rownrs)
-            r0 = bstart + rownrs[k]
+            r0 = bstart + rownrs[k]                                  # 1-based
             r1 = k < length(rownrs) ? bstart + rownrs[k+1] : bend    # exclusive
             v = _ism_decode(ism, c, database + offsets[k])
             @inbounds for r in r0:r1-1
-                out[r+1] = v
+                out[r] = v
             end
         end
     end
