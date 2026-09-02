@@ -22,6 +22,7 @@ include("column.jl")
 export CTDSTable, readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames
 export CasaRecord, SubTable, ColumnDesc, TableDesc, CasaType
+export VariableShape, VariableDims
 export getcolumn, getcell
 
 end

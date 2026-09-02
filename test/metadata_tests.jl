@@ -25,9 +25,11 @@
     @test data.type == MSv2.TpComplex
     @test data.isarray
     @test data.manager == "TiledShapeStMan"
+    @test data.shape isa VariableShape          # 2-D, per-row-variable shape
 
     uvw = columndesc(t, "UVW")
-    @test uvw.isarray && uvw.fixedshape == (3,)
+    @test uvw.isarray && uvw.shape == (3,)
+    @test columndesc(t, "TIME").shape == ()     # scalar
 
     # QuantumUnits / MEASINFO nested keyword records decode
     tk = columndesc(t, "TIME").keywords
@@ -60,5 +62,5 @@ end
 
     ant = subtable(ms, "ANTENNA")
     @test columndesc(ant, "NAME").type == MSv2.TpString
-    @test columndesc(ant, "POSITION").fixedshape == (3,)
+    @test columndesc(ant, "POSITION").shape == (3,)
 end

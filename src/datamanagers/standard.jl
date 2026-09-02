@@ -142,6 +142,15 @@ end
 
 # --- per-column geometry ---------------------------------------------
 
+# The fixed cell shape as a `Dims`; SSM cannot read variable-shape columns
+# (those are stored as indirect arrays in a separate file).
+_dims(c::ColumnDesc{<:Dims}) = c.shape
+_dims(c::ColumnDesc) =
+    error("column \"$(c.name)\": SSM reads of variable-shape arrays " *
+          "(indirect arrays) are not supported yet")
+
+_nrelem(c::ColumnDesc) = (s = _dims(c); isempty(s) ? 1 : prod(s))
+
 "Canonical byte width of one stored cell for column `c`."
 function cell_extsize(c::ColumnDesc)
     nrelem = _nrelem(c)
@@ -153,8 +162,6 @@ function cell_extsize(c::ColumnDesc)
         return sizeof(juliatype(c.type)) * nrelem
     end
 end
-
-_nrelem(c::ColumnDesc) = isempty(c.fixedshape) ? 1 : prod(c.fixedshape)
 
 # --- value access ---------------------------------------------------
 
@@ -188,23 +195,24 @@ end
 `ssmcol` and `row` are 1-based.
 """
 function ssm_getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Integer)
+    dims = _dims(c)                         # errors for variable-shape columns
     ext = cell_extsize(c)
     off, firstrow = locate(ssm, ssmcol, row)
     inbucket = Int(row) - firstrow          # 0-based position within the bucket
-    nrelem = _nrelem(c)
+    nrelem = isempty(dims) ? 1 : prod(dims)
 
     if c.type == TpBool
         bits = _read_bits(ssm, off, inbucket * nrelem, nrelem)
-        return isempty(c.fixedshape) ? bits[1] : reshape(bits, c.fixedshape...)
+        return isempty(dims) ? bits[1] : reshape(bits, dims...)
     elseif c.type == TpString
         c.maxlength > 0 && error("fixed-length strings not yet supported")
-        !isempty(c.fixedshape) && error("string arrays not yet supported (Phase 2)")
+        isempty(dims) || error("string arrays not yet supported (Phase 2)")
         return _read_string_ref(ssm, off + inbucket * ext)
-    elseif isempty(c.fixedshape)
+    elseif isempty(dims)
         return _read_elems(ssm, juliatype(c.type), off + inbucket * ext, 1)[1]
     else
         vals = _read_elems(ssm, juliatype(c.type), off + inbucket * ext, nrelem)
-        return reshape(vals, c.fixedshape...)
+        return reshape(vals, dims...)
     end
 end
 
@@ -259,8 +267,9 @@ Read all `nrow` cells of column `ssmcol` (1-based).  Returns a `Vector`
 for scalars and a `Vector{Array}` for direct-array columns.
 """
 function ssm_getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer)
+    dims = _dims(c)                         # errors for variable-shape columns
     coloff = ssm.offset[ssmcol]
-    nrelem = _nrelem(c)
+    nrelem = isempty(dims) ? 1 : prod(dims)
 
     if c.type == TpBool
         out = Vector{Bool}(undef, nrow * nrelem)
@@ -269,8 +278,8 @@ function ssm_getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Int
             bits = _read_bits(ssm, bucketptr(ssm, bkt) + coloff, 0, n)
             copyto!(out, (firstrow - 1) * nrelem + 1, bits, 1, n)
         end
-        return isempty(c.fixedshape) ? out :
-               [reshape(out[(r-1)*nrelem+1 : r*nrelem], c.fixedshape...) for r in 1:nrow]
+        return isempty(dims) ? out :
+               [reshape(out[(r-1)*nrelem+1 : r*nrelem], dims...) for r in 1:nrow]
 
     elseif c.type == TpString
         return [ssm_getcell(ssm, ssmcol, c, r) for r in 1:nrow]
@@ -287,7 +296,7 @@ function ssm_getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Int
                 flat[base + k] = _swap(ssm, raw[k])
             end
         end
-        isempty(c.fixedshape) && return flat
-        return [reshape(flat[(r-1)*nrelem+1 : r*nrelem], c.fixedshape...) for r in 1:nrow]
+        isempty(dims) && return flat
+        return [reshape(flat[(r-1)*nrelem+1 : r*nrelem], dims...) for r in 1:nrow]
     end
 end

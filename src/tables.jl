@@ -12,16 +12,31 @@ end
 
 # --- column description --------------------------------------------
 
-struct ColumnDesc
+"An array column with a fixed number of axes but a per-row-variable cell shape
+(casacore ndim > 0 with no declared shape, e.g. `DATA`, `FLAG_CATEGORY`)."
+struct VariableShape end
+
+"An array column whose dimensionality itself varies per row
+(casacore ndim == -1, e.g. `ASSOC_SPW_ID`)."
+struct VariableDims end
+
+"""
+Cell-shape descriptor for a column:
+  * `()`             — scalar
+  * a `Dims` tuple   — array with a fixed cell shape
+  * `VariableShape`  — array, fixed dimensionality, per-row-variable shape
+  * `VariableDims`   — array whose dimensionality itself varies per row
+"""
+const CellShape = Union{Dims,VariableShape,VariableDims}
+
+struct ColumnDesc{T<:CellShape}
     name::String
     comment::String
     manager::String            # data-manager *type* the column is bound to
     group::String              # data-manager *group* (instance) name
     type::CasaType             # scalar or array CasaType
     isarray::Bool
-    ndim::Int                  # declared axes: 0 = scalar, N = fixed N-dim
-                               # array, -1 = array whose ndim varies per row
-    shape::Dims                # fixed cell shape, () if not fixed
+    shape::T                   # () scalar / Dims fixed / VariableShape / VariableDims
     option::Int32
     maxlength::UInt32
     keywords::CasaRecord
@@ -29,12 +44,15 @@ struct ColumnDesc
     # filled in from ColumnSet: data-manager instance sequence number
     # (`nothing` until the column is bound to a data manager)
     sequ::Union{Int,Nothing}
-    fixedshape::Dims           # per-column stored shape (array cols)
 end
 
-Base.show(io::IO, c::ColumnDesc) = print(io, "ColumnDesc(", c.name, "::",
-    c.type, c.isarray && !isempty(c.shape) ? string(c.shape) : "",
-    " @", c.manager, "/", c.group, ")")
+function Base.show(io::IO, c::ColumnDesc)
+    s = c.shape isa Dims && !isempty(c.shape) ? string(c.shape) :
+        c.shape isa VariableShape ? "[var shape]" :
+        c.shape isa VariableDims ? "[var dims]" : ""
+    print(io, "ColumnDesc(", c.name, "::", c.type, s,
+          " @", c.manager, "/", c.group, ")")
+end
 
 function read_columndesc(a::AipsIO)
     read_u32(a)                 # ColumnDesc wrapper version
@@ -50,7 +68,7 @@ function read_columndesc(a::AipsIO)
     dtype       = casatype(read_i32(a))
     option      = read_i32(a)
     nrdim       = Int(read_i32(a))
-    shape       = isarray ? read_iposition(a) : ()
+    schemashape = isarray ? read_iposition(a) : ()
     maxlen      = read_u32(a)
     keywords    = read_record(a)
 
@@ -62,9 +80,16 @@ function read_columndesc(a::AipsIO)
         default = read_valtype(a, dtype)
     end
 
-    ColumnDesc(name, comment, manager, group, dtype, isarray, nrdim,
-               shape, option, maxlen, keywords, default, nothing, ())
+    shape = _cellshape(isarray, nrdim, schemashape)
+    ColumnDesc(name, comment, manager, group, dtype, isarray,
+               shape, option, maxlen, keywords, default, nothing)
 end
+
+_cellshape(isarray::Bool, nrdim::Int, fixed::Dims)::CellShape =
+    !isarray            ? () :
+    !isempty(fixed)     ? fixed :
+    nrdim == -1         ? VariableDims() :
+                          VariableShape()
 
 # --- table description --------------------------------------------
 
@@ -188,12 +213,13 @@ function readtable(path::AbstractString)
 
     dms, colseq, colshape = read_columnset(a, desc.columns)
 
-    # merge sequence numbers / stored shapes into the column descriptions
+    # merge sequence numbers / column-level fixed shapes into the descriptions
     cols = ColumnDesc[]
     for (i, c) in enumerate(desc.columns)
+        shape = haskey(colshape, i) ? colshape[i] : c.shape   # column shape wins
         push!(cols, ColumnDesc(c.name, c.comment, c.manager, c.group,
-            c.type, c.isarray, c.ndim, c.shape, c.option, c.maxlength,
-            c.keywords, c.default, get(colseq, i, nothing), get(colshape, i, ())))
+            c.type, c.isarray, shape, c.option, c.maxlength,
+            c.keywords, c.default, get(colseq, i, nothing)))
     end
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.public,
                       desc.private, cols)
