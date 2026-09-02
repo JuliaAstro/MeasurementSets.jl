@@ -10,19 +10,23 @@ No dependency on the casacore C++ library.
 
 ## Status
 
-**Phase 1 — CTDS metadata (read).** Implemented:
+**Phase 1 — CTDS metadata (read).**
+`AipsIO` primitive decoder; `table.dat` / `table.info` parsing (table &
+column descriptions, keyword sets incl. nested `Record`s / `QuantumUnits`
+/ `MEASINFO`, data-manager bindings, row counts, endianness); the MS
+subtable tree.
 
-- `AipsIO` primitive decoder (object framing, strings, `IPosition`,
-  `Block`, `Array`, canonical big-endian scalars).
-- `table.dat` / `table.info` parsing: table description, column
-  descriptions, keyword sets (including nested `Record`s, `QuantumUnits`
-  and `MEASINFO` measure info), data-manager bindings and instance
-  headers, row counts, endianness.
-- The MS subtable tree (`TpTable` keywords → subtable paths).
+**Phase 2 — StandardStMan (SSM) column data (read).**
+`getcolumn(t, name)` / `getcell(t, name, row)` for SSM-backed columns:
+scalar numerics, `Bool` (bit-unpacked), variable-length `String`
+(incl. multi-bucket string buckets), and direct fixed-shape numeric/`Bool`
+arrays.  Little- and big-endian tables.  Verified column-by-column
+against `Casacore.jl`.
 
-Not yet implemented: column *data* decoding (`StandardStMan`,
-`TiledStMan`/`TiledShapeStMan`, `IncrementalStMan`), the high-level typed
-MS API, `Tables.jl` integration, and all writers.
+Not yet implemented: SSM indirect arrays and string arrays;
+`TiledStMan`/`TiledShapeStMan` (visibility cubes) and `IncrementalStMan`
+(most MAIN metadata columns); the high-level typed MS API; `Tables.jl`
+integration; all writers.
 
 ## Usage
 
@@ -39,6 +43,11 @@ ms = MeasurementSet("/path/to/my.ms")
 subtablenames(ms)                         # ["ANTENNA", "SPECTRAL_WINDOW", …]
 spw = subtable(ms, "SPECTRAL_WINDOW")
 columndesc(spw, "CHAN_FREQ")
+
+ant = subtable(ms, "ANTENNA")
+getcolumn(ant, "NAME")                    # ["ea01", "ea02", …]  (SSM)
+getcolumn(ant, "POSITION")               # Vector of 3-element Float64 arrays
+getcell(readtable("/path/to/my.ms"), "ANTENNA1", 1)   # Int32
 ```
 
 ## Tests

@@ -15,9 +15,12 @@ include("typeenum.jl")
 include("record.jl")
 include("tables.jl")
 include("measurementset.jl")
+include("datamanagers/standard.jl")
+include("column.jl")
 
 export CTDSTable, readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames
 export CasaRecord, SubTable, ColumnDesc, TableDesc, CasaType
+export getcolumn, getcell
 
 end

@@ -51,11 +51,11 @@ end
 
 function read_recorddesc(a::AipsIO)
     version = getstart(a, "RecordDesc")
-    n = Int(ntoh(read(a.io, Int32)))
+    n = Int(read_i32(a))
     fields = RecordField[]
     for _ in 1:n
         name = read_string(a)
-        t = casatype(ntoh(read(a.io, Int32)))
+        t = casatype(read_i32(a))
         shape = Int[]
         sub = RecordField[]
         tdesc = ""
@@ -98,16 +98,16 @@ Read whatever record-like object comes next (`TableRecord`, `Record`,
 function read_record(a::AipsIO)
     tp = getnexttype(a)
     if tp == "TableKeywordSet" || tp == "ScalarKeywordSet" || tp == "ArrayKeywordSet"
-        version = ntoh(read(a.io, UInt32))
+        version = read_u32(a)
         kind = tp == "ScalarKeywordSet" ? 0 : tp == "ArrayKeywordSet" ? 1 : 2
         rec = read_keyset(a, version, kind)
         getend(a)
         return rec
     else
         # "TableRecord" or "Record"
-        version = ntoh(read(a.io, UInt32))
+        version = read_u32(a)
         fields = read_recorddesc(a)
-        _rectype = ntoh(read(a.io, Int32))
+        _rectype = read_i32(a)
         rec = read_recorddata(a, fields, version)
         getend(a)
         return rec
@@ -144,13 +144,13 @@ const ARRAYKEY =
 function read_keyset(a::AipsIO, version, kind::Int)
     # --- key description: Map<String,void> --------------------------
     getstart(a, "Map<String,void>")
-    n = Int(ntoh(read(a.io, UInt32)))
-    ntoh(read(a.io, Int32)); read_string(a)         # default attr (dt, comment)
+    n = Int(read_u32(a))
+    read_i32(a); read_string(a)         # default attr (dt, comment)
     names = String[]
     types = CasaType[]
     for _ in 1:n
         push!(names, read_string(a))
-        push!(types, casatype(ntoh(read(a.io, Int32))))
+        push!(types, casatype(read_i32(a)))
         read_string(a)                              # per-key comment
     end
     getend(a)
@@ -169,7 +169,7 @@ function read_keyset(a::AipsIO, version, kind::Int)
     read_keygroup(a, rec, idx, SCALARKEY)
     kind > 0 && read_keygroup(a, rec, idx, ARRAYKEY)
     if kind > 1
-        m = Int(ntoh(read(a.io, UInt32)))
+        m = Int(read_u32(a))
         for _ in 1:m
             key = read_string(a)
             name = read_string(a)
@@ -178,7 +178,7 @@ function read_keyset(a::AipsIO, version, kind::Int)
         end
     end
     if version > 1
-        m = ntoh(read(a.io, UInt32))
+        m = read_u32(a)
         m == 0 || error("read_keyset: nested keyword sets not supported")
     end
     return rec
@@ -186,7 +186,7 @@ end
 
 function read_keygroup(a::AipsIO, rec, idx, order)
     for t in order
-        m = Int(ntoh(read(a.io, UInt32)))
+        m = Int(read_u32(a))
         for _ in 1:m
             name = read_string(a)
             val = read_datafield(a, t)

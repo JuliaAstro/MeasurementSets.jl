@@ -35,25 +35,25 @@ Base.show(io::IO, c::ColumnDesc) = print(io, "ColumnDesc(", c.name, "::",
     " @", c.datamanager, "/", c.datagroup, ")")
 
 function read_columndesc(a::AipsIO)
-    ntoh(read(a.io, UInt32))                 # ColumnDesc wrapper version
+    read_u32(a)                 # ColumnDesc wrapper version
     classname = read_string(a)               # e.g. "ScalarColumnDesc<Int>"
     isarray = startswith(classname, "Array")
     isrecord = startswith(classname, "ScalarRecord")
 
-    ntoh(read(a.io, UInt32))                  # BaseColumnDesc version
+    read_u32(a)                  # BaseColumnDesc version
     name        = read_string(a)
     comment     = read_string(a)
     datamanager = read_string(a)
     datagroup   = read_string(a)
-    dtype       = casatype(ntoh(read(a.io, Int32)))
-    option      = ntoh(read(a.io, Int32))
-    nrdim       = Int(ntoh(read(a.io, Int32)))
+    dtype       = casatype(read_i32(a))
+    option      = read_i32(a)
+    nrdim       = Int(read_i32(a))
     shape       = isarray ? read_iposition(a) : Int[]
-    maxlen      = ntoh(read(a.io, UInt32))
+    maxlen      = read_u32(a)
     keywords    = read_record(a)
 
     default = nothing
-    ntoh(read(a.io, UInt32))                  # getDesc version
+    read_u32(a)                  # getDesc version
     if isarray
         read(a.io, UInt8)                     # obsolete "has default" switch
     elseif !isrecord
@@ -83,7 +83,7 @@ function read_tabledesc(a::AipsIO)
     keywords = read_record(a)
     privkw = tvers != 1 ? read_record(a) : CasaRecord()
 
-    ncol = Int(ntoh(read(a.io, UInt32)))
+    ncol = Int(read_u32(a))
     cols = ColumnDesc[read_columndesc(a) for _ in 1:ncol]
     getend(a)
     return TableDesc(name, version, comment, keywords, privkw, cols)
@@ -176,8 +176,8 @@ function readtable(path::AbstractString)
     a = AipsIO(read(joinpath(dir, "table.dat")))
     version = Int(getstart(a, "Table"))
     version <= 3 || error("Table version $version not supported")
-    nr = version > 2 ? Int(ntoh(read(a.io, UInt64))) : Int(ntoh(read(a.io, UInt32)))
-    format = ntoh(read(a.io, UInt32))
+    nr = version > 2 ? Int(read_scalar(a, UInt64)) : Int(read_u32(a))
+    format = read_u32(a)
     bigendian = format == 0
     read_string(a)                                  # "PlainTable"
 
@@ -201,38 +201,38 @@ end
 
 function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})
     ncol = length(columns)
-    v = Int(ntoh(read(a.io, Int32)))
+    v = Int(read_i32(a))
     local setversion
     if v < 0
         setversion = -v
         if setversion <= 2
-            ntoh(read(a.io, UInt32))
+            read_u32(a)
         else
-            ntoh(read(a.io, UInt64))
+            read_scalar(a, UInt64)
         end
     else
         setversion = 1
     end
     if setversion >= 3
-        ntoh(read(a.io, Int32)); ntoh(read(a.io, Int32))   # StorageOption
+        read_i32(a); read_i32(a)   # StorageOption
     end
-    ntoh(read(a.io, UInt32))                               # nrman (seq counter)
-    ndm = Int(ntoh(read(a.io, UInt32)))
+    read_u32(a)                               # nrman (seq counter)
+    ndm = Int(read_u32(a))
     dmnames = String[]
     dmseq = Int[]
     for _ in 1:ndm
         push!(dmnames, read_string(a))
-        push!(dmseq, Int(ntoh(read(a.io, UInt32))))
+        push!(dmseq, Int(read_u32(a)))
     end
 
     colseq = Dict{Int,Int}()
     colshape = Dict{Int,Vector{Int}}()
     for (i, col) in enumerate(columns)
-        ntoh(read(a.io, UInt32))                           # PlainColumn version
+        read_u32(a)                           # PlainColumn version
         # version==1 would embed a keyword record here; unsupported (pre-2000)
         read_string(a)                                     # originalName
-        ntoh(read(a.io, UInt32))                           # derived version
-        colseq[i] = Int(ntoh(read(a.io, UInt32)))          # data-manager seqnr
+        read_u32(a)                           # derived version
+        colseq[i] = Int(read_u32(a))          # data-manager seqnr
         if col.isarray
             shapedef = read(a.io, UInt8) != 0x00
             shapedef && (colshape[i] = read_iposition(a))
@@ -241,7 +241,7 @@ function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})
 
     dms = DataManagerInfo[]
     for i in 1:ndm
-        n = Int(ntoh(read(a.io, UInt32)))
+        n = Int(read_u32(a))
         push!(dms, DataManagerInfo(dmnames[i], dmseq[i], read(a.io, n)))
     end
     return dms, colseq, colshape
