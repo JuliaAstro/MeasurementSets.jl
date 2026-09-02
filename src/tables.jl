@@ -19,7 +19,8 @@ struct ColumnDesc
     group::String              # data-manager *group* (instance) name
     type::CasaType             # scalar or array CasaType
     isarray::Bool
-    ndim::Int                  # 0 => unknown/scalar; -1 kept as-is
+    ndim::Int                  # declared axes: 0 = scalar, N = fixed N-dim
+                               # array, -1 = array whose ndim varies per row
     shape::Dims                # fixed cell shape, () if not fixed
     option::Int32
     maxlength::UInt32
