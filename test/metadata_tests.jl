@@ -19,12 +19,12 @@
     time = columndesc(t, "TIME")
     @test time.type == MSv2.TpDouble
     @test !time.isarray
-    @test time.datamanager == "StandardStMan"
+    @test time.manager == "StandardStMan"
 
     data = columndesc(t, "DATA")
     @test data.type == MSv2.TpComplex
     @test data.isarray
-    @test data.datamanager == "TiledShapeStMan"
+    @test data.manager == "TiledShapeStMan"
 
     uvw = columndesc(t, "UVW")
     @test uvw.isarray && uvw.fixedshape == (3,)

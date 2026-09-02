@@ -15,8 +15,8 @@ end
 struct ColumnDesc
     name::String
     comment::String
-    datamanager::String        # data-manager *type* the column is bound to
-    datagroup::String          # data-manager *group* (instance) name
+    manager::String            # data-manager *type* the column is bound to
+    group::String              # data-manager *group* (instance) name
     type::CasaType             # scalar or array CasaType
     isarray::Bool
     ndim::Int                  # 0 => unknown/scalar; -1 kept as-is
@@ -33,7 +33,7 @@ end
 
 Base.show(io::IO, c::ColumnDesc) = print(io, "ColumnDesc(", c.name, "::",
     c.type, c.isarray && !isempty(c.shape) ? string(c.shape) : "",
-    " @", c.datamanager, "/", c.datagroup, ")")
+    " @", c.manager, "/", c.group, ")")
 
 function read_columndesc(a::AipsIO)
     read_u32(a)                 # ColumnDesc wrapper version
@@ -44,8 +44,8 @@ function read_columndesc(a::AipsIO)
     read_u32(a)                  # BaseColumnDesc version
     name        = read_string(a)
     comment     = read_string(a)
-    datamanager = read_string(a)
-    datagroup   = read_string(a)
+    manager     = read_string(a)
+    group       = read_string(a)
     dtype       = casatype(read_i32(a))
     option      = read_i32(a)
     nrdim       = Int(read_i32(a))
@@ -61,7 +61,7 @@ function read_columndesc(a::AipsIO)
         default = read_valtype(a, dtype)
     end
 
-    ColumnDesc(name, comment, datamanager, datagroup, dtype, isarray, nrdim,
+    ColumnDesc(name, comment, manager, group, dtype, isarray, nrdim,
                shape, option, maxlen, keywords, default, nothing, ())
 end
 
@@ -190,7 +190,7 @@ function readtable(path::AbstractString)
     # merge sequence numbers / stored shapes into the column descriptions
     cols = ColumnDesc[]
     for (i, c) in enumerate(desc.columns)
-        push!(cols, ColumnDesc(c.name, c.comment, c.datamanager, c.datagroup,
+        push!(cols, ColumnDesc(c.name, c.comment, c.manager, c.group,
             c.type, c.isarray, c.ndim, c.shape, c.option, c.maxlength,
             c.keywords, c.default, get(colseq, i, nothing), get(colshape, i, ())))
     end
