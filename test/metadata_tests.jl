@@ -27,7 +27,7 @@
     @test data.datamanager == "TiledShapeStMan"
 
     uvw = columndesc(t, "UVW")
-    @test uvw.isarray && uvw.fixedshape == [3]
+    @test uvw.isarray && uvw.fixedshape == (3,)
 
     # QuantumUnits / MEASINFO nested keyword records decode
     tk = columndesc(t, "TIME").keywords
@@ -60,5 +60,5 @@ end
 
     ant = subtable(ms, "ANTENNA")
     @test columndesc(ant, "NAME").type == MSv2.TpString
-    @test columndesc(ant, "POSITION").fixedshape == [3]
+    @test columndesc(ant, "POSITION").fixedshape == (3,)
 end

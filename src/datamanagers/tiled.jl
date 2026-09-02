@@ -16,8 +16,8 @@
 import Mmap
 
 struct TSMCube
-    cubeshape::Vector{Int}
-    tileshape::Vector{Int}
+    cubeshape::Dims
+    tileshape::Dims
     fileseqnr::Union{Int,Nothing}   # nothing => no data (undefined cells)
     fileoffset::Int
 end

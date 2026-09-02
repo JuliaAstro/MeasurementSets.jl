@@ -20,7 +20,7 @@ struct ColumnDesc
     type::CasaType             # scalar or array CasaType
     isarray::Bool
     ndim::Int                  # 0 => unknown/scalar; -1 kept as-is
-    shape::Vector{Int}         # fixed cell shape, empty if not fixed
+    shape::Dims                # fixed cell shape, () if not fixed
     option::Int32
     maxlength::UInt32
     keywords::CasaRecord
@@ -28,11 +28,11 @@ struct ColumnDesc
     # filled in from ColumnSet: data-manager instance sequence number
     # (`nothing` until the column is bound to a data manager)
     seqnr::Union{Int,Nothing}
-    fixedshape::Vector{Int}    # per-column stored shape (array cols)
+    fixedshape::Dims           # per-column stored shape (array cols)
 end
 
 Base.show(io::IO, c::ColumnDesc) = print(io, "ColumnDesc(", c.name, "::",
-    c.type, c.isarray && !isempty(c.shape) ? string(Tuple(c.shape)) : "",
+    c.type, c.isarray && !isempty(c.shape) ? string(c.shape) : "",
     " @", c.datamanager, "/", c.datagroup, ")")
 
 function read_columndesc(a::AipsIO)
@@ -49,7 +49,7 @@ function read_columndesc(a::AipsIO)
     dtype       = casatype(read_i32(a))
     option      = read_i32(a)
     nrdim       = Int(read_i32(a))
-    shape       = isarray ? read_iposition(a) : Int[]
+    shape       = isarray ? read_iposition(a) : ()
     maxlen      = read_u32(a)
     keywords    = read_record(a)
 
@@ -62,7 +62,7 @@ function read_columndesc(a::AipsIO)
     end
 
     ColumnDesc(name, comment, datamanager, datagroup, dtype, isarray, nrdim,
-               shape, option, maxlen, keywords, default, nothing, Int[])
+               shape, option, maxlen, keywords, default, nothing, ())
 end
 
 # --- table description --------------------------------------------
@@ -192,7 +192,7 @@ function readtable(path::AbstractString)
     for (i, c) in enumerate(desc.columns)
         push!(cols, ColumnDesc(c.name, c.comment, c.datamanager, c.datagroup,
             c.type, c.isarray, c.ndim, c.shape, c.option, c.maxlength,
-            c.keywords, c.default, get(colseq, i, nothing), get(colshape, i, Int[])))
+            c.keywords, c.default, get(colseq, i, nothing), get(colshape, i, ())))
     end
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.keywords,
                       desc.privatekeywords, cols)
@@ -227,7 +227,7 @@ function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})
     end
 
     colseq = Dict{Int,Int}()
-    colshape = Dict{Int,Vector{Int}}()
+    colshape = Dict{Int,Dims}()
     for (i, col) in enumerate(columns)
         read_u32(a)                           # PlainColumn version
         # version==1 would embed a keyword record here; unsupported (pre-2000)

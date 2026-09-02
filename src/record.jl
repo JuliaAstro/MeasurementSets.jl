@@ -43,7 +43,7 @@ _short(v) = repr(v)
 struct RecordField
     name::String
     type::CasaType
-    shape::Vector{Int}      # for array fields
+    shape::Dims             # for array fields
     subdesc::Vector{RecordField}
     tabledesc::String       # for TpTable fields
     comment::String
@@ -56,7 +56,7 @@ function read_recorddesc(a::AipsIO)
     for _ in 1:n
         name = read_string(a)
         t = casatype(read_i32(a))
-        shape = Int[]
+        shape = ()
         sub = RecordField[]
         tdesc = ""
         if t == TpRecord

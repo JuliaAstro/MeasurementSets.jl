@@ -102,16 +102,16 @@ end
 # --- aggregates -------------------------------------------------------
 
 """
-    read_iposition(a) -> Vector{Int}
+    read_iposition(a) -> Dims  (a tuple of Int)
 
 An `IPosition` (array shape). Version 1 stores Int32 elements, version 2
 Int64.
 """
-function read_iposition(a::AipsIO)
+function read_iposition(a::AipsIO)::Dims
     v = getstart(a, "IPosition")
     nel = Int(read_u32(a))
     T = v == 1 ? Int32 : Int64
-    shape = Int[Int(read_scalar(a, T)) for _ in 1:nel]
+    shape = Tuple(Int(read_scalar(a, T)) for _ in 1:nel)
     getend(a)
     return shape
 end

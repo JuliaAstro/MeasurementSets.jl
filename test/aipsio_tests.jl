@@ -29,7 +29,7 @@ aipsstr(s) = vcat(be(UInt32(length(s))), Vector{UInt8}(s))
                   be(Int32(4)), be(Int32(8)))
     iplen = UInt32(4 + length(ipbody))
     ipbytes = vcat(be(UInt32(0xbebebebe)), be(iplen), ipbody)
-    @test read_iposition(AipsIO(ipbytes)) == [4, 8]
+    @test read_iposition(AipsIO(ipbytes)) == (4, 8)
 
     # Block<Int32>
     blbody = vcat(aipsstr("Block"), be(UInt32(1)), be(UInt32(3)),
