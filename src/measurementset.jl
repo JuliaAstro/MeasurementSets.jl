@@ -2,8 +2,8 @@
 
 struct MeasurementSet
     path::String
-    main::CTDSTable
-    subtables::Dict{String,CTDSTable}       # lazily populated
+    data::CTDSTable                     # the MAIN table
+    tables::Dict{String,CTDSTable}      # subtable cache, lazily populated
 end
 
 """
@@ -14,15 +14,14 @@ Subtables are read on first access via `getproperty` / `subtable`.
 """
 function MeasurementSet(path::AbstractString)
     dir = String(rstrip(path, '/'))
-    main = readtable(dir)
-    MeasurementSet(dir, main, Dict{String,CTDSTable}())
+    MeasurementSet(dir, readtable(dir), Dict{String,CTDSTable}())
 end
 
 Base.propertynames(ms::MeasurementSet) =
-    (:path, :main, :subtables, Symbol.(first.(subtables(ms.main)))...)
+    (:path, :data, :tables, Symbol.(first.(subtables(getfield(ms, :data))))...)
 
 function Base.getproperty(ms::MeasurementSet, s::Symbol)
-    s in (:path, :main, :subtables) && return getfield(ms, s)
+    s in (:path, :data, :tables) && return getfield(ms, s)
     return subtable(ms, String(s))
 end
 
@@ -32,9 +31,9 @@ end
 Read (and cache) the subtable referenced by keyword `name` in MAIN.
 """
 function subtable(ms::MeasurementSet, name::String)
-    cache = getfield(ms, :subtables)
+    cache = getfield(ms, :tables)
     haskey(cache, name) && return cache[name]
-    for (kw, p) in subtables(getfield(ms, :main))
+    for (kw, p) in subtables(getfield(ms, :data))
         if kw == name
             t = readtable(p)
             cache[name] = t
@@ -44,10 +43,10 @@ function subtable(ms::MeasurementSet, name::String)
     throw(KeyError(name))
 end
 
-subtablenames(ms::MeasurementSet) = first.(subtables(getfield(ms, :main)))
+subtablenames(ms::MeasurementSet) = first.(subtables(getfield(ms, :data)))
 
 function Base.show(io::IO, ms::MeasurementSet)
-    m = getfield(ms, :main)
     print(io, "MeasurementSet(\"", basename(getfield(ms, :path)), "\", ",
-          m.rows, " rows, ", length(subtablenames(ms)), " subtables)")
+          getfield(ms, :data).rows, " rows, ",
+          length(subtablenames(ms)), " subtables)")
 end
