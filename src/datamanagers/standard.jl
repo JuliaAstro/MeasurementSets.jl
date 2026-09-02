@@ -9,12 +9,16 @@
 # Bucket kinds: data buckets (fixed-length cells laid out column by column),
 # string buckets (variable-length strings), index buckets (the row->bucket
 # maps).  Which bucket is which is recorded in the header / index.
+#
+# Rows and SSM column numbers are 1-based in this file's API; the on-disk
+# 0-based values are converted at parse time.  Bucket numbers and byte
+# offsets stay as raw file-layout quantities.
 
 struct SSMIndex
     nused::Int
     rowsperbucket::Int
-    lastrow::Vector{Int}        # lastrow[i] = last (0-based) row in bucket i
-    bucketnumber::Vector{Int}
+    lastrow::Vector{Int}        # lastrow[i] = last (1-based) row in bucket i
+    bucketnumber::Vector{Int}   # physical bucket number (0-based block in file)
 end
 
 function read_ssmindex(a::AipsIO)
@@ -23,14 +27,15 @@ function read_ssmindex(a::AipsIO)
     rpb = Int(read_u32(a))
     read_i32(a)                                   # nrColumns
     read_map(a, Int32, Int32)                     # free-space map (unused here)
-    lastrow = version == 1 ? Int.(read_block(a, UInt32)) : Int.(read_block(a, UInt64))
+    ondisk = version == 1 ? read_block(a, UInt32) : read_block(a, UInt64)
+    lastrow = Int[Int(x) + 1 for x in ondisk]     # on-disk last row is 0-based
     bucketnr = Int.(read_block(a, UInt32))
     getend(a)
     return SSMIndex(nused, rpb, lastrow, bucketnr)
 end
 
-# index of the bucket holding `row` (0-based) within this SSMIndex:
-# first i with lastrow[i] >= row.
+# position i within this index whose bucket holds `row` (1-based):
+# the first i with lastrow[i] >= row.
 function index_of(ix::SSMIndex, row::Integer)
     for i in 1:ix.nused
         ix.lastrow[i] >= row && return i
@@ -38,10 +43,11 @@ function index_of(ix::SSMIndex, row::Integer)
     error("SSMIndex: row $row out of range")
 end
 
+# (bucket number, first row in that bucket, last row in that bucket) — 1-based rows
 function bucket_of(ix::SSMIndex, row::Integer)
     i = index_of(ix, row)
-    startrow = i == 1 ? 0 : ix.lastrow[i-1] + 1
-    return ix.bucketnumber[i], startrow, ix.lastrow[i]
+    firstrow = i == 1 ? 1 : ix.lastrow[i-1] + 1
+    return ix.bucketnumber[i], firstrow, ix.lastrow[i]
 end
 
 # ---------------------------------------------------------------------
@@ -52,8 +58,8 @@ mutable struct StandardStMan
     bucketsize::Int
     nrbuckets::Int
     laststringbucket::Int
-    columnoffset::Vector{Int}   # per SSM-local column: byte offset in bucket
-    colindexmap::Vector{Int}    # per SSM-local column: which SSMIndex (0-based)
+    columnoffset::Vector{Int}   # per SSM column (1-based): byte offset in bucket
+    colindexmap::Vector{Int}    # per SSM column (1-based): which SSMIndex (1-based)
     indices::Vector{SSMIndex}
 end
 
@@ -97,7 +103,7 @@ function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
     getstart(blk, "SSM")
     read_string(blk)                                       # data-manager name
     columnoffset = Int.(read_block(blk, UInt32))
-    colindexmap  = Int.(read_block(blk, UInt32))
+    colindexmap  = Int[Int(x) + 1 for x in read_block(blk, UInt32)]   # -> 1-based
     getend(blk)
 
     ssm = StandardStMan(bytes, be, h.bucketsize, h.nrbuckets, h.laststr,
@@ -152,12 +158,12 @@ _nrelem(c::ColumnDesc) = isempty(c.fixedshape) ? 1 : prod(c.fixedshape)
 
 # --- value access ---------------------------------------------------
 
-"Return (byte offset into `ssm.data`, startrow, endrow) for a cell."
-function locate(ssm::StandardStMan, ssmcol::Int, extsize::Int, row::Integer)
-    ix = ssm.indices[ssm.colindexmap[ssmcol+1] + 1]
-    bkt, startrow, endrow = bucket_of(ix, row)
-    off = bucketptr(ssm, bkt) + ssm.columnoffset[ssmcol+1]
-    return off, startrow, endrow
+"Byte offset into `ssm.data` of column `ssmcol`'s block in the bucket
+holding `row`, plus that bucket's first row (1-based)."
+function locate(ssm::StandardStMan, ssmcol::Int, row::Integer)
+    ix = ssm.indices[ssm.colindexmap[ssmcol]]
+    bkt, firstrow, _ = bucket_of(ix, row)
+    return bucketptr(ssm, bkt) + ssm.columnoffset[ssmcol], firstrow
 end
 
 _swap(ssm::StandardStMan, x) = ssm.bigendian ? ntoh(x) : ltoh(x)
@@ -177,25 +183,27 @@ function _read_bits(ssm::StandardStMan, off::Int, bitstart::Int, n::Int)
 end
 
 """
-    ssm_getcell(ssm, ssmcol, coldesc, row) -> value  (0-based row)
+    ssm_getcell(ssm, ssmcol, coldesc, row) -> value
+
+`ssmcol` and `row` are 1-based.
 """
 function ssm_getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Integer)
     ext = cell_extsize(c)
-    off, startrow, _ = locate(ssm, ssmcol, ext, row)
-    local_ = Int(row) - startrow
+    off, firstrow = locate(ssm, ssmcol, row)
+    inbucket = Int(row) - firstrow          # 0-based position within the bucket
     nrelem = _nrelem(c)
 
     if c.type == TpBool
-        bits = _read_bits(ssm, off, local_ * nrelem, nrelem)
+        bits = _read_bits(ssm, off, inbucket * nrelem, nrelem)
         return isempty(c.fixedshape) ? bits[1] : reshape(bits, c.fixedshape...)
     elseif c.type == TpString
         c.maxlength > 0 && error("fixed-length strings not yet supported")
         !isempty(c.fixedshape) && error("string arrays not yet supported (Phase 2)")
-        return _read_string_ref(ssm, off + local_ * ext)
+        return _read_string_ref(ssm, off + inbucket * ext)
     elseif isempty(c.fixedshape)
-        return _read_elems(ssm, juliatype(c.type), off + local_ * ext, 1)[1]
+        return _read_elems(ssm, juliatype(c.type), off + inbucket * ext, 1)[1]
     else
-        vals = _read_elems(ssm, juliatype(c.type), off + local_ * ext, nrelem)
+        vals = _read_elems(ssm, juliatype(c.type), off + inbucket * ext, nrelem)
         return reshape(vals, c.fixedshape...)
     end
 end
@@ -235,51 +243,51 @@ function _read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int
     return String(take!(out))
 end
 
-# iterate (bucketnr, startrow, endrow) over every bucket of a column's index
+# iterate (bucketnr, firstrow, lastrow) over every bucket of a column's index
 function _foreach_bucket(f, ssm::StandardStMan, ssmcol::Int)
-    ix = ssm.indices[ssm.colindexmap[ssmcol+1] + 1]
+    ix = ssm.indices[ssm.colindexmap[ssmcol]]
     for i in 1:ix.nused
-        startrow = i == 1 ? 0 : ix.lastrow[i-1] + 1
-        f(ix.bucketnumber[i], startrow, ix.lastrow[i])
+        firstrow = i == 1 ? 1 : ix.lastrow[i-1] + 1
+        f(ix.bucketnumber[i], firstrow, ix.lastrow[i])
     end
 end
 
 """
     ssm_getcolumn(ssm, ssmcol, coldesc, nrow) -> Vector / Array
 
-Read all `nrow` cells of a column.  Returns a `Vector` for scalars and a
-`Vector{Array}` for direct-array columns.
+Read all `nrow` cells of column `ssmcol` (1-based).  Returns a `Vector`
+for scalars and a `Vector{Array}` for direct-array columns.
 """
 function ssm_getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer)
-    ext = cell_extsize(c)
-    coloff = ssm.columnoffset[ssmcol+1]
+    coloff = ssm.columnoffset[ssmcol]
     nrelem = _nrelem(c)
 
     if c.type == TpBool
         out = Vector{Bool}(undef, nrow * nrelem)
-        _foreach_bucket(ssm, ssmcol) do bkt, s, e
-            n = (e - s + 1) * nrelem
+        _foreach_bucket(ssm, ssmcol) do bkt, first, last
+            n = (last - first + 1) * nrelem
             bits = _read_bits(ssm, bucketptr(ssm, bkt) + coloff, 0, n)
-            copyto!(out, s * nrelem + 1, bits, 1, n)
+            copyto!(out, (first - 1) * nrelem + 1, bits, 1, n)
         end
         return isempty(c.fixedshape) ? out :
-               [reshape(view(out, r*nrelem+1 : (r+1)*nrelem), c.fixedshape...) for r in 0:nrow-1]
+               [reshape(out[(r-1)*nrelem+1 : r*nrelem], c.fixedshape...) for r in 1:nrow]
 
     elseif c.type == TpString
-        return [ssm_getcell(ssm, ssmcol, c, r) for r in 0:nrow-1]
+        return [ssm_getcell(ssm, ssmcol, c, r) for r in 1:nrow]
 
     else
         T = juliatype(c.type)
         flat = Vector{T}(undef, nrow * nrelem)
-        _foreach_bucket(ssm, ssmcol) do bkt, s, e
-            n = (e - s + 1) * nrelem
+        _foreach_bucket(ssm, ssmcol) do bkt, first, last
+            n = (last - first + 1) * nrelem
             off = bucketptr(ssm, bkt) + coloff
             raw = reinterpret(T, @view ssm.data[off+1 : off + n*sizeof(T)])
+            base = (first - 1) * nrelem
             @inbounds for k in 1:n
-                flat[s*nrelem + k] = _swap(ssm, raw[k])
+                flat[base + k] = _swap(ssm, raw[k])
             end
         end
         isempty(c.fixedshape) && return flat
-        return [reshape(flat[r*nrelem+1 : (r+1)*nrelem], c.fixedshape...) for r in 0:nrow-1]
+        return [reshape(flat[(r-1)*nrelem+1 : r*nrelem], c.fixedshape...) for r in 1:nrow]
     end
 end

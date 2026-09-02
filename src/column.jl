@@ -16,9 +16,9 @@ function _dm_instance(t::CTDSTable, seqnr::Int)
     return inst
 end
 
-# 0-based index of a column among those bound to the same DM instance
-function _ssm_local_index(t::CTDSTable, c::ColumnDesc)
-    i = 0
+# 1-based position of a column among those bound to the same DM instance
+function _dm_local_index(t::CTDSTable, c::ColumnDesc)
+    i = 1
     for x in t.desc.columns
         x === c && return i
         x.seqnr == c.seqnr && (i += 1)
@@ -36,7 +36,7 @@ function getcolumn(t::CTDSTable, name::AbstractString)
     inst = _dm_instance(t, c.seqnr)
     inst isa StandardStMan ||
         error("column \"$name\" uses $(typeof(inst)); not supported yet")
-    ssm_getcolumn(inst, _ssm_local_index(t, c), c, t.nrow)
+    ssm_getcolumn(inst, _dm_local_index(t, c), c, t.nrow)
 end
 
 """
@@ -49,7 +49,7 @@ function getcell(t::CTDSTable, name::AbstractString, row::Integer)
     inst = _dm_instance(t, c.seqnr)
     inst isa StandardStMan ||
         error("column \"$name\" uses $(typeof(inst)); not supported yet")
-    ssm_getcell(inst, _ssm_local_index(t, c), c, row - 1)
+    ssm_getcell(inst, _dm_local_index(t, c), c, row)
 end
 
 getcolumn(ms::MeasurementSet, sub::AbstractString, name::AbstractString) =
