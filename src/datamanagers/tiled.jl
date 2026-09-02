@@ -4,10 +4,10 @@
 # TiledColumnStMan.cc, TSMCube.cc, TSMFile.cc.
 #
 # A hypercube of shape `cubeshape` is partitioned into tiles of shape
-# `tileshape`.  Tiles are stored back-to-back in a `table.f<seqnr>_TSM<n>`
-# file starting at `fileoffset`, in column-major tile order; within a tile
-# the elements are column-major over `tileshape` (edge tiles are still
-# full-size on disk).  The header file `table.f<seqnr>` is a plain
+# `tileshape`.  Tiles are stored back-to-back in a `table.f<sequ>_TSM<n>`
+# file starting at `offset`, in column-major tile order; within a tile the
+# elements are column-major over `tileshape` (edge tiles are still
+# full-size on disk).  The header file `table.f<sequ>` is a plain
 # big-endian AipsIO stream.
 #
 # Only single-column tiled storage managers are supported (all the MS uses).
@@ -18,27 +18,27 @@ import Mmap
 struct TSMCube
     cubeshape::Dims
     tileshape::Dims
-    fileseqnr::Union{Int,Nothing}   # nothing => no data (undefined cells)
-    fileoffset::Int
+    sequ::Union{Int,Nothing}    # _TSM file number; nothing => no data
+    offset::Int                 # byte offset of this cube within its _TSM file
 end
 
-isnull(c::TSMCube) = c.fileseqnr === nothing || isempty(c.cubeshape)
+isnull(c::TSMCube) = c.sequ === nothing || isempty(c.cubeshape)
 
 mutable struct TiledStMan
     path::String
     bigendian::Bool
     kind::Symbol                   # :column or :shape
-    seqnr::Int
-    dtype::CasaType
-    hypercolumn::String
-    nrdim::Int
-    tsmfiles::Dict{Int,String}      # _TSM sequence nr -> file path
-    tsmdata::Dict{Int,Vector{UInt8}}  # lazily mmapped
+    sequ::Int                      # this data manager's sequence number
+    type::CasaType                 # element type of the tiled column
+    hyper::String                  # hypercolumn name
+    dims::Int                      # hypercube dimensionality
+    files::Dict{Int,String}        # _TSM sequence nr -> file path
+    data::Dict{Int,Vector{UInt8}}  # _TSM sequence nr -> lazily mmapped bytes
     cubes::Vector{TSMCube}
     # TiledShapeStMan row -> cube mapping (empty for TiledColumnStMan)
-    rowmap::Vector{Int}            # 1-based last row of each interval
-    cubemap::Vector{Int}          # 1-based cube index per interval
-    posmap::Vector{Int}           # 1-based last last-axis position per interval
+    row::Vector{Int}              # 1-based last row of each interval
+    cube::Vector{Int}             # 1-based cube index per interval
+    pos::Vector{Int}              # 1-based last last-axis position per interval
 end
 
 # --- header parsing -------------------------------------------------
@@ -47,35 +47,35 @@ function _read_tsmcube(a::AipsIO)
     version = read_u32(a)
     read_record(a)                              # values_p (id values; empty here)
     read_scalar(a, Bool)                        # extensible
-    nrdim = Int(read_u32(a))
+    read_u32(a)                                 # nrdim (== length(cubeshape))
     cubeshape = read_iposition(a)
     tileshape = read_iposition(a)
     fs = Int(read_i32(a))
-    fileseqnr = fs < 0 ? nothing : fs
-    fileoffset = version == 1 ? Int(read_u32(a)) : Int(read_scalar(a, UInt64))
-    return TSMCube(cubeshape, tileshape, fileseqnr, fileoffset)
+    sequ = fs < 0 ? nothing : fs
+    offset = version == 1 ? Int(read_u32(a)) : Int(read_scalar(a, UInt64))
+    return TSMCube(cubeshape, tileshape, sequ, offset)
 end
 
 function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::CTDSTable)
     version = getstart(a, "TiledStMan")
     version >= 2 && read_scalar(a, Bool)                   # bigEndian flag
-    tsm.seqnr = Int(read_u32(a))
+    tsm.sequ = Int(read_u32(a))
     version >= 3 ? read_scalar(a, UInt64) : read_u32(a)    # nrrow
     ncol = Int(read_u32(a))
     ncol == 1 || error("TiledStMan: only single-column tiled managers supported (got $ncol)")
-    tsm.dtype = casatype(read_i32(a))
-    tsm.hypercolumn = read_string(a)
+    tsm.type = casatype(read_i32(a))
+    tsm.hyper = read_string(a)
     version >= 3 ? read_scalar(a, UInt64) : read_u32(a)    # persMaxCacheSize
-    tsm.nrdim = Int(read_u32(a))
+    tsm.dims = Int(read_u32(a))
 
     nrfile = Int(version >= 3 ? read_scalar(a, UInt64) : read_u32(a))
-    for i in 0:nrfile-1
+    for _ in 0:nrfile-1
         present = read_scalar(a, Bool)
         present || continue
         fv = read_u32(a)
         fseq = Int(read_u32(a))
         fv == 1 ? read_u32(a) : read_scalar(a, UInt64)     # file length
-        tsm.tsmfiles[fseq] = joinpath(t.path, "table.f$(tsm.seqnr)_TSM$(fseq)")
+        tsm.files[fseq] = joinpath(t.path, "table.f$(tsm.sequ)_TSM$(fseq)")
     end
 
     nrcube = Int(version >= 3 ? read_scalar(a, UInt64) : read_u32(a))
@@ -91,27 +91,27 @@ function open_tiledstman(t::CTDSTable, dm::DataManagerInfo)
                      Dict{Int,String}(), Dict{Int,Vector{UInt8}}(),
                      TSMCube[], Int[], Int[], Int[])
 
-    kind = getnexttype(a)                            # peek outer wrapper
-    ver_outer = read_u32(a)
-    if kind == "TiledColumnStMan"
+    wrapper = getnexttype(a)                         # peek outer wrapper
+    read_u32(a)                                      # wrapper version
+    if wrapper == "TiledColumnStMan"
         tsm.kind = :column
         read_iposition(a)                           # tileShape_p (also in cube)
         _headerfile_get!(a, tsm, t)
-    elseif kind == "TiledShapeStMan"
+    elseif wrapper == "TiledShapeStMan"
         tsm.kind = :shape
         _headerfile_get!(a, tsm, t)
         read_iposition(a)                           # defaultTileShape
         nused = Int(read_u32(a))
-        rowmap = Int.(read_block(a, UInt32))
-        cubemap = Int.(read_block(a, UInt32))
-        posmap = Int.(read_block(a, UInt32))
-        tsm.rowmap  = Int[x + 1 for x in rowmap[1:nused]]     # -> 1-based
-        tsm.cubemap = Int[x + 1 for x in cubemap[1:nused]]
-        tsm.posmap  = Int[x + 1 for x in posmap[1:nused]]
-    elseif kind in ("TiledCellStMan", "TiledDataStMan")
-        error("$kind not yet supported")
+        rawrow  = Int.(read_block(a, UInt32))
+        rawcube = Int.(read_block(a, UInt32))
+        rawpos  = Int.(read_block(a, UInt32))
+        tsm.row  = Int[x + 1 for x in rawrow[1:nused]]        # -> 1-based
+        tsm.cube = Int[x + 1 for x in rawcube[1:nused]]
+        tsm.pos  = Int[x + 1 for x in rawpos[1:nused]]
+    elseif wrapper in ("TiledCellStMan", "TiledDataStMan")
+        error("$wrapper not yet supported")
     else
-        error("unknown tiled storage manager \"$kind\"")
+        error("unknown tiled storage manager \"$wrapper\"")
     end
     getend(a)
     return tsm
@@ -119,35 +119,33 @@ end
 
 # --- row -> (cube, last-axis position) -----------------------------
 
-function _cube_for_row(tsm::TiledStMan, row::Integer)
+function _cube_for_row(tsm::TiledStMan, rownr::Integer)
     if tsm.kind == :column                       # one cube, position == row
-        cube = tsm.cubes[findfirst(c -> !isnull(c), tsm.cubes)]
-        return cube, Int(row)
+        c = tsm.cubes[findfirst(x -> !isnull(x), tsm.cubes)]
+        return c, Int(rownr)
     end
     # TiledShapeStMan: interval search over the row map
-    if isempty(tsm.rowmap) || row > tsm.rowmap[end]
+    if isempty(tsm.row) || rownr > tsm.row[end]
         return tsm.cubes[1], 0                   # cube 0 == undefined cells
     end
-    idx = findfirst(>=(row), tsm.rowmap)
-    cube = tsm.cubes[tsm.cubemap[idx]]
-    pos = tsm.posmap[idx] - (tsm.rowmap[idx] - Int(row))
-    return cube, pos
+    idx = findfirst(>=(rownr), tsm.row)
+    c = tsm.cubes[tsm.cube[idx]]
+    p = tsm.pos[idx] - (tsm.row[idx] - Int(rownr))
+    return c, p
 end
 
 # --- tile data access ---------------------------------------------
 
-function _tsmbytes(tsm::TiledStMan, seqnr::Int)
-    get!(tsm.tsmdata, seqnr) do
-        Mmap.mmap(tsm.tsmfiles[seqnr], Vector{UInt8})
+function _tsmbytes(tsm::TiledStMan, sequ::Int)
+    get!(tsm.data, sequ) do
+        Mmap.mmap(tsm.files[sequ], Vector{UInt8})
     end
 end
-
-_pixbytes(t::CasaType) = t == TpBool ? 0 : sizeof(juliatype(t))   # 0 => bit-packed
 
 # bucket (tile) size in bytes for a single-column manager
 function _bucketbytes(tsm::TiledStMan, cube::TSMCube)
     ntile = prod(cube.tileshape)
-    tsm.dtype == TpBool ? cld(ntile, 8) : ntile * sizeof(juliatype(tsm.dtype))
+    tsm.type == TpBool ? cld(ntile, 8) : ntile * sizeof(juliatype(tsm.type))
 end
 
 _colmajor_offset(pos, dims) = begin
@@ -166,7 +164,7 @@ Read the sub-array at last-axis index `lastpos` (0-based) of `cube`,
 de-tiling into a column-major Julia array of shape `cube.cubeshape[1:end-1]`.
 """
 function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int)
-    T = juliatype(tsm.dtype)
+    T = juliatype(tsm.type)
     nd = length(cube.cubeshape)
     cs = cube.cubeshape
     ts = cube.tileshape
@@ -174,7 +172,7 @@ function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int)
     planeshape = cs[1:nd-1]
     out = Array{T}(undef, planeshape...)
 
-    data = _tsmbytes(tsm, cube.fileseqnr)
+    bytes = _tsmbytes(tsm, cube.sequ)
     bbytes = _bucketbytes(tsm, cube)
     swap = tsm.bigendian ? ntoh : ltoh
 
@@ -186,7 +184,7 @@ function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int)
     for lt in leadtiles
         tilecoord = ntuple(d -> d < nd ? lt[d] : tlast_tile, nd)
         tilenr = _colmajor_offset(tilecoord, tpd)
-        base = cube.fileoffset + tilenr * bbytes
+        base = cube.offset + tilenr * bbytes
 
         # overlap of this tile with the plane, per leading axis
         los = ntuple(d -> lt[d] * ts[d], nd-1)
@@ -196,12 +194,12 @@ function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int)
             tl = ntuple(d -> d < nd ? pix[d] - los[d] : tlast_in, nd)
             k = _colmajor_offset(tl, ts)          # element index within tile
             if T === Bool
-                byte = data[base + (k >> 3) + 1]
+                byte = bytes[base + (k >> 3) + 1]
                 out[CartesianIndex(ntuple(d -> pix[d] + 1, nd-1))] =
                     (byte >> (k & 7)) & 0x01 == 0x01
             else
                 b = base + k * sizeof(T)
-                v = reinterpret(T, @view data[b+1 : b+sizeof(T)])[1]
+                v = reinterpret(T, @view bytes[b+1 : b+sizeof(T)])[1]
                 out[CartesianIndex(ntuple(d -> pix[d] + 1, nd-1))] = swap(v)
             end
         end
@@ -213,21 +211,21 @@ end
     tsm_getcell(tsm, coldesc, row) -> Array   (1-based row)
 """
 function tsm_getcell(tsm::TiledStMan, ::ColumnDesc, row::Integer)
-    cube, pos = _cube_for_row(tsm, row)
+    cube, p = _cube_for_row(tsm, row)
     isnull(cube) && error("row $row of this column has no stored data " *
                           "(the tiled cell is undefined)")
-    return read_plane(tsm, cube, pos - 1)
+    return read_plane(tsm, cube, p - 1)
 end
 
 "Whether every row of this tiled column is an undefined (unwritten) cell."
 alldefined_none(tsm::TiledStMan) =
-    tsm.kind == :shape && (isempty(tsm.rowmap) || all(isnull, tsm.cubes))
+    tsm.kind == :shape && (isempty(tsm.row) || all(isnull, tsm.cubes))
 
 # Fast whole-column read for the common layout: a single hypercube whose
 # leading axes are not tiled (tilesPerDim == 1 there), so each on-disk tile
 # is a contiguous run of whole cells along the last (row) axis.
 function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function, nrow::Int)
-    T = juliatype(tsm.dtype)
+    T = juliatype(tsm.type)
     T === Bool && return nothing            # bit unpacking: use the slow path
     nd = length(cube.cubeshape)
     cs, ts = cube.cubeshape, cube.tileshape
@@ -236,7 +234,7 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function, nrow:
     planeshape = cs[1:nd-1]
     planelen = prod(planeshape)
     rowspertile = ts[nd]
-    data = _tsmbytes(tsm, cube.fileseqnr)
+    bytes = _tsmbytes(tsm, cube.sequ)
     bbytes = _bucketbytes(tsm, cube)
     swap = tsm.bigendian ? ntoh : ltoh
 
@@ -245,8 +243,8 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function, nrow:
         p = rowpos(r) - 1                    # 0-based last-axis position
         tile = p ÷ rowspertile
         within = (p % rowspertile) * planelen
-        b = cube.fileoffset + tile * bbytes + within * sizeof(T)
-        raw = reinterpret(T, @view data[b+1 : b + planelen*sizeof(T)])
+        b = cube.offset + tile * bbytes + within * sizeof(T)
+        raw = reinterpret(T, @view bytes[b+1 : b + planelen*sizeof(T)])
         dst = (r - 1) * planelen
         @inbounds for k in 1:planelen
             backing[dst + k] = swap(raw[k])
@@ -268,8 +266,8 @@ function tsm_getcolumn(tsm::TiledStMan, c::ColumnDesc, nrow::Integer)
         cube = tsm.cubes[real[1]]
         rowpos = if tsm.kind == :column
             identity
-        elseif length(tsm.rowmap) == 1 && tsm.rowmap[1] >= nrow
-            r -> tsm.posmap[1] - (tsm.rowmap[1] - r)
+        elseif length(tsm.row) == 1 && tsm.row[1] >= nrow
+            r -> tsm.pos[1] - (tsm.row[1] - r)
         else
             nothing
         end
