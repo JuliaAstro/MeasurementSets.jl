@@ -82,7 +82,7 @@ end
 
 # --- column & table descriptions -------------------------------
 
-function _write_columndesc(w::AipsWriter, c::ColumnDesc)
+function _write_columndesc(w::AipsWriter, c::ColumnDesc, varndim::Dict{String,Int}=Dict{String,Int}())
     arr = isarray(c)
     wr_u32(w, 1)                          # ColumnDesc wrapper version
     wr_string(w, c.classname)
@@ -93,7 +93,7 @@ function _write_columndesc(w::AipsWriter, c::ColumnDesc)
     wr_string(w, c.group)
     wr_i32(w, Int(c.type))
     wr_i32(w, c.option)
-    wr_i32(w, _nrdim(c))
+    wr_i32(w, get(varndim, c.name, _nrdim(c)))
     arr && wr_iposition(w, c.shape isa Dims ? c.shape : ())
     wr_u32(w, c.maxlength)
     write_record(w, c.keywords)
@@ -122,7 +122,8 @@ function _write_valtype(w::AipsWriter, t::CasaType, default)
     end
 end
 
-function write_tabledesc(w::AipsWriter, td::TableDesc)
+function write_tabledesc(w::AipsWriter, td::TableDesc,
+                         varndim::Dict{String,Int}=Dict{String,Int}())
     putstart(w, "TableDesc", 2)
     wr_string(w, td.name)
     wr_string(w, td.version)
@@ -131,7 +132,7 @@ function write_tabledesc(w::AipsWriter, td::TableDesc)
     write_record(w, td.private)
     wr_u32(w, length(td.columns))
     for c in td.columns
-        _write_columndesc(w, c)
+        _write_columndesc(w, c, varndim)
     end
     putend(w)
 end
@@ -181,13 +182,14 @@ end
 
 # --- table.dat / table.info ---------------------------------
 
-function table_dat_bytes(td::TableDesc, nrow::Integer, dms::Vector{DMWrite})
+function table_dat_bytes(td::TableDesc, nrow::Integer, dms::Vector{DMWrite},
+                         varndim::Dict{String,Int}=Dict{String,Int}())
     w = AipsWriter(; endian=:big)         # table.dat is always canonical
     putstart(w, "Table", 2)
     wr_u32(w, nrow)
     wr_u32(w, 1)                          # endian format: 1 = little-endian SM files
     wr_string(w, "PlainTable")
-    write_tabledesc(w, td)
+    write_tabledesc(w, td, varndim)
     write_columnset(w, td.columns, dms, nrow)
     putend(w)
     return bytes(w)
@@ -209,10 +211,11 @@ Write `table.dat` (atomically) and `table.info` for a table.  The data
 managers in `dms` have already written their own `table.f<seq>*` files.
 """
 function write_table_files(dir::AbstractString, td::TableDesc, nrow::Integer,
-                           dms::Vector{DMWrite}; type="", subtype="", readme="")
+                           dms::Vector{DMWrite}; type="", subtype="", readme="",
+                           varndim::Dict{String,Int}=Dict{String,Int}())
     mkpath(dir)
     tmp = joinpath(dir, "table.dat_tmp")
-    write(tmp, table_dat_bytes(td, nrow, dms))
+    write(tmp, table_dat_bytes(td, nrow, dms, varndim))
     mv(tmp, joinpath(dir, "table.dat"); force=true)
     write_tableinfo(dir; type, subtype, readme)
 end
