@@ -38,12 +38,30 @@ mutable struct IncrementalStMan
     length::Int            # bucket size in bytes
     buckets::Int           # number of data buckets
     index::ISMIndex
+    path::String           # the `table.f<seq>` path (for the `...i` array file)
+    arrayfile::Union{ArrayFile,Nothing}   # lazily opened `table.f<seq>i`
 end
 
 _u32(ism, off) = (ism.endian === :big ? ntoh : ltoh)(reinterpret(UInt32, view(ism.data, off+1:off+4))[1])
+_ism_i64(ism, off) = (ism.endian === :big ? ntoh : ltoh)(reinterpret(Int64, view(ism.data, off+1:off+8))[1])
+
+# `table.f<seq>i` --- opened on first indirect-array access, then memoized.
+function _arrayfile!(ism::IncrementalStMan)
+    ism.arrayfile === nothing &&
+        (ism.arrayfile = open_arrayfile(ism.path * "i", ism.endian))
+    return ism.arrayfile
+end
+
+# How column `c` is stored in an ISM bucket data part:
+#   :scalar  fixed-width scalar (incl. variable-length scalar string)
+#   :direct  fixed-shape array laid out inline
+#   :ind     variable-shape array -> Int64 offset into `table.f<seq>i`
+_ismkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : :direct
+_ismkind(c::ColumnDesc) = :ind
 
 function open_incrementalstman(t::CTDSTable, dm::DataManagerInfo)
-    bytes = read(joinpath(t.path, "table.f$(dm.sequ)"))
+    path = joinpath(t.path, "table.f$(dm.sequ)")
+    bytes = read(path)
     endian = t.endian
 
     h = AipsIO(IOBuffer(bytes); endian)
@@ -68,7 +86,7 @@ function open_incrementalstman(t::CTDSTable, dm::DataManagerInfo)
     getend(ia)
 
     return IncrementalStMan(bytes, endian, bucketsize, nbucket,
-                            ISMIndex(used, rows, bucket))
+                            ISMIndex(used, rows, bucket), path, nothing)
 end
 
 # --- bucket index parsing -----------------------------------------
@@ -113,6 +131,12 @@ end
 # --- value decoding ----------------------------------------------
 
 function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
+    if _ismkind(c) === :ind
+        foff = Int(_ism_i64(ism, dataoff))
+        foff == 0 && return juliatype(c.type)[]      # shape not defined for this row
+        return af_read(_arrayfile!(ism), c.type, foff)
+    end
+
     dims = _dims(c)
     nrelem = isempty(dims) ? 1 : prod(dims)
     swap = ism.endian === :big ? ntoh : ltoh
@@ -156,8 +180,8 @@ Whole-column read: walk buckets and run-length-fill from the stored values.
 """
 function ism_getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
                        nrow::Integer, ncol::Int)
-    dims = _dims(c)
-    scalar = isempty(dims) && c.type != TpString
+    kind = _ismkind(c)
+    scalar = kind === :scalar && c.type != TpString
     out = scalar ? Vector{juliatype(c.type)}(undef, nrow) :
           Vector{Any}(undef, nrow)
 
@@ -176,4 +200,166 @@ function ism_getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
         end
     end
     return out
+end
+
+# =====================  writer  =====================================
+# Fresh sequential fill: buckets filled left-to-right, a value stored only
+# when it differs from the value currently in effect ("store on change").
+# Layout: [512-byte header][nbucket * bucketsize][AipsIO "ISMIndex"].
+
+# append `x` (a bitstype) to `buf` in `endian` byte order; return its offset
+function _append_val!(buf::Vector{UInt8}, x, endian::Symbol)
+    off = length(buf)
+    resize!(buf, off + sizeof(x))
+    _wrbytes!(buf, off, x, endian)
+    return off
+end
+
+# one stored value in the bucket data part
+function _ism_encode!(buf::Vector{UInt8}, c::ColumnDesc, kind::Symbol, v,
+                      endian::Symbol, afw::ArrayFileWriter)
+    if kind === :ind
+        foff = (v isa AbstractArray && isempty(v)) ? Int64(0) : af_put!(afw, c.type, v)
+        _append_val!(buf, Int64(foff), endian)
+    elseif c.type == TpBool
+        n = kind === :scalar ? 1 : prod(_dims(c))
+        packed = zeros(UInt8, cld(n, 8))
+        vv = v isa AbstractArray ? vec(v) : (v,)
+        for k in 0:n-1
+            vv[k+1] && (packed[(k >> 3) + 1] |= (0x01 << (k & 7)))
+        end
+        append!(buf, packed)
+    elseif c.type == TpString
+        s = codeunits(String(v))
+        _append_val!(buf, UInt32(4 + length(s)), endian)     # length word counts itself
+        append!(buf, s)
+    else
+        J = juliatype(c.type)
+        vv = v isa AbstractArray ? vec(v) : (v,)
+        for x in vv
+            _append_val!(buf, J(x), endian)
+        end
+    end
+end
+
+# casacore's per-column contribution to the minimum bucket size (ISMBase::init)
+function _ism_fixedsize(c::ColumnDesc, kind::Symbol)
+    kind === :ind && return 8 + 8
+    if c.type == TpString && kind === :scalar
+        return 8 + 4 * 2                                      # variable: nr = 1
+    elseif c.type == TpBool
+        return 8 + cld(kind === :scalar ? 1 : prod(_dims(c)), 8)
+    else
+        return 8 + sizeof(juliatype(c.type)) * (kind === :scalar ? 1 : prod(_dims(c)))
+    end
+end
+
+"""
+    write_incrementalstman(dir, sequ, cols, coldata, nrow, endian) -> Vector{UInt8}
+
+Write `table.f<sequ>` (+ `table.f<sequ>i` for indirect columns) for an
+IncrementalStMan holding `cols` in order, and return the `"ISM"` record for
+the table.dat column-set section.
+"""
+function write_incrementalstman(dir::AbstractString, sequ::Int,
+                                cols::Vector{<:ColumnDesc}, coldata::Vector,
+                                nrow::Int, endian::Symbol)
+    ncol = length(cols)
+    kinds = Symbol[_ismkind(c) for c in cols]
+    headersize = 4 * (ncol + 1)
+    fixedsize = sum(_ism_fixedsize(cols[i], kinds[i]) for i in 1:ncol; init=0)
+    perrow = fixedsize                                       # ~worst case per row
+    bucketsize = clamp(headersize + 100 * perrow, 32768, 327680)
+    rpb = max(1, (bucketsize - headersize) ÷ max(perrow, 1))
+    nbucket = max(1, cld(nrow, rpb))
+
+    afw = ArrayFileWriter(; endian, version=1)               # ISM array files are version 1
+    have_ind = any(k -> k === :ind, kinds)
+
+    # build every bucket
+    bkts = Vector{Tuple{Vector{UInt8},Vector{Vector{Tuple{Int,Int}}}}}(undef, nbucket)
+    for b in 0:nbucket-1
+        r0 = b * rpb
+        r1 = min(nrow, r0 + rpb)
+        databuf = UInt8[]
+        entries = [Tuple{Int,Int}[] for _ in 1:ncol]
+        for i in 1:ncol
+            haveprev = false
+            prev = nothing
+            for lr in 0:(r1 - r0 - 1)
+                v = coldata[i][r0 + lr + 1]
+                if !haveprev || !isequal(v, prev)
+                    off = length(databuf)
+                    _ism_encode!(databuf, cols[i], kinds[i], v, endian, afw)
+                    push!(entries[i], (lr, off))
+                    prev = v
+                    haveprev = true
+                end
+            end
+        end
+        bkts[b + 1] = (databuf, entries)
+    end
+
+    # grow the bucket size if a bucket's data + index part needs more
+    for (databuf, entries) in bkts
+        idxlen = 4 * ncol + sum(length(e) for e in entries; init=0) * 8
+        bucketsize = max(bucketsize, 4 + length(databuf) + idxlen)
+    end
+    bucketsize = max(bucketsize, headersize + 2 * fixedsize)
+
+    # ISMIndex blob
+    iw = AipsWriter(; endian)
+    putstart(iw, "ISMIndex", 1)
+    wr_u32(iw, nbucket)                                      # nused
+    startrows = UInt32[b * rpb for b in 0:nbucket-1]
+    push!(startrows, UInt32(nrow))                           # sentinel
+    wr_block(iw, startrows)
+    wr_block(iw, UInt32.(0:nbucket-1))
+    putend(iw)
+    idxblob = bytes(iw)
+
+    # header
+    hw = AipsWriter(; endian)
+    putstart(hw, "IncrementalStMan", endian === :big ? 4 : 5)
+    endian === :big || wr_scalar(hw, false)                  # bigEndian flag
+    wr_u32(hw, bucketsize)
+    wr_u32(hw, nbucket)
+    wr_u32(hw, 0)                                            # persCacheSize
+    wr_u32(hw, count(k -> k === :ind, kinds))                # uniqnr
+    wr_u32(hw, 0)                                            # nFreeBucket
+    wr_i32(hw, -1)                                           # firstFreeBucket
+    putend(hw)
+    hdr = bytes(hw)
+    @assert length(hdr) <= 512
+
+    file = zeros(UInt8, 512 + nbucket * bucketsize + length(idxblob))
+    copyto!(file, 1, hdr, 1, length(hdr))
+    for b in 0:nbucket-1
+        databuf, entries = bkts[b + 1]
+        base = 512 + b * bucketsize
+        woffset = 4 + length(databuf)
+        _wrbytes!(file, base, UInt32(woffset), endian)
+        copyto!(file, base + 4 + 1, databuf, 1, length(databuf))
+        p = base + woffset
+        for i in 1:ncol
+            _wrbytes!(file, p, UInt32(length(entries[i])), endian); p += 4
+            for (rr, _) in entries[i]
+                _wrbytes!(file, p, UInt32(rr), endian); p += 4
+            end
+            for (_, oo) in entries[i]
+                _wrbytes!(file, p, UInt32(oo), endian); p += 4
+            end
+        end
+    end
+    copyto!(file, 512 + nbucket * bucketsize + 1, idxblob, 1, length(idxblob))
+
+    write(joinpath(dir, "table.f$sequ"), file)
+    have_ind && write(joinpath(dir, "table.f$(sequ)i"), arrayfile_bytes(afw))
+
+    # the "ISM" record for table.dat (always canonical big-endian there)
+    bw = AipsWriter(; endian=:big)
+    putstart(bw, "ISM", 3)
+    wr_string(bw, "ISM")
+    putend(bw)
+    return bytes(bw)
 end

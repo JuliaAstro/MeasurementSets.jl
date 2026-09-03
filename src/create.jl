@@ -38,7 +38,8 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
     cls = arr ? _classname(c.type, true) : _classname(c.type, false)
     opt = (arr && c.shape isa Dims && !isempty(c.shape)) ?
           (c.option | Int32(5)) : Int32(0)           # Direct | FixedShape
-    return ColumnDesc(c.name, c.comment, "StandardStMan", "StandardStMan",
+    mgr = kind === :ism ? "IncrementalStMan" : "StandardStMan"
+    return ColumnDesc(c.name, c.comment, mgr, mgr,
         c.type, cls, c.shape, opt, c.maxlength, c.keywords, c.default, c.sequ)
 end
 
@@ -56,12 +57,14 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            public::CasaRecord=CasaRecord(),
                            private::CasaRecord=CasaRecord(),
                            tsm::AbstractSet{<:AbstractString}=Set{String}(),
+                           ism::AbstractSet{<:AbstractString}=Set{String}(),
                            tablename::AbstractString="",
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
     mkpath(dir)
     tsm_i = findall(c -> c.name in tsm, descs)
-    ssm_i = setdiff(1:length(descs), tsm_i)          # scalars, direct + indirect arrays
+    ism_i = findall(c -> c.name in ism, descs)
+    ssm_i = setdiff(1:length(descs), vcat(tsm_i, ism_i))  # scalars, direct + indirect
 
     out = Vector{ColumnDesc}(undef, length(descs))
     dms = DMWrite[]
@@ -80,6 +83,13 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         blk = write_standardstman(dir, seq, cols, data[ssm_i], Int(nrow), endian)
         push!(dms, DMWrite("StandardStMan", seq, blk))
         for (k, i) in enumerate(ssm_i); out[i] = cols[k]; end
+        seq += 1
+    end
+    if !isempty(ism_i)
+        cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ism), seq) for i in ism_i]
+        blk = write_incrementalstman(dir, seq, cols, data[ism_i], Int(nrow), endian)
+        push!(dms, DMWrite("IncrementalStMan", seq, blk))
+        for (k, i) in enumerate(ism_i); out[i] = cols[k]; end
         seq += 1
     end
     for i in tsm_i
@@ -105,7 +115,7 @@ exact class names) is taken from `SCHEMAVER2[name]` when available.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
-                     tsm=String[],
+                     tsm=String[], ism=String[],
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
     pairs = columns isa AbstractDict ? collect(columns) :
@@ -137,6 +147,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
     end
 
     _write_table_core(dir, descs, data; nrow, endian, tsm = Set(String.(tsm)),
+                      ism = Set(String.(ism)),
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
 
@@ -150,6 +161,7 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
     descs = ColumnDesc[]
     data = Vector{Any}[]
     tsm = Set{String}()
+    ism = Set{String}()
     skipped = String[]
     for c in t.desc.columns
         col = try
@@ -162,11 +174,13 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
         catch
             push!(skipped, c.name); continue
         end
-        # preserve the source's storage-manager kind for array cubes
-        wanttsm = _is_tsm(c.shape) && occursin("Tiled", c.manager)
-        if wanttsm
+        # preserve the source's storage-manager kind
+        dm = _source_dm(t, c)
+        if _is_tsm(c.shape) && occursin("Tiled", dm)
             length(unique(size.(vals))) == 1 || (push!(skipped, c.name); continue)
             push!(tsm, c.name)
+        elseif dm in ("IncrementalStMan", "ISM")
+            push!(ism, c.name)
         end
         push!(descs, c)
         push!(data, vals)
@@ -174,10 +188,18 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
     isempty(skipped) ||
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(r), endian=:little,
-                      public, private=CasaRecord(), tsm,
+                      public, private=CasaRecord(), tsm, ism,
                       tablename=t.desc.name, type=t.type, subtype=t.subtype,
                       readme=t.readme)
     return descs
+end
+
+# the storage-manager instance a source column is actually bound to
+# (the ColumnDesc.manager string is unreliable — the reference MS labels
+# ISM-bound columns "StandardStMan").
+function _source_dm(t::CTDSTable, c::ColumnDesc)
+    i = findfirst(d -> d.sequ == c.sequ, t.managers)
+    i === nothing ? c.manager : t.managers[i].name
 end
 
 """
@@ -340,8 +362,14 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
         push!(pub.names, tbl); push!(pub.types, TpTable)
         push!(pub.values, SubTable("./" * tbl)); push!(pub.comments, "")
     end
+    # MAIN's scalar per-integration metadata goes through IncrementalStMan,
+    # as in a real MS
+    ismcols = Set(["TIME", "INTERVAL", "EXPOSURE", "TIME_CENTROID", "FEED1",
+        "FEED2", "FIELD_ID", "ARRAY_ID", "OBSERVATION_ID", "PROCESSOR_ID",
+        "SCAN_NUMBER", "STATE_ID"])
     _write_table_core(dir, mdescs, mdata; nrow=nrow, endian=:little, public=pub,
-                      tsm=Set(["DATA", "FLAG"]), tablename="MSDesc",
-                      type="Measurement Set")
+                      tsm=Set(["DATA", "FLAG"]),
+                      ism=intersect(ismcols, Set(c.name for c in mdescs)),
+                      tablename="MSDesc", type="Measurement Set")
     return dir
 end
