@@ -128,7 +128,7 @@ function read_ssm_header!(hdr::AipsIO)
     return (; version, size, buckets, indices, first, offset, last, length, nrinx)
 end
 
-function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
+function open_standardstman(t::Table, dm::DataManagerInfo)
     path = joinpath(t.path, "table.f$(dm.sequ)")
     bytes = read(path)
     endian = t.endian

@@ -135,7 +135,7 @@ end
 
 # --- the table ---------------------------------------------------
 
-struct CTDSTable
+struct Table
     path::String
     type::String               # table.info Type
     subtype::String            # table.info SubType
@@ -147,28 +147,28 @@ struct CTDSTable
     managers::Vector{DataManagerInfo}
 end
 
-nrow(t::CTDSTable) = t.rows
-columnnames(t::CTDSTable) = [c.name for c in t.desc.columns]
-function columndesc(t::CTDSTable, name::AbstractString)
+nrow(t::Table) = t.rows
+columnnames(t::Table) = [c.name for c in t.desc.columns]
+function columndesc(t::Table, name::AbstractString)
     i = findfirst(c -> c.name == name, t.desc.columns)
     i === nothing && throw(KeyError(name))
     t.desc.columns[i]
 end
-keywords(t::CTDSTable) = t.desc.public
+keywords(t::Table) = t.desc.public
 
-function Base.show(io::IO, t::CTDSTable)
-    print(io, "CTDSTable(\"", basename(t.path), "\", ", t.rows, " rows, ",
+function Base.show(io::IO, t::Table)
+    print(io, "Table(\"", basename(t.path), "\", ", t.rows, " rows, ",
           length(t.desc.columns), " columns")
     isempty(t.type) || print(io, ", type=\"", t.type, "\"")
     print(io, ")")
 end
 
 """
-    subtables(t::CTDSTable) -> Vector{Pair{String,String}}
+    subtables(t::Table) -> Vector{Pair{String,String}}
 
 Keyword name => subtable directory path, for every `TpTable` keyword.
 """
-function subtables(t::CTDSTable)
+function subtables(t::Table)
     out = Pair{String,String}[]
     for (n, v) in t.desc.public
         v isa SubTable && push!(out, n => _subtable_path(t.path, v.name))
@@ -198,7 +198,7 @@ function read_tableinfo(dir::String)
 end
 
 """
-    readtable(path) -> CTDSTable
+    readtable(path) -> Table
 
 Read the metadata (description, keywords, data-manager bindings, row count)
 of the casacore table directory at `path`.  Column *data* is not read.
@@ -232,7 +232,7 @@ function readtable(path::AbstractString)
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.public,
                       desc.private, cols)
 
-    return CTDSTable(dir, tp, st, readme, version, nr, endian, desc2, dms)
+    return Table(dir, tp, st, readme, version, nr, endian, desc2, dms)
 end
 
 function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})

@@ -282,13 +282,13 @@ stdtable(name::AbstractString) = SCHEMAVER2[uppercase(name)]
 stdcolumns(name::AbstractString) = stdtable(name).columns
 
 """
-    validate(t::CTDSTable; table="MAIN") -> Vector{String}
+    validate(t::Table; table="MAIN") -> Vector{String}
 
 Check `t` against the standard schema for `table`.  Returns a list of
 issues (missing required column, element-type mismatch, missing required
 subtable, unexpected keyword value); empty means conformant.  Never throws.
 """
-function validate(t::CTDSTable; table::AbstractString="MAIN")
+function validate(t::Table; table::AbstractString="MAIN")
     issues = String[]
     std = get(SCHEMAVER2, uppercase(table), nothing)
     std === nothing && return ["no standard schema for table \"$table\""]

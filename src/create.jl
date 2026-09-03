@@ -155,7 +155,7 @@ end
 
 # Read every readable column of `t` (rows `r`) and write it to `dir`.
 # `public` overrides the table's public keyword set (used for MAIN).
-function _copy_table(dir::AbstractString, t::CTDSTable, r;
+function _copy_table(dir::AbstractString, t::Table, r;
                      public::Record=t.desc.public,
                      private::Record=t.desc.private)
     descs = ColumnDesc[]
@@ -197,7 +197,7 @@ end
 # the storage-manager instance a source column is actually bound to
 # (the ColumnDesc.manager string is unreliable — the reference MS labels
 # ISM-bound columns "StandardStMan").
-function _source_dm(t::CTDSTable, c::ColumnDesc)
+function _source_dm(t::Table, c::ColumnDesc)
     i = findfirst(d -> d.sequ == c.sequ, t.managers)
     i === nothing ? c.manager : t.managers[i].name
 end

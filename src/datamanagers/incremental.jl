@@ -82,7 +82,7 @@ end
 _ismkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : :direct
 _ismkind(c::ColumnDesc) = :ind
 
-function open_incrementalstman(t::CTDSTable, dm::DataManagerInfo)
+function open_incrementalstman(t::Table, dm::DataManagerInfo)
     path = joinpath(t.path, "table.f$(dm.sequ)")
     bytes = read(path)
     endian = t.endian

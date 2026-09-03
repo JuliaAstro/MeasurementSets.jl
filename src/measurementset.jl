@@ -2,8 +2,8 @@
 
 struct MeasurementSet
     path::String
-    data::CTDSTable                     # the MAIN table
-    tables::Dict{String,CTDSTable}      # subtable cache, lazily populated
+    data::Table                     # the MAIN table
+    tables::Dict{String,Table}      # subtable cache, lazily populated
 end
 
 """
@@ -14,7 +14,7 @@ Subtables are read on first access via `getproperty` / `subtable`.
 """
 function MeasurementSet(path::AbstractString)
     dir = String(rstrip(path, '/'))
-    MeasurementSet(dir, readtable(dir), Dict{String,CTDSTable}())
+    MeasurementSet(dir, readtable(dir), Dict{String,Table}())
 end
 
 Base.propertynames(ms::MeasurementSet) =
@@ -26,7 +26,7 @@ function Base.getproperty(ms::MeasurementSet, s::Symbol)
 end
 
 """
-    subtable(ms, name) -> CTDSTable
+    subtable(ms, name) -> Table
 
 Read (and cache) the subtable referenced by keyword `name` in MAIN.
 """

@@ -14,7 +14,7 @@
 # removed so casacore recomputes it.
 
 mutable struct EditTable
-    reader::CTDSTable
+    reader::Table
     rows::Int
     override::Dict{String,Vector{Any}}     # SSM/ISM: whole materialised columns
     tsmedit::Dict{String,Dict{Int,Any}}    # TSM: column -> (1-based row -> new cell)

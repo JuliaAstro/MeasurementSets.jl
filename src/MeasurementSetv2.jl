@@ -22,7 +22,7 @@ include("tables_interface.jl")
 include("create.jl")
 include("edit.jl")
 
-export CTDSTable, readtable, columnnames, columndesc, keywords, subtables, nrow
+export Table, readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames
 export Record, SubTable, ColumnDesc, TableDesc, CasaType
 export VariableShape, VariableDims, isarray

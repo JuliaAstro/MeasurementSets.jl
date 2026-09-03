@@ -64,7 +64,7 @@ function _read_tsmcube(a::AipsIO)
     return TSMCube(cubeshape, tileshape, sequ, offset)
 end
 
-function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::CTDSTable)
+function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::Table)
     version = getstart(a, "TiledStMan")
     version >= 2 && read_scalar(a, Bool)                   # bigEndian flag
     tsm.sequ = Int(read_u32(a))
@@ -92,7 +92,7 @@ function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::CTDSTable)
     return version
 end
 
-function open_tiledstman(t::CTDSTable, dm::DataManagerInfo)
+function open_tiledstman(t::Table, dm::DataManagerInfo)
     path = joinpath(t.path, "table.f$(dm.sequ)")
     a = AipsIO(read(path); endian=:big)             # header file is big-endian
     tsm = TiledStMan(path, t.endian, :column, dm.sequ, TpOther, "", 0,

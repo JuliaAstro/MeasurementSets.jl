@@ -1,4 +1,4 @@
-# Tables.jl integration: a CTDSTable (and a MeasurementSet, via its MAIN
+# Tables.jl integration: a Table (and a MeasurementSet, via its MAIN
 # table) is both a column source and a row source.  Access is lazy — each
 # column materialises only when asked for.
 
@@ -6,16 +6,16 @@ import Tables
 
 # --- column access ------------------------------------------------
 
-Tables.istable(::Type{CTDSTable}) = true
-Tables.columnaccess(::Type{CTDSTable}) = true
-Tables.rowaccess(::Type{CTDSTable}) = true
+Tables.istable(::Type{Table}) = true
+Tables.columnaccess(::Type{Table}) = true
+Tables.rowaccess(::Type{Table}) = true
 
-Tables.columns(t::CTDSTable) = t
-Tables.columnnames(t::CTDSTable) = Symbol.(columnnames(t))
-Tables.getcolumn(t::CTDSTable, nm::Symbol) = column(t, String(nm))
-Tables.getcolumn(t::CTDSTable, i::Int) = column(t, t.desc.columns[i].name)
+Tables.columns(t::Table) = t
+Tables.columnnames(t::Table) = Symbol.(columnnames(t))
+Tables.getcolumn(t::Table, nm::Symbol) = column(t, String(nm))
+Tables.getcolumn(t::Table, i::Int) = column(t, t.desc.columns[i].name)
 
-function _schema_eltype(t::CTDSTable, c::ColumnDesc)
+function _schema_eltype(t::Table, c::ColumnDesc)
     c.sequ === nothing && return Any
     try
         _eltype(c, _dm_instance(t, c.sequ))
@@ -24,7 +24,7 @@ function _schema_eltype(t::CTDSTable, c::ColumnDesc)
     end
 end
 
-Tables.schema(t::CTDSTable) = Tables.Schema(
+Tables.schema(t::Table) = Tables.Schema(
     Symbol.(columnnames(t)),
     Tuple(_schema_eltype(t, c) for c in t.desc.columns))
 
@@ -36,7 +36,7 @@ struct CTDSRows
     n::Int
 end
 
-function Tables.rows(t::CTDSTable)
+function Tables.rows(t::Table)
     CTDSRows(Column[column(t, c.name) for c in t.desc.columns],
              Symbol.(columnnames(t)), t.rows)
 end
@@ -61,10 +61,10 @@ function Tables.getcolumn(row::CTDSRow, nm::Symbol)
 end
 
 # `for r in table`
-Base.length(t::CTDSTable) = t.rows
-Base.IteratorSize(::Type{CTDSTable}) = Base.HasLength()
-Base.eltype(::Type{CTDSTable}) = CTDSRow
-function Base.iterate(t::CTDSTable, state=(Tables.rows(t), 1))
+Base.length(t::Table) = t.rows
+Base.IteratorSize(::Type{Table}) = Base.HasLength()
+Base.eltype(::Type{Table}) = CTDSRow
+function Base.iterate(t::Table, state=(Tables.rows(t), 1))
     r, i = state
     i > r.n && return nothing
     (CTDSRow(r, i), (r, i + 1))

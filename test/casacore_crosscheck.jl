@@ -17,7 +17,7 @@ if _HAVE_CASACORE
 
     _cc_eltype(tab, name) = _scalar_eltype(typeof(tab[Symbol(name)]).parameters[1])
 
-    function crosscheck_table(ours::MSv2.CTDSTable, theirs)
+    function crosscheck_table(ours::MSv2.Table, theirs)
         @test nrow(ours) == size(theirs, 1)
         @test Set(columnnames(ours)) == Set(String.(keys(theirs)))
         for c in ours.desc.columns

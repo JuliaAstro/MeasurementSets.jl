@@ -2,11 +2,11 @@
 # the bound data manager.
 
 # cache opened data-manager instances on the table
-const _DM_CACHE = IdDict{CTDSTable,Dict{Int,Any}}()
+const _DM_CACHE = IdDict{Table,Dict{Int,Any}}()
 
-_dm_instance(::CTDSTable, ::Nothing) = error("column is not bound to a data manager")
+_dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager")
 
-function _dm_instance(t::CTDSTable, sequ::Int)
+function _dm_instance(t::Table, sequ::Int)
     cache = get!(() -> Dict{Int,Any}(), _DM_CACHE, t)
     haskey(cache, sequ) && return cache[sequ]
     dm = t.managers[findfirst(d -> d.sequ == sequ, t.managers)]
@@ -24,7 +24,7 @@ function _dm_instance(t::CTDSTable, sequ::Int)
 end
 
 # (1-based position of `c` among columns bound to its DM instance, count bound)
-function _dm_local(t::CTDSTable, c::ColumnDesc)
+function _dm_local(t::Table, c::ColumnDesc)
     idx = 0
     n = 0
     for x in t.desc.columns
@@ -40,7 +40,7 @@ end
 # --- the lazy column -------------------------------------------------
 
 struct Column{T} <: AbstractVector{T}
-    table::CTDSTable
+    table::Table
     desc::ColumnDesc
     inst::Any            # opened data-manager instance
     index::Int           # DM-local column index (SSM/ISM)
@@ -61,12 +61,12 @@ function _eltype(c::ColumnDesc, inst)
 end
 
 """
-    column(t::CTDSTable, name) -> Column
+    column(t::Table, name) -> Column
 
 A lazy `AbstractVector` over a column: `col[i]` reads one cell, `col[r]` a
 range, `col[:]` the whole column (fast path).
 """
-function column(t::CTDSTable, name::AbstractString)
+function column(t::Table, name::AbstractString)
     c = columndesc(t, name)
     inst = _dm_instance(t, c.sequ)
     idx, n = _dm_local(t, c)
@@ -122,17 +122,17 @@ end
 
 Read an entire column's data (eager; equivalent to `column(t, name)[:]`).
 """
-getcolumn(t::CTDSTable, name::AbstractString) = column(t, name)[:]
+getcolumn(t::Table, name::AbstractString) = column(t, name)[:]
 
 """
     getcell(t, name, row) -> value
 
 Read one cell (`row` is 1-based).
 """
-getcell(t::CTDSTable, name::AbstractString, row::Integer) = column(t, name)[row]
+getcell(t::Table, name::AbstractString, row::Integer) = column(t, name)[row]
 
-Base.getindex(t::CTDSTable, name::AbstractString) = column(t, name)
-Base.getindex(t::CTDSTable, name::Symbol) = column(t, String(name))
+Base.getindex(t::Table, name::AbstractString) = column(t, name)
+Base.getindex(t::Table, name::Symbol) = column(t, String(name))
 
 getcolumn(ms::MeasurementSet, sub::AbstractString, name::AbstractString) =
     column(subtable(ms, sub), name)[:]
