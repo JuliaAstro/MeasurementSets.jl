@@ -35,6 +35,7 @@ struct ColumnDesc{T<:CellShape}
     manager::String            # data-manager *type* the column is bound to
     group::String              # data-manager *group* (instance) name
     type::CasaType             # scalar or array CasaType
+    classname::String          # casacore ColumnDesc class, e.g. "ScalarColumnDesc<Int>"
     shape::T                   # () scalar / Dims fixed / VariableShape / VariableDims
     option::Int32
     maxlength::UInt32
@@ -84,7 +85,7 @@ function read_columndesc(a::AipsIO)
     end
 
     shape = _cellshape(isarray, nrdim, schemashape)
-    ColumnDesc(name, comment, manager, group, dtype,
+    ColumnDesc(name, comment, manager, group, dtype, classname,
                shape, option, maxlen, keywords, default, nothing)
 end
 
@@ -220,7 +221,7 @@ function readtable(path::AbstractString)
     for (i, c) in enumerate(desc.columns)
         shape = haskey(colshape, i) ? colshape[i] : c.shape   # column shape wins
         push!(cols, ColumnDesc(c.name, c.comment, c.manager, c.group,
-            c.type, shape, c.option, c.maxlength,
+            c.type, c.classname, shape, c.option, c.maxlength,
             c.keywords, c.default, get(colseq, i, nothing)))
     end
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.public,

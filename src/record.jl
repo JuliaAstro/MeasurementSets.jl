@@ -9,13 +9,14 @@ struct SubTable
 end
 
 "An ordered casacore (Table)Record: field name -> value, with the on-disk types."
-struct CasaRecord
+mutable struct CasaRecord
     names::Vector{String}
     types::Vector{CasaType}
     values::Vector{Any}
     comments::Vector{String}
+    rectype::Int32            # RecordInterface::RecordType (0 Fixed, 1 Variable)
 end
-CasaRecord() = CasaRecord(String[], CasaType[], Any[], String[])
+CasaRecord() = CasaRecord(String[], CasaType[], Any[], String[], Int32(1))
 
 Base.length(r::CasaRecord) = length(r.names)
 Base.keys(r::CasaRecord) = r.names
@@ -107,8 +108,9 @@ function read_record(a::AipsIO)
         # "TableRecord" or "Record"
         version = read_u32(a)
         fields = read_recorddesc(a)
-        _rectype = read_i32(a)
+        rectype = read_i32(a)
         rec = read_recorddata(a, fields, version)
+        rec.rectype = rectype
         getend(a)
         return rec
     end

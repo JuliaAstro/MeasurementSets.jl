@@ -1,21 +1,25 @@
-# AipsIO --- reader for the object-framed byte stream used by casacore for
-# `table.dat` and the data-manager headers.
+# AipsIO --- reader and writer for the object-framed byte stream used by
+# casacore for `table.dat` and the data-manager headers.
 #
 # Framing (see casacore/casa/IO/AipsIO.cc):
 #   * The root stream begins with the magic value 0xbebebebe (UInt32).
 #   * Every object is written as
 #         [len::UInt32][type::String][version::UInt32][body...]
 #     where `len` counts itself, the type string, the version and the body.
-#     (On write casacore reserves the slot with a second magic value and
-#     overwrites it with the length in `putend`; nested objects carry no
-#     magic of their own.)
+#     (casacore's `putstart` reserves the slot with the magic value and
+#     `putend` overwrites it with the length; nested objects carry no magic.)
 #   * Strings are [n::UInt32][n bytes] with no terminator.
 #
 # `table.dat` is always "canonical" (big-endian).  Storage-manager files
-# follow the table's endian flag, so `AipsIO` carries an `endian` field
+# follow the table's endian flag, so both sides carry an `endian` field
 # (`:big` or `:little`).
 
 const AIPS_MAGIC = 0xbebebebe
+
+# canonical (big) or LE-canonical byte order
+_toendian(endian::Symbol, x) = endian === :big ? hton(x) : htol(x)
+
+# ============================ reader ================================
 
 mutable struct AipsIO
     io::IO
@@ -30,8 +34,6 @@ AipsIO(data::Vector{UInt8}; kw...) = AipsIO(IOBuffer(data); kw...)
 Base.position(a::AipsIO) = position(a.io)
 Base.seek(a::AipsIO, n::Integer) = seek(a.io, n)
 Base.eof(a::AipsIO) = eof(a.io)
-
-# --- primitive scalar reads (honouring endianness) ---------------------
 
 _ord(a::AipsIO, x) = a.endian === :big ? ntoh(x) : ltoh(x)
 
@@ -54,14 +56,6 @@ function read_string(a::AipsIO)
     String(read(a.io, Int(n)))
 end
 
-# --- object framing ----------------------------------------------------
-
-"""
-    getnexttype(a) -> String
-
-Peek the type name of the next object without consuming its version.
-Consumes the root magic on the first call at the outermost level.
-"""
 function getnexttype(a::AipsIO)
     if a.level == 0
         magic = read_u32(a)
@@ -75,39 +69,20 @@ function getnexttype(a::AipsIO)
     return tp
 end
 
-"""
-    getstart(a, expected) -> version::UInt32
-
-Begin reading an object, verifying its type, and return its version.
-"""
 function getstart(a::AipsIO, expected::AbstractString)
     tp = getnexttype(a)
     tp == expected || error("AipsIO.getstart: found \"$tp\", expected \"$expected\"")
     return read_u32(a)
 end
 
-"""
-    getend(a)
-
-Finish the current object, seeking to its recorded end so a partially
-decoded object cannot desynchronise the stream.
-"""
 function getend(a::AipsIO)
     a.level > 0 || error("AipsIO.getend: no matching getstart")
     endpos = pop!(a.ends)
     a.level -= 1
-    endpos == AIPS_MAGIC || seek(a.io, endpos)   # unknown on non-seekable writes
+    endpos == AIPS_MAGIC || seek(a.io, endpos)
     return nothing
 end
 
-# --- aggregates -------------------------------------------------------
-
-"""
-    read_iposition(a) -> Dims  (a tuple of Int)
-
-An `IPosition` (array shape). Version 1 stores Int32 elements, version 2
-Int64.
-"""
 function read_iposition(a::AipsIO)::Dims
     v = getstart(a, "IPosition")
     nel = Int(read_u32(a))
@@ -117,11 +92,6 @@ function read_iposition(a::AipsIO)::Dims
     return shape
 end
 
-"""
-    read_block(a, ::Type{T}) -> Vector{T}
-
-A casacore `Block<T>` : `getstart("Block")`, count, then the elements.
-"""
 function read_block(a::AipsIO, ::Type{T}) where {T}
     getstart(a, "Block")
     n = Int(read_u32(a))
@@ -133,11 +103,6 @@ end
 read_element(a::AipsIO, ::Type{String}) = read_string(a)
 read_element(a::AipsIO, ::Type{T}) where {T} = read_scalar(a, T)
 
-"""
-    read_map(a, ::Type{K}, ::Type{V}) -> Vector{Pair{K,V}}
-
-A casacore `std::map<K,V>` written as `SimpleOrderedMap`.
-"""
 function read_map(a::AipsIO, ::Type{K}, ::Type{V}) where {K,V}
     getstart(a, "SimpleOrderedMap")
     read_element(a, V)                       # obsolete default value
@@ -148,11 +113,6 @@ function read_map(a::AipsIO, ::Type{K}, ::Type{V}) where {K,V}
     return out
 end
 
-"""
-    read_array(a, ::Type{T}) -> (shape::Vector{Int}, data::Vector{T})
-
-A casacore `Array<T>` written via AipsIO (used for array-valued keywords).
-"""
 function read_array(a::AipsIO, ::Type{T}) where {T}
     tp = getnexttype(a)
     (tp == "Array" || startswith(tp, "Array<")) ||
@@ -167,4 +127,78 @@ function read_array(a::AipsIO, ::Type{T}) where {T}
     data = T[read_element(a, T) for _ in 1:nwritten]
     getend(a)
     return shape, data
+end
+
+# ============================ writer ================================
+
+mutable struct AipsWriter
+    io::IOBuffer
+    endian::Symbol
+    starts::Vector{Int}   # position of the length slot for each open object
+    level::Int
+end
+
+AipsWriter(; endian::Symbol=:big) = AipsWriter(IOBuffer(), endian, Int[], 0)
+
+"The bytes written (terminal — all framing must be closed via `putend`)."
+function bytes(w::AipsWriter)
+    @assert w.level == 0 "AipsWriter.bytes: $(w.level) object(s) still open"
+    return take!(w.io)
+end
+
+_put(w::AipsWriter, x) = write(w.io, _toendian(w.endian, x))
+
+wr_u32(w::AipsWriter, x) = _put(w, UInt32(x))
+wr_i32(w::AipsWriter, x) = _put(w, Int32(x))
+wr_u64(w::AipsWriter, x) = _put(w, UInt64(x))
+
+wr_scalar(w::AipsWriter, x::Bool) = write(w.io, x ? 0x01 : 0x00)
+wr_scalar(w::AipsWriter, x::Complex) = (_put(w, real(x)); _put(w, imag(x)))
+wr_scalar(w::AipsWriter, x) = _put(w, x)
+
+function wr_string(w::AipsWriter, s::AbstractString)
+    wr_u32(w, ncodeunits(s))
+    write(w.io, s)
+    return nothing
+end
+
+function putstart(w::AipsWriter, type::AbstractString, version::Integer)
+    w.level == 0 && wr_u32(w, AIPS_MAGIC)
+    push!(w.starts, position(w.io))
+    wr_u32(w, 0)                         # length placeholder
+    wr_string(w, type)
+    wr_u32(w, version)
+    w.level += 1
+    return nothing
+end
+
+function putend(w::AipsWriter)
+    start = pop!(w.starts)
+    stop = position(w.io)
+    seek(w.io, start)
+    wr_u32(w, stop - start)              # slot + type + version + body
+    seek(w.io, stop)
+    w.level -= 1
+    return nothing
+end
+
+function wr_iposition(w::AipsWriter, shape)
+    putstart(w, "IPosition", 1)
+    wr_u32(w, length(shape))
+    for x in shape
+        wr_i32(w, x)
+    end
+    putend(w)
+end
+
+wr_element(w::AipsWriter, x::AbstractString) = wr_string(w, x)
+wr_element(w::AipsWriter, x) = wr_scalar(w, x)
+
+function wr_block(w::AipsWriter, xs)
+    putstart(w, "Block", 1)
+    wr_u32(w, length(xs))
+    for x in xs
+        wr_element(w, x)
+    end
+    putend(w)
 end

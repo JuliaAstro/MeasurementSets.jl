@@ -300,3 +300,173 @@ function ssm_getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Int
         return [reshape(flat[(r-1)*nrelem+1 : r*nrelem], dims...) for r in 1:nrow]
     end
 end
+
+# =====================  writer  =====================================
+# Fresh, sequential fill: one bucket stream, no free list, no bucket
+# splitting.  Layout: [data buckets][string buckets][index bucket].
+
+_wrbytes!(buf, off, x, endian) = begin
+    v = _toendian(endian, x)
+    copyto!(buf, off + 1, reinterpret(UInt8, [v]), 1, sizeof(x))
+end
+
+"""
+    write_standardstman(dir, sequ, cols, coldata, nrow, endian) -> Vector{UInt8}
+
+Write `table.f<sequ>` for a StandardStMan holding `cols` (in order), and
+return the `"SSM"` record for the table.dat column-set section.  `coldata[i]`
+is a length-`nrow` vector of cell values for `cols[i]`.
+"""
+function write_standardstman(dir::AbstractString, sequ::Int,
+                             cols::Vector{<:ColumnDesc}, coldata::Vector,
+                             nrow::Int, endian::Symbol)
+    ncol = length(cols)
+    swap(x) = _toendian(endian, x)
+    exts   = [cell_extsize(c) for c in cols]
+    nelems = [_nrelem(c) for c in cols]
+    isbool = [c.type == TpBool for c in cols]
+
+    rpb = clamp(nrow, 1, 1024)
+    blocksz(i) = isbool[i] ? cld(rpb * nelems[i], 8) : exts[i] * rpb
+    bs = [blocksz(i) for i in 1:ncol]
+    coloffset = Int[sum(bs[1:i-1]) for i in 1:ncol]
+    datasize = sum(bs)
+    ndata = cld(nrow, rpb)
+
+    # --- variable strings: build the string stream + per-cell refs -----
+    strstream = UInt8[]
+    strref = [Vector{NTuple{3,Int}}(undef, 0) for _ in 1:ncol]   # (bkt,off,len) or inline
+    inlinechars = [Dict{Int,Vector{UInt8}}() for _ in 1:ncol]
+
+    # index bytes: SSMIndex `itsLastRow` (0-based last row of each bucket)
+    idxrows = UInt32[min((k + 1) * rpb, nrow) - 1 for k in 0:ndata-1]
+    iw = AipsWriter(; endian)
+    putstart(iw, "SSMIndex", 1)
+    wr_u32(iw, ndata); wr_u32(iw, rpb); wr_i32(iw, ncol)
+    putstart(iw, "SimpleOrderedMap", 1); wr_i32(iw, 0); wr_u32(iw, 0); wr_u32(iw, 1); putend(iw)
+    wr_block(iw, idxrows)
+    wr_block(iw, UInt32.(0:ndata-1))
+    putend(iw)
+    idxbytes = bytes(iw)
+
+    bucketsize = max(datasize, length(idxbytes) + 8, 512)
+    strchar = bucketsize - 16
+
+    for i in 1:ncol
+        cols[i].type == TpString || continue
+        for r in 1:nrow
+            s = codeunits(String(coldata[i][r]))
+            if length(s) <= 8
+                push!(strref[i], (0, 0, length(s)))
+                inlinechars[i][r] = collect(s)
+            else
+                bkt = length(strstream) ÷ strchar
+                off = length(strstream) % strchar
+                append!(strstream, s)
+                push!(strref[i], (bkt, off, length(s)))   # bkt is string-bucket-relative
+            end
+        end
+    end
+    nstr = isempty(strstream) ? 0 : cld(length(strstream), strchar)
+    strbase = ndata                       # first string bucket number
+    idxbase = ndata + nstr                # index bucket number
+
+    # --- data buckets -----------------------------------------------
+    file = zeros(UInt8, 512 + (ndata + nstr + 1) * bucketsize)
+    _bp(n) = 512 + n * bucketsize
+    for k in 0:ndata-1
+        base = _bp(k)
+        r0 = k * rpb
+        nr = min(rpb, nrow - r0)
+        for i in 1:ncol
+            c = cols[i]; co = base + coloffset[i]; ext = exts[i]; nel = nelems[i]
+            if c.type == TpBool
+                for lr in 0:nr-1, e in 0:nel-1
+                    v = coldata[i][r0 + lr + 1]
+                    bit = (v isa AbstractArray ? v[e+1] : v)::Bool
+                    if bit
+                        b = lr * nel + e
+                        file[co + (b >> 3) + 1] |= (0x01 << (b & 7))
+                    end
+                end
+            elseif c.type == TpString
+                for lr in 0:nr-1
+                    r = r0 + lr + 1
+                    o = co + lr * 12
+                    bkt, soff, len = strref[i][r]
+                    if haskey(inlinechars[i], r)
+                        cs = inlinechars[i][r]
+                        copyto!(file, o + 1, cs, 1, length(cs))
+                    else
+                        _wrbytes!(file, o,     Int32(strbase + bkt), endian)
+                        _wrbytes!(file, o + 4, Int32(soff), endian)
+                    end
+                    _wrbytes!(file, o + 8, Int32(len), endian)
+                end
+            else
+                J = juliatype(c.type)
+                for lr in 0:nr-1
+                    v = coldata[i][r0 + lr + 1]
+                    o = co + lr * ext
+                    if nel == 1
+                        _wrbytes!(file, o, J(v), endian)
+                    else
+                        vv = vec(v)
+                        for e in 1:nel
+                            _wrbytes!(file, o + (e-1)*sizeof(J), J(vv[e]), endian)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    # --- string buckets (headers are big-endian) -------------------
+    for k in 0:nstr-1
+        base = _bp(strbase + k)
+        s0 = k * strchar
+        used = min(strchar, length(strstream) - s0)
+        _wrbytes!(file, base,      Int32(0), :big)          # free list
+        _wrbytes!(file, base + 4,  Int32(used), :big)       # usedLength
+        _wrbytes!(file, base + 8,  Int32(strchar - used), :big)  # nDeleted
+        _wrbytes!(file, base + 12, Int32(-1), :big)         # nextBucket
+        copyto!(file, base + 16 + 1, strstream, s0 + 1, used)
+    end
+
+    # --- index bucket ------------------------------------------------
+    ibase = _bp(idxbase)
+    _wrbytes!(file, ibase,     Int32(idxbase), :big)        # check number
+    _wrbytes!(file, ibase + 4, Int32(-1), :big)             # next index bucket
+    copyto!(file, ibase + 8 + 1, idxbytes, 1, length(idxbytes))
+
+    # --- 512-byte header ------------------------------------------
+    hw = AipsWriter(; endian)
+    putstart(hw, "StandardStMan", 3)
+    wr_scalar(hw, endian === :big)
+    wr_u32(hw, bucketsize)
+    wr_u32(hw, ndata + nstr + 1)          # nrBuckets
+    wr_u32(hw, 2)                         # persCacheSize
+    wr_u32(hw, 0)                         # nFreeBucket
+    wr_i32(hw, -1)                        # firstFreeBucket
+    wr_u32(hw, 1)                         # nrIdxBuckets
+    wr_i32(hw, idxbase)                   # firstIdxBucket
+    wr_u32(hw, 0)                         # idxBucketOffset
+    wr_i32(hw, nstr > 0 ? strbase + nstr - 1 : -1)   # lastStringBucket
+    wr_u32(hw, length(idxbytes))
+    wr_u32(hw, 1)                         # nrinx
+    putend(hw)
+    hdr = bytes(hw)
+    @assert length(hdr) <= 512
+    copyto!(file, 1, hdr, 1, length(hdr))
+
+    write(joinpath(dir, "table.f$sequ"), file)
+
+    # --- the "SSM" record for table.dat --------------------------
+    bw = AipsWriter(; endian=:big)
+    putstart(bw, "SSM", 2)
+    wr_string(bw, "SSM")
+    wr_block(bw, UInt32.(coloffset))
+    wr_block(bw, fill(UInt32(0), ncol))   # colIndexMap: all in index 0
+    putend(bw)
+    return bytes(bw)
+end

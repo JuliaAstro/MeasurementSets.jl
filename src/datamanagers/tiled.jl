@@ -278,3 +278,96 @@ function tsm_getcolumn(tsm::TiledStMan, c::ColumnDesc, nrow::Integer)
     end
     return [tsm_getcell(tsm, c, r) for r in 1:nrow]
 end
+
+# =====================  writer  =====================================
+# Single hypercube covering all rows (uniform cell shape).
+
+# TSMCube::putObject writes no framing of its own.
+function _tsm_putobject_cube(w::AipsWriter, cubeshape, tileshape, fileseqnr, offset)
+    wr_u32(w, 1)                                          # cube version 1
+    write_record(w, CasaRecord(); typename="Record")     # values_p (empty)
+    wr_scalar(w, true)                                    # extensible
+    wr_u32(w, length(cubeshape))
+    wr_iposition(w, cubeshape)
+    wr_iposition(w, tileshape)
+    wr_i32(w, fileseqnr)
+    wr_u32(w, offset)
+end
+
+"""
+    write_tiledshapestman(dir, sequ, col, celldata, nrow, endian) -> Vector{UInt8}
+
+Write `table.f<sequ>` + `table.f<sequ>_TSM1` for one variable-shape numeric/
+Bool array column, and return the (empty) block for the table.dat column-set
+section.  All cells must share one shape.
+"""
+function write_tiledshapestman(dir::AbstractString, sequ::Int, col::ColumnDesc,
+                               celldata::Vector, nrow::Int, endian::Symbol)
+    shapes = unique(size.(celldata))
+    length(shapes) == 1 ||
+        error("TiledShapeStMan writer needs a uniform cell shape, got $shapes")
+    cell = collect(shapes[1])
+    J = juliatype(col.type)
+    elemsz = J === Bool ? 0 : sizeof(J)              # 0 => bit-packed
+    planelen = prod(cell; init=1)
+
+    trow = clamp((1 << 20) ÷ max(planelen * max(elemsz, 1), 1), 1, nrow)
+    tileshape = (cell..., trow)
+    cubeshape = (cell..., nrow)
+    ntiles = cld(nrow, trow)
+    tilepix = prod(tileshape)
+    tilebytes = J === Bool ? cld(tilepix, 8) : tilepix * elemsz
+
+    # --- _TSM1 -----------------------------------------------------
+    data = zeros(UInt8, ntiles * tilebytes)
+    for r in 0:nrow-1
+        plane = vec(celldata[r + 1])
+        tile = r ÷ trow
+        base = tile * tilebytes
+        within = (r % trow) * planelen
+        if J === Bool
+            for e in 0:planelen-1
+                if plane[e + 1]
+                    b = within + e
+                    data[base + (b >> 3) + 1] |= (0x01 << (b & 7))
+                end
+            end
+        else
+            off = base + within * elemsz
+            for e in 1:planelen
+                _wrbytes!(data, off + (e-1)*elemsz, J(plane[e]), endian)
+            end
+        end
+    end
+    write(joinpath(dir, "table.f$(sequ)_TSM1"), data)
+
+    # --- header file (big-endian AipsIO) --------------------------
+    hw = AipsWriter(; endian=:big)
+    putstart(hw, "TiledShapeStMan", 1)
+    putstart(hw, "TiledStMan", 2)
+    wr_scalar(hw, endian === :big)                   # bigEndian flag
+    wr_u32(hw, sequ)
+    wr_u32(hw, nrow)
+    wr_u32(hw, 1)                                    # ncolumn
+    wr_i32(hw, Int(col.type))
+    wr_string(hw, "TSM$(col.name)")                  # hypercolumn name
+    wr_u32(hw, 0)                                    # persMaxCacheSize
+    wr_u32(hw, length(cubeshape))                    # nrdim
+    wr_u32(hw, 2)                                    # nrFile
+    wr_scalar(hw, false)                             # file 0 absent
+    wr_scalar(hw, true)                              # file 1 present
+    wr_u32(hw, 1); wr_u32(hw, 1); wr_u32(hw, length(data))  # TSMFile v1: seqnr 1, length
+    wr_u32(hw, 2)                                    # nrCube
+    _tsm_putobject_cube(hw, Int[], Int[], -1, 0)     # cube 0 (empty)
+    _tsm_putobject_cube(hw, cubeshape, tileshape, 1, 0)
+    putend(hw)                                       # close "TiledStMan"
+    wr_iposition(hw, tileshape)                      # defaultTileShape
+    wr_u32(hw, 1)                                    # nrUsedRowMap
+    wr_block(hw, UInt32[nrow - 1])                   # rowMap  (0-based last row)
+    wr_block(hw, UInt32[1])                          # cubeMap
+    wr_block(hw, UInt32[nrow - 1])                   # posMap
+    putend(hw)
+    write(joinpath(dir, "table.f$sequ"), bytes(hw))
+
+    return UInt8[]                                   # empty table.dat block
+end
