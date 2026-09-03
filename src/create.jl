@@ -181,24 +181,27 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
 end
 
 """
-    write_ms(dir, ms::MeasurementSet; rows=Colon())
+    write_ms(dir, ms::MeasurementSet; rows=Colon(), subtables=Colon())
 
-Write `ms` to a new MeasurementSet directory `dir`: every subtable in full,
-MAIN restricted to `rows`.  Columns the reader cannot decode (SSM indirect
-variable-shape arrays) and non-uniform `VariableShape` columns are skipped
+Write `ms` to a new MeasurementSet directory `dir`: MAIN restricted to
+`rows`, and every subtable in full (or only those named in `subtables`, a
+collection of keyword names).  A column the reader cannot decode is skipped
 with a warning.
 """
-function write_ms(dir::AbstractString, ms::MeasurementSet; rows=Colon())
+function write_ms(dir::AbstractString, ms::MeasurementSet;
+                  rows=Colon(), subtables=Colon())
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
 
     main = getfield(ms, :data)
     mrows = rows === Colon() ? (1:main.rows) : rows
+    want(kw) = subtables === Colon() || kw in subtables
 
     # write subtables, remember which ones succeeded
     written = String[]
-    for (kw, path) in subtables(main)
+    for (kw, path) in MeasurementSetv2.subtables(main)
+        want(kw) || continue
         sub = try
             subtable(ms, kw)
         catch e
@@ -229,13 +232,13 @@ function write_ms(dir::AbstractString, ms::MeasurementSet; rows=Colon())
 end
 
 """
-    copyms(src, dst; rows=Colon())
+    copyms(src, dst; rows=Colon(), subtables=Colon())
 
 Copy the MeasurementSet at `src` to a new directory `dst` (MAIN rows
-optionally sliced).
+optionally sliced; `subtables` optionally restricted to a set of names).
 """
-copyms(src::AbstractString, dst::AbstractString; rows=Colon()) =
-    write_ms(dst, MeasurementSet(src); rows)
+copyms(src::AbstractString, dst::AbstractString; rows=Colon(), subtables=Colon()) =
+    write_ms(dst, MeasurementSet(src); rows, subtables)
 
 # --- synthesise a minimal standard MS -----------------------------
 

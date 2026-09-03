@@ -57,24 +57,38 @@ if isdir(SAMPLE_MS)
 
     @testset "copyms slice" begin
         n = 200
+        subs = ["ANTENNA", "DATA_DESCRIPTION", "FEED", "FIELD", "OBSERVATION",
+                "POLARIZATION", "PROCESSOR", "SPECTRAL_WINDOW", "STATE"]
         dst = joinpath(mktempdir(), "slice.ms")
-        copyms(SAMPLE_MS, dst; rows=_rng(1, n))
+        copyms(SAMPLE_MS, dst; rows=_rng(1, n), subtables=subs)
 
         ours = MeasurementSet(dst)
         src = MeasurementSet(SAMPLE_MS)
         @test getfield(ours, :data).rows == n
+        @test issubset(subs, subtablenames(ours))
 
         for name in ("TIME", "ANTENNA1", "ANTENNA2", "UVW", "DATA", "FLAG",
                      "WEIGHT", "SIGMA", "FLAG_ROW", "DATA_DESC_ID")
             @test ours[name][:] == [src[name][i] for i in 1:n]
         end
 
+        # indirect subtable columns now copy in full
+        for (st, col) in (("SPECTRAL_WINDOW", "CHAN_FREQ"),
+                          ("POLARIZATION", "CORR_TYPE"),
+                          ("FEED", "POLARIZATION_TYPE"),
+                          ("FIELD", "PHASE_DIR"))
+            o = readtable(joinpath(dst, st))
+            s = readtable(joinpath(SAMPLE_MS, st))
+            @test getcolumn(o, col) == getcolumn(s, col)
+        end
+
         if _HAVE_CASACORE
             ct = CCT.Table(dst)
             @test size(ct, 1) == n
             @test ct[:TIME][:] == [src["TIME"][i] for i in 1:n]
-            d = ct[:DATA][1]
-            @test d == src["DATA"][1]
+            @test ct[:DATA][1] == src["DATA"][1]
+            @test CCT.Table(joinpath(dst, "SPECTRAL_WINDOW"))[:CHAN_FREQ][1] ==
+                  getcell(readtable(joinpath(SAMPLE_MS, "SPECTRAL_WINDOW")), "CHAN_FREQ", 1)
         end
     end
 end

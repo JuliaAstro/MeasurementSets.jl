@@ -38,27 +38,24 @@ if isdir(SAMPLE_MS)
     end
 
     if _HAVE_CASACORE
-        _cc_cells(cc, n) =
-            ndims(cc) == 1 ? [cc[i] for i in 1:n] : [cc[i] for i in 1:n]
-
         @testset "indirect columns vs casacore" begin
             cases = [
-                ("SPECTRAL_WINDOW", ["CHAN_FREQ", "CHAN_WIDTH", "EFFECTIVE_BW"]),
-                ("POLARIZATION",    ["CORR_TYPE", "CORR_PRODUCT"]),
+                ("SPECTRAL_WINDOW", ["CHAN_FREQ", "CHAN_WIDTH", "EFFECTIVE_BW"], Colon()),
+                ("POLARIZATION",    ["CORR_TYPE", "CORR_PRODUCT"], Colon()),
                 ("FEED",            ["BEAM_OFFSET", "POL_RESPONSE",
-                                     "POLARIZATION_TYPE", "RECEPTOR_ANGLE"]),
-                ("FIELD",           ["PHASE_DIR", "DELAY_DIR"]),
-                ("OBSERVATION",     ["LOG", "SCHEDULE"]),
-                ("POINTING",        ["DIRECTION"]),
+                                     "POLARIZATION_TYPE", "RECEPTOR_ANGLE"], Colon()),
+                ("FIELD",           ["PHASE_DIR", "DELAY_DIR"], Colon()),
+                ("OBSERVATION",     ["LOG", "SCHEDULE"], Colon()),
+                ("POINTING",        ["DIRECTION", "TARGET"], 1:2000),
             ]
-            for (st, cols) in cases
+            for (st, cols, rng) in cases
                 t = readtable(joinpath(SAMPLE_MS, st))
                 cc = CCT.Table(joinpath(SAMPLE_MS, st))
                 for col in cols
-                    ours = getcolumn(t, col)
+                    c = column(t, col)
+                    rows = rng === Colon() ? (1:length(c)) : rng
                     theirs = cc[Symbol(col)]
-                    n = length(ours)
-                    @test all(i -> collect(ours[i]) == collect(theirs[i]), 1:n)
+                    @test all(i -> collect(c[i]) == collect(theirs[i]), rows)
                 end
             end
         end

@@ -46,14 +46,20 @@ endian storage-manager files, verified against `Casacore.jl`.
 
 * `write_table(dir, name, cols; nrow)` — one CTDS table from `name => vector`
   pairs or a `Tables` source.
-* `copyms(src, dst; rows=Colon())` — copy an MS (MAIN row-sliced); columns
-  the reader can't decode (SSM indirect arrays) are skipped with a warning.
+* `copyms(src, dst; rows=Colon())` — copy an MS (MAIN row-sliced).
 * `create_ms(dir; nrow, nchan, ncorr, nant)` — synthesise a minimal,
   `validate`-clean MS.
 
-Not yet implemented: SSM/ISM indirect-array and string-array reading (so
-those columns are dropped by `copyms`); multi-column tiled managers;
-ISM / TiledColumnStMan writers.
+**Phase 7 — StandardStMan indirect / string arrays (read + write).**
+The `StIndArray` / `table.f<n>i` mechanism and the string-handler array
+format behind every variable-shape subtable column (`CHAN_FREQ`,
+`CORR_TYPE`, `POLARIZATION_TYPE`, `POL_RESPONSE`, `PHASE_DIR`, `LOG`, …).
+`copyms` now reproduces every column of a standard MS; `create_ms` writes
+these as real ragged arrays.
+
+Not yet implemented: ISM indirect / string arrays (no ISM columns in the
+reference MS, no ISM writer); multi-column tiled managers;
+TiledColumnStMan writer; virtual column engines.
 
 ## Usage
 
@@ -86,7 +92,9 @@ stdtable("SPECTRAL_WINDOW").columns
 copyms("/path/to/my.ms", "/tmp/copy.ms"; rows=1:2000)
 create_ms("/tmp/synth.ms"; nrow=100, nchan=64, ncorr=4, nant=6)
 write_table("/tmp/spw", "SPECTRAL_WINDOW",
-            ["NUM_CHAN" => [64], "REF_FREQUENCY" => [1.4e9]]; nrow=1)
+            ["NUM_CHAN" => [64, 32],
+             "CHAN_FREQ" => [collect(1.0:64.0), collect(1.0:32.0)]];  # ragged
+            nrow=2)
 ```
 
 ## Tests
