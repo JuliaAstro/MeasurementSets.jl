@@ -10,10 +10,10 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
 
 @testset "MeasurementSetv2" begin
     include("aipsio_tests.jl")
+    include("casacore_crosscheck.jl")       # defines _HAVE_CASACORE / CCT
 
     if isdir(SAMPLE_MS)
         include("metadata_tests.jl")
-        include("casacore_crosscheck.jl")   # defines _HAVE_CASACORE / CCT
         include("ssm_tests.jl")
         include("tsm_tests.jl")
         include("ism_tests.jl")
@@ -23,4 +23,6 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
     else
         @info "SAMPLE_MS not found; skipping data-dependent tests" SAMPLE_MS
     end
+
+    include("writer_tests.jl")
 end

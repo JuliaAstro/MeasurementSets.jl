@@ -160,7 +160,8 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
         push!(descs, c)
         push!(data, vals)
     end
-    isempty(skipped) || @warn "$(basename(dir)): skipped unreadable columns" cols=skipped
+    isempty(skipped) ||
+        @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(r), endian=:little,
                       public, private=CasaRecord(),
                       tablename=t.desc.name, type=t.type, subtype=t.subtype,

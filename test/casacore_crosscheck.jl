@@ -27,6 +27,9 @@ if _HAVE_CASACORE
     end
 
     @testset "casacore cross-check" begin
+      if !isdir(SAMPLE_MS)
+        @info "SAMPLE_MS not found; skipping casacore cross-check"
+      else
         crosscheck_table(readtable(SAMPLE_MS), CCT.Table(SAMPLE_MS))
 
         main_cc = CCT.Table(SAMPLE_MS)
@@ -39,5 +42,6 @@ if _HAVE_CASACORE
             crosscheck_table(readtable(joinpath(SAMPLE_MS, sub)),
                              getproperty(main_cc, Symbol(sub)))
         end
+      end
     end
 end

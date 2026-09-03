@@ -2,9 +2,9 @@
 
 [![Build Status](https://github.com/Paul Barrett/MeasurementSetv2.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/Paul Barrett/MeasurementSetv2.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
-A pure-Julia reader (and, in later phases, writer) for the **Measurement Set
-version 2** data format — the casacore Table Data System (CTDS) tables used
-for interferometric visibility data by ALMA, the VLA, LOFAR and others.
+A pure-Julia reader and writer for the **Measurement Set version 2** data
+format — the casacore Table Data System (CTDS) tables used for
+interferometric visibility data by ALMA, the VLA, LOFAR and others.
 
 No dependency on the casacore C++ library.
 
@@ -38,10 +38,22 @@ typical MAIN table is readable except ones that were never written.
 Lazy `Column <: AbstractVector` (`t[:DATA]`, `col[i]`, `col[1:5]`,
 `col[:]`), `Tables.jl` column *and* row access (subtables drop straight
 into `DataFrame`, `Tables.rowtable`, …), and a machine-readable encoding of
-the MS v2 standard schema (`MS_SCHEMA`, `stdtable`, `validate`).
+the MS v2 standard schema (`SCHEMAVER2`, `stdtable`, `validate`).
 
-Not yet implemented: SSM/ISM indirect arrays and string arrays;
-multi-column tiled managers; all writers.
+**Phase 6 — writers.**
+Pure-Julia `table.dat` + StandardStMan + TiledShapeStMan writers, little-
+endian storage-manager files, verified against `Casacore.jl`.
+
+* `write_table(dir, name, cols; nrow)` — one CTDS table from `name => vector`
+  pairs or a `Tables` source.
+* `copyms(src, dst; rows=Colon())` — copy an MS (MAIN row-sliced); columns
+  the reader can't decode (SSM indirect arrays) are skipped with a warning.
+* `create_ms(dir; nrow, nchan, ncorr, nant)` — synthesise a minimal,
+  `validate`-clean MS.
+
+Not yet implemented: SSM/ISM indirect-array and string-array reading (so
+those columns are dropped by `copyms`); multi-column tiled managers;
+ISM / TiledColumnStMan writers.
 
 ## Usage
 
@@ -69,6 +81,12 @@ Tables.schema(subtable(ms, "SPECTRAL_WINDOW"))
 # standard-schema check
 validate(ms)                             # String[]  (conformant)
 stdtable("SPECTRAL_WINDOW").columns
+
+# writing
+copyms("/path/to/my.ms", "/tmp/copy.ms"; rows=1:2000)
+create_ms("/tmp/synth.ms"; nrow=100, nchan=64, ncorr=4, nant=6)
+write_table("/tmp/spw", "SPECTRAL_WINDOW",
+            ["NUM_CHAN" => [64], "REF_FREQUENCY" => [1.4e9]]; nrow=1)
 ```
 
 ## Tests
