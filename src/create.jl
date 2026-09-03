@@ -27,11 +27,22 @@ _withsequ(c::ColumnDesc, s) = ColumnDesc(c.name, c.comment, c.manager, c.group,
     c.type, c.classname, c.shape, c.option, c.maxlength, c.keywords, c.default, s)
 
 # Rewrite a column description so it is consistent with the data manager the
-# writer will actually bind it to (`:ssm` or `:tsm`).
+# writer will actually bind it to (`:ssm` / `:ism` / `:tsm` / `:tcm` / `:tcell`).
 function _normalize_desc(c::ColumnDesc, kind::Symbol)
     arr = _is_tsm(c.shape) || (c.shape isa Dims && !isempty(c.shape))
     if kind === :tsm
         return ColumnDesc(c.name, c.comment, "TiledShapeStMan", "TSM" * c.name,
+            c.type, _classname(c.type, true), c.shape, Int32(0),
+            c.maxlength, c.keywords, c.default, c.sequ)
+    end
+    if kind === :tcm     # TiledColumnStMan — fixed cell shape, direct
+        return ColumnDesc(c.name, c.comment, "TiledColumnStMan", "TSM" * c.name,
+            c.type, _classname(c.type, true), c.shape,
+            COLOPT_DIRECT | COLOPT_FIXEDSHAPE,
+            c.maxlength, c.keywords, c.default, c.sequ)
+    end
+    if kind === :tcell   # TiledCellStMan — per-row hypercube
+        return ColumnDesc(c.name, c.comment, "TiledCellStMan", "TSM" * c.name,
             c.type, _classname(c.type, true), c.shape, Int32(0),
             c.maxlength, c.keywords, c.default, c.sequ)
     end
@@ -43,28 +54,44 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
         c.type, cls, c.shape, opt, c.maxlength, c.keywords, c.default, c.sequ)
 end
 
+# Normalise a tiled-manager spec to a list of column-name groups: a flat
+# collection of names → one single-column group each; a collection of
+# collections → used verbatim (one shared hypercube per inner group).
+function _tsm_groups(x)
+    isempty(x) && return Vector{String}[]
+    first(x) isa AbstractString ? [String[String(s)] for s in x] :
+                                  [String[String(c) for c in g] for g in x]
+end
+
 """
     _write_table_core(dir, descs, data; nrow, endian, public, private,
-                      tablename, type, subtype, readme)
+                      tsm, tcm, tcell, ism, tablename, type, subtype, readme)
 
 Write a CTDS table from explicit column descriptions + per-column data
-vectors.  Scalar / fixed-shape / string columns are bound to one
-StandardStMan; each `VariableShape` / `VariableDims` array column gets its
-own TiledShapeStMan.
+vectors.  Columns not named in `tsm` / `tcm` / `tcell` / `ism` go to one
+StandardStMan.  `tsm` / `tcm` / `tcell` each take either a flat list of
+names (one hypercube per column) or a list of name groups (one shared
+hypercube per group).
 """
 function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            data::Vector; nrow::Integer, endian::Symbol=:little,
                            public::Record=Record(),
                            private::Record=Record(),
-                           tsm::AbstractSet{<:AbstractString}=Set{String}(),
+                           tsm=Set{String}(), tcm=Set{String}(), tcell=Set{String}(),
                            ism::AbstractSet{<:AbstractString}=Set{String}(),
                            tablename::AbstractString="",
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
     mkpath(dir)
-    tsm_i = findall(c -> c.name in tsm, descs)
+    tiledgroups = [(:tsm, "TiledShapeStMan", write_tiledshapestman, _tsm_groups(tsm)),
+                   (:tcm, "TiledColumnStMan", write_tiledcolumnstman, _tsm_groups(tcm)),
+                   (:tcell, "TiledCellStMan", write_tiledcellstman, _tsm_groups(tcell))]
+    tiledn = Set{String}()
+    for (_, _, _, gs) in tiledgroups, g in gs, n in g
+        push!(tiledn, n)
+    end
     ism_i = findall(c -> c.name in ism, descs)
-    ssm_i = setdiff(1:length(descs), vcat(tsm_i, ism_i))  # scalars, direct + indirect
+    ssm_i = setdiff(1:length(descs), vcat(findall(c -> c.name in tiledn, descs), ism_i))
 
     out = Vector{ColumnDesc}(undef, length(descs))
     dms = DMWrite[]
@@ -92,11 +119,18 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         for (k, i) in enumerate(ism_i); out[i] = cols[k]; end
         seq += 1
     end
-    for i in tsm_i
-        c = _withsequ(_normalize_desc(descs[i], :tsm), seq)
-        blk = write_tiledshapestman(dir, seq, c, data[i], Int(nrow), endian)
-        push!(dms, DMWrite("TiledShapeStMan", seq, blk))
-        out[i] = c
+    for (kind, dmname, writer, groups) in tiledgroups, g in groups
+        idxs = Int[]
+        for nm in g
+            i = findfirst(c -> c.name == nm, descs)
+            i === nothing && error("$dmname group $g: unknown column \"$nm\"")
+            push!(idxs, i)
+        end
+        sort!(idxs)                       # bind in TableDesc column order (= header dtype order)
+        cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], kind), seq) for i in idxs]
+        blk = writer(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian)
+        push!(dms, DMWrite(dmname, seq, blk))
+        for (k, i) in enumerate(idxs); out[i] = cols[k]; end
         seq += 1
     end
 
@@ -115,7 +149,7 @@ exact class names) is taken from `SCHEMAVER2[name]` when available.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
-                     tsm=String[], ism=String[],
+                     tsm=String[], tcm=String[], tcell=String[], ism=String[],
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
     pairs = columns isa AbstractDict ? collect(columns) :
@@ -146,7 +180,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         push!(data, vals)
     end
 
-    _write_table_core(dir, descs, data; nrow, endian, tsm = Set(String.(tsm)),
+    _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,
                       ism = Set(String.(ism)),
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
@@ -160,8 +194,9 @@ function _copy_table(dir::AbstractString, t::Table, r;
                      private::Record=t.desc.private)
     descs = ColumnDesc[]
     data = Vector{Any}[]
-    tsm = Set{String}()
     ism = Set{String}()
+    tiled = Dict{Int,Vector{String}}()       # source sequ -> column names (desc order)
+    tiledkind = Dict{Int,String}()           # source sequ -> manager type string
     skipped = String[]
     for c in t.desc.columns
         col = try
@@ -176,19 +211,35 @@ function _copy_table(dir::AbstractString, t::Table, r;
         end
         # preserve the source's storage-manager kind
         dm = _source_dm(t, c)
-        if _is_tsm(c.shape) && occursin("Tiled", dm)
-            length(unique(size.(vals))) == 1 || (push!(skipped, c.name); continue)
-            push!(tsm, c.name)
+        if occursin("Tiled", dm)
+            push!(get!(() -> String[], tiled, c.sequ), c.name)
+            tiledkind[c.sequ] = dm
         elseif dm in ("IncrementalStMan", "ISM")
             push!(ism, c.name)
         end
         push!(descs, c)
         push!(data, vals)
     end
+
+    _rows(nm) = data[findfirst(d -> d.name == nm, descs)]
+    tsmg = Vector{String}[]; tcmg = Vector{String}[]; tcellg = Vector{String}[]
+    for (sequ, names) in sort(collect(tiled); by = first)
+        uniform = all(length(unique(size.(_rows(nm)))) == 1 for nm in names)
+        if tiledkind[sequ] == "TiledColumnStMan" && uniform
+            push!(tcmg, names)
+        elseif tiledkind[sequ] == "TiledCellStMan"
+            push!(tcellg, names)
+        else
+            tiledkind[sequ] == "TiledColumnStMan" &&
+                @warn "$(basename(dir)): $(join(names, ',')) not uniform — writing as TiledShapeStMan"
+            push!(tsmg, names)
+        end
+    end
+
     isempty(skipped) ||
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(r), endian=:little,
-                      public, private=Record(), tsm, ism,
+                      public, private=Record(), tsm=tsmg, tcm=tcmg, tcell=tcellg, ism,
                       tablename=t.desc.name, type=t.type, subtype=t.subtype,
                       readme=t.readme)
     return descs
@@ -353,10 +404,12 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
                           tablename=tbl * "Desc", type=titlecase(replace(tbl, '_'=>' ')))
     end
 
-    # MAIN (+ optional DATA); FLAG and DATA go through TiledShapeStMan
+    # MAIN: DATA + FLAG + WEIGHT_SPECTRUM share one TiledShapeStMan hypercube
     mdescs, mdata = _synth_table("MAIN", nrow, nchan, ncorr, nrec)
     push!(mdescs, _mkdesc("DATA", TpComplex, VariableShape()))
     push!(mdata, [zeros(ComplexF32, ncorr, nchan) for _ in 1:nrow])
+    push!(mdescs, _mkdesc("WEIGHT_SPECTRUM", TpFloat, VariableShape()))
+    push!(mdata, [zeros(Float32, ncorr, nchan) for _ in 1:nrow])
     pub = Record()
     push!(pub.names, "MS_VERSION"); push!(pub.types, TpFloat)
     push!(pub.values, MS_VERSION); push!(pub.comments, "")
@@ -370,7 +423,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
         "FEED2", "FIELD_ID", "ARRAY_ID", "OBSERVATION_ID", "PROCESSOR_ID",
         "SCAN_NUMBER", "STATE_ID"])
     _write_table_core(dir, mdescs, mdata; nrow=nrow, endian=:little, public=pub,
-                      tsm=Set(["DATA", "FLAG"]),
+                      tsm=[["DATA", "FLAG", "WEIGHT_SPECTRUM"]],
                       ism=intersect(ismcols, Set(c.name for c in mdescs)),
                       tablename="MSDesc", type="Measurement Set")
     return dir

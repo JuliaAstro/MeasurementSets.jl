@@ -150,24 +150,24 @@ end
     dst = joinpath(mktempdir(), "c1.ms")
     create_ms(dst; nrow=6, nchan=4, ncorr=2, nant=3)
     dataseq = columndesc(readtable(dst), "DATA").sequ
-    dfile = joinpath(dst, "table.f$(dataseq)_TSM1")
+    dfile = joinpath(dst, "table.f$(dataseq)_TSM1")   # DATA+FLAG+WEIGHT_SPECTRUM share it
     dbefore = read(dfile)
 
     edit(dst) do t
-        addcolumn!(t, "WEIGHT_SPECTRUM")
-        t[:WEIGHT_SPECTRUM][:] = [fill(Float32(i), 2, 4) for i in 1:6]
+        addcolumn!(t, "SIGMA_SPECTRUM")
+        t[:SIGMA_SPECTRUM][:] = [fill(Float32(i), 2, 4) for i in 1:6]
     end
 
-    @test read(dfile) == dbefore                    # untouched TSM file byte-identical
+    @test read(dfile) == dbefore                    # untouched shared TSM file byte-identical
     ms = MeasurementSet(dst)
-    @test "WEIGHT_SPECTRUM" in columnnames(getfield(ms, :data))
-    @test ms[:WEIGHT_SPECTRUM][3] == fill(3f0, 2, 4)
+    @test "SIGMA_SPECTRUM" in columnnames(getfield(ms, :data))
+    @test ms[:SIGMA_SPECTRUM][3] == fill(3f0, 2, 4)
     @test ms[:DATA][2] == zeros(ComplexF32, 2, 4)   # other columns intact
     @test isempty(validate(ms))
 
     if _HAVE_CASACORE
         ct = CCT.Table(dst)
-        @test ct[:WEIGHT_SPECTRUM][3] == fill(3f0, 2, 4)
+        @test ct[:SIGMA_SPECTRUM][3] == fill(3f0, 2, 4)
     end
 end
 

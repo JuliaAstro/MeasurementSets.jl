@@ -12,7 +12,7 @@ function _dm_instance(t::Table, sequ::Int)
     dm = t.managers[findfirst(d -> d.sequ == sequ, t.managers)]
     inst = if dm.name in ("StandardStMan", "SSM")
         open_standardstman(t, dm)
-    elseif dm.name in ("TiledShapeStMan", "TiledColumnStMan", "TiledStMan")
+    elseif dm.name in ("TiledShapeStMan", "TiledColumnStMan", "TiledCellStMan", "TiledStMan")
         open_tiledstman(t, dm)
     elseif dm.name in ("IncrementalStMan", "ISM")
         open_incrementalstman(t, dm)
@@ -55,7 +55,8 @@ function _eltype(c::ColumnDesc, inst)
     s isa Dims && isempty(s) && return E
     s isa Dims && return Array{E,length(s)}
     if s isa VariableShape && inst isa TiledStMan
-        return Array{E, inst.dims - 1}
+        nd = inst.kind === :cell ? inst.dims : inst.dims - 1
+        return Array{E, nd}
     end
     return Array{E}
 end
@@ -82,7 +83,7 @@ function Base.getindex(c::Column, i::Int)
     if inst isa StandardStMan
         ssm_getcell(inst, c.index, c.desc, i)
     elseif inst isa TiledStMan
-        tsm_getcell(inst, c.desc, i)
+        tsm_getcell(inst, c.index, c.desc, i)
     else
         ism_getcell(inst, c.index, c.desc, i, c.cols)
     end
@@ -93,7 +94,7 @@ function Base.getindex(c::Column, ::Colon)
     if inst isa StandardStMan
         ssm_getcolumn(inst, c.index, c.desc, c.table.rows)
     elseif inst isa TiledStMan
-        tsm_getcolumn(inst, c.desc, c.table.rows)
+        tsm_getcolumn(inst, c.index, c.desc, c.table.rows)
     else
         ism_getcolumn(inst, c.index, c.desc, c.table.rows, c.cols)
     end

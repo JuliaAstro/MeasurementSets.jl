@@ -61,8 +61,18 @@ end
 
 _nrows(t::EditTable) = length(t.rowmap)
 
-_dmkind(inst) = inst isa StandardStMan ? :ssm :
-                inst isa IncrementalStMan ? :ism : :tsm
+function _dmkind(inst)
+    inst isa StandardStMan && return :ssm
+    inst isa IncrementalStMan && return :ism
+    inst isa TiledStMan || return :ssm
+    inst.kind === :column ? :tcm : inst.kind === :cell ? :tcell : :tsm
+end
+
+const _TILED_KINDS = (:tsm, :tcm, :tcell)
+_tsm_dmname(k) = k === :tsm ? "TiledShapeStMan" :
+                 k === :tcm ? "TiledColumnStMan" : "TiledCellStMan"
+_tsm_writer(k) = k === :tsm ? write_tiledshapestman :
+                 k === :tcm ? write_tiledcolumnstman : write_tiledcellstman
 
 # the pending-add tuple for `name`, or nothing
 function _added(t::EditTable, name::AbstractString)
@@ -111,7 +121,7 @@ function Base.setindex!(c::EditColumn, v, i::Int)
     a = _added(t, n)
     if a !== nothing
         a[3][i] = v
-    elseif _kind(t, n) === :tsm
+    elseif _kind(t, n) in _TILED_KINDS
         get!(() -> Dict{Int,Any}(), t.tsmedit, n)[i] = v
     else
         _materialize!(t, n)
@@ -329,9 +339,13 @@ function _append_only(t::EditTable)
         all(i -> t.rowmap[i] == 0, n+1:length(t.rowmap))
 end
 
+_has_tcell(t::EditTable) = any(m -> m.name == "TiledCellStMan", t.reader.managers)
+
 function Base.flush(t::EditTable)
     t.flushed && return t
-    if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t)
+    grew = length(t.rowmap) > t.reader.rows
+    if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
+       !(grew && _has_tcell(t))                       # TiledCellStMan can't grow in place
         _flush_fast(t)
     else
         _flush_regen(t)
@@ -358,11 +372,12 @@ function _flush_fast(t::EditTable)
         kind = _dmkind(inst)
         touched = any(c -> haskey(t.override, c.name) || haskey(t.tsmedit, c.name), cols)
 
-        if kind === :tsm
-            c = cols[1]                                # single-column TSM
-            added > 0 && tsm_extend_rows!(inst, c, oldrows, newrows)
-            for (row, plane) in get(t.tsmedit, c.name, Dict{Int,Any}())
-                tsm_setcell!(inst, row, plane)
+        if kind in _TILED_KINDS
+            added > 0 && kind !== :tcell && tsm_extend_rows!(inst, cols, oldrows, newrows)
+            for (li, c) in enumerate(cols)             # li = binding column index
+                for (row, plane) in get(t.tsmedit, c.name, Dict{Int,Any}())
+                    tsm_setcell!(inst, li, row, plane)
+                end
             end
         elseif touched || added > 0
             data = Any[_resolve(t, c.name) for c in cols]
@@ -407,7 +422,7 @@ function _flush_regen(t::EditTable)
 
     for (d, k, _) in t.addcols
         kindof[d.name] = k
-        s = k === :tsm ? nothing : firstkind(k)
+        s = k in _TILED_KINDS ? nothing : firstkind(k)
         if s === nothing
             seqof[d.name] = nextseq; nextseq += 1
         else
@@ -456,12 +471,12 @@ function _flush_regen(t::EditTable)
             end
         end
 
-        if k === :tsm
-            nm = names[1]
-            nd = _norm(descfor(nm), :tsm, sequ)
-            blk = write_tiledshapestman(dir, sequ, nd, getres(nm), newrows, endian)
-            push!(dms, DMWrite("TiledShapeStMan", sequ, blk))
-            normof[nm] = nd
+        if k in _TILED_KINDS
+            nds = ColumnDesc[_norm(descfor(nm), k, sequ) for nm in names]
+            data = Any[getres(nm) for nm in names]
+            blk = _tsm_writer(k)(dir, sequ, nds, data, newrows, endian)
+            push!(dms, DMWrite(_tsm_dmname(k), sequ, blk))
+            for (nm, nd) in zip(names, nds); normof[nm] = nd; end
         else
             nds = ColumnDesc[_norm(descfor(nm), k, sequ) for nm in names]
             data = Any[getres(nm) for nm in names]
