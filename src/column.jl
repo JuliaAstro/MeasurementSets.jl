@@ -102,6 +102,19 @@ end
 Base.getindex(c::Column, r::AbstractVector{<:Integer}) = [c[i] for i in r]
 Base.collect(c::Column) = c[:]
 
+# Rows `r` of `c` as a `Vector{Any}` of plain values / dense `Array`s (lazy
+# wrappers collapsed so the reader's nested wrapper types stay out of
+# downstream inference).  Per-cell; a whole-column fast path here trips a
+# Julia 1.12 codegen bug.
+function _read_cells(c::Column, r)
+    out = Vector{Any}(undef, length(r))
+    @inbounds for (k, i) in enumerate(r)
+        v = c[i]
+        out[k] = v isa AbstractArray ? Array(v) : v
+    end
+    return out
+end
+
 # --- convenience verbs + indexing ---------------------------------
 
 """

@@ -158,7 +158,7 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
             push!(skipped, c.name); continue
         end
         vals = try
-            Any[col[i] for i in r]
+            _read_cells(col, r)
         catch
             push!(skipped, c.name); continue
         end
