@@ -348,8 +348,18 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int, col::ColumnDesc,
         end
     end
     write(joinpath(dir, "table.f$(sequ)_TSM1"), data)
+    write(joinpath(dir, "table.f$sequ"),
+          _tsm_header_bytes(sequ, col.type, "TSM$(col.name)", cubeshape,
+                            tileshape, length(data), nrow, endian))
 
-    # --- header file (big-endian AipsIO) --------------------------
+    return UInt8[]                                   # empty table.dat block
+end
+
+# The `table.f<sequ>` header for a single-column TiledShapeStMan with one
+# hypercube covering all rows.  `datalen` = byte length of `_TSM1`.
+function _tsm_header_bytes(sequ::Int, type::CasaType, hyper::AbstractString,
+                           cubeshape, tileshape, datalen::Int, nrow::Int,
+                           endian::Symbol)
     hw = AipsWriter(; endian=:big)
     putstart(hw, "TiledShapeStMan", TSM_WRAPPER_VER)
     putstart(hw, "TiledStMan", TSM_BASE_VER)
@@ -357,14 +367,14 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int, col::ColumnDesc,
     wr_u32(hw, sequ)
     wr_u32(hw, nrow)
     wr_u32(hw, 1)                                    # ncolumn (single-column TSM)
-    wr_i32(hw, Int(col.type))
-    wr_string(hw, "TSM$(col.name)")                  # hypercolumn name
+    wr_i32(hw, Int(type))
+    wr_string(hw, hyper)                             # hypercolumn name
     wr_u32(hw, 0)                                    # persMaxCacheSize
     wr_u32(hw, length(cubeshape))                    # nrdim
     wr_u32(hw, 2)                                    # nrFile (cube 0 absent, cube 1 present)
     wr_scalar(hw, false)                             # file 0 absent
     wr_scalar(hw, true)                              # file 1 present
-    wr_u32(hw, TSM_FILE_VER); wr_u32(hw, 1); wr_u32(hw, length(data))  # TSMFile: seqnr 1
+    wr_u32(hw, TSM_FILE_VER); wr_u32(hw, 1); wr_u32(hw, datalen)  # TSMFile: seqnr 1
     wr_u32(hw, 2)                                    # nrCube (dummy + real)
     _tsm_putobject_cube(hw, Int[], Int[], -1, 0)     # cube 0 (empty)
     _tsm_putobject_cube(hw, cubeshape, tileshape, 1, 0)
@@ -375,7 +385,111 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int, col::ColumnDesc,
     wr_block(hw, UInt32[1])                          # cubeMap
     wr_block(hw, UInt32[nrow - 1])                   # posMap
     putend(hw)
-    write(joinpath(dir, "table.f$sequ"), bytes(hw))
+    return bytes(hw)
+end
 
-    return UInt8[]                                   # empty table.dat block
+# =====================  in-place edit  ==============================
+
+# a writable, shared mmap over `table.f<sequ>_TSM<n>`
+function _tsm_writable(tsm::TiledStMan, sequ::Int)
+    io = open(tsm.files[sequ], "r+")
+    m = Mmap.mmap(io, Vector{UInt8}, filesize(io); shared=true)
+    close(io)                                        # mapping stays valid
+    return m
+end
+
+# byte-exact inverse of `read_plane`: write `plane` into `bytes` at
+# last-axis index `lastpos` (0-based) of `cube`.
+function write_plane!(bytes::Vector{UInt8}, tsm::TiledStMan, cube::TSMCube,
+                      lastpos::Int, plane)
+    T = juliatype(tsm.type)
+    nd = length(cube.cubeshape)
+    cs, ts = cube.cubeshape, cube.tileshape
+    tpd = Int[cld(cs[d], ts[d]) for d in 1:nd]
+    planeshape = cs[1:nd-1]
+    v = vec(plane)
+    length(v) == prod(planeshape; init=1) ||
+        error("write_plane!: value has $(size(plane)), cell shape is $planeshape")
+
+    bbytes = _bucketbytes(tsm, cube)
+    tlast_tile = lastpos ÷ ts[nd]
+    tlast_in   = lastpos % ts[nd]
+
+    for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, nd-1))
+        tilecoord = ntuple(d -> d < nd ? lt[d] : tlast_tile, nd)
+        tilenr = _colmajor_offset(tilecoord, tpd)
+        base = cube.offset + tilenr * bbytes
+        los = ntuple(d -> lt[d] * ts[d], nd-1)
+        his = ntuple(d -> min((lt[d]+1) * ts[d], cs[d]) - 1, nd-1)
+        for pix in CartesianIndices(ntuple(d -> los[d]:his[d], nd-1))
+            pl = _colmajor_offset(ntuple(d -> pix[d], nd-1), planeshape)
+            tl = ntuple(d -> d < nd ? pix[d] - los[d] : tlast_in, nd)
+            k = _colmajor_offset(tl, ts)
+            val = v[pl + 1]
+            if T === Bool
+                bi = base + (k >> 3) + 1
+                bit = 0x01 << (k & 7)
+                bytes[bi] = (val::Bool) ? (bytes[bi] | bit) : (bytes[bi] & ~bit)
+            else
+                _wrbytes!(bytes, base + k * sizeof(T), T(val), tsm.endian)
+            end
+        end
+    end
+    return bytes
+end
+
+"""
+    tsm_setcell!(tsm, row, plane)
+
+Overwrite one tiled cell (1-based `row`) in place.  `plane` must match the
+existing cell shape.
+"""
+function tsm_setcell!(tsm::TiledStMan, row::Integer, plane)
+    cube, p = _cube_for_row(tsm, row)
+    isnull(cube) && error("row $row of this column has no stored cube to write into")
+    m = _tsm_writable(tsm, cube.sequ)
+    write_plane!(m, tsm, cube, p - 1, plane)
+    Mmap.sync!(m)
+    tsm.data[cube.sequ] = m                          # refresh the read cache
+    return tsm
+end
+
+"""
+    tsm_extend_rows!(tsm, col, oldnrow, newnrow)
+
+Grow the single hypercube's last axis from `oldnrow` to `newnrow`:
+append zero-filled tiles to `_TSM1` and rewrite the header.  The new
+rows read back as zeros until written.
+"""
+function tsm_extend_rows!(tsm::TiledStMan, col::ColumnDesc,
+                          oldnrow::Integer, newnrow::Integer)
+    ridx = findfirst(!isnull, tsm.cubes)
+    ridx === nothing && error("tsm_extend_rows!: column has no real hypercube")
+    cube = tsm.cubes[ridx]
+    nd = length(cube.cubeshape)
+    trow = cube.tileshape[nd]
+    tilebytes = _bucketbytes(tsm, cube)
+    oldtiles = cld(Int(oldnrow), trow)
+    newtiles = cld(Int(newnrow), trow)
+
+    tsmpath = tsm.files[cube.sequ]
+    if newtiles > oldtiles
+        open(tsmpath, "a") do io
+            write(io, zeros(UInt8, (newtiles - oldtiles) * tilebytes))
+        end
+    end
+    datalen = filesize(tsmpath)
+
+    cubeshape = (cube.cubeshape[1:nd-1]..., Int(newnrow))
+    write(tsm.path,
+          _tsm_header_bytes(tsm.sequ, tsm.type, tsm.hyper, cubeshape,
+                            cube.tileshape, datalen, Int(newnrow), tsm.endian))
+
+    # refresh in-memory reader state
+    tsm.cubes[ridx] = TSMCube(cubeshape, cube.tileshape, cube.sequ, cube.offset)
+    tsm.row = [Int(newnrow)]
+    tsm.cube = [ridx]
+    tsm.pos = [Int(newnrow)]
+    delete!(tsm.data, cube.sequ)
+    return tsm
 end

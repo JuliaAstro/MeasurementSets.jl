@@ -20,6 +20,7 @@ include("column.jl")
 include("schema.jl")
 include("tables_interface.jl")
 include("create.jl")
+include("edit.jl")
 
 export CTDSTable, readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames
@@ -28,5 +29,6 @@ export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 export write_table, write_ms, copyms, create_ms
+export edit, addrows!, setcell!, setcolumn!
 
 end
