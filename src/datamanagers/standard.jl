@@ -61,12 +61,24 @@ mutable struct StandardStMan
     offset::Vector{Int}        # per SSM column (1-based): byte offset in bucket
     index::Vector{Int}         # per SSM column (1-based): which SSMIndex (1-based)
     indices::Vector{SSMIndex}
+    path::String               # the `table.f<seq>` path (for the `...i` array file)
+    arrayfile::Union{ArrayFile,Nothing}   # lazily opened `table.f<seq>i`
 end
 
 bucketptr(ssm::StandardStMan, n::Integer) = 512 + Int(n) * ssm.length
 
+# `table.f<seq>i` --- opened on first indirect-array access, then memoized.
+function _arrayfile!(ssm::StandardStMan)
+    ssm.arrayfile === nothing &&
+        (ssm.arrayfile = open_arrayfile(ssm.path * "i", ssm.endian))
+    return ssm.arrayfile
+end
+
 # Int32 in the table's endianness (data-bucket contents, string refs).
 _i32(ssm, off) = (ssm.endian === :big ? ntoh : ltoh)(reinterpret(Int32, view(ssm.data, off+1:off+4))[1])
+
+# Int64 in the table's endianness (indirect-array file offset in a bucket cell).
+_i64(ssm, off) = (ssm.endian === :big ? ntoh : ltoh)(reinterpret(Int64, view(ssm.data, off+1:off+8))[1])
 
 # Int32 in big-endian: casacore always uses CanonicalConversion (never the
 # little-endian variant) for the string-bucket and index-bucket headers.
@@ -91,7 +103,8 @@ function read_ssm_header!(hdr::AipsIO)
 end
 
 function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
-    bytes = read(joinpath(t.path, "table.f$(dm.sequ)"))
+    path = joinpath(t.path, "table.f$(dm.sequ)")
+    bytes = read(path)
     endian = t.endian
 
     # header lives in the first 512 bytes
@@ -106,7 +119,7 @@ function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
     getend(blk)
 
     ssm = StandardStMan(bytes, endian, h.size, h.buckets, h.last,
-                        offset, index, SSMIndex[])
+                        offset, index, SSMIndex[], path, nothing)
 
     # assemble and parse the index buckets
     idxbytes = _read_index_bytes(ssm, h)
@@ -141,17 +154,25 @@ end
 
 # --- per-column geometry ---------------------------------------------
 
-# The fixed cell shape as a `Dims`; SSM cannot read variable-shape columns
-# (those are stored as indirect arrays in a separate file).
+# The fixed cell shape as a `Dims` (scalar -> `()`).
 _dims(c::ColumnDesc{<:Dims}) = c.shape
-_dims(c::ColumnDesc) =
-    error("column \"$(c.name)\": SSM reads of variable-shape arrays " *
-          "(indirect arrays) are not supported yet")
+_dims(c::ColumnDesc) = error("column \"$(c.name)\": not a fixed-shape column")
+
+# How column `c` is stored in an SSM data bucket:
+#   :scalar  fixed-width scalar (incl. variable-length scalar string)
+#   :direct  fixed-shape array laid out inline
+#   :indarr  variable-shape non-string array -> Int64 offset into `table.f<seq>i`
+#   :indstr  variable-shape string array     -> 12-byte string-bucket ref
+_ssmkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : :direct
+_ssmkind(c::ColumnDesc) = c.type == TpString ? :indstr : :indarr
 
 _nrelem(c::ColumnDesc) = (s = _dims(c); isempty(s) ? 1 : prod(s))
 
 "Canonical byte width of one stored cell for column `c`."
 function cell_extsize(c::ColumnDesc)
+    k = _ssmkind(c)
+    k === :indarr && return 8                                # Int64 file offset
+    k === :indstr && return 12                               # 3 Int32 string ref
     nrelem = _nrelem(c)
     if c.type == TpString
         return c.maxlength > 0 ? Int(c.maxlength) : 12       # 3 Int32 refs
@@ -194,10 +215,20 @@ end
 `ssmcol` and `row` are 1-based.
 """
 function ssm_getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Integer)
-    dims = _dims(c)                         # errors for variable-shape columns
+    kind = _ssmkind(c)
     ext = cell_extsize(c)
     off, firstrow = locate(ssm, ssmcol, row)
     inbucket = Int(row) - firstrow          # 0-based position within the bucket
+
+    if kind === :indarr
+        foff = Int(_i64(ssm, off + inbucket * 8))
+        foff == 0 && return juliatype(c.type)[]      # shape not defined for this row
+        return af_read(_arrayfile!(ssm), c.type, foff)
+    elseif kind === :indstr
+        return _read_string_array(ssm, off + inbucket * 12)
+    end
+
+    dims = _dims(c)
     nrelem = isempty(dims) ? 1 : prod(dims)
 
     if c.type == TpBool
@@ -230,7 +261,7 @@ end
 
 # string bucket: 4 leading Int32 (free-list, usedLength, nDeleted, nextBucket)
 # then the character area; a value may span buckets via nextBucket.
-function _read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int)
+function _read_string_bytes(ssm::StandardStMan, bkt::Int, offset::Int, len::Int)
     intsz = 4
     start = 4 * intsz
     out = IOBuffer()
@@ -247,7 +278,55 @@ function _read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int
         off = 0
         remaining > 0 && (bkt = nextbkt)
     end
-    return String(take!(out))
+    return take!(out)
+end
+
+_read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int) =
+    String(_read_string_bytes(ssm, bkt, offset, len))
+
+# indirect string array (SSMIndStringColumn): the 12-byte cell is the same
+# (bucketNr, offset, totalLength) triple as a scalar string; the blob in the
+# string bucket is  [ndim:uInt][dim:Int x ndim][filled:uInt]  then, per
+# element (column-major),  [len:uInt][len bytes].  All ints big-endian.
+function _read_string_array(ssm::StandardStMan, cell::Int)
+    total = Int(_i32(ssm, cell + 8))
+    total <= 0 && return String[]                     # shape not defined for this row
+    bkt = Int(_i32(ssm, cell))
+    off = Int(_i32(ssm, cell + 4))
+    blob = _read_string_bytes(ssm, bkt, off, total)
+    be32(p) = ntoh(reinterpret(Int32, @view blob[p+1:p+4])[1])
+    ndim = Int(be32(0))
+    dims = ntuple(k -> Int(be32(4k)), ndim)          # dims at bytes 4 .. 4*ndim
+    filled = Int(be32(4 * ndim + 4))                 # then the "filled" flag
+    p = 4 * (ndim + 2)                               # elements start here
+    n = prod(dims; init=1)
+    out = Vector{String}(undef, n)
+    for k in 1:n
+        if filled == 0
+            out[k] = ""
+        else
+            len = Int(be32(p)); p += 4
+            out[k] = String(@view blob[p+1:p+len]); p += len
+        end
+    end
+    return reshape(out, dims)
+end
+
+# Build the string-bucket blob for one indirect string-array cell (inverse
+# of `_read_string_array`).  All header ints big-endian.
+function _string_array_blob(arr)
+    out = IOBuffer()
+    be(x) = write(out, hton(x))
+    shp = size(arr)
+    be(UInt32(length(shp)))
+    for d in shp; be(Int32(d)); end
+    be(UInt32(1))                                     # "filled" flag
+    for s in vec(arr)
+        b = codeunits(String(s))
+        be(UInt32(length(b)))
+        write(out, b)
+    end
+    return take!(out)
 end
 
 # iterate (bucketnr, firstrow, lastrow) over every bucket of a column's index
@@ -266,7 +345,12 @@ Read all `nrow` cells of column `ssmcol` (1-based).  Returns a `Vector`
 for scalars and a `Vector{Array}` for direct-array columns.
 """
 function ssm_getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer)
-    dims = _dims(c)                         # errors for variable-shape columns
+    kind = _ssmkind(c)
+    if kind === :indarr || kind === :indstr
+        return [ssm_getcell(ssm, ssmcol, c, r) for r in 1:nrow]   # small side tables
+    end
+
+    dims = _dims(c)
     coloff = ssm.offset[ssmcol]
     nrelem = isempty(dims) ? 1 : prod(dims)
 
@@ -321,9 +405,10 @@ function write_standardstman(dir::AbstractString, sequ::Int,
                              nrow::Int, endian::Symbol)
     ncol = length(cols)
     swap(x) = _toendian(endian, x)
+    kinds  = [_ssmkind(c) for c in cols]
     exts   = [cell_extsize(c) for c in cols]
-    nelems = [_nrelem(c) for c in cols]
-    isbool = [c.type == TpBool for c in cols]
+    nelems = [kinds[i] in (:indarr, :indstr) ? 0 : _nrelem(cols[i]) for i in 1:ncol]
+    isbool = [cols[i].type == TpBool && kinds[i] !== :indarr for i in 1:ncol]
 
     rpb = clamp(nrow, 1, 1024)
     blocksz(i) = isbool[i] ? cld(rpb * nelems[i], 8) : exts[i] * rpb
@@ -331,6 +416,19 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     coloffset = Int[sum(bs[1:i-1]) for i in 1:ncol]
     datasize = sum(bs)
     ndata = cld(nrow, rpb)
+
+    # --- indirect non-string arrays -> the `table.f<sequ>i` array file ---
+    afw = ArrayFileWriter(; endian, version=0)
+    have_indarr = any(k -> k === :indarr, kinds)
+    indoffsets = [Int64[] for _ in 1:ncol]           # per :indarr column, per row
+    for i in 1:ncol
+        kinds[i] === :indarr || continue
+        for r in 1:nrow
+            v = coldata[i][r]
+            push!(indoffsets[i],
+                  isempty(v) ? Int64(0) : af_put!(afw, cols[i].type, v))
+        end
+    end
 
     # --- variable strings: build the string stream + per-cell refs -----
     strstream = UInt8[]
@@ -352,10 +450,11 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     strchar = size - 16
 
     for i in 1:ncol
-        cols[i].type == TpString || continue
+        (kinds[i] === :scalar && cols[i].type == TpString) || kinds[i] === :indstr || continue
         for r in 1:nrow
-            s = codeunits(String(coldata[i][r]))
-            if length(s) <= 8
+            s = kinds[i] === :indstr ? _string_array_blob(coldata[i][r]) :
+                                       codeunits(String(coldata[i][r]))
+            if length(s) <= 8 && kinds[i] !== :indstr
                 push!(strref[i], (0, 0, length(s)))
                 inlinechars[i][r] = collect(s)
             else
@@ -379,7 +478,12 @@ function write_standardstman(dir::AbstractString, sequ::Int,
         nr = min(rpb, nrow - r0)
         for i in 1:ncol
             c = cols[i]; co = base + coloffset[i]; ext = exts[i]; nel = nelems[i]
-            if c.type == TpBool
+            if kinds[i] === :indarr
+                for lr in 0:nr-1
+                    _wrbytes!(file, co + lr * 8,
+                              Int64(indoffsets[i][r0 + lr + 1]), endian)
+                end
+            elseif isbool[i]
                 for lr in 0:nr-1, e in 0:nel-1
                     v = coldata[i][r0 + lr + 1]
                     bit = (v isa AbstractArray ? v[e+1] : v)::Bool
@@ -421,6 +525,8 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     end
 
     # --- string buckets (headers are big-endian) -------------------
+    # Buckets are chained k -> k+1 so a value straddling a `strchar`
+    # boundary is followed via `nextBucket` on read.
     for k in 0:nstr-1
         base = _bp(strbase + k)
         s0 = k * strchar
@@ -428,7 +534,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
         _wrbytes!(file, base,      Int32(0), :big)          # free list
         _wrbytes!(file, base + 4,  Int32(used), :big)       # usedLength
         _wrbytes!(file, base + 8,  Int32(strchar - used), :big)  # nDeleted
-        _wrbytes!(file, base + 12, Int32(-1), :big)         # nextBucket
+        _wrbytes!(file, base + 12, Int32(k < nstr - 1 ? strbase + k + 1 : -1), :big)
         copyto!(file, base + 16 + 1, strstream, s0 + 1, used)
     end
 
@@ -459,6 +565,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     copyto!(file, 1, hdr, 1, length(hdr))
 
     write(joinpath(dir, "table.f$sequ"), file)
+    have_indarr && write(joinpath(dir, "table.f$(sequ)i"), arrayfile_bytes(afw))
 
     # --- the "SSM" record for table.dat --------------------------
     bw = AipsWriter(; endian=:big)

@@ -55,16 +55,25 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            data::Vector; nrow::Integer, endian::Symbol=:little,
                            public::CasaRecord=CasaRecord(),
                            private::CasaRecord=CasaRecord(),
+                           tsm::AbstractSet{<:AbstractString}=Set{String}(),
                            tablename::AbstractString="",
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
     mkpath(dir)
-    ssm_i = findall(c -> !_is_tsm(c.shape), descs)
-    tsm_i = findall(c -> _is_tsm(c.shape), descs)
+    tsm_i = findall(c -> c.name in tsm, descs)
+    ssm_i = setdiff(1:length(descs), tsm_i)          # scalars, direct + indirect arrays
 
     out = Vector{ColumnDesc}(undef, length(descs))
     dms = DMWrite[]
     seq = 0
+    varndim = Dict{String,Int}()
+
+    # true per-row cell dimensionality for every variable-shape column
+    for i in 1:length(descs)
+        d = descs[i]
+        (d.shape isa VariableShape && !isempty(data[i])) || continue
+        varndim[d.name] = ndims(data[i][1])
+    end
 
     if !isempty(ssm_i)
         cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ssm), seq) for i in ssm_i]
@@ -73,13 +82,11 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         for (k, i) in enumerate(ssm_i); out[i] = cols[k]; end
         seq += 1
     end
-    varndim = Dict{String,Int}()
     for i in tsm_i
         c = _withsequ(_normalize_desc(descs[i], :tsm), seq)
         blk = write_tiledshapestman(dir, seq, c, data[i], Int(nrow), endian)
         push!(dms, DMWrite("TiledShapeStMan", seq, blk))
         out[i] = c
-        varndim[c.name] = ndims(data[i][1])       # true cell dimensionality
         seq += 1
     end
 
@@ -98,6 +105,7 @@ exact class names) is taken from `SCHEMAVER2[name]` when available.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
+                     tsm=String[],
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
     pairs = columns isa AbstractDict ? collect(columns) :
@@ -128,7 +136,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         push!(data, vals)
     end
 
-    _write_table_core(dir, descs, data; nrow, endian,
+    _write_table_core(dir, descs, data; nrow, endian, tsm = Set(String.(tsm)),
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
 
@@ -141,6 +149,7 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
                      private::CasaRecord=t.desc.private)
     descs = ColumnDesc[]
     data = Vector{Any}[]
+    tsm = Set{String}()
     skipped = String[]
     for c in t.desc.columns
         col = try
@@ -153,9 +162,11 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
         catch
             push!(skipped, c.name); continue
         end
-        # uniform-shape check for would-be TSM columns
-        if _is_tsm(c.shape) && length(unique(size.(vals))) != 1
-            push!(skipped, c.name); continue
+        # preserve the source's storage-manager kind for array cubes
+        wanttsm = _is_tsm(c.shape) && occursin("Tiled", c.manager)
+        if wanttsm
+            length(unique(size.(vals))) == 1 || (push!(skipped, c.name); continue)
+            push!(tsm, c.name)
         end
         push!(descs, c)
         push!(data, vals)
@@ -163,7 +174,7 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
     isempty(skipped) ||
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(r), endian=:little,
-                      public, private=CasaRecord(),
+                      public, private=CasaRecord(), tsm,
                       tablename=t.desc.name, type=t.type, subtype=t.subtype,
                       readme=t.readme)
     return descs
@@ -233,14 +244,14 @@ _mkdesc(name, ct, shape; opt=Int32(0), keywords=CasaRecord()) =
                shape, opt, UInt32(0), keywords, nothing, nothing)
 
 # concrete cell shape for a `VariableShape` standard column, given problem size
-function _synth_shape(tbl, name, nchan, ncorr, nrec)
+function _synth_shape(name, nchan, ncorr, nrec)
     name in ("CHAN_FREQ", "CHAN_WIDTH", "EFFECTIVE_BW", "RESOLUTION") && return (nchan,)
     name == "CORR_TYPE" && return (ncorr,)
     name == "CORR_PRODUCT" && return (2, ncorr)
     name in ("DELAY_DIR", "PHASE_DIR", "REFERENCE_DIR", "DIRECTION", "TARGET") && return (2, 1)
     name == "BEAM_OFFSET" && return (2, nrec)
     name == "POL_RESPONSE" && return (nrec, nrec)
-    name == "RECEPTOR_ANGLE" && return (nrec,)
+    name in ("RECEPTOR_ANGLE", "POLARIZATION_TYPE") && return (nrec,)
     name in ("SIGMA", "WEIGHT") && return (ncorr,)
     name == "FLAG_CATEGORY" && return (ncorr, nchan, 1)
     (name == "DATA" || name == "FLAG") && return (ncorr, nchan)
@@ -248,13 +259,11 @@ function _synth_shape(tbl, name, nchan, ncorr, nrec)
 end
 
 # a length-`n` data vector for one standard column
-function _synth_col(tbl, sc::StdColumn, n, nchan, ncorr, nrec)
+function _synth_col(sc::StdColumn, n, nchan, ncorr, nrec)
     T = sc.type
-    if T == TpString
-        return fill("", n)                       # scalars, incl. would-be arrays
-    end
-    J = juliatype(T)
     if sc.shape === ()
+        T == TpString && return fill("", n)
+        J = juliatype(T)
         v = zeros(J, n)
         sc.name == "TIME" || sc.name == "TIME_CENTROID" ?
             (v .= J(4.6e9) .+ (0:n-1)) :
@@ -264,29 +273,22 @@ function _synth_col(tbl, sc::StdColumn, n, nchan, ncorr, nrec)
         sc.name == "NUM_RECEPTORS" ? (v .= J(nrec)) : nothing
         return v
     end
-    shp = sc.shape isa Dims ? sc.shape : _synth_shape(tbl, sc.name, nchan, ncorr, nrec)
-    return [zeros(J, shp) for _ in 1:n]
+    shp = sc.shape isa Dims ? sc.shape : _synth_shape(sc.name, nchan, ncorr, nrec)
+    T == TpString && return [fill("", shp) for _ in 1:n]
+    return [zeros(juliatype(T), shp) for _ in 1:n]
 end
 
 # build (descs, data) for one standard table
-function _synth_table(tbl, nrows, nchan, ncorr, nrec; force_tsm=String[])
+function _synth_table(tbl, nrows, nchan, ncorr, nrec)
     std = SCHEMAVER2[tbl]
     descs = ColumnDesc[]
     data = Vector{Any}[]
     for sc in std.columns
         sc.required || continue
-        vals = _synth_col(tbl, sc, nrows, nchan, ncorr, nrec)
-        shape = if sc.name in force_tsm
-            VariableShape()
-        elseif sc.type == TpString && !(sc.shape isa Dims)
-            ()                                       # scalar string simplification
-        elseif sc.shape isa Dims
-            sc.shape
-        elseif eltype(vals) <: AbstractArray
-            size(vals[1])
-        else
-            ()
-        end
+        vals = _synth_col(sc, nrows, nchan, ncorr, nrec)
+        shape = sc.shape isa Dims ? sc.shape :
+                sc.shape isa VariableDims ? VariableDims() :
+                VariableShape()
         push!(descs, _mkdesc(sc.name, sc.type, shape))
         push!(data, vals)
     end
@@ -298,8 +300,9 @@ end
 
 Synthesise a minimal, `validate`-clean MeasurementSet v2 at `dir` (zero /
 default-valued data).  MAIN's `DATA`/`FLAG` go through TiledShapeStMan;
-everything else through StandardStMan.  Variable-shape string columns are
-written as scalar strings.
+scalars and fixed-shape arrays through StandardStMan direct cells;
+variable-shape array columns (`CHAN_FREQ`, `CORR_TYPE`, `POLARIZATION_TYPE`,
+…) through StandardStMan indirect arrays.
 """
 function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
                    ncorr::Integer=2, nant::Integer=3, nrec::Integer=2)
@@ -324,8 +327,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
     end
 
     # MAIN (+ optional DATA); FLAG and DATA go through TiledShapeStMan
-    mdescs, mdata = _synth_table("MAIN", nrow, nchan, ncorr, nrec;
-                                 force_tsm=["FLAG"])
+    mdescs, mdata = _synth_table("MAIN", nrow, nchan, ncorr, nrec)
     push!(mdescs, _mkdesc("DATA", TpComplex, VariableShape()))
     push!(mdata, [zeros(ComplexF32, ncorr, nchan) for _ in 1:nrow])
     pub = CasaRecord()
@@ -336,6 +338,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
         push!(pub.values, SubTable("./" * tbl)); push!(pub.comments, "")
     end
     _write_table_core(dir, mdescs, mdata; nrow=nrow, endian=:little, public=pub,
-                      tablename="MSDesc", type="Measurement Set")
+                      tsm=Set(["DATA", "FLAG"]), tablename="MSDesc",
+                      type="Measurement Set")
     return dir
 end
