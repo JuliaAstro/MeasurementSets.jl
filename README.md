@@ -67,8 +67,17 @@ read + write. `copyms` keeps a source's ISM columns as ISM;
 `create_ms` writes MAIN's per-integration scalars (`TIME`, `FIELD_ID`,
 …) through ISM.
 
-Not yet implemented: multi-column tiled managers; `TiledColumnStMan`
-writer; virtual column engines; in-place edits / row appends.
+**Phase 9 — in-place edits.**
+`edit(path) do t … end` opens an existing table for update: overwrite
+cells / whole columns (`t[:X][i] = v`, `t[:X][:] = vals`) and append rows
+(`addrows!(t, n)`).  Hybrid persist — a touched `TiledShapeStMan` column
+is patched in the tile file in place (editing one cell of a multi-GB cube
+touches a few bytes); a touched StandardStMan / IncrementalStMan file is
+regenerated from its in-memory column data.
+
+Not yet implemented: row *deletion*; `addColumn` / schema change;
+concurrent writers; multi-column tiled managers; `TiledColumnStMan`
+writer; virtual column engines.
 
 ## Usage
 
@@ -104,6 +113,14 @@ write_table("/tmp/spw", "SPECTRAL_WINDOW",
             ["NUM_CHAN" => [64, 32],
              "CHAN_FREQ" => [collect(1.0:64.0), collect(1.0:32.0)]];  # ragged
             nrow=2)
+
+# editing in place
+edit("/tmp/copy.ms") do t
+    t[:FLAG][5] = trues(4, 64)           # patched in the tile file
+    t[:SCAN_NUMBER][10] = 7
+    addrows!(t, 10)                      # every storage manager grows
+    for r in 91:100; t[:TIME][r] = 4.6e9 + r end
+end
 ```
 
 ## Tests

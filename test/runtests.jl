@@ -27,4 +27,5 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
     include("writer_tests.jl")
     include("indirect_tests.jl")
     include("ism_writer_tests.jl")
+    include("edit_tests.jl")
 end
