@@ -26,8 +26,7 @@ buckets), and direct fixed-shape numeric/`Bool` arrays.
 columns — the visibility cubes (`DATA`, `FLAG`, `WEIGHT`, `SIGMA`,
 `UVW`, …).  Header parsing, `row → hypercube` mapping, and tile
 de-interleaving from the `table.f<n>_TSM<m>` files (mmapped).  Detects
-never-written columns (`WEIGHT_SPECTRUM`).  Single-column tiled managers
-only.
+never-written columns.  (Multi-column hypercubes: Phase 11.)
 
 **Phase 4 — IncrementalStMan column data (read).**
 The "store-on-change" manager behind most MAIN metadata columns (`TIME`,
@@ -96,9 +95,19 @@ column) and `table.dat` is rewritten in full.  Untouched managers keep
 their files and header bytes.  Plain cell/column overwrite and pure row
 appends still take the Phase-9 in-place fast path.
 
-Not yet implemented: free-list bucket reuse; concurrent writers;
-multi-column tiled managers; `TiledColumnStMan` writer; virtual column
-engines.
+**Phase 11 — multi-column tiled storage managers.**
+`TiledShapeStMan` hypercubes shared by several data columns of one cell
+shape (the `DATA` + `FLAG` + `WEIGHT_SPECTRUM` layout of a CASA-filled
+MS): concatenated per-column tile blocks in casacore's size-sorted order,
+read and write.  New `TiledColumnStMan` and `TiledCellStMan` writers.
+`write_table` takes `tsm` / `tcm` / `tcell` column-name *groups*;
+`copyms` reproduces a source's hypercube grouping (and keeps a
+`TiledColumnStMan` `UVW` as such instead of moving it to StandardStMan);
+`create_ms` shares one cube between `DATA`, `FLAG` and `WEIGHT_SPECTRUM`.
+
+Not yet implemented: hypercube coordinate / id columns; `TiledDataStMan`;
+adding a column to an existing shared hypercube; free-list bucket reuse;
+concurrent writers; virtual column engines.
 
 ## Usage
 
