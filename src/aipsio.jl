@@ -35,14 +35,14 @@ Base.position(a::AipsIO) = position(a.io)
 Base.seek(a::AipsIO, n::Integer) = seek(a.io, n)
 Base.eof(a::AipsIO) = eof(a.io)
 
-_ord(a::AipsIO, x) = a.endian === :big ? ntoh(x) : ltoh(x)
+swapbytes(a::AipsIO, x) = a.endian === :big ? ntoh(x) : ltoh(x)
 
-read_scalar(a::AipsIO, ::Type{T}) where {T} = _ord(a, read(a.io, T))
+read_scalar(a::AipsIO, ::Type{T}) where {T} = swapbytes(a, read(a.io, T))
 read_scalar(a::AipsIO, ::Type{Bool}) = read(a.io, UInt8) != 0x00
 
 function read_scalar(a::AipsIO, ::Type{Complex{T}}) where {T}
-    re = _ord(a, read(a.io, T))
-    im = _ord(a, read(a.io, T))
+    re = swapbytes(a, read(a.io, T))
+    im = swapbytes(a, read(a.io, T))
     Complex{T}(re, im)
 end
 

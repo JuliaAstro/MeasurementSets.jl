@@ -43,8 +43,8 @@ struct Column{T} <: AbstractVector{T}
     table::CTDSTable
     desc::ColumnDesc
     inst::Any            # opened data-manager instance
-    localidx::Int        # DM-local column index (SSM/ISM)
-    ncol::Int            # number of columns bound to the DM instance (ISM)
+    index::Int           # DM-local column index (SSM/ISM)
+    cols::Int            # number of columns bound to the DM instance (ISM)
 end
 
 # Best-known element type: a scalar, a fixed-shape Array, or an Array of
@@ -80,22 +80,22 @@ function Base.getindex(c::Column, i::Int)
     @boundscheck checkbounds(c, i)
     inst = c.inst
     if inst isa StandardStMan
-        ssm_getcell(inst, c.localidx, c.desc, i)
+        ssm_getcell(inst, c.index, c.desc, i)
     elseif inst isa TiledStMan
         tsm_getcell(inst, c.desc, i)
     else
-        ism_getcell(inst, c.localidx, c.desc, i, c.ncol)
+        ism_getcell(inst, c.index, c.desc, i, c.cols)
     end
 end
 
 function Base.getindex(c::Column, ::Colon)
     inst = c.inst
     if inst isa StandardStMan
-        ssm_getcolumn(inst, c.localidx, c.desc, c.table.rows)
+        ssm_getcolumn(inst, c.index, c.desc, c.table.rows)
     elseif inst isa TiledStMan
         tsm_getcolumn(inst, c.desc, c.table.rows)
     else
-        ism_getcolumn(inst, c.localidx, c.desc, c.table.rows, c.ncol)
+        ism_getcolumn(inst, c.index, c.desc, c.table.rows, c.cols)
     end
 end
 

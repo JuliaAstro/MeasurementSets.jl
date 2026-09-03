@@ -75,20 +75,19 @@ _be_i32(ssm, off) = ntoh(reinterpret(Int32, view(ssm.data, off+1:off+4))[1])
 function read_ssm_header!(hdr::AipsIO)
     version = getstart(hdr, "StandardStMan")
     version >= 3 && read_scalar(hdr, Bool)                 # bigEndian flag
-    bucketsize   = Int(read_u32(hdr))
-    nrbuckets    = Int(read_u32(hdr))
+    size     = Int(read_u32(hdr))
+    buckets  = Int(read_u32(hdr))
     read_u32(hdr)                                          # persCacheSize
     read_u32(hdr)                                          # freeBucketsNr
     read_i32(hdr)                                          # firstFreeBucket
-    nridxbuckets = Int(read_u32(hdr))
-    firstidx     = Int(read_i32(hdr))
-    idxoffset    = version >= 2 ? Int(read_u32(hdr)) : 0
-    laststr      = Int(read_i32(hdr))
-    indexlength  = Int(read_u32(hdr))
-    nrinx        = Int(read_u32(hdr))
+    indices  = Int(read_u32(hdr))
+    first    = Int(read_i32(hdr))
+    offset   = version >= 2 ? Int(read_u32(hdr)) : 0
+    last     = Int(read_i32(hdr))
+    length   = Int(read_u32(hdr))
+    nrinx    = Int(read_u32(hdr))
     getend(hdr)
-    return (; version, bucketsize, nrbuckets, nridxbuckets, firstidx,
-            idxoffset, laststr, indexlength, nrinx)
+    return (; version, size, buckets, indices, first, offset, last, length, nrinx)
 end
 
 function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
@@ -106,7 +105,7 @@ function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
     index  = Int[Int(x) + 1 for x in read_block(blk, UInt32)]   # -> 1-based
     getend(blk)
 
-    ssm = StandardStMan(bytes, endian, h.bucketsize, h.nrbuckets, h.laststr,
+    ssm = StandardStMan(bytes, endian, h.size, h.buckets, h.last,
                         offset, index, SSMIndex[])
 
     # assemble and parse the index buckets
@@ -117,18 +116,18 @@ function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
 end
 
 function _read_index_bytes(ssm::StandardStMan, h)
-    h.indexlength == 0 && return UInt8[]
+    h.length == 0 && return UInt8[]
     aclen = 8                                       # 2 * canonical size of Int32
     idxbucketsize = ssm.length - aclen
     out = UInt8[]
-    bkt = h.firstidx
-    remaining = h.indexlength
-    for _ in 1:h.nridxbuckets
+    bkt = h.first
+    remaining = h.length
+    for _ in 1:h.indices
         base = bucketptr(ssm, bkt)
         nextbkt = _be_i32(ssm, base + 4)
-        if h.idxoffset > 0
-            s = base + h.idxoffset
-            append!(out, @view ssm.data[s+1:s+h.indexlength])
+        if h.offset > 0
+            s = base + h.offset
+            append!(out, @view ssm.data[s+1:s+h.length])
         else
             take = min(remaining, idxbucketsize)
             s = base + aclen
@@ -349,8 +348,8 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     putend(iw)
     idxbytes = bytes(iw)
 
-    bucketsize = max(datasize, length(idxbytes) + 8, 512)
-    strchar = bucketsize - 16
+    size = max(datasize, length(idxbytes) + 8, 512)
+    strchar = size - 16
 
     for i in 1:ncol
         cols[i].type == TpString || continue
@@ -372,8 +371,8 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     idxbase = ndata + nstr                # index bucket number
 
     # --- data buckets -----------------------------------------------
-    file = zeros(UInt8, 512 + (ndata + nstr + 1) * bucketsize)
-    _bp(n) = 512 + n * bucketsize
+    file = zeros(UInt8, 512 + (ndata + nstr + 1) * size)
+    _bp(n) = 512 + n * size
     for k in 0:ndata-1
         base = _bp(k)
         r0 = k * rpb
@@ -443,7 +442,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     hw = AipsWriter(; endian)
     putstart(hw, "StandardStMan", 3)
     wr_scalar(hw, endian === :big)
-    wr_u32(hw, bucketsize)
+    wr_u32(hw, size)
     wr_u32(hw, ndata + nstr + 1)          # nrBuckets
     wr_u32(hw, 2)                         # persCacheSize
     wr_u32(hw, 0)                         # nFreeBucket
