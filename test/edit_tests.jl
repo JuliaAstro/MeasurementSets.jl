@@ -97,6 +97,155 @@ end
     @test ms[:TIME][7:8] == [7.0, 8.0]
 end
 
+@testset "edit — removerows!" begin
+    dst = joinpath(mktempdir(), "r1.ms")
+    create_ms(dst; nrow=10, nchan=4, ncorr=2, nant=3)
+
+    edit(dst) do t
+        for r in 1:10
+            t[:TIME][r]  = 100.0 + r                # ISM
+            t[:UVW][r]   = Float64[r, r, r]         # SSM direct array
+            t[:DATA][r]  = fill(ComplexF32(r), 2, 4) # TSM
+        end
+        removerows!(t, [2, 5, 9])
+    end
+
+    keep = [1, 3, 4, 6, 7, 8, 10]
+    ms = MeasurementSet(dst)
+    @test getfield(ms, :data).rows == 7
+    @test ms[:TIME][:] == [100.0 + r for r in keep]
+    @test [ms[:UVW][i] for i in 1:7] == [Float64[r, r, r] for r in keep]
+    @test [ms[:DATA][i] for i in 1:7] == [fill(ComplexF32(r), 2, 4) for r in keep]
+    @test isempty(validate(ms))
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dst)
+        @test size(ct, 1) == 7
+        @test collect(ct[:TIME][:]) == [100.0 + r for r in keep]
+        @test ct[:UVW][:, 4] == Float64[6, 6, 6]
+        @test ct[:DATA][3] == fill(ComplexF32(4), 2, 4)
+    end
+end
+
+@testset "edit — removerows! + addrows! mixed" begin
+    dst = joinpath(mktempdir(), "r2.ms")
+    create_ms(dst; nrow=10, nchan=4, ncorr=2, nant=3)
+    time0 = copy(MeasurementSet(dst)[:TIME][:])
+
+    edit(dst) do t
+        removerows!(t, [1, 2, 3])                   # keep original rows 4..10
+        addrows!(t, 2)                              # -> 9 rows
+        t[:TIME][8] = 5.0
+        t[:TIME][9] = 6.0
+    end
+
+    ms = MeasurementSet(dst)
+    @test getfield(ms, :data).rows == 9
+    @test ms[:TIME][1:7] == time0[4:10]
+    @test ms[:TIME][8:9] == [5.0, 6.0]
+    @test isempty(validate(ms))
+end
+
+@testset "edit — addcolumn! (standard schema)" begin
+    dst = joinpath(mktempdir(), "c1.ms")
+    create_ms(dst; nrow=6, nchan=4, ncorr=2, nant=3)
+    dataseq = columndesc(readtable(dst), "DATA").sequ
+    dfile = joinpath(dst, "table.f$(dataseq)_TSM1")
+    dbefore = read(dfile)
+
+    edit(dst) do t
+        addcolumn!(t, "WEIGHT_SPECTRUM")
+        t[:WEIGHT_SPECTRUM][:] = [fill(Float32(i), 2, 4) for i in 1:6]
+    end
+
+    @test read(dfile) == dbefore                    # untouched TSM file byte-identical
+    ms = MeasurementSet(dst)
+    @test "WEIGHT_SPECTRUM" in columnnames(getfield(ms, :data))
+    @test ms[:WEIGHT_SPECTRUM][3] == fill(3f0, 2, 4)
+    @test ms[:DATA][2] == zeros(ComplexF32, 2, 4)   # other columns intact
+    @test isempty(validate(ms))
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dst)
+        @test ct[:WEIGHT_SPECTRUM][3] == fill(3f0, 2, 4)
+    end
+end
+
+@testset "edit — addcolumn! custom then removecolumn!" begin
+    dst = joinpath(mktempdir(), "c2.ms")
+    create_ms(dst; nrow=5, nchan=4, ncorr=2, nant=3)
+
+    edit(dst) do t
+        addcolumn!(t, "FOO", collect(1.0:5.0))
+    end
+    ms = MeasurementSet(dst)
+    @test ms[:FOO][:] == collect(1.0:5.0)
+    @test isempty(validate(ms))
+
+    edit(dst) do t
+        removecolumn!(t, "FOO")
+    end
+    r = readtable(dst)
+    @test !("FOO" in columnnames(r))
+    @test isempty(validate(MeasurementSet(dst)))
+    if _HAVE_CASACORE
+        ct = CCT.Table(dst)
+        @test !("FOO" in [string(n) for n in propertynames(ct)])
+    end
+end
+
+@testset "edit — removecolumn! drops a whole storage manager" begin
+    dst = joinpath(mktempdir(), "c3.ms")
+    create_ms(dst; nrow=5, nchan=4, ncorr=2, nant=3)
+
+    edit(dst) do t
+        addcolumn!(t, "BAR", [zeros(Float32, 2, 2) for _ in 1:5];
+                   kind=:tsm, shape=VariableShape())
+    end
+    barseq = columndesc(readtable(dst), "BAR").sequ
+    @test isfile(joinpath(dst, "table.f$(barseq)_TSM1"))
+
+    edit(dst) do t
+        removecolumn!(t, "BAR")
+    end
+    @test !isfile(joinpath(dst, "table.f$(barseq)_TSM1"))
+    @test !isfile(joinpath(dst, "table.f$(barseq)"))
+    r = readtable(dst)
+    @test !("BAR" in columnnames(r))
+    @test !any(m -> m.sequ == barseq, r.managers)
+    @test isempty(validate(MeasurementSet(dst)))
+end
+
+if isdir(SAMPLE_MS)
+    @testset "edit — removerows! on a sample slice" begin
+        src = MeasurementSet(SAMPLE_MS)
+        drop = [i for i in 1:40 if iseven(i)]
+        keep = [i for i in 1:40 if isodd(i)]
+        d_keep = [copy(src["DATA"][i]) for i in keep]
+        t_keep = [src["TIME"][i] for i in keep]
+        u_keep = [copy(src["UVW"][i]) for i in keep]
+
+        dst = joinpath(mktempdir(), "r3.ms")
+        copyms(SAMPLE_MS, dst; rows=1:40,
+               subtables=["ANTENNA", "SPECTRAL_WINDOW", "POLARIZATION"])
+        edit(dst) do t
+            removerows!(t, drop)
+        end
+
+        o = MeasurementSet(dst)
+        @test getfield(o, :data).rows == 20
+        @test [o[:DATA][i] for i in 1:20] == d_keep
+        @test [o[:TIME][i] for i in 1:20] == t_keep
+        @test [o[:UVW][i] for i in 1:20] == u_keep
+        if _HAVE_CASACORE
+            ct = CCT.Table(dst)
+            @test size(ct, 1) == 20
+            @test ct[:DATA][7] == d_keep[7]
+            @test collect(ct[:TIME][:]) == t_keep
+        end
+    end
+end
+
 if isdir(SAMPLE_MS)
     @testset "edit — copyms slice then edit" begin
         src = MeasurementSet(SAMPLE_MS)

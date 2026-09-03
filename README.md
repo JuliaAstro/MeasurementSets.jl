@@ -75,9 +75,30 @@ is patched in the tile file in place (editing one cell of a multi-GB cube
 touches a few bytes); a touched StandardStMan / IncrementalStMan file is
 regenerated from its in-memory column data.
 
-Not yet implemented: row *deletion*; `addColumn` / schema change;
-concurrent writers; multi-column tiled managers; `TiledColumnStMan`
-writer; virtual column engines.
+**Phase 10 — row deletion + `addColumn` / `removeColumn`.**
+`edit` sessions can now change the row set and the schema:
+
+```julia
+edit("/tmp/copy.ms") do t
+    removerows!(t, [3, 8, 12])            # drop rows
+    addrows!(t, 5)                        # append rows
+    addcolumn!(t, "WEIGHT_SPECTRUM")      # from the standard schema
+    addcolumn!(t, "FOO", rand(nrow(t)))   # explicit data
+    removecolumn!(t, "FLAG_CATEGORY")
+end
+```
+
+`removerows!` / `addcolumn!` / `removecolumn!` take the *regen* persist
+path: every affected storage-manager file is rebuilt from the resolved
+in-memory column data (a tiled column's tile file included — so, unlike
+casacore, rows can be deleted even from a table with a `TiledStMan`
+column) and `table.dat` is rewritten in full.  Untouched managers keep
+their files and header bytes.  Plain cell/column overwrite and pure row
+appends still take the Phase-9 in-place fast path.
+
+Not yet implemented: free-list bucket reuse; concurrent writers;
+multi-column tiled managers; `TiledColumnStMan` writer; virtual column
+engines.
 
 ## Usage
 
@@ -120,6 +141,13 @@ edit("/tmp/copy.ms") do t
     t[:SCAN_NUMBER][10] = 7
     addrows!(t, 10)                      # every storage manager grows
     for r in 91:100; t[:TIME][r] = 4.6e9 + r end
+end
+
+# row / schema mutation (regen path)
+edit("/tmp/copy.ms") do t
+    removerows!(t, [2, 5, 9])
+    addcolumn!(t, "WEIGHT_SPECTRUM")
+    removecolumn!(t, "FLAG_CATEGORY")
 end
 ```
 
