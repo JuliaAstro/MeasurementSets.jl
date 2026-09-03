@@ -44,9 +44,12 @@ the MS v2 standard schema (`SCHEMAVER2`, `stdtable`, `validate`).
 Pure-Julia `table.dat` + StandardStMan + TiledShapeStMan writers, little-
 endian storage-manager files, verified against `Casacore.jl`.
 
-* `write_table(dir, name, cols; nrow)` — one CTDS table from `name => vector`
-  pairs or a `Tables` source.
-* `copyms(src, dst; rows=Colon())` — copy an MS (MAIN row-sliced).
+* `write_table(dir, name, cols; nrow, tsm=…, ism=…)` — one CTDS table from
+  `name => vector` pairs or a `Tables` source; `tsm` / `ism` name the
+  columns to bind to TiledShapeStMan / IncrementalStMan (default:
+  StandardStMan).
+* `copyms(src, dst; rows=Colon(), subtables=Colon())` — copy an MS,
+  preserving each column's storage-manager kind.
 * `create_ms(dir; nrow, nchan, ncorr, nant)` — synthesise a minimal,
   `validate`-clean MS.
 
@@ -57,9 +60,15 @@ format behind every variable-shape subtable column (`CHAN_FREQ`,
 `copyms` now reproduces every column of a standard MS; `create_ms` writes
 these as real ragged arrays.
 
-Not yet implemented: ISM indirect / string arrays (no ISM columns in the
-reference MS, no ISM writer); multi-column tiled managers;
-TiledColumnStMan writer; virtual column engines.
+**Phase 8 — IncrementalStMan writer + ISM indirect arrays.**
+A byte-exact writer for the "store on change" run-length format (header,
+multi-bucket data + index parts, `ISMIndex`), plus ISM indirect-array
+read + write. `copyms` keeps a source's ISM columns as ISM;
+`create_ms` writes MAIN's per-integration scalars (`TIME`, `FIELD_ID`,
+…) through ISM.
+
+Not yet implemented: multi-column tiled managers; `TiledColumnStMan`
+writer; virtual column engines; in-place edits / row appends.
 
 ## Usage
 
