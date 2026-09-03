@@ -1,21 +1,44 @@
-# IncrementalStMan (ISM) reader.
+# IncrementalStMan (ISM) reader + writer.
 #
 # Mirrors casacore/tables/DataMan/ISMBase.cc, ISMIndex.cc, ISMBucket.cc,
-# ISMColumn.cc.
+# ISMColumn.cc, ISMIndColumn.cc.
 #
 # ISM stores a value only when it differs from the previous row ("store on
-# change").  `table.f<seqnr>` layout:
-#   * bytes [0, 512)              : AipsIO "IncrementalStMan" header
-#   * bytes [512, 512+k*len)      : k data buckets
-#   * bytes [512 + k*len, ...)    : AipsIO "ISMIndex" (row -> bucket map)
+# change").  `table.f<seqnr>` layout (every integer in the table's byte
+# order):
+#   * bytes [0, ISM_LEADER)                : AipsIO "IncrementalStMan"
+#                                            header, zero-padded
+#   * bytes [ISM_LEADER, +nbucket*len)     : the data buckets
+#   * remainder                            : AipsIO "ISMIndex" (row->bucket)
 #
-# Bucket layout (see ISMBucket synopsis):
-#   [idx offset: uInt] [data part] [index part] [free]
-# The index part holds, per column: [nr: uInt][nr row numbers][nr data offsets].
-# Row numbers are bucket-relative; a value is valid from its row until the
-# next stored row number (or the end of the bucket).
+# A bucket is  [uInt woffset][data part][index part][free space].  The low
+# 28 bits of `woffset` (ISM_IDXOFF_MASK) give the byte offset of the index
+# part; the top nibble (ISM_ROWNR64_MASK) flags 64-bit row numbers.  The
+# index part holds, per bound column,
+#   [uInt nr][nr * uInt(/uInt64) bucket-relative 0-based row][nr * uInt off]
+# where each `off` is measured from the first data byte (`base + ISM_UINT`).
+# A stored value is valid from its row until the next stored row (or the
+# bucket end).  Indirect (variable-shape) array columns store an 8-byte
+# Int64 offset into `table.f<seqnr>i` (a version-1 StManArrayFile).
+#
+# casacore auto-sizes a bucket to hold ISM_TARGET_ROWS rows, clamped to
+# [ISM_MIN_BUCKET, ISM_MAX_BUCKET] (ISMBase::init).
 #
 # Rows and column numbers are 1-based in this file's API.
+
+const ISM_LEADER       = 512           # fixed header-leader size; bucket 0 starts here
+const ISM_UINT         = 4             # canonical uInt size (index words, offsets)
+const ISM_INDEX_ENTRY  = 2 * ISM_UINT  # one (row number, data offset) index pair
+const ISM_MIN_BUCKET   = 32768         # casacore auto bucket-size floor
+const ISM_MAX_BUCKET   = 327680        # casacore auto bucket-size soft ceiling
+const ISM_TARGET_ROWS  = 100           # casacore auto bucket-size target rows/bucket
+const ISM_ROWNR64_MASK = 0xf0000000    # woffset top nibble: 64-bit row numbers
+const ISM_IDXOFF_MASK  = 0x0fffffff    # woffset low 28 bits: byte offset of index part
+
+# AipsIO object versions we write (casacore accepts these for a modern table)
+const ISM_HDR_VERSION   = 5   # "IncrementalStMan" header, little-endian (4 for big-endian)
+const ISMINDEX_VERSION  = 1   # "ISMIndex", 32-bit row numbers (2 would be 64-bit)
+const ISM_DM_VERSION    = 3   # the "ISM" record in table.dat
 
 struct ISMIndex
     used::Int
@@ -76,7 +99,7 @@ function open_incrementalstman(t::CTDSTable, dm::DataManagerInfo)
     end
     getend(h)
 
-    idxpos = 512 + nbucket * bucketsize
+    idxpos = ISM_LEADER + nbucket * bucketsize
     ia = AipsIO(IOBuffer(@view bytes[idxpos+1:end]); endian)
     iv = getstart(ia, "ISMIndex")
     used = Int(read_u32(ia))
@@ -94,14 +117,14 @@ end
 # Parse the per-column (rownumbers, offsets) index of one bucket, for the
 # first `ncol` columns.  Returns the vectors for column `colnr` (1-based).
 function _ism_colindex(ism::IncrementalStMan, bucketnr::Int, colnr::Int, ncol::Int)
-    base = 512 + bucketnr * ism.length
+    base = ISM_LEADER + bucketnr * ism.length
     hdr = _u32(ism, base)
-    use64 = (hdr & 0xf0000000) != 0
-    p = base + Int(hdr & 0x0fffffff)          # start of the index part
+    use64 = (hdr & ISM_ROWNR64_MASK) != 0
+    p = base + Int(hdr & ISM_IDXOFF_MASK)     # start of the index part
     rownr_t = use64 ? UInt64 : UInt32
     local rownrs, offsets
     for i in 1:ncol
-        nr = Int(_u32(ism, p)); p += 4
+        nr = Int(_u32(ism, p)); p += ISM_UINT
         rr = Vector{Int}(undef, nr)
         for j in 1:nr
             rr[j] = Int((ism.endian === :big ? ntoh : ltoh)(
@@ -110,13 +133,13 @@ function _ism_colindex(ism::IncrementalStMan, bucketnr::Int, colnr::Int, ncol::I
         end
         oo = Vector{Int}(undef, nr)
         for j in 1:nr
-            oo[j] = Int(_u32(ism, p)); p += 4
+            oo[j] = Int(_u32(ism, p)); p += ISM_UINT
         end
         if i == colnr
             rownrs, offsets = rr, oo
         end
     end
-    return rownrs, offsets, base + 4          # data part starts at base+4
+    return rownrs, offsets, base + ISM_UINT   # data part starts after `woffset`
 end
 
 # largest index i with v[i] <= x  (v ascending)
@@ -147,8 +170,8 @@ function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
         return isempty(dims) ? bits[1] : reshape(bits, dims...)
     elseif c.type == TpString
         isempty(dims) || error("ISM string arrays not supported yet")
-        total = Int(_u32(ism, dataoff))
-        return String(ism.data[dataoff+5 : dataoff+total])   # total = 4 + nchars
+        total = Int(_u32(ism, dataoff))                       # counts the length word
+        return String(ism.data[dataoff + ISM_UINT + 1 : dataoff + total])
     else
         T = juliatype(c.type)
         raw = reinterpret(T, view(ism.data, dataoff+1 : dataoff + nrelem*sizeof(T)))
@@ -205,7 +228,7 @@ end
 # =====================  writer  =====================================
 # Fresh sequential fill: buckets filled left-to-right, a value stored only
 # when it differs from the value currently in effect ("store on change").
-# Layout: [512-byte header][nbucket * bucketsize][AipsIO "ISMIndex"].
+# Layout: [ISM_LEADER header][nbucket * bucketsize][AipsIO "ISMIndex"].
 
 # append `x` (a bitstype) to `buf` in `endian` byte order; return its offset
 function _append_val!(buf::Vector{UInt8}, x, endian::Symbol)
@@ -231,7 +254,7 @@ function _ism_encode!(buf::Vector{UInt8}, c::ColumnDesc, kind::Symbol, v,
         append!(buf, packed)
     elseif c.type == TpString
         s = codeunits(String(v))
-        _append_val!(buf, UInt32(4 + length(s)), endian)     # length word counts itself
+        _append_val!(buf, UInt32(ISM_UINT + length(s)), endian)   # length word counts itself
         append!(buf, s)
     else
         J = juliatype(c.type)
@@ -242,16 +265,15 @@ function _ism_encode!(buf::Vector{UInt8}, c::ColumnDesc, kind::Symbol, v,
     end
 end
 
-# casacore's per-column contribution to the minimum bucket size (ISMBase::init)
+# casacore's per-column contribution to the minimum bucket size
+# (ISMBase::init): one index-entry pair plus one stored value.
 function _ism_fixedsize(c::ColumnDesc, kind::Symbol)
-    kind === :ind && return 8 + 8
-    if c.type == TpString && kind === :scalar
-        return 8 + 4 * 2                                      # variable: nr = 1
-    elseif c.type == TpBool
-        return 8 + cld(kind === :scalar ? 1 : prod(_dims(c)), 8)
-    else
-        return 8 + sizeof(juliatype(c.type)) * (kind === :scalar ? 1 : prod(_dims(c)))
-    end
+    nrelem() = kind === :scalar ? 1 : prod(_dims(c))
+    valbytes = kind === :ind ? sizeof(Int64) :
+               c.type == TpString ? 2 * ISM_UINT :           # variable: length word + one char
+               c.type == TpBool ? cld(nrelem(), 8) :
+               sizeof(juliatype(c.type)) * nrelem()
+    return ISM_INDEX_ENTRY + valbytes
 end
 
 """
@@ -266,10 +288,11 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
                                 nrow::Int, endian::Symbol)
     ncol = length(cols)
     kinds = Symbol[_ismkind(c) for c in cols]
-    headersize = 4 * (ncol + 1)
-    fixedsize = sum(_ism_fixedsize(cols[i], kinds[i]) for i in 1:ncol; init=0)
-    perrow = fixedsize                                       # ~worst case per row
-    bucketsize = clamp(headersize + 100 * perrow, 32768, 327680)
+    # per-bucket index header: `woffset` + one `nr` word per column
+    headersize = ISM_UINT * (ncol + 1)
+    perrow = sum(_ism_fixedsize(cols[i], kinds[i]) for i in 1:ncol; init=0)  # ~worst case
+    bucketsize = clamp(headersize + ISM_TARGET_ROWS * perrow,
+                       ISM_MIN_BUCKET, ISM_MAX_BUCKET)
     rpb = max(1, (bucketsize - headersize) ÷ max(perrow, 1))
     nbucket = max(1, cld(nrow, rpb))
 
@@ -300,27 +323,29 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
         bkts[b + 1] = (databuf, entries)
     end
 
-    # grow the bucket size if a bucket's data + index part needs more
+    # grow the bucket size if a bucket's data + index part needs more, and
+    # keep casacore's `>= headersize + 2*perrow` floor (ISMBase::init)
     for (databuf, entries) in bkts
-        idxlen = 4 * ncol + sum(length(e) for e in entries; init=0) * 8
-        bucketsize = max(bucketsize, 4 + length(databuf) + idxlen)
+        idxlen = ISM_UINT * ncol +
+                 sum(length(e) for e in entries; init=0) * ISM_INDEX_ENTRY
+        bucketsize = max(bucketsize, ISM_UINT + length(databuf) + idxlen)
     end
-    bucketsize = max(bucketsize, headersize + 2 * fixedsize)
+    bucketsize = max(bucketsize, headersize + 2 * perrow)
 
     # ISMIndex blob
     iw = AipsWriter(; endian)
-    putstart(iw, "ISMIndex", 1)
+    putstart(iw, "ISMIndex", ISMINDEX_VERSION)
     wr_u32(iw, nbucket)                                      # nused
     startrows = UInt32[b * rpb for b in 0:nbucket-1]
     push!(startrows, UInt32(nrow))                           # sentinel
-    wr_block(iw, startrows)
-    wr_block(iw, UInt32.(0:nbucket-1))
+    wr_block(iw, startrows)                                  # 0-based bucket start rows
+    wr_block(iw, UInt32.(0:nbucket-1))                       # bucket numbers
     putend(iw)
     idxblob = bytes(iw)
 
     # header
     hw = AipsWriter(; endian)
-    putstart(hw, "IncrementalStMan", endian === :big ? 4 : 5)
+    putstart(hw, "IncrementalStMan", endian === :big ? ISM_HDR_VERSION - 1 : ISM_HDR_VERSION)
     endian === :big || wr_scalar(hw, false)                  # bigEndian flag
     wr_u32(hw, bucketsize)
     wr_u32(hw, nbucket)
@@ -330,35 +355,35 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
     wr_i32(hw, -1)                                           # firstFreeBucket
     putend(hw)
     hdr = bytes(hw)
-    @assert length(hdr) <= 512
+    @assert length(hdr) <= ISM_LEADER
 
-    file = zeros(UInt8, 512 + nbucket * bucketsize + length(idxblob))
+    file = zeros(UInt8, ISM_LEADER + nbucket * bucketsize + length(idxblob))
     copyto!(file, 1, hdr, 1, length(hdr))
     for b in 0:nbucket-1
         databuf, entries = bkts[b + 1]
-        base = 512 + b * bucketsize
-        woffset = 4 + length(databuf)
+        base = ISM_LEADER + b * bucketsize
+        woffset = ISM_UINT + length(databuf)                 # offset of the index part
         _wrbytes!(file, base, UInt32(woffset), endian)
-        copyto!(file, base + 4 + 1, databuf, 1, length(databuf))
+        copyto!(file, base + ISM_UINT + 1, databuf, 1, length(databuf))
         p = base + woffset
         for i in 1:ncol
-            _wrbytes!(file, p, UInt32(length(entries[i])), endian); p += 4
+            _wrbytes!(file, p, UInt32(length(entries[i])), endian); p += ISM_UINT
             for (rr, _) in entries[i]
-                _wrbytes!(file, p, UInt32(rr), endian); p += 4
+                _wrbytes!(file, p, UInt32(rr), endian); p += ISM_UINT
             end
             for (_, oo) in entries[i]
-                _wrbytes!(file, p, UInt32(oo), endian); p += 4
+                _wrbytes!(file, p, UInt32(oo), endian); p += ISM_UINT
             end
         end
     end
-    copyto!(file, 512 + nbucket * bucketsize + 1, idxblob, 1, length(idxblob))
+    copyto!(file, ISM_LEADER + nbucket * bucketsize + 1, idxblob, 1, length(idxblob))
 
     write(joinpath(dir, "table.f$sequ"), file)
     have_ind && write(joinpath(dir, "table.f$(sequ)i"), arrayfile_bytes(afw))
 
     # the "ISM" record for table.dat (always canonical big-endian there)
     bw = AipsWriter(; endian=:big)
-    putstart(bw, "ISM", 3)
+    putstart(bw, "ISM", ISM_DM_VERSION)
     wr_string(bw, "ISM")
     putend(bw)
     return bytes(bw)
