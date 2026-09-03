@@ -44,7 +44,7 @@ struct ColumnDesc{T<:CellShape}
     shape::T                   # () scalar / Dims fixed / VariableShape / VariableDims
     option::Int32
     maxlength::UInt32
-    keywords::CasaRecord
+    keywords::Record
     default::Any               # scalar columns only
     # filled in from ColumnSet: data-manager instance sequence number
     # (`nothing` until the column is bound to a data manager)
@@ -106,8 +106,8 @@ struct TableDesc
     name::String
     version::String
     comment::String
-    public::CasaRecord         # public keyword set
-    private::CasaRecord        # private (internal) keyword set
+    public::Record         # public keyword set
+    private::Record        # private (internal) keyword set
     columns::Vector{ColumnDesc}
 end
 
@@ -117,7 +117,7 @@ function read_tabledesc(a::AipsIO)
     version = read_string(a)
     comment = read_string(a)
     public = read_record(a)
-    private = tvers != 1 ? read_record(a) : CasaRecord()
+    private = tvers != 1 ? read_record(a) : Record()
 
     ncol = Int(read_u32(a))
     cols = ColumnDesc[read_columndesc(a) for _ in 1:ncol]

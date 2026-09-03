@@ -54,8 +54,8 @@ own TiledShapeStMan.
 """
 function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            data::Vector; nrow::Integer, endian::Symbol=:little,
-                           public::CasaRecord=CasaRecord(),
-                           private::CasaRecord=CasaRecord(),
+                           public::Record=Record(),
+                           private::Record=Record(),
                            tsm::AbstractSet{<:AbstractString}=Set{String}(),
                            ism::AbstractSet{<:AbstractString}=Set{String}(),
                            tablename::AbstractString="",
@@ -142,7 +142,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         arr = _is_tsm(shp) || (shp isa Dims && !isempty(shp))
         push!(descs, ColumnDesc(cn, sc === nothing ? "" : sc.comment,
             "", "", ct, _classname(ct, arr), shp, Int32(0), UInt32(0),
-            CasaRecord(), nothing, nothing))
+            Record(), nothing, nothing))
         push!(data, vals)
     end
 
@@ -156,8 +156,8 @@ end
 # Read every readable column of `t` (rows `r`) and write it to `dir`.
 # `public` overrides the table's public keyword set (used for MAIN).
 function _copy_table(dir::AbstractString, t::CTDSTable, r;
-                     public::CasaRecord=t.desc.public,
-                     private::CasaRecord=t.desc.private)
+                     public::Record=t.desc.public,
+                     private::Record=t.desc.private)
     descs = ColumnDesc[]
     data = Vector{Any}[]
     tsm = Set{String}()
@@ -188,7 +188,7 @@ function _copy_table(dir::AbstractString, t::CTDSTable, r;
     isempty(skipped) ||
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(r), endian=:little,
-                      public, private=CasaRecord(), tsm, ism,
+                      public, private=Record(), tsm, ism,
                       tablename=t.desc.name, type=t.type, subtype=t.subtype,
                       readme=t.readme)
     return descs
@@ -236,7 +236,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
     # MAIN public keywords: keep non-table entries, point table entries at
     # the freshly written subtable dirs
     src = main.desc.public
-    pub = CasaRecord()
+    pub = Record()
     for i in 1:length(src)
         nm, v = src.names[i], src.values[i]
         if v isa SubTable
@@ -266,7 +266,7 @@ copyms(src::AbstractString, dst::AbstractString; rows=Colon(), subtables=Colon()
 
 const SYNTH_TIME0 = 4.6e9      # arbitrary epoch (MJD seconds) for synthesised TIME
 
-_mkdesc(name, ct, shape; opt=Int32(0), keywords=CasaRecord()) =
+_mkdesc(name, ct, shape; opt=Int32(0), keywords=Record()) =
     ColumnDesc(name, "", "", "", ct, _classname(ct, shape !== ()),
                shape, opt, UInt32(0), keywords, nothing, nothing)
 
@@ -357,7 +357,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
     mdescs, mdata = _synth_table("MAIN", nrow, nchan, ncorr, nrec)
     push!(mdescs, _mkdesc("DATA", TpComplex, VariableShape()))
     push!(mdata, [zeros(ComplexF32, ncorr, nchan) for _ in 1:nrow])
-    pub = CasaRecord()
+    pub = Record()
     push!(pub.names, "MS_VERSION"); push!(pub.types, TpFloat)
     push!(pub.values, MS_VERSION); push!(pub.comments, "")
     for (tbl, _) in subrows

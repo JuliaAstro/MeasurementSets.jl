@@ -24,7 +24,7 @@ include("edit.jl")
 
 export CTDSTable, readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames
-export CasaRecord, SubTable, ColumnDesc, TableDesc, CasaType
+export Record, SubTable, ColumnDesc, TableDesc, CasaType
 export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate

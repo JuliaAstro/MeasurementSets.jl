@@ -34,7 +34,7 @@ _classname(t::CasaType, isarr::Bool) =
 
 const _ARRAY_CASATYPE = Dict(v => k for (k, v) in ARRAYTYPE)   # scalar -> array CasaType
 
-function _write_recorddesc(w::AipsWriter, rec::CasaRecord)
+function _write_recorddesc(w::AipsWriter, rec::Record)
     putstart(w, "RecordDesc", V_RECORDDESC)
     wr_i32(w, length(rec))
     for i in 1:length(rec)
@@ -79,7 +79,7 @@ Emit a casacore "TableRecord" (v1).  Nested records are written as empty
 sub-descriptions followed by a full nested record; `SubTable` values are
 written as their stored path string.
 """
-function write_record(w::AipsWriter, rec::CasaRecord; typename="TableRecord")
+function write_record(w::AipsWriter, rec::Record; typename="TableRecord")
     putstart(w, typename, V_TABLERECORD)
     _write_recorddesc(w, rec)
     wr_i32(w, rec.rectype)

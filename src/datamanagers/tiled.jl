@@ -293,7 +293,7 @@ end
 # TSMCube::putObject writes no framing of its own.
 function _tsm_putobject_cube(w::AipsWriter, cubeshape, tileshape, fileseqnr, offset)
     wr_u32(w, TSM_CUBE_VER)
-    write_record(w, CasaRecord(); typename="Record")     # values_p (empty)
+    write_record(w, Record(); typename="Record")     # values_p (empty)
     wr_scalar(w, true)                                    # extensible
     wr_u32(w, length(cubeshape))
     wr_iposition(w, cubeshape)

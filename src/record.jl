@@ -13,28 +13,28 @@ const RECORD_FIXED    = Int32(0)
 const RECORD_VARIABLE = Int32(1)
 
 "An ordered casacore (Table)Record: field name -> value, with the on-disk types."
-mutable struct CasaRecord
+mutable struct Record
     names::Vector{String}
     types::Vector{CasaType}
     values::Vector{Any}
     comments::Vector{String}
     rectype::Int32            # RECORD_FIXED / RECORD_VARIABLE
 end
-CasaRecord() = CasaRecord(String[], CasaType[], Any[], String[], RECORD_VARIABLE)
+Record() = Record(String[], CasaType[], Any[], String[], RECORD_VARIABLE)
 
-Base.length(r::CasaRecord) = length(r.names)
-Base.keys(r::CasaRecord) = r.names
-Base.haskey(r::CasaRecord, k::AbstractString) = k in r.names
-function Base.getindex(r::CasaRecord, k::AbstractString)
+Base.length(r::Record) = length(r.names)
+Base.keys(r::Record) = r.names
+Base.haskey(r::Record, k::AbstractString) = k in r.names
+function Base.getindex(r::Record, k::AbstractString)
     i = findfirst(==(k), r.names)
     i === nothing && throw(KeyError(k))
     r.values[i]
 end
-Base.get(r::CasaRecord, k::AbstractString, default) = haskey(r, k) ? r[k] : default
-Base.iterate(r::CasaRecord, s=1) = s > length(r) ? nothing : (r.names[s] => r.values[s], s + 1)
+Base.get(r::Record, k::AbstractString, default) = haskey(r, k) ? r[k] : default
+Base.iterate(r::Record, s=1) = s > length(r) ? nothing : (r.names[s] => r.values[s], s + 1)
 
-function Base.show(io::IO, r::CasaRecord)
-    print(io, "CasaRecord(")
+function Base.show(io::IO, r::Record)
+    print(io, "Record(")
     join(io, (string(n, "=", _short(v)) for (n, v) in r), ", ")
     print(io, ")")
 end
@@ -95,7 +95,7 @@ end
 # --- the dispatcher -------------------------------------------------
 
 """
-    read_record(a) -> CasaRecord
+    read_record(a) -> Record
 
 Read whatever record-like object comes next (`TableRecord`, `Record`,
 `TableKeywordSet`, `ScalarKeywordSet`, `ArrayKeywordSet`).
@@ -121,7 +121,7 @@ function read_record(a::AipsIO)
 end
 
 function read_recorddata(a::AipsIO, fields::Vector{RecordField}, version)
-    rec = CasaRecord()
+    rec = Record()
     for f in fields
         if f.type == TpRecord
             val = isempty(f.subdesc) ? read_record(a) :
@@ -163,7 +163,7 @@ function read_keyset(a::AipsIO, version, kind::Int)
     read_block(a, Int32)                            # excluded dtypes
     read_block(a, String)                           # excluded names
 
-    rec = CasaRecord()
+    rec = Record()
     resize!(rec.names, n); resize!(rec.types, n)
     resize!(rec.values, n); resize!(rec.comments, n)
     for i in 1:n
