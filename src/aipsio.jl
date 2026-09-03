@@ -122,7 +122,7 @@ function read_array(a::AipsIO, ::Type{T}) where {T}
     if version < 3          # discard the obsolete origin
         for _ in 1:ndim; read_i32(a); end
     end
-    shape = Int[Int(read_u32(a)) for _ in 1:ndim]
+    shape = Tuple(Int(read_u32(a)) for _ in 1:ndim)::Dims
     nwritten = Int(read_u32(a))
     data = T[read_element(a, T) for _ in 1:nwritten]
     getend(a)
