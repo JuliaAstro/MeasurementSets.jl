@@ -15,6 +15,14 @@
 
 import Mmap
 
+const TSM_TILE_TARGET = 1 << 20   # writer: aim for ~1 MiB of data per tile
+
+# AipsIO object versions we write in `table.f<seqnr>`
+const TSM_WRAPPER_VER = 1   # "TiledShapeStMan" outer object
+const TSM_BASE_VER    = 2   # nested "TiledStMan" object
+const TSM_CUBE_VER    = 1   # TSMCube::putObject (writes no framing)
+const TSM_FILE_VER    = 1   # a TSMFile record
+
 struct TSMCube
     cubeshape::Dims
     tileshape::Dims
@@ -284,7 +292,7 @@ end
 
 # TSMCube::putObject writes no framing of its own.
 function _tsm_putobject_cube(w::AipsWriter, cubeshape, tileshape, fileseqnr, offset)
-    wr_u32(w, 1)                                          # cube version 1
+    wr_u32(w, TSM_CUBE_VER)
     write_record(w, CasaRecord(); typename="Record")     # values_p (empty)
     wr_scalar(w, true)                                    # extensible
     wr_u32(w, length(cubeshape))
@@ -311,7 +319,7 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int, col::ColumnDesc,
     elemsz = J === Bool ? 0 : sizeof(J)              # 0 => bit-packed
     planelen = prod(cell; init=1)
 
-    trow = clamp((1 << 20) ÷ max(planelen * max(elemsz, 1), 1), 1, nrow)
+    trow = clamp(TSM_TILE_TARGET ÷ max(planelen * max(elemsz, 1), 1), 1, nrow)
     tileshape = (cell..., trow)
     cubeshape = (cell..., nrow)
     ntiles = cld(nrow, trow)
@@ -343,21 +351,21 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int, col::ColumnDesc,
 
     # --- header file (big-endian AipsIO) --------------------------
     hw = AipsWriter(; endian=:big)
-    putstart(hw, "TiledShapeStMan", 1)
-    putstart(hw, "TiledStMan", 2)
+    putstart(hw, "TiledShapeStMan", TSM_WRAPPER_VER)
+    putstart(hw, "TiledStMan", TSM_BASE_VER)
     wr_scalar(hw, endian === :big)                   # bigEndian flag
     wr_u32(hw, sequ)
     wr_u32(hw, nrow)
-    wr_u32(hw, 1)                                    # ncolumn
+    wr_u32(hw, 1)                                    # ncolumn (single-column TSM)
     wr_i32(hw, Int(col.type))
     wr_string(hw, "TSM$(col.name)")                  # hypercolumn name
     wr_u32(hw, 0)                                    # persMaxCacheSize
     wr_u32(hw, length(cubeshape))                    # nrdim
-    wr_u32(hw, 2)                                    # nrFile
+    wr_u32(hw, 2)                                    # nrFile (cube 0 absent, cube 1 present)
     wr_scalar(hw, false)                             # file 0 absent
     wr_scalar(hw, true)                              # file 1 present
-    wr_u32(hw, 1); wr_u32(hw, 1); wr_u32(hw, length(data))  # TSMFile v1: seqnr 1, length
-    wr_u32(hw, 2)                                    # nrCube
+    wr_u32(hw, TSM_FILE_VER); wr_u32(hw, 1); wr_u32(hw, length(data))  # TSMFile: seqnr 1
+    wr_u32(hw, 2)                                    # nrCube (dummy + real)
     _tsm_putobject_cube(hw, Int[], Int[], -1, 0)     # cube 0 (empty)
     _tsm_putobject_cube(hw, cubeshape, tileshape, 1, 0)
     putend(hw)                                       # close "TiledStMan"

@@ -4,6 +4,22 @@
 # ColumnDesc.cc, BaseColDesc.cc, ColumnSet.cc, TableRecordRep.cc.
 # The write side always emits keyword sets as "TableRecord" (v1).
 
+# --- AipsIO object versions the write side emits (casacore's read side
+#     expects exactly these in the *.cc files named above) --------------
+const V_TABLE       = 2    # "Table"
+const V_TABLEDESC   = 2    # "TableDesc"
+const V_RECORDDESC  = 2    # "RecordDesc"
+const V_TABLERECORD = 1    # "TableRecord" / "Record"
+const V_AIPS_ARRAY  = 3    # "Array<void>"
+const V_COLUMNDESC  = 1    # ColumnDesc wrapper / BaseColumnDesc / {Array,Scalar}ColumnDesc
+const V_PLAINCOLUMN = 2    # PlainColumn::putFile
+const V_COL_DERIVED = 1    # {Scalar,Array}ColumnData::putFileDerived
+
+const COLUMNSET_SEPFILE    = -2    # ColumnSet::putFile version; negative => per-DM files
+const SMFILE_LITTLE_ENDIAN = 1     # table.dat "endian format" flag for the SM files
+const SHAPECOL_FIXED  = 0x01       # PlainColumn shapeColDef byte: fixed cell shape
+const SHAPECOL_VARIES = 0x00       # ... variable / indirect
+
 # fixed-width (8-char) casacore type id used in ColumnDesc class names
 const _TYPEID = Dict{CasaType,String}(
     TpBool => "Bool    ", TpUChar => "uChar   ", TpShort => "Short   ",
@@ -19,14 +35,14 @@ _classname(t::CasaType, isarr::Bool) =
 const _ARRAY_CASATYPE = Dict(v => k for (k, v) in ARRAYTYPE)   # scalar -> array CasaType
 
 function _write_recorddesc(w::AipsWriter, rec::CasaRecord)
-    putstart(w, "RecordDesc", 2)
+    putstart(w, "RecordDesc", V_RECORDDESC)
     wr_i32(w, length(rec))
     for i in 1:length(rec)
         wr_string(w, rec.names[i])
         t = rec.types[i]
         wr_i32(w, Int(t))
         if t == TpRecord
-            putstart(w, "RecordDesc", 2); wr_i32(w, 0); putend(w)   # empty sub-desc
+            putstart(w, "RecordDesc", V_RECORDDESC); wr_i32(w, 0); putend(w)   # empty sub-desc
         elseif t == TpTable
             wr_string(w, "")                                        # tableDescName
         elseif isarraytype(t)
@@ -38,7 +54,7 @@ function _write_recorddesc(w::AipsWriter, rec::CasaRecord)
 end
 
 function _write_aipsarray(w::AipsWriter, a::AbstractArray)
-    putstart(w, "Array<void>", 3)
+    putstart(w, "Array<void>", V_AIPS_ARRAY)
     wr_i32(w, ndims(a))
     for s in size(a); wr_u32(w, s); end
     wr_u32(w, length(a))
@@ -64,7 +80,7 @@ sub-descriptions followed by a full nested record; `SubTable` values are
 written as their stored path string.
 """
 function write_record(w::AipsWriter, rec::CasaRecord; typename="TableRecord")
-    putstart(w, typename, 1)
+    putstart(w, typename, V_TABLERECORD)
     _write_recorddesc(w, rec)
     wr_i32(w, rec.rectype)
     for i in 1:length(rec)
@@ -84,9 +100,9 @@ end
 
 function _write_columndesc(w::AipsWriter, c::ColumnDesc, varndim::Dict{String,Int}=Dict{String,Int}())
     arr = isarray(c)
-    wr_u32(w, 1)                          # ColumnDesc wrapper version
+    wr_u32(w, V_COLUMNDESC)               # ColumnDesc wrapper
     wr_string(w, c.classname)
-    wr_u32(w, 1)                          # BaseColumnDesc version
+    wr_u32(w, V_COLUMNDESC)               # BaseColumnDesc
     wr_string(w, c.name)
     wr_string(w, c.comment)
     wr_string(w, c.manager)
@@ -99,12 +115,12 @@ function _write_columndesc(w::AipsWriter, c::ColumnDesc, varndim::Dict{String,In
     write_record(w, c.keywords)
     # putDesc
     if arr
-        wr_u32(w, 1)                      # ArrayColumnDescBase version
+        wr_u32(w, V_COLUMNDESC)           # ArrayColumnDescBase
         write(w.io, 0x00)                 # obsolete "has default" switch
     elseif startswith(c.classname, "ScalarRecord")
-        wr_u32(w, 1)
+        wr_u32(w, V_COLUMNDESC)
     else
-        wr_u32(w, 1)                      # ScalarColumnDesc version
+        wr_u32(w, V_COLUMNDESC)           # ScalarColumnDesc
         _write_valtype(w, c.type, c.default)
     end
 end
@@ -124,7 +140,7 @@ end
 
 function write_tabledesc(w::AipsWriter, td::TableDesc,
                          varndim::Dict{String,Int}=Dict{String,Int}())
-    putstart(w, "TableDesc", 2)
+    putstart(w, "TableDesc", V_TABLEDESC)
     wr_string(w, td.name)
     wr_string(w, td.version)
     wr_string(w, td.comment)
@@ -147,23 +163,23 @@ struct DMWrite
 end
 
 function _write_plaincolumn(w::AipsWriter, c::ColumnDesc)
-    wr_u32(w, 2)                          # PlainColumn version 2
+    wr_u32(w, V_PLAINCOLUMN)             # PlainColumn::putFile
     wr_string(w, c.name)                  # originalName
-    wr_u32(w, 1)                          # derived version
+    wr_u32(w, V_COL_DERIVED)             # ...ColumnData::putFileDerived
     wr_u32(w, c.sequ)                     # data-manager sequence number
     if isarray(c)
         if c.shape isa Dims && !isempty(c.shape)
-            write(w.io, 0x01)             # shapeColDef: fixed cell shape
+            write(w.io, SHAPECOL_FIXED)   # cell shape is fixed
             wr_iposition(w, c.shape)      # -> casacore uses a direct-array column
         else
-            write(w.io, 0x00)
+            write(w.io, SHAPECOL_VARIES)
         end
     end
 end
 
 function write_columnset(w::AipsWriter, cols::Vector{<:ColumnDesc},
                          dms::Vector{DMWrite}, nrow::Integer)
-    wr_i32(w, -2)                         # version (negative), SepFile
+    wr_i32(w, COLUMNSET_SEPFILE)
     wr_u32(w, nrow)
     wr_u32(w, length(dms))                # seqCount
     wr_u32(w, length(dms))                # number of DMs with columns
@@ -185,9 +201,9 @@ end
 function table_dat_bytes(td::TableDesc, nrow::Integer, dms::Vector{DMWrite},
                          varndim::Dict{String,Int}=Dict{String,Int}())
     w = AipsWriter(; endian=:big)         # table.dat is always canonical
-    putstart(w, "Table", 2)
+    putstart(w, "Table", V_TABLE)
     wr_u32(w, nrow)
-    wr_u32(w, 1)                          # endian format: 1 = little-endian SM files
+    wr_u32(w, SMFILE_LITTLE_ENDIAN)       # SM files are little-endian
     wr_string(w, "PlainTable")
     write_tabledesc(w, td, varndim)
     write_columnset(w, td.columns, dms, nrow)

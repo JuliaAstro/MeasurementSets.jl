@@ -2,6 +2,11 @@
 # data-manager bindings.  (casacore/tables/Tables/PlainTable.cc,
 # TableDesc.cc, ColumnDesc.cc, BaseColDesc.cc, ColumnSet.cc, PlainColumn.cc)
 
+# `ColumnDesc.option` is a bit mask (casacore ColumnDesc::Option)
+const COLOPT_DIRECT     = Int32(1)   # array stored directly in the row (not indirect)
+const COLOPT_UNDEFINED  = Int32(2)   # a cell value may be undefined
+const COLOPT_FIXEDSHAPE = Int32(4)   # every cell has the same shape
+
 # --- ValType scalar default -----------------------------------------
 
 function read_valtype(a::AipsIO, t::CasaType)

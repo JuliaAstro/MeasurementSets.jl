@@ -16,6 +16,10 @@
 
 const AIPS_MAGIC = 0xbebebebe
 
+# AipsIO object versions the write side emits
+const V_IPOSITION = 1   # "IPosition" with Int32 elements (2 would be Int64)
+const V_BLOCK     = 1   # "Block"
+
 # canonical (big) or LE-canonical byte order
 _toendian(endian::Symbol, x) = endian === :big ? hton(x) : htol(x)
 
@@ -183,7 +187,7 @@ function putend(w::AipsWriter)
 end
 
 function wr_iposition(w::AipsWriter, shape)
-    putstart(w, "IPosition", 1)
+    putstart(w, "IPosition", V_IPOSITION)
     wr_u32(w, length(shape))
     for x in shape
         wr_i32(w, x)
@@ -195,7 +199,7 @@ wr_element(w::AipsWriter, x::AbstractString) = wr_string(w, x)
 wr_element(w::AipsWriter, x) = wr_scalar(w, x)
 
 function wr_block(w::AipsWriter, xs)
-    putstart(w, "Block", 1)
+    putstart(w, "Block", V_BLOCK)
     wr_u32(w, length(xs))
     for x in xs
         wr_element(w, x)

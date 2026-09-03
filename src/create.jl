@@ -37,7 +37,7 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
     end
     cls = arr ? _classname(c.type, true) : _classname(c.type, false)
     opt = (arr && c.shape isa Dims && !isempty(c.shape)) ?
-          (c.option | Int32(5)) : Int32(0)           # Direct | FixedShape
+          (c.option | COLOPT_DIRECT | COLOPT_FIXEDSHAPE) : Int32(0)
     mgr = kind === :ism ? "IncrementalStMan" : "StandardStMan"
     return ColumnDesc(c.name, c.comment, mgr, mgr,
         c.type, cls, c.shape, opt, c.maxlength, c.keywords, c.default, c.sequ)
@@ -264,6 +264,8 @@ copyms(src::AbstractString, dst::AbstractString; rows=Colon(), subtables=Colon()
 
 # --- synthesise a minimal standard MS -----------------------------
 
+const SYNTH_TIME0 = 4.6e9      # arbitrary epoch (MJD seconds) for synthesised TIME
+
 _mkdesc(name, ct, shape; opt=Int32(0), keywords=CasaRecord()) =
     ColumnDesc(name, "", "", "", ct, _classname(ct, shape !== ()),
                shape, opt, UInt32(0), keywords, nothing, nothing)
@@ -291,7 +293,7 @@ function _synth_col(sc::StdColumn, n, nchan, ncorr, nrec)
         J = juliatype(T)
         v = zeros(J, n)
         sc.name == "TIME" || sc.name == "TIME_CENTROID" ?
-            (v .= J(4.6e9) .+ (0:n-1)) :
+            (v .= J(SYNTH_TIME0) .+ (0:n-1)) :
         sc.name == "INTERVAL" || sc.name == "EXPOSURE" ? (v .= J(1)) :
         sc.name == "NUM_CHAN" ? (v .= J(nchan)) :
         sc.name == "NUM_CORR" ? (v .= J(ncorr)) :
@@ -357,7 +359,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
     push!(mdata, [zeros(ComplexF32, ncorr, nchan) for _ in 1:nrow])
     pub = CasaRecord()
     push!(pub.names, "MS_VERSION"); push!(pub.types, TpFloat)
-    push!(pub.values, 2.0f0); push!(pub.comments, "")
+    push!(pub.values, MS_VERSION); push!(pub.comments, "")
     for (tbl, _) in subrows
         push!(pub.names, tbl); push!(pub.types, TpTable)
         push!(pub.values, SubTable("./" * tbl)); push!(pub.comments, "")

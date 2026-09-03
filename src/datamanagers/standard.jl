@@ -1,18 +1,44 @@
-# StandardStMan (SSM) reader.
+# StandardStMan (SSM) reader + writer.
 #
 # Mirrors casacore/tables/DataMan/SSMBase.cc, SSMIndex.cc, SSMColumn.cc,
-# SSMDirColumn.cc, SSMStringHandler.cc.
+# SSMDirColumn.cc, SSMIndColumn.cc, SSMIndStringColumn.cc, SSMStringHandler.cc.
 #
 # On-disk layout of `table.f<seqnr>`:
-#   * bytes [0, 512)          : AipsIO "StandardStMan" header
-#   * bytes [512, 512+k*len)  : k equally-sized buckets
-# Bucket kinds: data buckets (fixed-length cells laid out column by column),
-# string buckets (variable-length strings), index buckets (the row->bucket
-# maps).  Which bucket is which is recorded in the header / index.
+#   * bytes [0, SSM_LEADER)                : AipsIO "StandardStMan" header
+#   * bytes [SSM_LEADER, +nbucket*len)     : equal-size buckets
+# Bucket kinds (data / string / index) are assigned by the header + SSMIndex,
+# not tagged in the bucket.  Every stored integer is in the table's byte
+# order EXCEPT the string-bucket and index-bucket headers, which casacore
+# always writes big-endian (CanonicalConversion):
+#   data bucket   : fixed-length cells laid out column by column
+#   string bucket : [SSM_STRBUCKET_HEADER = 4 big-endian Int32
+#                    (freeList, usedLength, nDeleted, nextBucket)][chars...]
+#   index bucket  : [SSM_IDXBUCKET_HEADER = 2 big-endian Int32
+#                    (checkNr, nextBucket)][serialized SSMIndex bytes...]
+#
+# A variable-length string cell is SSM_STRING_REF bytes = 3 Int32 (bucketNr,
+# offset, length); a string of <= SSM_STRING_INLINE_MAX chars is stored
+# inline in the first 8 bytes of the cell instead.  An indirect
+# (variable-shape) non-string array cell is an SSM_INDARR_REF-byte Int64
+# offset into `table.f<seqnr>i`.
 #
 # Rows and SSM column numbers are 1-based in this file's API; the on-disk
 # 0-based values are converted at parse time.  Bucket numbers and byte
 # offsets stay as raw file-layout quantities.
+
+const SSM_LEADER            = 512   # header-leader size; bucket 0 starts here
+const SSM_INT               = 4     # canonical Int32 / uInt size
+const SSM_STRING_REF        = 3 * SSM_INT   # var-string cell: (bucket, offset, length)
+const SSM_STRING_INLINE_MAX = 8     # strings this short are stored inline in the cell
+const SSM_INDARR_REF        = 8     # indirect-array cell: one Int64 file offset
+const SSM_STRBUCKET_HEADER  = 4 * SSM_INT   # string bucket: 4 leading Int32
+const SSM_IDXBUCKET_HEADER  = 2 * SSM_INT   # index bucket: 2 leading Int32
+const SSM_WRITE_ROWS_PER_BUCKET = 1024      # writer: max data rows packed per bucket
+
+# AipsIO object versions we write
+const SSM_HDR_VERSION  = 3   # "StandardStMan" header
+const SSMINDEX_VERSION = 1   # "SSMIndex"
+const SSM_DM_VERSION   = 2   # the "SSM" record in table.dat
 
 struct SSMIndex
     used::Int                   # number of intervals in use
@@ -65,7 +91,7 @@ mutable struct StandardStMan
     arrayfile::Union{ArrayFile,Nothing}   # lazily opened `table.f<seq>i`
 end
 
-bucketptr(ssm::StandardStMan, n::Integer) = 512 + Int(n) * ssm.length
+bucketptr(ssm::StandardStMan, n::Integer) = SSM_LEADER + Int(n) * ssm.length
 
 # `table.f<seq>i` --- opened on first indirect-array access, then memoized.
 function _arrayfile!(ssm::StandardStMan)
@@ -107,7 +133,7 @@ function open_standardstman(t::CTDSTable, dm::DataManagerInfo)
     bytes = read(path)
     endian = t.endian
 
-    # header lives in the first 512 bytes
+    # header lives in the first SSM_LEADER bytes
     h = read_ssm_header!(AipsIO(IOBuffer(bytes); endian))
 
     # the SSM record embedded in table.dat (always big-endian there)
@@ -130,20 +156,19 @@ end
 
 function _read_index_bytes(ssm::StandardStMan, h)
     h.length == 0 && return UInt8[]
-    aclen = 8                                       # 2 * canonical size of Int32
-    idxbucketsize = ssm.length - aclen
+    idxbucketsize = ssm.length - SSM_IDXBUCKET_HEADER
     out = UInt8[]
     bkt = h.first
     remaining = h.length
     for _ in 1:h.indices
         base = bucketptr(ssm, bkt)
-        nextbkt = _be_i32(ssm, base + 4)
+        nextbkt = _be_i32(ssm, base + SSM_INT)           # checkNr, then nextBucket
         if h.offset > 0
             s = base + h.offset
             append!(out, @view ssm.data[s+1:s+h.length])
         else
             take = min(remaining, idxbucketsize)
-            s = base + aclen
+            s = base + SSM_IDXBUCKET_HEADER
             append!(out, @view ssm.data[s+1:s+take])
         end
         remaining -= idxbucketsize
@@ -171,13 +196,13 @@ _nrelem(c::ColumnDesc) = (s = _dims(c); isempty(s) ? 1 : prod(s))
 "Canonical byte width of one stored cell for column `c`."
 function cell_extsize(c::ColumnDesc)
     k = _ssmkind(c)
-    k === :indarr && return 8                                # Int64 file offset
-    k === :indstr && return 12                               # 3 Int32 string ref
+    k === :indarr && return SSM_INDARR_REF
+    k === :indstr && return SSM_STRING_REF
     nrelem = _nrelem(c)
     if c.type == TpString
-        return c.maxlength > 0 ? Int(c.maxlength) : 12       # 3 Int32 refs
+        return c.maxlength > 0 ? Int(c.maxlength) : SSM_STRING_REF
     elseif c.type == TpBool
-        return cld(nrelem, 8)
+        return cld(nrelem, 8)                                # bit-packed
     else
         return sizeof(juliatype(c.type)) * nrelem
     end
@@ -221,11 +246,11 @@ function ssm_getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Intege
     inbucket = Int(row) - firstrow          # 0-based position within the bucket
 
     if kind === :indarr
-        foff = Int(_i64(ssm, off + inbucket * 8))
+        foff = Int(_i64(ssm, off + inbucket * SSM_INDARR_REF))
         foff == 0 && return juliatype(c.type)[]      # shape not defined for this row
         return af_read(_arrayfile!(ssm), c.type, foff)
     elseif kind === :indstr
-        return _read_string_array(ssm, off + inbucket * 12)
+        return _read_string_array(ssm, off + inbucket * SSM_STRING_REF)
     end
 
     dims = _dims(c)
@@ -246,33 +271,32 @@ function ssm_getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Intege
     end
 end
 
-# variable-length scalar string: 3 Int32s (bucketnr, offset, length); if
-# length <= 8 the characters sit inline in the first 8 bytes.
+# variable-length scalar string cell: 3 Int32 (bucketNr, offset, length); a
+# string of <= SSM_STRING_INLINE_MAX chars sits inline in the first 8 bytes.
 function _read_string_ref(ssm::StandardStMan, off::Int)
-    len = Int(_i32(ssm, off + 8))
+    len = Int(_i32(ssm, off + 2 * SSM_INT))               # 3rd Int32 = length
     len <= 0 && return ""
-    if len <= 8
+    if len <= SSM_STRING_INLINE_MAX
         return String(ssm.data[off+1:off+len])
     end
     bkt = Int(_i32(ssm, off))
-    soff = Int(_i32(ssm, off + 4))
+    soff = Int(_i32(ssm, off + SSM_INT))
     return _read_string_bucket(ssm, bkt, soff, len)
 end
 
-# string bucket: 4 leading Int32 (free-list, usedLength, nDeleted, nextBucket)
-# then the character area; a value may span buckets via nextBucket.
+# string bucket: SSM_STRBUCKET_HEADER = 4 leading big-endian Int32 (free
+# list, usedLength, nDeleted, nextBucket) then the character area; a value
+# may span buckets via nextBucket.
 function _read_string_bytes(ssm::StandardStMan, bkt::Int, offset::Int, len::Int)
-    intsz = 4
-    start = 4 * intsz
     out = IOBuffer()
     remaining = len
     off = offset
     while remaining > 0
         base = bucketptr(ssm, bkt)
-        usedlen = Int(_be_i32(ssm, base + intsz))
-        nextbkt = Int(_be_i32(ssm, base + 3 * intsz))
+        usedlen = Int(_be_i32(ssm, base + SSM_INT))       # header field 2
+        nextbkt = Int(_be_i32(ssm, base + 3 * SSM_INT))   # header field 4
         n = min(remaining, usedlen - off)
-        s = base + start + off
+        s = base + SSM_STRBUCKET_HEADER + off
         write(out, @view ssm.data[s+1:s+n])
         remaining -= n
         off = 0
@@ -289,23 +313,23 @@ _read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int) =
 # string bucket is  [ndim:uInt][dim:Int x ndim][filled:uInt]  then, per
 # element (column-major),  [len:uInt][len bytes].  All ints big-endian.
 function _read_string_array(ssm::StandardStMan, cell::Int)
-    total = Int(_i32(ssm, cell + 8))
+    total = Int(_i32(ssm, cell + 2 * SSM_INT))        # 3rd Int32 = blob length
     total <= 0 && return String[]                     # shape not defined for this row
     bkt = Int(_i32(ssm, cell))
-    off = Int(_i32(ssm, cell + 4))
+    off = Int(_i32(ssm, cell + SSM_INT))
     blob = _read_string_bytes(ssm, bkt, off, total)
-    be32(p) = ntoh(reinterpret(Int32, @view blob[p+1:p+4])[1])
+    be32(p) = ntoh(reinterpret(Int32, @view blob[p+1:p+SSM_INT])[1])
     ndim = Int(be32(0))
-    dims = ntuple(k -> Int(be32(4k)), ndim)          # dims at bytes 4 .. 4*ndim
-    filled = Int(be32(4 * ndim + 4))                 # then the "filled" flag
-    p = 4 * (ndim + 2)                               # elements start here
+    dims = ntuple(k -> Int(be32(SSM_INT * k)), ndim)  # dims right after ndim
+    filled = Int(be32(SSM_INT * (ndim + 1)))          # then the "filled" flag
+    p = SSM_INT * (ndim + 2)                          # elements start here
     n = prod(dims; init=1)
     out = Vector{String}(undef, n)
     for k in 1:n
         if filled == 0
             out[k] = ""
         else
-            len = Int(be32(p)); p += 4
+            len = Int(be32(p)); p += SSM_INT
             out[k] = String(@view blob[p+1:p+len]); p += len
         end
     end
@@ -410,8 +434,8 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     nelems = [kinds[i] in (:indarr, :indstr) ? 0 : _nrelem(cols[i]) for i in 1:ncol]
     isbool = [cols[i].type == TpBool && kinds[i] !== :indarr for i in 1:ncol]
 
-    rpb = clamp(nrow, 1, 1024)
-    blocksz(i) = isbool[i] ? cld(rpb * nelems[i], 8) : exts[i] * rpb
+    rpb = clamp(nrow, 1, SSM_WRITE_ROWS_PER_BUCKET)
+    blocksz(i) = isbool[i] ? cld(rpb * nelems[i], 8) : exts[i] * rpb   # 8 = bits/byte
     bs = [blocksz(i) for i in 1:ncol]
     coloffset = Int[sum(bs[1:i-1]) for i in 1:ncol]
     datasize = sum(bs)
@@ -438,23 +462,24 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     # index bytes: SSMIndex `itsLastRow` (0-based last row of each bucket)
     idxrows = UInt32[min((k + 1) * rpb, nrow) - 1 for k in 0:ndata-1]
     iw = AipsWriter(; endian)
-    putstart(iw, "SSMIndex", 1)
+    putstart(iw, "SSMIndex", SSMINDEX_VERSION)
     wr_u32(iw, ndata); wr_u32(iw, rpb); wr_i32(iw, ncol)
-    putstart(iw, "SimpleOrderedMap", 1); wr_i32(iw, 0); wr_u32(iw, 0); wr_u32(iw, 1); putend(iw)
+    putstart(iw, "SimpleOrderedMap", 1)                  # empty free-space map
+    wr_i32(iw, 0); wr_u32(iw, 0); wr_u32(iw, 1); putend(iw)
     wr_block(iw, idxrows)
     wr_block(iw, UInt32.(0:ndata-1))
     putend(iw)
     idxbytes = bytes(iw)
 
-    size = max(datasize, length(idxbytes) + 8, 512)
-    strchar = size - 16
+    size = max(datasize, length(idxbytes) + SSM_IDXBUCKET_HEADER, SSM_LEADER)
+    strchar = size - SSM_STRBUCKET_HEADER
 
     for i in 1:ncol
         (kinds[i] === :scalar && cols[i].type == TpString) || kinds[i] === :indstr || continue
         for r in 1:nrow
             s = kinds[i] === :indstr ? _string_array_blob(coldata[i][r]) :
                                        codeunits(String(coldata[i][r]))
-            if length(s) <= 8 && kinds[i] !== :indstr
+            if length(s) <= SSM_STRING_INLINE_MAX && kinds[i] !== :indstr
                 push!(strref[i], (0, 0, length(s)))
                 inlinechars[i][r] = collect(s)
             else
@@ -470,8 +495,8 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     idxbase = ndata + nstr                # index bucket number
 
     # --- data buckets -----------------------------------------------
-    file = zeros(UInt8, 512 + (ndata + nstr + 1) * size)
-    _bp(n) = 512 + n * size
+    file = zeros(UInt8, SSM_LEADER + (ndata + nstr + 1) * size)
+    _bp(n) = SSM_LEADER + n * size
     for k in 0:ndata-1
         base = _bp(k)
         r0 = k * rpb
@@ -480,7 +505,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
             c = cols[i]; co = base + coloffset[i]; ext = exts[i]; nel = nelems[i]
             if kinds[i] === :indarr
                 for lr in 0:nr-1
-                    _wrbytes!(file, co + lr * 8,
+                    _wrbytes!(file, co + lr * SSM_INDARR_REF,
                               Int64(indoffsets[i][r0 + lr + 1]), endian)
                 end
             elseif isbool[i]
@@ -495,16 +520,16 @@ function write_standardstman(dir::AbstractString, sequ::Int,
             elseif c.type == TpString
                 for lr in 0:nr-1
                     r = r0 + lr + 1
-                    o = co + lr * 12
+                    o = co + lr * SSM_STRING_REF
                     bkt, soff, len = strref[i][r]
                     if haskey(inlinechars[i], r)
                         cs = inlinechars[i][r]
                         copyto!(file, o + 1, cs, 1, length(cs))
                     else
-                        _wrbytes!(file, o,     Int32(strbase + bkt), endian)
-                        _wrbytes!(file, o + 4, Int32(soff), endian)
+                        _wrbytes!(file, o,               Int32(strbase + bkt), endian)
+                        _wrbytes!(file, o + SSM_INT,     Int32(soff), endian)
                     end
-                    _wrbytes!(file, o + 8, Int32(len), endian)
+                    _wrbytes!(file, o + 2 * SSM_INT, Int32(len), endian)
                 end
             else
                 J = juliatype(c.type)
@@ -531,26 +556,27 @@ function write_standardstman(dir::AbstractString, sequ::Int,
         base = _bp(strbase + k)
         s0 = k * strchar
         used = min(strchar, length(strstream) - s0)
-        _wrbytes!(file, base,      Int32(0), :big)          # free list
-        _wrbytes!(file, base + 4,  Int32(used), :big)       # usedLength
-        _wrbytes!(file, base + 8,  Int32(strchar - used), :big)  # nDeleted
-        _wrbytes!(file, base + 12, Int32(k < nstr - 1 ? strbase + k + 1 : -1), :big)
-        copyto!(file, base + 16 + 1, strstream, s0 + 1, used)
+        _wrbytes!(file, base,               Int32(0), :big)              # free list
+        _wrbytes!(file, base + SSM_INT,     Int32(used), :big)           # usedLength
+        _wrbytes!(file, base + 2 * SSM_INT, Int32(strchar - used), :big) # nDeleted
+        _wrbytes!(file, base + 3 * SSM_INT,                              # nextBucket
+                  Int32(k < nstr - 1 ? strbase + k + 1 : -1), :big)
+        copyto!(file, base + SSM_STRBUCKET_HEADER + 1, strstream, s0 + 1, used)
     end
 
     # --- index bucket ------------------------------------------------
     ibase = _bp(idxbase)
-    _wrbytes!(file, ibase,     Int32(idxbase), :big)        # check number
-    _wrbytes!(file, ibase + 4, Int32(-1), :big)             # next index bucket
-    copyto!(file, ibase + 8 + 1, idxbytes, 1, length(idxbytes))
+    _wrbytes!(file, ibase,           Int32(idxbase), :big)  # check number
+    _wrbytes!(file, ibase + SSM_INT, Int32(-1), :big)       # next index bucket
+    copyto!(file, ibase + SSM_IDXBUCKET_HEADER + 1, idxbytes, 1, length(idxbytes))
 
-    # --- 512-byte header ------------------------------------------
+    # --- header (zero-padded to SSM_LEADER) -----------------------
     hw = AipsWriter(; endian)
-    putstart(hw, "StandardStMan", 3)
+    putstart(hw, "StandardStMan", SSM_HDR_VERSION)
     wr_scalar(hw, endian === :big)
     wr_u32(hw, size)
     wr_u32(hw, ndata + nstr + 1)          # nrBuckets
-    wr_u32(hw, 2)                         # persCacheSize
+    wr_u32(hw, 2)                         # persCacheSize (casacore default)
     wr_u32(hw, 0)                         # nFreeBucket
     wr_i32(hw, -1)                        # firstFreeBucket
     wr_u32(hw, 1)                         # nrIdxBuckets
@@ -561,7 +587,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     wr_u32(hw, 1)                         # nrinx
     putend(hw)
     hdr = bytes(hw)
-    @assert length(hdr) <= 512
+    @assert length(hdr) <= SSM_LEADER
     copyto!(file, 1, hdr, 1, length(hdr))
 
     write(joinpath(dir, "table.f$sequ"), file)
@@ -569,7 +595,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
 
     # --- the "SSM" record for table.dat --------------------------
     bw = AipsWriter(; endian=:big)
-    putstart(bw, "SSM", 2)
+    putstart(bw, "SSM", SSM_DM_VERSION)
     wr_string(bw, "SSM")
     wr_block(bw, UInt32.(coloffset))
     wr_block(bw, fill(UInt32(0), ncol))   # colIndexMap: all in index 0

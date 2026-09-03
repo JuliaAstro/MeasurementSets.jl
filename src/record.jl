@@ -8,15 +8,19 @@ struct SubTable
     name::String        # path as stored on disk (usually "Table: <abs path>")
 end
 
+# casacore RecordInterface::RecordType
+const RECORD_FIXED    = Int32(0)
+const RECORD_VARIABLE = Int32(1)
+
 "An ordered casacore (Table)Record: field name -> value, with the on-disk types."
 mutable struct CasaRecord
     names::Vector{String}
     types::Vector{CasaType}
     values::Vector{Any}
     comments::Vector{String}
-    rectype::Int32            # RecordInterface::RecordType (0 Fixed, 1 Variable)
+    rectype::Int32            # RECORD_FIXED / RECORD_VARIABLE
 end
-CasaRecord() = CasaRecord(String[], CasaType[], Any[], String[], Int32(1))
+CasaRecord() = CasaRecord(String[], CasaType[], Any[], String[], RECORD_VARIABLE)
 
 Base.length(r::CasaRecord) = length(r.names)
 Base.keys(r::CasaRecord) = r.names

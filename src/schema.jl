@@ -4,6 +4,8 @@
 # conformant MS.  Only the standard columns/keywords are encoded; an MS may
 # carry additional instrument-specific ones.
 
+const MS_VERSION = 2.0f0        # the MAIN table's `MS_VERSION` keyword value
+
 struct StdColumn
     name::String
     type::CasaType
@@ -61,7 +63,7 @@ definetable("MAIN", [
     optional("WEIGHT_SPECTRUM", TpFloat, VARSHAPE),
     optional("SIGMA_SPECTRUM", TpFloat, VARSHAPE),
 ];
-    keywords = Pair{String,Any}["MS_VERSION" => 2.0f0],
+    keywords = Pair{String,Any}["MS_VERSION" => MS_VERSION],
     subtables = ["ANTENNA", "DATA_DESCRIPTION", "FEED", "FIELD", "FLAG_CMD",
                  "HISTORY", "OBSERVATION", "POINTING", "POLARIZATION",
                  "PROCESSOR", "SPECTRAL_WINDOW", "STATE"])

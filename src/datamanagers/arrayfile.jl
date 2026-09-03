@@ -5,10 +5,10 @@
 # Mirrors casacore/tables/DataMan/StArrayFile.cc + StIndArray.cc.
 #
 # File layout:
-#   bytes [0, 4)    version  (uInt32)
-#   bytes [4, 12)   leng     (Int64)   -- logical length / next-alloc pointer
-#   bytes [12, 16)  padding  (zero)
-#   records from byte 16, each starting on an 8-byte boundary:
+#   bytes [0, AF_INT)          version  (uInt32)
+#   bytes [AF_INT, AF_INT+8)   leng     (Int64)  -- logical length / next-alloc ptr
+#   bytes [.., AF_HEADER)      padding  (zero)
+#   records from byte AF_HEADER, each starting on an AF_ALIGN-byte boundary:
 #     [refCount : uInt32]     -- only when version >= 1 (SSM writes version 0)
 #     [ndim     : uInt32]
 #     [dim      : Int32 x ndim]
@@ -22,7 +22,9 @@
 # Every integer/float is in the *table's* byte order --- the file itself
 # carries no endian flag.
 
-const _ARRAYFILE_HDR = 16
+const AF_INT    = 4    # canonical Int32 / uInt size (version, refCount, ndim, dims)
+const AF_HEADER = 16   # file header size (version @0, leng @4, pad @12)
+const AF_ALIGN  = 8    # each array record starts on an 8-byte boundary
 
 # --- reader --------------------------------------------------------
 
@@ -37,19 +39,19 @@ _af_get(af::ArrayFile, ::Type{T}, off::Integer) where {T} =
 
 function open_arrayfile(path::AbstractString, endian::Symbol)
     data = read(path)
-    length(data) >= _ARRAYFILE_HDR ||
+    length(data) >= AF_HEADER ||
         error("StManArrayFile $path: truncated header ($(length(data)) bytes)")
-    version = Int((endian === :big ? ntoh : ltoh)(reinterpret(UInt32, @view data[1:4])[1]))
+    version = Int((endian === :big ? ntoh : ltoh)(reinterpret(UInt32, @view data[1:AF_INT])[1]))
     return ArrayFile(data, endian, version)
 end
 
 # shape record at byte `offset` -> (dims::Dims, first-data-byte offset)
 function _af_shape(af::ArrayFile, offset::Integer)
     p = Int(offset)
-    af.version >= 1 && (p += 4)                       # skip refCount
-    ndim = Int(_af_get(af, UInt32, p)); p += 4
-    dims = ntuple(k -> Int(_af_get(af, Int32, p + 4 * (k - 1))), ndim)
-    return dims, p + 4 * ndim
+    af.version >= 1 && (p += AF_INT)                  # skip refCount
+    ndim = Int(_af_get(af, UInt32, p)); p += AF_INT
+    dims = ntuple(k -> Int(_af_get(af, Int32, p + AF_INT * (k - 1))), ndim)
+    return dims, p + AF_INT * ndim
 end
 
 """
@@ -72,12 +74,12 @@ function af_read(af::ArrayFile, t::CasaType, offset::Integer)
     elseif t == TpString
         out = Vector{String}(undef, n)
         for k in 0:n-1
-            so = Int(_af_get(af, UInt32, dp + 4k))
+            so = Int(_af_get(af, UInt32, dp + AF_INT * k))     # offset slot
             if so == 0
                 out[k+1] = ""
             else
                 len = Int(_af_get(af, UInt32, so))
-                out[k+1] = String(af.data[so+4+1 : so+4+len])
+                out[k+1] = String(af.data[so + AF_INT + 1 : so + AF_INT + len])
             end
         end
         return reshape(out, dims)
@@ -110,8 +112,8 @@ end
 
 function ArrayFileWriter(; endian::Symbol, version::Integer=0)
     io = IOBuffer()
-    write(io, zeros(UInt8, _ARRAYFILE_HDR))           # reserve the header
-    ArrayFileWriter(io, endian, Int(version), Int64(_ARRAYFILE_HDR))
+    write(io, zeros(UInt8, AF_HEADER))           # reserve the header
+    ArrayFileWriter(io, endian, Int(version), Int64(AF_HEADER))
 end
 
 _afw(w::ArrayFileWriter, x) = write(w.io, w.endian === :big ? hton(x) : htol(x))
@@ -134,7 +136,7 @@ Append `arr` (element `CasaType` `t`) as a new record and return its byte
 offset (to be stored in the data-manager bucket cell).
 """
 function af_put!(w::ArrayFileWriter, t::CasaType, arr)
-    rec = 8 * cld(w.leng, 8)                          # 8-align the record start
+    rec = AF_ALIGN * cld(w.leng, AF_ALIGN)            # align the record start
     _afw_pad_to(w, rec)
     w.version >= 1 && _afw(w, UInt32(1))              # refCount
     shp = size(arr)
@@ -156,15 +158,15 @@ function af_put!(w::ArrayFileWriter, t::CasaType, arr)
 
     elseif t == TpString
         slotbase = position(w.io)
-        write(w.io, zeros(UInt8, 4n))                 # offset slots, patched below
+        write(w.io, zeros(UInt8, AF_INT * n))         # offset slots, patched below
         w.leng = position(w.io)
         for k in 0:n-1
             s = codeunits(String(v[k+1]))
             if isempty(s)
-                _afw_at(w, UInt32(0), slotbase + 4k)
+                _afw_at(w, UInt32(0), slotbase + AF_INT * k)
             else
                 so = Int(w.leng)
-                _afw_at(w, UInt32(so), slotbase + 4k)
+                _afw_at(w, UInt32(so), slotbase + AF_INT * k)
                 seek(w.io, so)
                 _afw(w, UInt32(length(s)))
                 write(w.io, s)
@@ -193,7 +195,7 @@ end
 function arrayfile_bytes(w::ArrayFileWriter)
     _afw_pad_to(w, w.leng)
     _afw_at(w, UInt32(w.version), 0)
-    _afw_at(w, Int64(w.leng), 4)
+    _afw_at(w, Int64(w.leng), AF_INT)
     seek(w.io, w.leng)
     return take!(w.io)
 end
