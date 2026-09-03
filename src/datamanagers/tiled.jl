@@ -65,9 +65,12 @@ end
 _canon(t::CasaType) = t == TpBool ? 0 : sizeof(juliatype(t))
 
 # binding-index order in which the columns' blocks are laid out inside a
-# tile: a stable sort by descending canonical size (negated key, not
-# `rev=true`, so ties keep binding order — matches casacore).
-_tile_order(types) = sortperm(1:length(types); by = i -> -_canon(types[i]))
+# tile.  casacore sorts `dataCols_p` descending by canonical pixel size
+# (`GenSortIndirect`, `Sort::Descending`); its comparator
+# `isAscending(i,j) = data[i] > data[j] || (data[i] == data[j] && i > j)`
+# means a descending sort breaks ties by *descending original index*, so
+# equal-size columns end up in reverse binding order.
+_tile_order(types) = sortperm(1:length(types); by = i -> (-_canon(types[i]), -i))
 
 # (bytes per full tile, byte offset of each binding column's block in a tile)
 function _tile_layout(types::Vector{CasaType}, tileshape)

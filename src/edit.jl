@@ -357,18 +357,20 @@ function Base.flush(t::EditTable)
 end
 
 function _flush_fast(t::EditTable)
-    dir = t.reader.path
-    endian = t.reader.endian
-    oldrows, newrows = t.reader.rows, length(t.rowmap)
+    rd = t.reader
+    dir = rd.path
+    endian = rd.endian
+    oldrows, newrows = rd.rows, length(t.rowmap)
     added = newrows - oldrows
 
     bysequ = Dict{Int,Vector{ColumnDesc}}()
-    for c in t.reader.desc.columns
+    for c in rd.desc.columns
         push!(get!(() -> ColumnDesc[], bysequ, c.sequ), c)
     end
 
+    blocks = Dict{Int,Vector{UInt8}}()          # regenerated SSM/ISM table.dat blocks
     for (sequ, cols) in bysequ
-        inst = _dm_instance(t.reader, sequ)
+        inst = _dm_instance(rd, sequ)
         kind = _dmkind(inst)
         touched = any(c -> haskey(t.override, c.name) || haskey(t.tsmedit, c.name), cols)
 
@@ -381,15 +383,30 @@ function _flush_fast(t::EditTable)
             end
         elseif touched || added > 0
             data = Any[_resolve(t, c.name) for c in cols]
-            if kind === :ssm
-                write_standardstman(dir, sequ, cols, data, newrows, endian)
-            else
+            blocks[sequ] = kind === :ssm ?
+                write_standardstman(dir, sequ, cols, data, newrows, endian) :
                 write_incrementalstman(dir, sequ, cols, data, newrows, endian)
-            end
         end
     end
 
-    newrows == oldrows || _patch_nrow!(dir, newrows)
+    if added > 0
+        # bucket geometry (rows-per-bucket) shifts with the row count, so the
+        # regenerated SSM/ISM table.dat blocks (column offsets) must be
+        # rewritten -- a full but cheap table.dat rebuild.
+        dms = DMWrite[DMWrite(m.name, m.sequ, get(blocks, m.sequ, m.header))
+                      for m in rd.managers]
+        sort!(dms; by = d -> d.sequ)
+        varndim = Dict{String,Int}()
+        for c in rd.desc.columns
+            c.shape isa VariableShape || continue
+            nd = _probe_ndim(t, c.name)
+            nd === nothing || (varndim[c.name] = nd)
+        end
+        td = TableDesc(rd.desc.name, rd.desc.version, rd.desc.comment,
+                       rd.desc.public, rd.desc.private, rd.desc.columns)
+        write_table_files(dir, td, newrows, dms; type=rd.type, subtype=rd.subtype,
+                          readme=rd.readme, varndim)
+    end
 end
 
 _norm(c::ColumnDesc, kind::Symbol, sequ::Int) = _withsequ(_normalize_desc(c, kind), sequ)
