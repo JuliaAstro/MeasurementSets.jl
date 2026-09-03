@@ -26,6 +26,6 @@ export CasaRecord, SubTable, ColumnDesc, TableDesc, CasaType
 export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
-export write_table, write_ms, copyms
+export write_table, write_ms, copyms, create_ms
 
 end

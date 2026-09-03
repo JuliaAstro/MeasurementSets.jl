@@ -224,3 +224,117 @@ optionally sliced).
 """
 copyms(src::AbstractString, dst::AbstractString; rows=Colon()) =
     write_ms(dst, MeasurementSet(src); rows)
+
+# --- synthesise a minimal standard MS -----------------------------
+
+_mkdesc(name, ct, shape; opt=Int32(0), keywords=CasaRecord()) =
+    ColumnDesc(name, "", "", "", ct, _classname(ct, shape !== ()),
+               shape, opt, UInt32(0), keywords, nothing, nothing)
+
+# concrete cell shape for a `VariableShape` standard column, given problem size
+function _synth_shape(tbl, name, nchan, ncorr, nrec)
+    name in ("CHAN_FREQ", "CHAN_WIDTH", "EFFECTIVE_BW", "RESOLUTION") && return (nchan,)
+    name == "CORR_TYPE" && return (ncorr,)
+    name == "CORR_PRODUCT" && return (2, ncorr)
+    name in ("DELAY_DIR", "PHASE_DIR", "REFERENCE_DIR", "DIRECTION", "TARGET") && return (2, 1)
+    name == "BEAM_OFFSET" && return (2, nrec)
+    name == "POL_RESPONSE" && return (nrec, nrec)
+    name == "RECEPTOR_ANGLE" && return (nrec,)
+    name in ("SIGMA", "WEIGHT") && return (ncorr,)
+    name == "FLAG_CATEGORY" && return (ncorr, nchan, 1)
+    (name == "DATA" || name == "FLAG") && return (ncorr, nchan)
+    return (1,)
+end
+
+# a length-`n` data vector for one standard column
+function _synth_col(tbl, sc::StdColumn, n, nchan, ncorr, nrec)
+    T = sc.type
+    if T == TpString
+        return fill("", n)                       # scalars, incl. would-be arrays
+    end
+    J = juliatype(T)
+    if sc.shape === ()
+        v = zeros(J, n)
+        sc.name == "TIME" || sc.name == "TIME_CENTROID" ?
+            (v .= J(4.6e9) .+ (0:n-1)) :
+        sc.name == "INTERVAL" || sc.name == "EXPOSURE" ? (v .= J(1)) :
+        sc.name == "NUM_CHAN" ? (v .= J(nchan)) :
+        sc.name == "NUM_CORR" ? (v .= J(ncorr)) :
+        sc.name == "NUM_RECEPTORS" ? (v .= J(nrec)) : nothing
+        return v
+    end
+    shp = sc.shape isa Dims ? sc.shape : _synth_shape(tbl, sc.name, nchan, ncorr, nrec)
+    return [zeros(J, shp) for _ in 1:n]
+end
+
+# build (descs, data) for one standard table
+function _synth_table(tbl, nrows, nchan, ncorr, nrec; force_tsm=String[])
+    std = SCHEMAVER2[tbl]
+    descs = ColumnDesc[]
+    data = Vector{Any}[]
+    for sc in std.columns
+        sc.required || continue
+        vals = _synth_col(tbl, sc, nrows, nchan, ncorr, nrec)
+        shape = if sc.name in force_tsm
+            VariableShape()
+        elseif sc.type == TpString && !(sc.shape isa Dims)
+            ()                                       # scalar string simplification
+        elseif sc.shape isa Dims
+            sc.shape
+        elseif eltype(vals) <: AbstractArray
+            size(vals[1])
+        else
+            ()
+        end
+        push!(descs, _mkdesc(sc.name, sc.type, shape))
+        push!(data, vals)
+    end
+    descs, data
+end
+
+"""
+    create_ms(dir; nrow=10, nchan=4, ncorr=2, nant=3, nrec=2)
+
+Synthesise a minimal, `validate`-clean MeasurementSet v2 at `dir` (zero /
+default-valued data).  MAIN's `DATA`/`FLAG` go through TiledShapeStMan;
+everything else through StandardStMan.  Variable-shape string columns are
+written as scalar strings.
+"""
+function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
+                   ncorr::Integer=2, nant::Integer=3, nrec::Integer=2)
+    dir = String(rstrip(dir, '/'))
+    ispath(dir) && error("$dir already exists")
+    mkpath(dir)
+
+    subrows = ["ANTENNA"=>nant, "DATA_DESCRIPTION"=>1, "FEED"=>nant,
+        "FIELD"=>1, "FLAG_CMD"=>1, "HISTORY"=>1, "OBSERVATION"=>1,
+        "POINTING"=>1, "POLARIZATION"=>1, "PROCESSOR"=>1,
+        "SPECTRAL_WINDOW"=>1, "STATE"=>1]
+
+    for (tbl, nr) in subrows
+        descs, data = _synth_table(tbl, nr, nchan, ncorr, nrec)
+        nr = Int(nr)
+        if tbl == "ANTENNA"
+            i = findfirst(c -> c.name == "NAME", descs)
+            i === nothing || (data[i] = ["ANT$(k-1)" for k in 1:nr])
+        end
+        _write_table_core(joinpath(dir, tbl), descs, data; nrow=nr, endian=:little,
+                          tablename=tbl * "Desc", type=titlecase(replace(tbl, '_'=>' ')))
+    end
+
+    # MAIN (+ optional DATA); FLAG and DATA go through TiledShapeStMan
+    mdescs, mdata = _synth_table("MAIN", nrow, nchan, ncorr, nrec;
+                                 force_tsm=["FLAG"])
+    push!(mdescs, _mkdesc("DATA", TpComplex, VariableShape()))
+    push!(mdata, [zeros(ComplexF32, ncorr, nchan) for _ in 1:nrow])
+    pub = CasaRecord()
+    push!(pub.names, "MS_VERSION"); push!(pub.types, TpFloat)
+    push!(pub.values, 2.0f0); push!(pub.comments, "")
+    for (tbl, _) in subrows
+        push!(pub.names, tbl); push!(pub.types, TpTable)
+        push!(pub.values, SubTable("./" * tbl)); push!(pub.comments, "")
+    end
+    _write_table_core(dir, mdescs, mdata; nrow=nrow, endian=:little, public=pub,
+                      tablename="MSDesc", type="Measurement Set")
+    return dir
+end
