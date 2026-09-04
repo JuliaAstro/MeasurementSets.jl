@@ -105,9 +105,29 @@ read and write.  New `TiledColumnStMan` and `TiledCellStMan` writers.
 `TiledColumnStMan` `UVW` as such instead of moving it to StandardStMan);
 `create_ms` shares one cube between `DATA`, `FLAG` and `WEIGHT_SPECTRUM`.
 
+**Phase 12 — virtual column engines.**
+The other kind of casacore data manager: one that stores nothing itself
+but maps a column the user sees onto a hidden column of scaled integers,
+`virtual = stored·scale + offset`.  Read + write for `ScaledArrayEngine`,
+`ScaledComplexData`, `CompressFloat`, `CompressComplex`,
+`CompressComplexSD` (and `MappedArrayEngine`), including auto-scale
+(per-row `scale` / `offset` companion columns computed from each row's
+range).
+
+```julia
+write_table("/tmp/t", "T", ["DATA" => cubes]; nrow=n,
+            engines = Dict("DATA" => (; kind = :compresscomplex, autoscale = true)))
+```
+
+`copyms` re-encodes and keeps an engine column compressed; `edit` sessions
+re-encode a touched engine column on flush.  Verified byte-for-byte
+against casacore's own decoder for the auto-registered engines
+(`Compress*`, `MappedArrayEngine`).
+
 Not yet implemented: hypercube coordinate / id columns; `TiledDataStMan`;
-adding a column to an existing shared hypercube; free-list bucket reuse;
-concurrent writers; virtual column engines.
+`ForwardColumnEngine` / `VirtualTaQLColumn` / `BitFlagsEngine`; adding a
+column (or engine) to an existing table in an edit session; free-list
+bucket reuse; concurrent writers.
 
 ## Usage
 
