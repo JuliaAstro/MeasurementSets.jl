@@ -124,10 +124,33 @@ re-encode a touched engine column on flush.  Verified byte-for-byte
 against casacore's own decoder for the auto-registered engines
 (`Compress*`, `MappedArrayEngine`).
 
+**Phase 13 — concurrent access + locking.**
+Cooperative `fcntl` locking + row-count synchronisation via `table.lock`,
+so a table is safe to share with another Julia session or a real
+`casa` / python-casacore process.  `readtable` holds a shared lock while
+it slurps `table.dat` and trusts the `table.lock` `TableSyncData` sync
+blob's row count over `table.dat`'s (as casacore does); every writer runs
+under an exclusive lock, writes storage-manager files through an atomic
+rename, and updates the sync blob (new row count, bumped modify counter)
+on the way out.
+
+```julia
+t = readtable("/data/my.ms")
+# ... another process appends rows ...
+is_stale(t)          # true
+t = resync(t)        # re-opens; is_stale(t) now false
+is_multiused("/data/my.ms")   # is anyone else holding it open?
+```
+
+Locking is automatic and degrades to a silent no-op wherever it is
+unavailable (NFS without a lock daemon, a read-only directory,
+unsupported OS).  macOS + Linux.
+
 Not yet implemented: hypercube coordinate / id columns; `TiledDataStMan`;
 `ForwardColumnEngine` / `VirtualTaQLColumn` / `BitFlagsEngine`; adding a
 column (or engine) to an existing table in an edit session; free-list
-bucket reuse; concurrent writers.
+bucket reuse; in-place per-data-manager `resync` (Phase 13's `resync`
+re-opens); casacore's cooperative lock hand-off (request-id list).
 
 ## Usage
 
