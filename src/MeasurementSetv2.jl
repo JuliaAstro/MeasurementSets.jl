@@ -23,6 +23,7 @@ include("schema.jl")
 include("tables_interface.jl")
 include("create.jl")
 include("edit.jl")
+include("resync.jl")
 
 export Table, readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames

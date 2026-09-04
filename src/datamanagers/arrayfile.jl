@@ -218,6 +218,6 @@ function af_append!(path::AbstractString, endian::Symbol, t::CasaType, arr)
     seek(w.io, 0); write(w.io, data)              # start from the current file
     seek(w.io, leng)
     off = af_put!(w, t, arr)
-    write(path, arrayfile_bytes(w))
+    _atomic_write(path, arrayfile_bytes(w))
     return off
 end

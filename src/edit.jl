@@ -15,7 +15,7 @@
 #   TiledShapeStMan column is patched in place (editing one cell of a
 #   20 GB cube touches a few tile bytes); a touched StandardStMan /
 #   IncrementalStMan file is regenerated wholesale from its in-memory
-#   column data; `table.dat`'s `nrow` field is patched.
+#   column data; `table.dat` is rewritten only when rows were appended.
 #
 # * Regen path (rows deleted/reordered, or a column added/removed) — every
 #   affected storage-manager file is rebuilt from the resolved in-memory
@@ -23,7 +23,9 @@
 #   of row deletion / column drop on a tiled column) and `table.dat` is
 #   rewritten in full.  Untouched managers keep their files and header.
 #
-# On flush `table.lock` is removed so casacore recomputes the row count.
+# The whole flush runs under an exclusive lock on `table.lock`; on the way
+# out the `table.lock` sync blob is updated (new row count, bumped modify
+# counter) so a concurrent casacore reader re-syncs.
 
 mutable struct EditTable
     reader::Table
@@ -367,16 +369,20 @@ end
 
 function Base.flush(t::EditTable)
     t.flushed && return t
-    grew = length(t.rowmap) > t.reader.rows
-    if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
-       !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
-       !(grew && _has_engine(t)) && !_engine_touched(t)  # engines re-encode on regen
-        _flush_fast(t)
-    else
-        _flush_regen(t)
+    dir = t.reader.path
+    newrows = length(t.rowmap)
+    grew = newrows > t.reader.rows
+    withlock(dir, :write; create=true) do lk
+        old = read_syncinfo(lk)
+        if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
+           !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
+           !(grew && _has_engine(t)) && !_engine_touched(t)  # engines re-encode on regen
+            _flush_fast(t)
+        else
+            _flush_regen(t)
+        end
+        write_syncinfo(lk, newrows; modifycounter = (old.present ? old.modifycounter : 0) + 1)
     end
-    lock = joinpath(t.reader.path, "table.lock")
-    isfile(lock) && rm(lock; force=true)
     t.flushed = true
     return t
 end
@@ -584,19 +590,6 @@ function _flush_regen(t::EditTable)
              startswith(f, "table.f$(m.sequ)_")) && rm(joinpath(dir, f); force=true)
         end
     end
-end
-
-# patch the `nrow` UInt32 in the "Table" object of `table.dat` (big-endian)
-function _patch_nrow!(dir::AbstractString, rows::Integer)
-    p = joinpath(dir, "table.dat")
-    data = read(p)
-    a = AipsIO(IOBuffer(data); endian=:big)
-    getstart(a, "Table")
-    off = position(a)                                 # byte offset of the nrow field
-    copyto!(data, off + 1, reinterpret(UInt8, [hton(UInt32(rows))]), 1, 4)
-    tmp = p * "_tmp"
-    write(tmp, data)
-    mv(tmp, p; force=true)
 end
 
 Base.show(io::IO, t::EditTable) =

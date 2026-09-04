@@ -378,8 +378,8 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
     end
     copyto!(file, ISM_LEADER + nbucket * bucketsize + 1, idxblob, 1, length(idxblob))
 
-    write(joinpath(dir, "table.f$sequ"), file)
-    have_ind && write(joinpath(dir, "table.f$(sequ)i"), arrayfile_bytes(afw))
+    _atomic_write(joinpath(dir, "table.f$sequ"), file)
+    have_ind && _atomic_write(joinpath(dir, "table.f$(sequ)i"), arrayfile_bytes(afw))
 
     # the "ISM" record for table.dat (always canonical big-endian there)
     bw = AipsWriter(; endian=:big)

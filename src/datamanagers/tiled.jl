@@ -530,7 +530,7 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int,
             _pack_planes!(buf, tilebase, (p % trow) * planelen, planelen, types, offs,
                           ntuple(k -> vec(coldata[k][r]), ncol), endian)
         end
-        write(joinpath(dir, "table.f$(sequ)_TSM$si"), buf)
+        _atomic_write(joinpath(dir, "table.f$(sequ)_TSM$si"), buf)
         push!(files, _TSMFileSpec(true, si, length(buf)))
         push!(cubes, _TSMCubeSpec(cubeshape, tileshape, si, 0))
         si == 1 && (deftile = tileshape)
@@ -551,7 +551,7 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int,
     perm = sortperm(rowmap)                          # rowMap must be ascending
     rowmap, cubemap, posmap = rowmap[perm], cubemap[perm], posmap[perm]
 
-    write(joinpath(dir, "table.f$sequ"),
+    _atomic_write(joinpath(dir, "table.f$sequ"),
           _tiledshape_header_bytes(sequ, types, _hyper_name(cols), nrdim, cubes,
                                    files, deftile, rowmap, cubemap, posmap, nrow, endian))
     return UInt8[]
@@ -588,7 +588,7 @@ function write_tiledcolumnstman(dir::AbstractString, sequ::Int,
         _pack_planes!(buf, tilebase, (r % trow) * planelen, planelen, types, offs,
                       ntuple(k -> vec(coldata[k][r+1]), ncol), endian)
     end
-    write(joinpath(dir, "table.f$(sequ)_TSM0"), buf)
+    _atomic_write(joinpath(dir, "table.f$(sequ)_TSM0"), buf)
 
     w = AipsWriter(; endian=:big)
     putstart(w, "TiledColumnStMan", TSM_WRAPPER_VER)
@@ -598,7 +598,7 @@ function write_tiledcolumnstman(dir::AbstractString, sequ::Int,
                         _TSMCubeSpec[_TSMCubeSpec(cubeshape, tileshape, 0, 0)],
                         nrow, endian)
     putend(w)
-    write(joinpath(dir, "table.f$sequ"), bytes(w))
+    _atomic_write(joinpath(dir, "table.f$sequ"), bytes(w))
     return UInt8[]
 end
 
@@ -657,7 +657,7 @@ function write_tiledcellstman(dir::AbstractString, sequ::Int,
         append!(buf, cbuf)
         push!(cubes, _TSMCubeSpec(cell, tile, 0, offset))
     end
-    write(joinpath(dir, "table.f$(sequ)_TSM0"), buf)
+    _atomic_write(joinpath(dir, "table.f$(sequ)_TSM0"), buf)
 
     w = AipsWriter(; endian=:big)
     putstart(w, "TiledCellStMan", TSM_WRAPPER_VER)
@@ -666,7 +666,7 @@ function write_tiledcellstman(dir::AbstractString, sequ::Int,
                         _TSMFileSpec[_TSMFileSpec(true, 0, length(buf))],
                         cubes, nrow, endian; cube_extensible=false)
     putend(w)
-    write(joinpath(dir, "table.f$sequ"), bytes(w))
+    _atomic_write(joinpath(dir, "table.f$sequ"), bytes(w))
     return UInt8[]
 end
 
@@ -782,7 +782,7 @@ function tsm_extend_rows!(tsm::TiledStMan, cols::Vector{<:ColumnDesc},
                             _TSMCubeSpec[_TSMCubeSpec(cubeshape, cube.tileshape, cube.sequ, cube.offset)],
                             Int(newnrow), tsm.endian)
         putend(w)
-        write(tsm.path, bytes(w))
+        _atomic_write(tsm.path, bytes(w))
     else
         files = _TSMFileSpec[_TSMFileSpec(false, 0, 0)]
         for sfeq in 1:cube.sequ
@@ -791,7 +791,7 @@ function tsm_extend_rows!(tsm::TiledStMan, cols::Vector{<:ColumnDesc},
         end
         cubes = _TSMCubeSpec[_TSMCubeSpec((), (), -1, 0),
                              _TSMCubeSpec(cubeshape, cube.tileshape, cube.sequ, cube.offset)]
-        write(tsm.path,
+        _atomic_write(tsm.path,
               _tiledshape_header_bytes(tsm.sequ, tsm.types, tsm.hyper, nd, cubes, files,
                                        cube.tileshape, Int[Int(newnrow) - 1], Int[1],
                                        Int[Int(newnrow) - 1], Int(newnrow), tsm.endian))

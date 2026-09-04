@@ -222,18 +222,30 @@ function write_tableinfo(dir::AbstractString; type="", subtype="", readme="")
     end
 end
 
+# atomic file replace: write to a hidden sibling, then rename over `path`.
+# The dot prefix keeps the tmp out of `readdir` scans that count `table.f*`.
+function _atomic_write(path::AbstractString, data)
+    tmp = joinpath(dirname(path), "." * basename(path) * ".tmp")
+    write(tmp, data)
+    mv(tmp, path; force=true)
+    return path
+end
+
 """
     write_table_files(dir, td, nrow, dms; type, subtype, readme)
 
-Write `table.dat` (atomically) and `table.info` for a table.  The data
+Write `table.dat` (atomically) and `table.info` for a table, holding an
+exclusive lock on `table.lock` and updating its sync blob.  The data
 managers in `dms` have already written their own `table.f<seq>*` files.
 """
 function write_table_files(dir::AbstractString, td::TableDesc, nrow::Integer,
                            dms::Vector{DMWrite}; type="", subtype="", readme="",
                            varndim::Dict{String,Int}=Dict{String,Int}())
     mkpath(dir)
-    tmp = joinpath(dir, "table.dat_tmp")
-    write(tmp, table_dat_bytes(td, nrow, dms, varndim))
-    mv(tmp, joinpath(dir, "table.dat"); force=true)
-    write_tableinfo(dir; type, subtype, readme)
+    withlock(dir, :write; create=true) do lk
+        old = read_syncinfo(lk)
+        _atomic_write(joinpath(dir, "table.dat"), table_dat_bytes(td, nrow, dms, varndim))
+        write_tableinfo(dir; type, subtype, readme)
+        write_syncinfo(lk, nrow; modifycounter = (old.present ? old.modifycounter : 0) + 1)
+    end
 end

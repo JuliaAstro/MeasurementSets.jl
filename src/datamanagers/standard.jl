@@ -590,8 +590,8 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     @assert length(hdr) <= SSM_LEADER
     copyto!(file, 1, hdr, 1, length(hdr))
 
-    write(joinpath(dir, "table.f$sequ"), file)
-    have_indarr && write(joinpath(dir, "table.f$(sequ)i"), arrayfile_bytes(afw))
+    _atomic_write(joinpath(dir, "table.f$sequ"), file)
+    have_indarr && _atomic_write(joinpath(dir, "table.f$(sequ)i"), arrayfile_bytes(afw))
 
     # --- the "SSM" record for table.dat --------------------------
     bw = AipsWriter(; endian=:big)
