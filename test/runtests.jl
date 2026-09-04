@@ -30,4 +30,5 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
     include("tsm_multicol_tests.jl")
     include("engine_tests.jl")
     include("edit_tests.jl")
+    include("lock_tests.jl")
 end
