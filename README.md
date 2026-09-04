@@ -146,11 +146,38 @@ Locking is automatic and degrades to a silent no-op wherever it is
 unavailable (NFS without a lock daemon, a read-only directory,
 unsupported OS).  macOS + Linux.
 
-Not yet implemented: hypercube coordinate / id columns; `TiledDataStMan`;
-`ForwardColumnEngine` / `VirtualTaQLColumn` / `BitFlagsEngine`; adding a
-column (or engine) to an existing table in an edit session; free-list
-bucket reuse; in-place per-data-manager `resync` (Phase 13's `resync`
-re-opens); casacore's cooperative lock hand-off (request-id list).
+**Phase 14 — reference & concatenation tables (read).**
+`readtable` now recognises the other two first-class casacore table
+kinds and returns a matching view:
+
+* **`RefTable`** — a persistent row-number reference into a parent table,
+  what a TaQL `SELECT ... GIVING '<path>'` row selection or
+  `table.query` writes.  Column reads delegate to the parent through the
+  selected row list; a `SELECT a, b AS c` rename is honoured.
+* **`ConcatTable`** — a virtual row-wise concatenation of same-schema
+  tables (the MAIN table of a MultiMS).  Row offsets are recomputed from
+  each part's row count on open.
+
+Both present the same `column` / `nrow` / `columndesc` / `keywords` /
+`subtables` / `Tables.jl` surface as a plain `Table` and share the new
+`AbstractTable` supertype; `is_stale` / `resync` follow through to the
+parent(s).
+
+```julia
+rt = readtable("/tmp/selection.tab")     # a TaQL RefTable
+nrow(rt); rt[:DATA][1:10]                # reads the parent's rows
+
+# persist a selection as a real MS (deep copy via the Tables.jl path)
+write_table("/tmp/sel.ms", "MAIN", rt; nrow = nrow(rt))
+```
+
+Not yet implemented: writing a RefTable / ConcatTable, or editing one
+in place; a data-manager-preserving copy of one; hypercube coordinate /
+id columns; `TiledDataStMan`; `ForwardColumnEngine` /
+`VirtualTaQLColumn` / `BitFlagsEngine`; adding a column (or engine) to an
+existing table in an edit session; free-list bucket reuse; in-place
+per-data-manager `resync`; casacore's cooperative lock hand-off
+(request-id list).
 
 ## Usage
 
