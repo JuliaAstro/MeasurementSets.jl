@@ -219,3 +219,34 @@ function wr_block(w::AipsWriter, xs)
     end
     putend(w)
 end
+
+# casacore's std::map<String,String> ("SimpleOrderedMap" object,
+# casa/BasicSL/STLIO.tcc) -- a std::map iterates key-sorted, so the pairs
+# are written in ascending key order to match casacore's own byte output
+# exactly (see read_map's mirror-image parse).
+function wr_map(w::AipsWriter, m::AbstractDict{String,String})
+    putstart(w, "SimpleOrderedMap", 1)
+    wr_string(w, "")                    # obsolete default value
+    ks = sort!(collect(keys(m)))
+    wr_u32(w, length(ks))
+    wr_u32(w, 1)                        # obsolete increment
+    for k in ks
+        wr_string(w, k)
+        wr_string(w, m[k])
+    end
+    putend(w)
+end
+
+# casacore's generic Array<T> object (casa/IO/ArrayIO.tcc putArray,
+# version 3 -- no obsolete per-axis origin).  1-D String only (all a
+# RefTable's column-order list needs); mirrors read_array's parse.
+function wr_array(w::AipsWriter, xs::Vector{String})
+    putstart(w, "Array", 3)
+    wr_i32(w, 1)                         # ndim
+    wr_u32(w, length(xs))                # shape[1]
+    wr_u32(w, length(xs))                # nwritten
+    for x in xs
+        wr_string(w, x)
+    end
+    putend(w)
+end

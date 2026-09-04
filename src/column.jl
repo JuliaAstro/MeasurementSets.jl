@@ -163,7 +163,7 @@ end
 # wrappers collapsed so the reader's nested wrapper types stay out of
 # downstream inference).  Per-cell; a whole-column fast path here trips a
 # Julia 1.12 codegen bug.
-function _read_cells(c::Column, r)
+function _read_cells(c::AbstractVector, r)
     out = Vector{Any}(undef, length(r))
     @inbounds for (k, i) in enumerate(r)
         v = c[i]

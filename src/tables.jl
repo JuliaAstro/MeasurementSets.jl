@@ -304,6 +304,20 @@ function _resolve_tabpath(stored::AbstractString, selfdir::AbstractString)
     return normpath(joinpath(String(selfdir), rest))
 end
 
+# Write-side converse of `_resolve_tabpath` (casacore Path::stripDirectory),
+# limited to the same two relative forms `_resolve_tabpath` understands so
+# round-tripping stays symmetric: `name` inside `selfdir` -> "././rest";
+# `name` a sibling of `selfdir` (same parent directory) -> "./rest"; else
+# the absolute path.
+function _strip_directory(name::AbstractString, selfdir::AbstractString)
+    dir = rstrip(abspath(String(selfdir)), '/') * "/"
+    aname = abspath(String(name))
+    startswith(aname, dir) && return "././" * aname[length(dir)+1:end]
+    pdir = rstrip(dirname(dir[1:end-1]), '/') * "/"
+    startswith(aname, pdir) && return "./" * aname[length(pdir)+1:end]
+    return aname
+end
+
 # --- readers ----------------------------------------------------
 
 function read_tableinfo(dir::String)
@@ -424,6 +438,70 @@ function _read_concattable(a::AipsIO, dir::String, tp, st, readme)
         offsets[i+1] = offsets[i] + nrow(p)
     end
     return ConcatTable(dir, parts, offsets, subs, tp, st, readme)
+end
+
+# --- writers -------------------------------------------------------
+
+"""
+    write_reftable(dir, parent, rows; select) -> dir
+
+Persist a row-number reference to `parent` (a `Table`, `RefTable`, or
+`ConcatTable`) at `dir`, in casacore's RefTable format — openable by
+`casa` / python-casacore.  `rows` are 1-based row indices into `parent`
+(any order, repeats allowed).  `select` is `output_name => parent_name`
+pairs in output order (default: every column of `parent`, unrenamed).
+"""
+function write_reftable(dir::AbstractString, parent::AbstractTable,
+                        rows::AbstractVector{<:Integer};
+                        select::AbstractVector{<:Pair}=[n => n for n in columnnames(parent)])
+    dir = String(rstrip(dir, '/'))
+    ispath(dir) && error("$dir already exists")
+
+    order = String[String(first(p)) for p in select]
+    allunique(order) || throw(ArgumentError("write_reftable: duplicate output column name"))
+    namemap = Dict{String,String}(String(first(p)) => String(last(p)) for p in select)
+    pcols = Set(columnnames(parent))
+    for s in values(namemap)
+        s in pcols || throw(ArgumentError("write_reftable: parent has no column \"$s\""))
+    end
+    any(x -> x < 1, rows) && throw(ArgumentError("write_reftable: row indices are 1-based"))
+
+    mkpath(dir)
+    rows0 = Int.(collect(rows)) .- 1
+    bytes_ = reftable_dat_bytes(_strip_directory(parent.path, dir), rows0, namemap, order,
+                                nrow(parent), length(rows0))
+    _atomic_write(joinpath(dir, "table.dat"), bytes_)
+    write_tableinfo(dir; type=parent.type, subtype=parent.subtype, readme=parent.readme)
+    return dir
+end
+
+write_reftable(dir::AbstractString, rt::RefTable) =
+    write_reftable(dir, rt.parent, rt.rows; select=[nm => rt.namemap[nm] for nm in rt.order])
+
+"""
+    write_concattable(dir, parts; subtabnames=String[]) -> dir
+
+Persist a virtual row-wise concatenation of `parts` (same-schema tables)
+at `dir`.  `subtabnames` lists keyword subtables to also concatenate
+(rarely used; default none).
+"""
+function write_concattable(dir::AbstractString, parts::AbstractVector{<:AbstractTable};
+                           subtabnames::AbstractVector{<:AbstractString}=String[])
+    isempty(parts) && throw(ArgumentError("write_concattable: at least one table required"))
+    dir = String(rstrip(dir, '/'))
+    ispath(dir) && error("$dir already exists")
+    mkpath(dir)
+
+    names = [_strip_directory(p.path, dir) for p in parts]
+    total = sum(nrow, parts)
+    bytes_ = concattable_dat_bytes(names, String.(subtabnames), total)
+    _atomic_write(joinpath(dir, "table.dat"), bytes_)
+
+    p1 = parts[1]
+    lines = ["Virtual concatenation of the following tables:"; ("  " * p.path for p in parts)...]
+    readme = isempty(p1.readme) ? join(lines, "\n") : p1.readme * "\n" * join(lines, "\n")
+    write_tableinfo(dir; type=p1.type, subtype=p1.subtype, readme)
+    return dir
 end
 
 function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})

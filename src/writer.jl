@@ -213,6 +213,58 @@ function table_dat_bytes(td::TableDesc, nrow::Integer, dms::Vector{DMWrite},
     return bytes(w)
 end
 
+# RefTable's own `table.dat`: root "Table" object (always big-endian --
+# there are no storage-manager files of its own to have an endianness),
+# `tp="RefTable"`, then a nested "RefTable" object.  Mirrors
+# `RefTable::writeRefTable` (RefTable.cc:267-326).  `rows0` are 0-based
+# parent row numbers.
+function reftable_dat_bytes(parentstored::String, rows0::Vector{Int},
+                            namemap::Dict{String,String}, order::Vector{String},
+                            parentnrow::Integer, thisnrow::Integer)
+    rver = (parentnrow < typemax(UInt32) && thisnrow < typemax(UInt32) &&
+            all(x -> x < typemax(UInt32), rows0)) ? 2 : 3
+    outerver = thisnrow > typemax(Int32) ? 3 : 2
+    w = AipsWriter(; endian=:big)
+    putstart(w, "Table", outerver)
+    outerver == 3 ? wr_u64(w, thisnrow) : wr_u32(w, thisnrow)
+    wr_u32(w, 0)                                  # endian flag (unused -- no SM files)
+    wr_string(w, "RefTable")
+    putstart(w, "RefTable", rver)
+    wr_string(w, parentstored)
+    wr_map(w, namemap)
+    wr_array(w, order)
+    rver == 2 ? wr_u32(w, parentnrow) : wr_u64(w, parentnrow)
+    wr_scalar(w, length(rows0) < 2 || all(rows0[i] > rows0[i-1] for i in 2:length(rows0)))
+    rver == 2 ? wr_u32(w, thisnrow) : wr_u64(w, thisnrow)
+    for x in rows0
+        rver == 2 ? wr_u32(w, x) : wr_u64(w, x)
+    end
+    putend(w)                                     # close "RefTable"
+    putend(w)                                     # close "Table"
+    return bytes(w)
+end
+
+# ConcatTable's own `table.dat`, mirroring `ConcatTable::writeConcatTable`
+# (ConcatTable.cc:236-273).
+function concattable_dat_bytes(partnames::Vector{String}, subtabnames::Vector{String},
+                               thisnrow::Integer)
+    outerver = thisnrow > typemax(Int32) ? 3 : 2
+    w = AipsWriter(; endian=:big)
+    putstart(w, "Table", outerver)
+    outerver == 3 ? wr_u64(w, thisnrow) : wr_u32(w, thisnrow)
+    wr_u32(w, 0)
+    wr_string(w, "ConcatTable")
+    putstart(w, "ConcatTable", 0)
+    wr_u32(w, length(partnames))
+    for n in partnames
+        wr_string(w, n)
+    end
+    wr_block(w, subtabnames)
+    putend(w)
+    putend(w)
+    return bytes(w)
+end
+
 function write_tableinfo(dir::AbstractString; type="", subtype="", readme="")
     open(joinpath(dir, "table.info"), "w") do io
         println(io, "Type = ", type)

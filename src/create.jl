@@ -255,23 +255,29 @@ end
 
 # --- whole-MeasurementSet writers ---------------------------------
 
-# Read every readable column of `t` (rows `r`) and write it to `dir`.
-# `public` overrides the table's public keyword set (used for MAIN).
-function _copy_table(dir::AbstractString, t::Table, r;
-                     public::Record=t.desc.public,
-                     private::Record=t.desc.private)
+# Read every readable column of `dmsrc` (whose ColumnDesc/DM bindings
+# decide each output column's storage-manager kind) for rows `rows`, taking
+# the actual cell values from `valsrc` (== `dmsrc` for a plain Table or a
+# RefTable's parent; the ConcatTable itself for a ConcatTable, since its
+# rows span multiple parts) via `cols` (output name => source-column-name
+# pairs, in output order), and write it to `dir`.  `public` overrides the
+# table's public keyword set (used for MAIN).
+function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTable,
+                          cols::Vector{Tuple{String,String}}, rows;
+                          public::Record, private::Record, tablename::AbstractString,
+                          type::AbstractString, subtype::AbstractString, readme::AbstractString)
     descs = ColumnDesc[]
     data = Vector{Any}[]
     ism = Set{String}()
-    tiled = Dict{Int,Vector{String}}()       # source sequ -> column names (desc order)
+    tiled = Dict{Int,Vector{String}}()       # source sequ -> output column names (desc order)
     tiledkind = Dict{Int,String}()           # source sequ -> manager type string
     skipped = String[]
 
     # --- virtual column engines: re-encode; skip the implied companions ---
     engines = Dict{String,NamedTuple}()
     implied = Set{String}()
-    for c in t.desc.columns
-        _is_engine_dm(_source_dm(t, c)) || continue
+    for c in dmsrc.desc.columns
+        _is_engine_dm(_source_dm(dmsrc, c)) || continue
         kw = c.keywords
         sn = String(get(kw, "_BaseMappedArrayEngine_Name", ""))
         isempty(sn) || push!(implied, sn)
@@ -284,32 +290,34 @@ function _copy_table(dir::AbstractString, t::Table, r;
         end
     end
 
-    for c in t.desc.columns
-        c.name in implied && continue
+    for (outname, srcname) in cols
+        srcname in implied && continue
+        sc = columndesc(dmsrc, srcname)          # source column desc (pre-rename)
         col = try
-            column(t, c.name)
+            column(valsrc, srcname)
         catch
-            push!(skipped, c.name); continue
+            push!(skipped, outname); continue
         end
         vals = try
-            _read_cells(col, r)
+            _read_cells(col, rows)
         catch
-            push!(skipped, c.name); continue
+            push!(skipped, outname); continue
         end
-        dm = _source_dm(t, c)
+        oc = outname == srcname ? sc : _rename_columndesc(sc, outname)
+        dm = _source_dm(dmsrc, sc)
         if _is_engine_dm(dm)
-            engines[c.name] = _engine_spec_from_source(t, c, dm)
-            push!(descs, c); push!(data, vals)
+            engines[outname] = _engine_spec_from_source(dmsrc, sc, dm)
+            push!(descs, oc); push!(data, vals)
             continue
         end
         # preserve the source's storage-manager kind
         if occursin("Tiled", dm)
-            push!(get!(() -> String[], tiled, c.sequ), c.name)
-            tiledkind[c.sequ] = dm
+            push!(get!(() -> String[], tiled, sc.sequ), outname)
+            tiledkind[sc.sequ] = dm
         elseif dm in ("IncrementalStMan", "ISM")
-            push!(ism, c.name)
+            push!(ism, outname)
         end
-        push!(descs, c)
+        push!(descs, oc)
         push!(data, vals)
     end
 
@@ -330,11 +338,60 @@ function _copy_table(dir::AbstractString, t::Table, r;
 
     isempty(skipped) ||
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
-    _write_table_core(dir, descs, data; nrow=length(r), endian=:little,
+    _write_table_core(dir, descs, data; nrow=length(rows), endian=:little,
                       public, private=Record(), tsm=tsmg, tcm=tcmg, tcell=tcellg, ism,
-                      engines, tablename=t.desc.name, type=t.type, subtype=t.subtype,
-                      readme=t.readme)
+                      engines, tablename, type, subtype, readme)
     return descs
+end
+
+"""
+    _copy_table(dir, t::Table|RefTable|ConcatTable, r=1:nrow(t); public, private)
+
+Deep-copy `t`'s columns (rows `r`) to a fresh plain table at `dir`,
+preserving each column's storage-manager / virtual-engine kind.  For a
+`RefTable` the layout is taken from its parent (renamed/projected per its
+`namemap`/`order`); for a `ConcatTable`, from its first part -- mirroring
+casacore's own `RefTable::dataManagerInfo` / `ConcatTable::dataManagerInfo`.
+"""
+function _copy_table(dir::AbstractString, t::Table, r=1:nrow(t);
+                     public::Record=t.desc.public, private::Record=t.desc.private)
+    cols = Tuple{String,String}[(c.name, c.name) for c in t.desc.columns]
+    _copy_table_cols(dir, t, t, cols, r; public, private, tablename=t.desc.name,
+                     type=t.type, subtype=t.subtype, readme=t.readme)
+end
+
+function _copy_table(dir::AbstractString, rt::RefTable, r=1:nrow(rt);
+                     public::Record=keywords(rt), private::Record=Record())
+    rt.parent isa Table || error("materialise: RefTable parent is a " *
+                                 "$(typeof(rt.parent)); only a plain-table parent is supported")
+    p = rt.parent
+    cols = Tuple{String,String}[(nm, rt.namemap[nm]) for nm in rt.order]
+    _copy_table_cols(dir, p, p, cols, rt.rows[r]; public, private, tablename=p.desc.name,
+                     type=p.type, subtype=p.subtype, readme=p.readme)
+end
+
+function _copy_table(dir::AbstractString, ct::ConcatTable, r=1:nrow(ct);
+                     public::Record=keywords(ct), private::Record=Record())
+    p1 = ct.parts[1]
+    p1 isa Table || error("materialise: ConcatTable's first part is a " *
+                          "$(typeof(p1)); only a plain-table part is supported")
+    cols = Tuple{String,String}[(c.name, c.name) for c in p1.desc.columns]
+    _copy_table_cols(dir, p1, ct, cols, r; public, private, tablename=p1.desc.name,
+                     type=p1.type, subtype=p1.subtype, readme=p1.readme)
+end
+
+"""
+    copytable(dst, t::Table|RefTable|ConcatTable; rows=Colon()) -> dst
+
+Deep-copy `t` into a fresh plain table at `dst`, keeping each column's
+storage-manager / virtual-engine kind (mirrors what casacore's
+`GIVING ... AS PLAIN` does).  `rows` selects/reorders rows, 1-based into `t`.
+"""
+function copytable(dst::AbstractString, t::AbstractTable; rows=Colon())
+    dst = String(rstrip(dst, '/'))
+    ispath(dst) && error("$dst already exists")
+    _copy_table(dst, t, rows === Colon() ? (1:nrow(t)) : rows)
+    return dst
 end
 
 # reconstruct the `engines=` spec for a source virtual column
@@ -383,9 +440,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
     mkpath(dir)
 
     main = getfield(ms, :data)
-    main isa Table || error("write_ms: MAIN is a $(typeof(main)); " *
-                            "writing a reference / concat table is not supported")
-    mrows = rows === Colon() ? (1:main.rows) : rows
+    mrows = rows === Colon() ? (1:nrow(main)) : rows
     want(kw) = subtables === Colon() || kw in subtables
 
     # write subtables, remember which ones succeeded
@@ -397,14 +452,17 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
         catch e
             @warn "skipping subtable $kw" err=e; continue
         end
-        sub isa Table || (@warn "skipping non-plain subtable $kw" typeof(sub); continue)
-        _copy_table(joinpath(dir, kw), sub, 1:sub.rows)
-        push!(written, kw)
+        try
+            _copy_table(joinpath(dir, kw), sub, 1:nrow(sub))
+            push!(written, kw)
+        catch e
+            @warn "skipping subtable $kw (unsupported source)" typeof(sub) err=e
+        end
     end
 
     # MAIN public keywords: keep non-table entries, point table entries at
     # the freshly written subtable dirs
-    src = main.desc.public
+    src = keywords(main)
     pub = Record()
     for i in 1:length(src)
         nm, v = src.names[i], src.values[i]
