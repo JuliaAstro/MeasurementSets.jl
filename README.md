@@ -166,18 +166,34 @@ parent(s).
 ```julia
 rt = readtable("/tmp/selection.tab")     # a TaQL RefTable
 nrow(rt); rt[:DATA][1:10]                # reads the parent's rows
-
-# persist a selection as a real MS (deep copy via the Tables.jl path)
-write_table("/tmp/sel.ms", "MAIN", rt; nrow = nrow(rt))
 ```
 
-Not yet implemented: writing a RefTable / ConcatTable, or editing one
-in place; a data-manager-preserving copy of one; hypercube coordinate /
-id columns; `TiledDataStMan`; `ForwardColumnEngine` /
-`VirtualTaQLColumn` / `BitFlagsEngine`; adding a column (or engine) to an
-existing table in an edit session; free-list bucket reuse; in-place
-per-data-manager `resync`; casacore's cooperative lock hand-off
-(request-id list).
+**Phase 15 — persist a selection: write RefTable / ConcatTable, and a
+data-manager-preserving materialise.**
+
+```julia
+# a lightweight reference -- no data copied, openable by casa/python-casacore
+write_reftable("/tmp/ref.tab", readtable("/tmp/t.tab"), [5, 1, 3];
+               select = ["A" => "A", "BR" => "B"])   # optional rename/projection
+write_concattable("/tmp/cc.tab", [readtable("/tmp/p0"), readtable("/tmp/p1")])
+
+# a real independent table, storage-manager / engine layout kept
+copytable("/tmp/plain.tab", rt)          # rt :: RefTable or ConcatTable
+```
+
+`copytable` (and, through it, `copyms`/`write_ms` when MAIN or a subtable
+turns out to be a RefTable/ConcatTable) derives each output column's
+storage-manager or virtual-engine kind from the source exactly as
+`copyms` already did for a plain table — from the *parent* for a
+`RefTable`, from the *first part* for a `ConcatTable` — mirroring
+casacore's own `GIVING ... AS PLAIN` (`dataManagerInfo()`).
+
+Not yet implemented: editing a persisted RefTable/ConcatTable in place;
+concatenating keyword subtables on write; hypercube coordinate / id
+columns; `TiledDataStMan`; `ForwardColumnEngine` / `VirtualTaQLColumn` /
+`BitFlagsEngine`; adding a column (or engine) to an existing table in an
+edit session; free-list bucket reuse; in-place per-data-manager `resync`;
+casacore's cooperative lock hand-off (request-id list).
 
 ## Usage
 
