@@ -236,6 +236,31 @@ uncompressed) — writing Dysco is out of scope. Not yet implemented: RF/
 Row normalization; Gaussian/Uniform/StudentsT distributions (a clear
 `error`, not a silent misdecode); writing/compressing.
 
+**Phase 19 — `DyscoStMan` full read + write.** Completes Phase 18: all
+three normalizations (`AF`/`RF`/`Row`) and all four quantization
+distributions (`Gaussian`/`Uniform`/`StudentsT`/`TruncatedGaussian`), read
+*and* write. `write_table`/`create_ms` take `dysco=`/`dysco_spec=` kwargs
+to compress one or more columns (a Dysco group works like a `tsm` group —
+one or more column names sharing one instance); `copyms`/`write_ms`/
+`copytable` now **preserve** a source's Dysco compression (reading the
+live instance's own parameters) instead of downgrading to plain
+`StandardStMan`; `edit()` supports `setcell!`/`addrows!`/`removerows!` on
+a Dysco-bound column (always via the regen path — a touched cell needs
+its whole block re-decoded and re-encoded, like a virtual engine, not
+like a tiled cube's byte-addressable in-place patch). Verified against
+the real CASA install used in Phase 18: all 24 (normalization ×
+distribution × dither) write combinations produce files real CASA opens
+and decodes to float32 rounding precision of our own decoder — genuine
+write-direction interop. `dither=true` (the default, matching casacore's
+own always-dither write path) uses Julia's own `Random`, not casacore's
+`std::mt19937` bit-for-bit — a deliberate departure with no effect on
+decodability (dithering only affects which of two adjacent quantization
+symbols an in-between value rounds to). StudentsT's inverse CDF has no
+direct `SpecialFunctions.jl` equivalent (unlike the other three
+distributions, which use `erf`/`erfinv` matching casacore's own math) —
+implemented via a hand-rolled bisection on `SpecialFunctions.beta_inc`
+instead, self-consistent rather than GSL-bit-exact.
+
 ## Usage
 
 ```julia
