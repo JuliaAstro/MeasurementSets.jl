@@ -93,6 +93,39 @@ mutable struct VirtualEngine
     offsetcol::Any
 end
 
+# One constructor method per engine kind -- each builds its own fully-
+# initialised instance directly from the `_<Engine>_*` keywords (no
+# generic placeholder instance handed to a separate mutator).
+
+VirtualEngine(table::Table, kind::Mapped, vdesc::ColumnDesc, storedname::String, ::Record) =
+    VirtualEngine(table, kind, vdesc, storedname, false, true, true,
+                 nothing, nothing, "", "", nothing, nothing, nothing)
+
+function VirtualEngine(table::Table, kind::CompressKind, vdesc::ColumnDesc,
+                       storedname::String, kw::Record)
+    pfx = _prefix(kind)
+    fixed = Bool(get(kw, pfx * "Fixed", true))
+    autoscale = Bool(get(kw, pfx * "AutoScale", false))
+    scale  = Float32(get(kw, pfx * "Scale", ENG_UNIT_SCALE))
+    offset = Float32(get(kw, pfx * "Offset", ENG_ZERO_OFFSET))
+    scalename  = String(get(kw, pfx * "ScaleName", ""))
+    offsetname = String(get(kw, pfx * "OffsetName", ""))
+    return VirtualEngine(table, kind, vdesc, storedname, autoscale, fixed, fixed,
+                         scale, offset, scalename, offsetname, nothing, nothing, nothing)
+end
+
+function VirtualEngine(table::Table, kind::ScaledKind, vdesc::ColumnDesc,
+                       storedname::String, kw::Record)
+    fixed_scale  = Bool(get(kw, _prefix(kind) * "FixedScale", true))
+    fixed_offset = Bool(get(kw, _prefix(kind) * "FixedOffset", true))
+    scale  = get(kw, _prefix(kind) * "Scale", nothing)
+    offset = get(kw, _prefix(kind) * "Offset", nothing)
+    scalename  = String(get(kw, _prefix(kind) * "ScaleName", ""))
+    offsetname = String(get(kw, _prefix(kind) * "OffsetName", ""))
+    return VirtualEngine(table, kind, vdesc, storedname, false, fixed_scale, fixed_offset,
+                         scale, offset, scalename, offsetname, nothing, nothing, nothing)
+end
+
 # The three Compress* engines have a fixed, non-templated on-disk name.
 DATAMANAGERS["CompressFloat"]     = VirtualEngine
 DATAMANAGERS["CompressComplex"]   = VirtualEngine
@@ -144,34 +177,7 @@ function Base.open(::Type{VirtualEngine}, t::Table, dm::DataManagerInfo)
     isempty(storedname) &&
         error("virtual column \"$(vdesc.name)\": missing _BaseMappedArrayEngine_Name keyword")
 
-    e = VirtualEngine(t, kind, vdesc, storedname, false, true, true,
-                      nothing, nothing, "", "", nothing, nothing, nothing)
-    return _init!(e, kind, kw)
-end
-
-_init!(e::VirtualEngine, ::Mapped, ::Record) = e
-
-function _init!(e::VirtualEngine, kind::CompressKind, kw::Record)
-    pfx = _prefix(kind)
-    fixed = Bool(get(kw, pfx * "Fixed", true))
-    e.fixed_scale = e.fixed_offset = fixed
-    e.autoscale = Bool(get(kw, pfx * "AutoScale", false))
-    e.scale  = Float32(get(kw, pfx * "Scale", ENG_UNIT_SCALE))
-    e.offset = Float32(get(kw, pfx * "Offset", ENG_ZERO_OFFSET))
-    e.scalename  = String(get(kw, pfx * "ScaleName", ""))
-    e.offsetname = String(get(kw, pfx * "OffsetName", ""))
-    return e
-end
-
-function _init!(e::VirtualEngine, kind::ScaledKind, kw::Record)
-    pfx = _prefix(kind)
-    e.fixed_scale  = Bool(get(kw, pfx * "FixedScale", true))
-    e.fixed_offset = Bool(get(kw, pfx * "FixedOffset", true))
-    e.scale  = get(kw, pfx * "Scale", nothing)
-    e.offset = get(kw, pfx * "Offset", nothing)
-    e.scalename  = String(get(kw, pfx * "ScaleName", ""))
-    e.offsetname = String(get(kw, pfx * "OffsetName", ""))
-    return e
+    return VirtualEngine(t, kind, vdesc, storedname, kw)
 end
 
 _eng_stored(e::VirtualEngine)  =
