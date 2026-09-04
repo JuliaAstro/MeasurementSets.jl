@@ -46,6 +46,12 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
             c.type, _classname(c.type, true), c.shape, Int32(0),
             c.maxlength, c.keywords, c.default, c.sequ)
     end
+    if kind === :dysco   # DyscoStMan — fixed cell shape, direct (like :tcm)
+        return ColumnDesc(c.name, c.comment, "DyscoStMan", "Dysco" * c.name,
+            c.type, _classname(c.type, true), c.shape,
+            COLOPT_DIRECT | COLOPT_FIXEDSHAPE,
+            c.maxlength, c.keywords, c.default, c.sequ)
+    end
     cls = arr ? _classname(c.type, true) : _classname(c.type, false)
     opt = (arr && c.shape isa Dims && !isempty(c.shape)) ?
           (c.option | COLOPT_DIRECT | COLOPT_FIXEDSHAPE) : Int32(0)
@@ -82,15 +88,22 @@ _stored_casatype(::Type{ComplexF64}) = TpDComplex
 
 """
     _write_table_core(dir, descs, data; nrow, endian, public, private,
-                      tsm, tcm, tcell, ism, engines, tablename, type, subtype, readme)
+                      tsm, tcm, tcell, ism, engines, dysco, dysco_spec,
+                      tablename, type, subtype, readme)
 
 Write a CTDS table from explicit column descriptions + per-column data
 vectors.  Columns not named in `tsm` / `tcm` / `tcell` / `ism` /
-`engines` go to one StandardStMan.  `tsm` / `tcm` / `tcell` each take
-either a flat list of names (one hypercube per column) or a list of name
-groups (one shared hypercube per group).  `engines` maps a virtual
-column name to `(; kind, stored=:tsm, scale=nothing, offset=nothing,
-autoscale=false, stored_type=TpInt, storedname=nothing)`.
+`engines` / `dysco` go to one StandardStMan.  `tsm` / `tcm` / `tcell` /
+`dysco` each take either a flat list of names (one hypercube/instance per
+column) or a list of name groups (one shared hypercube/instance per
+group).  `engines` maps a virtual column name to `(; kind, stored=:tsm,
+scale=nothing, offset=nothing, autoscale=false, stored_type=TpInt,
+storedname=nothing)`.  `dysco_spec` maps a Dysco group's first column
+name to `(; normalization=AFNorm(), distribution=TruncatedGaussian(),
+dataBitCount=10, weightBitCount=12, distributionTruncation=2.5,
+studentTNu=5.0, antenna1, antenna2, rowsPerBlock=nrow, dither=true)` --
+`antenna1`/`antenna2` (0-based, length `nrow`) are mandatory (see
+[`write_dyscostman`](@ref)).
 """
 function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            data::Vector; nrow::Integer, endian::Symbol=:little,
@@ -99,6 +112,8 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            tsm=Set{String}(), tcm=Set{String}(), tcell=Set{String}(),
                            ism::AbstractSet{<:AbstractString}=Set{String}(),
                            engines::AbstractDict=Dict{String,NamedTuple}(),
+                           dysco=Vector{String}[],
+                           dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
                            tablename::AbstractString="",
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
@@ -150,9 +165,15 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
     for (_, _, _, gs) in tiledgroups, g in gs, n in g
         push!(tiledn, n)
     end
+    dyscog = _tsm_groups(dysco)
+    dyscon = Set{String}()
+    for g in dyscog, n in g
+        push!(dyscon, n)
+    end
     ism_i = findall(c -> c.name in ism, descs)
     ssm_i = setdiff(1:length(descs),
-                    vcat(findall(c -> c.name in tiledn || c.name in engine_virtual, descs),
+                    vcat(findall(c -> c.name in tiledn || c.name in engine_virtual ||
+                                      c.name in dyscon, descs),
                          ism_i))
 
     out = Vector{ColumnDesc}(undef, length(descs))
@@ -195,6 +216,34 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         for (k, i) in enumerate(idxs); out[i] = cols[k]; end
         seq += 1
     end
+    for g in dyscog
+        idxs = Int[]
+        for nm in g
+            i = findfirst(c -> c.name == nm, descs)
+            i === nothing && error("DyscoStMan group $g: unknown column \"$nm\"")
+            push!(idxs, i)
+        end
+        sort!(idxs)
+        cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :dysco), seq) for i in idxs]
+        spec = get(dysco_spec, g[1], NamedTuple())
+        haskey(spec, :antenna1) && haskey(spec, :antenna2) ||
+            error("dysco group $g: dysco_spec[\"$(g[1])\"] must supply antenna1/antenna2 " *
+                  "(0-based, length nrow)")
+        blk = write_dyscostman(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian;
+            normalization = get(spec, :normalization, AFNorm()),
+            distribution = get(spec, :distribution, TruncatedGaussian()),
+            dataBitCount = get(spec, :dataBitCount, 10),
+            weightBitCount = get(spec, :weightBitCount, 12),
+            distributionTruncation = get(spec, :distributionTruncation, 2.5),
+            studentTNu = get(spec, :studentTNu, 5.0),
+            antenna1 = spec.antenna1, antenna2 = spec.antenna2,
+            rowsPerBlock = get(spec, :rowsPerBlock, Int(nrow)),
+            dither = get(spec, :dither, true),
+            rng = get(spec, :rng, Random.default_rng()))
+        push!(dms, DMWrite("DyscoStMan", seq, blk))
+        for (k, i) in enumerate(idxs); out[i] = cols[k]; end
+        seq += 1
+    end
     for (vi, typestr) in engine_seq         # virtual engines write no file, empty block
         out[vi] = _withsequ(descs[vi], seq)
         push!(dms, DMWrite(typestr, seq, UInt8[]))
@@ -208,16 +257,21 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
 end
 
 """
-    write_table(dir, name, columns; nrow, endian=:little, type="", subtype="", readme="")
+    write_table(dir, name, columns; nrow, endian=:little,
+               tsm, tcm, tcell, ism, engines, dysco, dysco_spec,
+               type="", subtype="", readme="")
 
 Write a CTDS table at `dir`.  `columns` is an iterable of `name => vector`
 pairs (or a `Tables` columns source).  Column metadata (units, comments,
 exact class names) is taken from `SCHEMAVER2[name]` when available.
+`dysco`/`dysco_spec` compress one or more columns with `DyscoStMan` --
+see [`_write_table_core`](@ref) for the exact shape.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
                      tsm=String[], tcm=String[], tcell=String[], ism=String[],
                      engines::AbstractDict=Dict{String,NamedTuple}(),
+                     dysco=Vector{String}[], dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
     pairs = columns isa AbstractDict ? collect(columns) :
@@ -249,7 +303,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
     end
 
     _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,
-                      ism = Set(String.(ism)), engines,
+                      ism = Set(String.(ism)), engines, dysco, dysco_spec,
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
 
@@ -271,6 +325,7 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
     ism = Set{String}()
     tiled = Dict{Int,Vector{String}}()       # source sequ -> output column names (desc order)
     tiledkind = Dict{Int,String}()           # source sequ -> manager type string
+    dysco = Dict{Int,Vector{String}}()       # source sequ -> output column names
     skipped = String[]
 
     # --- virtual column engines: re-encode; skip the implied companions ---
@@ -314,6 +369,8 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
         if occursin("Tiled", dm)
             push!(get!(() -> String[], tiled, sc.sequ), outname)
             tiledkind[sc.sequ] = dm
+        elseif dm == "DyscoStMan"
+            push!(get!(() -> String[], dysco, sc.sequ), outname)
         elseif dm in ("IncrementalStMan", "ISM")
             push!(ism, outname)
         end
@@ -336,12 +393,34 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
         end
     end
 
+    dyscog = Vector{String}[]
+    dysco_spec = Dict{String,NamedTuple}()
+    for (sequ, names) in sort(collect(dysco); by = first)
+        push!(dyscog, names)
+        dysco_spec[names[1]] = _dysco_spec_from_source(dmsrc, sequ, rows)
+    end
+
     isempty(skipped) ||
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(rows), endian=:little,
                       public, private=Record(), tsm=tsmg, tcm=tcmg, tcell=tcellg, ism,
-                      engines, tablename, type, subtype, readme)
+                      engines, dysco=dyscog, dysco_spec, tablename, type, subtype, readme)
     return descs
+end
+
+# reconstruct the `dysco_spec=` entry for a source DyscoStMan-bound group
+# (parallel to `_engine_spec_from_source`): the compression parameters are
+# already live fields on the opened instance (no keyword-record parsing
+# needed, unlike engines) -- `rows` selects/reorders which source rows are
+# actually being copied, so antenna1/antenna2 (and the block-size clamp)
+# are read through that same selection.
+function _dysco_spec_from_source(t::Table, sequ::Int, rows)
+    inst = _dm_instance(t, sequ)
+    return (; normalization=inst.normalization, distribution=inst.distribution,
+            dataBitCount=inst.dataBitCount, weightBitCount=inst.weightBitCount,
+            distributionTruncation=inst.distributionTruncation, studentTNu=inst.studentTNu,
+            antenna1=inst.ant1[rows], antenna2=inst.ant2[rows],
+            rowsPerBlock=min(inst.rowsPerBlock, length(rows)))
 end
 
 """

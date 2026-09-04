@@ -10,7 +10,12 @@ shells out to this script only when a CASA python3 is found on the machine
 
 Usage:
     python3 dysco_fixture.py <outdir> <nant> <ntime> <nchan> <npol> \
-                              <dataBitCount> <weightBitCount> <seed>
+                              <dataBitCount> <weightBitCount> <seed> \
+                              [<normalization> [<distribution> [<studentTNu>]]]
+
+<normalization> is one of AF/RF/Row (default AF); <distribution> one of
+Gaussian/Uniform/StudentsT/TruncatedGaussian (default TruncatedGaussian);
+<studentTNu> only matters for the StudentsT distribution (default 5.0).
 
 Writes into <outdir>:
     dysco.tab/            the DyscoStMan-backed casacore table
@@ -38,6 +43,10 @@ def main():
     outdir, nant, ntime, nchan, npol, dbits, wbits, seed = sys.argv[1:9]
     nant, ntime, nchan, npol = int(nant), int(ntime), int(nchan), int(npol)
     dbits, wbits, seed = int(dbits), int(wbits), int(seed)
+    rest = sys.argv[9:]
+    normalization = rest[0] if len(rest) > 0 else "AF"
+    distribution = rest[1] if len(rest) > 1 else "TruncatedGaussian"
+    studentTNu = float(rest[2]) if len(rest) > 2 else 5.0
 
     tabname = os.path.join(outdir, "dysco.tab")
     if os.path.exists(tabname):
@@ -76,8 +85,8 @@ def main():
     dminfo = {
         "*1": {"TYPE": "DyscoStMan", "NAME": "dysco",
                "SPEC": {"dataBitCount": dbits, "weightBitCount": wbits,
-                        "distribution": "TruncatedGaussian", "normalization": "AF",
-                        "studentTNu": 0.0, "distributionTruncation": 2.5},
+                        "distribution": distribution, "normalization": normalization,
+                        "studentTNu": studentTNu, "distributionTruncation": 2.5},
                "COLUMNS": ["DATA", "WEIGHT_SPECTRUM"]}
     }
 

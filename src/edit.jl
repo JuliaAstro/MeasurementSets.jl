@@ -69,6 +69,7 @@ function _dmkind(inst)
     inst isa StandardStMan && return :ssm
     inst isa IncrementalStMan && return :ism
     inst isa VirtualEngine && return :engine
+    inst isa DyscoStMan && return :dysco
     inst isa TiledStMan || return :ssm
     inst.kind === :column ? :tcm : inst.kind === :cell ? :tcell : :tsm
 end
@@ -356,6 +357,7 @@ end
 
 _has_tcell(t::EditTable) = any(m -> m.name == "TiledCellStMan", t.reader.managers)
 _has_engine(t::EditTable) = any(m -> _is_engine_dm(m.name), t.reader.managers)
+_has_dysco(t::EditTable) = any(m -> m.name == "DyscoStMan", t.reader.managers)
 
 # a virtual-engine column that was overwritten this session
 function _engine_touched(t::EditTable)
@@ -369,6 +371,21 @@ function _engine_touched(t::EditTable)
     return false
 end
 
+# a Dysco-bound column that was overwritten this session -- like an
+# engine cell, a touched Dysco cell needs its whole block re-decoded and
+# re-encoded, nothing like a tiled cube's byte-addressable in-place patch,
+# so any touch forces the regen path.
+function _dysco_touched(t::EditTable)
+    for m in t.reader.managers
+        m.name == "DyscoStMan" || continue
+        for c in t.reader.desc.columns
+            c.sequ == m.sequ || continue
+            (haskey(t.override, c.name) || haskey(t.tsmedit, c.name)) && return true
+        end
+    end
+    return false
+end
+
 function Base.flush(t::EditTable)
     t.flushed && return t
     dir = t.reader.path
@@ -378,7 +395,8 @@ function Base.flush(t::EditTable)
         old = read_syncinfo(lk)
         if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
            !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
-           !(grew && _has_engine(t)) && !_engine_touched(t)  # engines re-encode on regen
+           !(grew && _has_engine(t)) && !_engine_touched(t) &&  # engines re-encode on regen
+           !(grew && _has_dysco(t)) && !_dysco_touched(t)  # Dysco always re-encodes on regen
             _flush_fast(t)
         else
             _flush_regen(t)
@@ -566,6 +584,25 @@ function _flush_regen(t::EditTable)
             data = Any[getres(nm) for nm in names]
             blk = _tsm_writer(k)(dir, sequ, nds, data, newrows, endian)
             push!(dms, DMWrite(_tsm_dmname(k), sequ, blk))
+            for (nm, nd) in zip(names, nds); normof[nm] = nd; end
+        elseif k === :dysco
+            # preserve the pre-edit instance's compression parameters;
+            # antenna1/antenna2 are re-resolved through the *new* row
+            # mapping (addrows!/removerows!-aware), not read stale off
+            # the old instance -- mirrors _dysco_spec_from_source but
+            # accounts for row changes mid-edit-session.
+            nds = ColumnDesc[_norm(descfor(nm), k, sequ) for nm in names]
+            data = Any[getres(nm) for nm in names]
+            inst = _dm_instance(rd, sequ)
+            a1new = Int.(getres("ANTENNA1"))
+            a2new = Int.(getres("ANTENNA2"))
+            blk = write_dyscostman(dir, sequ, nds, data, newrows, endian;
+                normalization = inst.normalization, distribution = inst.distribution,
+                dataBitCount = inst.dataBitCount, weightBitCount = inst.weightBitCount,
+                distributionTruncation = inst.distributionTruncation, studentTNu = inst.studentTNu,
+                antenna1 = a1new, antenna2 = a2new,
+                rowsPerBlock = min(inst.rowsPerBlock, newrows))
+            push!(dms, DMWrite("DyscoStMan", sequ, blk))
             for (nm, nd) in zip(names, nds); normof[nm] = nd; end
         else
             nds = ColumnDesc[_norm(descfor(nm), k, sequ) for nm in names]
