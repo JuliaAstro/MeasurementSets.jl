@@ -161,12 +161,21 @@ end
 
 # Rows `r` of `c` as a `Vector{Any}` of plain values / dense `Array`s (lazy
 # wrappers collapsed so the reader's nested wrapper types stay out of
-# downstream inference).  Per-cell; a whole-column fast path here trips a
-# Julia 1.12 codegen bug.
+# downstream inference -- some `getindex(::Colon)` fast paths return views
+# into a shared backing buffer, e.g. TiledStMan's `_read_cube_bulk`).
+#
+# `r` an identity, full, in-order range (`1:length(c)`) uses the column's
+# own whole-column fast path (`c[:]`) instead of indexing cell by cell --
+# a real win for a big table (a `copyms` of a 925k-row subtable roughly
+# halves).  Any other `r` (a `RefTable` selection, a genuine partial row
+# slice) stays per-cell, where bulk-reading the whole source column to
+# keep a small subset would be a regression, not a win.
 function _read_cells(c::AbstractVector, r)
+    full = r isa AbstractUnitRange{<:Integer} && !isempty(r) &&
+           first(r) == 1 && last(r) == length(c)
+    vals = full ? c[:] : (c[i] for i in r)
     out = Vector{Any}(undef, length(r))
-    @inbounds for (k, i) in enumerate(r)
-        v = c[i]
+    @inbounds for (k, v) in enumerate(vals)
         out[k] = v isa AbstractArray ? Array(v) : v
     end
     return out
