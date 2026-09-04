@@ -86,6 +86,74 @@ if MSv2L.LOCK_SUPPORTED
         sleep(0.2)
         @test !is_multiused(ms)
     end
+
+    @testset "lock — request-id add/remove round trip" begin
+        d = mktempdir()
+        MSv2L.create_ms(joinpath(d, "x.ms"); nrow=2, nchan=2, ncorr=2, nant=2)
+        ms = joinpath(d, "x.ms")
+        lk = MSv2L.open_lock(ms; create=false)
+
+        MSv2L._add_reqid!(lk)
+        raw = read(joinpath(ms, "table.lock"))
+        @test ntoh(reinterpret(Int32, raw[1:4])[1]) == 1
+        @test ntoh(reinterpret(Int32, raw[5:8])[1]) == getpid()
+
+        MSv2L._remove_reqid!(lk)
+        raw2 = read(joinpath(ms, "table.lock"))
+        @test all(iszero, raw2[1:MSv2L.LOCK_SIZEREQID])         # back to fully zero
+
+        # LOCK_NRREQID slots -> the count clamps, doesn't overflow the region
+        for _ in 1:40
+            MSv2L._add_reqid!(lk)
+        end
+        raw3 = read(joinpath(ms, "table.lock"))
+        @test ntoh(reinterpret(Int32, raw3[1:4])[1]) == MSv2L.LOCK_NRREQID
+        MSv2L._release!(lk)
+    end
+
+    @testset "lock — cooperative hand-off announces + cleans up" begin
+        d = mktempdir()
+        MSv2L.create_ms(joinpath(d, "x.ms"); nrow=2, nchan=2, ncorr=2, nant=2)
+        ms = joinpath(d, "x.ms")
+
+        lk = MSv2L.open_lock(ms; create=false)
+        MSv2L.lock_write!(lk)                                   # parent holds the write lock
+
+        child = """
+        import MeasurementSetv2 as M
+        M.SYNC_MAXWAIT_S[] = 10.0
+        lk = M.open_lock(raw"$ms"; create=false)
+        M.lock_write!(lk)                       # blocks -> announces itself, retries
+        """
+        p = run(`$_JULIA --project=$_PROJ --startup-file=no -e $child`; wait=false)
+        childpid = getpid(p)
+
+        # Poll the request-id region through the parent's own already-open
+        # handle -- read(path) would open+close a second fd on table.lock,
+        # and POSIX drops *all* of this process's fcntl locks on a file the
+        # moment any fd to it is closed, which would release the very lock
+        # under test.
+        seen = false
+        t0 = time()
+        while time() - t0 < 8.0
+            seek(lk.io, 0)
+            raw = read(lk.io, MSv2L.LOCK_SIZEREQID)
+            n = ntoh(reinterpret(Int32, raw[1:4])[1])
+            if n > 0 && ntoh(reinterpret(Int32, raw[5:8])[1]) == childpid
+                seen = true
+                break
+            end
+            sleep(0.05)
+        end
+        @test seen                              # the child announced itself while blocked
+
+        MSv2L._release!(lk)                     # let the child through
+        wait(p)
+        @test p.exitcode == 0
+
+        raw2 = read(joinpath(ms, "table.lock"))
+        @test ntoh(reinterpret(Int32, raw2[1:4])[1]) == 0   # child removed its own entry
+    end
 end
 
 @testset "lock — sync blob written + tracks edits" begin

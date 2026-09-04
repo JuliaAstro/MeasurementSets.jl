@@ -9,7 +9,13 @@
 # `table.lock` on-disk layout (all fixed fields big-endian canonical):
 #
 #   [0 .. SIZEREQID)   int32 N  +  up to NRREQID (pid, hostid) int32 pairs
-#                                  --- the "request id" list
+#                                  --- the "request id" list.  On a
+#                                  contended acquire we announce ourselves
+#                                  here (and remove ourselves once done)
+#                                  so a real casacore peer in
+#                                  TableLock::AutoLocking mode can see us
+#                                  waiting and release cooperatively --
+#                                  see `_add_reqid!`/`_remove_reqid!`.
 #   [SIZEREQID .. +4)   uint32   length of the sync-info blob
 #   [SIZEREQID+4 .. )   the AipsIO "sync" blob (nrow + modify counter)
 #
@@ -119,29 +125,107 @@ end
 
 _conflict_errno(e) = e == _EAGAIN || e == _EACCES
 
+_mypid() = Int32(getpid())
+
+# Read/write the whole 260-byte request-id region as 65 big-endian
+# Int32s: reqid[1] = count N; pair i (0-based, i=0..31) is
+# (reqid[2i+2], reqid[2i+3]) = (pid, hostid).  Mirrors LockFile.cc's
+# itsReqId layout (casa/IO/LockFile.cc:332-390).
+function _reqid_read(lk::TableLock)
+    try
+        seek(lk.io, 0)
+        buf = read(lk.io, LOCK_SIZEREQID)
+        length(buf) == LOCK_SIZEREQID || return zeros(Int32, 65)
+        return Int32[ntoh(reinterpret(Int32, @view buf[4i+1:4i+4])[1]) for i in 0:64]
+    catch
+        return zeros(Int32, 65)
+    end
+end
+
+function _reqid_write!(lk::TableLock, reqid::Vector{Int32})
+    lk.writable || return
+    try
+        # One single write of the whole region (matches casacore's own
+        # one-shot `pwrite`) -- 65 separate small writes would let a
+        # concurrent reader observe a torn, half-updated region.
+        buf = reinterpret(UInt8, hton.(reqid))
+        seek(lk.io, 0)
+        write(lk.io, buf)
+        flush(lk.io)
+        ccall(:fsync, Cint, (Cint,), _rawfd(lk))
+    catch
+    end
+end
+
+# Announce this process as waiting for the lock (casacore
+# LockFile::addReqId, LockFile.cc:332-345) -- lets a real casacore peer
+# holding the table in TableLock::AutoLocking mode see a nonzero request
+# count and voluntarily release early instead of us waiting out the full
+# poll budget.  UserLocking peers never look at this, but writing it is
+# harmless and matches what a real casacore process would do too.
+function _add_reqid!(lk::TableLock)
+    reqid = _reqid_read(lk)
+    inx = min(Int(reqid[1]), LOCK_NRREQID - 1)
+    reqid[1] = inx + 1
+    reqid[2inx+2] = _mypid()
+    reqid[2inx+3] = 0                      # hostid -- casacore hardcodes 0 too
+    _reqid_write!(lk, reqid)
+end
+
+# Remove this process's own entry (casacore LockFile::removeReqId,
+# LockFile.cc:347-364) once we've acquired the lock or given up waiting.
+# Simplified to an unambiguous "erase and shift down" rather than a
+# byte-for-byte port of casacore's terse shift arithmetic -- a real peer
+# only ever reads the *count* to decide whether to release, so exact
+# internal-shift fidelity isn't required for interop.
+function _remove_reqid!(lk::TableLock)
+    reqid = _reqid_read(lk)
+    nr = Int(reqid[1])
+    mypid = _mypid()
+    i = findfirst(k -> reqid[2k+2] == mypid && reqid[2k+3] == 0, 0:nr-1)
+    i === nothing && return
+    for k in i:nr-2
+        reqid[2k+2] = reqid[2k+4]
+        reqid[2k+3] = reqid[2k+5]
+    end
+    reqid[2nr] = 0
+    reqid[2nr+1] = 0
+    reqid[1] = nr - 1
+    _reqid_write!(lk, reqid)
+end
+
 # byte-0 lock; `wait` polls up to SYNC_MAXWAIT_S, else one attempt
 function _acquire!(lk::TableLock, ltype::Int16; wait::Bool)
     (lk.noop || lk.io === nothing) && return true
     t0 = time()
+    added = false
     fl = Ref(_mkflock(ltype, LOCK_RW_BYTE, 1))
-    while true
-        rc, e = _fcntl(lk, F_SETLK, fl)
-        rc == 0 && return true
-        if e == _EINTR
-            continue
-        elseif _conflict_errno(e)
-            wait || return false
-            if time() - t0 > SYNC_MAXWAIT_S[]
-                @warn "table.lock: gave up waiting for a lock after $(SYNC_MAXWAIT_S[]) s; proceeding unlocked" lk.dir
+    try
+        while true
+            rc, e = _fcntl(lk, F_SETLK, fl)
+            rc == 0 && return true
+            if e == _EINTR
+                continue
+            elseif _conflict_errno(e)
+                wait || return false
+                if !added && lk.writable
+                    _add_reqid!(lk)
+                    added = true
+                end
+                if time() - t0 > SYNC_MAXWAIT_S[]
+                    @warn "table.lock: gave up waiting for a lock after $(SYNC_MAXWAIT_S[]) s; proceeding unlocked" lk.dir
+                    lk.noop = true
+                    return true
+                end
+                sleep(0.05)
+            else
+                # ENOLCK (no lock daemon), EINVAL/ENOTSUP (fs w/o locking), EBADF ...
                 lk.noop = true
                 return true
             end
-            sleep(0.05)
-        else
-            # ENOLCK (no lock daemon), EINVAL/ENOTSUP (fs w/o locking), EBADF ...
-            lk.noop = true
-            return true
         end
+    finally
+        added && _remove_reqid!(lk)
     end
 end
 
