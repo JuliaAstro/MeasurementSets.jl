@@ -18,6 +18,8 @@ function _dm_instance(t::Table, sequ::Int)
         open_incrementalstman(t, dm)
     elseif _is_engine_dm(dm.name)
         open_engine(t, dm)
+    elseif dm.name == "DyscoStMan"
+        open_dyscostman(t, dm)
     else
         error("data manager \"$(dm.name)\" not yet supported (column data)")
     end
@@ -90,6 +92,8 @@ function Base.getindex(c::Column, i::Int)
         tsm_getcell(inst, c.index, c.desc, i)
     elseif inst isa VirtualEngine
         engine_getcell(inst, c.desc, i)
+    elseif inst isa DyscoStMan
+        dysco_getcell(inst, c.index, c.desc, i)
     else
         ism_getcell(inst, c.index, c.desc, i, c.cols)
     end
@@ -103,6 +107,8 @@ function Base.getindex(c::Column, ::Colon)
         tsm_getcolumn(inst, c.index, c.desc, c.table.rows)
     elseif inst isa VirtualEngine
         engine_getcolumn(inst, c.desc, c.table.rows)
+    elseif inst isa DyscoStMan
+        dysco_getcolumn(inst, c.index, c.desc, c.table.rows)
     else
         ism_getcolumn(inst, c.index, c.desc, c.table.rows, c.cols)
     end

@@ -220,6 +220,22 @@ holding the table in its default `AutoLocking` mode can see us waiting
 and release early. See the Phase 13 section above for the usage example
 — this is automatic, no API change.
 
+**Phase 18 — `DyscoStMan` column data (read).** `DyscoStMan` (the
+third-party `aroffringa/dysco` lossy-compression storage manager many
+large modern MSes use for `DATA`/`WEIGHT_SPECTRUM`) is no longer in the
+"data manager not yet supported" set — `getcolumn`/`getcell`/`column`
+transparently decode it. Scope: **AF normalization + TruncatedGaussian
+quantization only** (the real-world default combo), **read-only**.
+Verified against a genuine `DyscoStMan`-compressed table written by a
+real CASA install's `casatools` (`table.create(...; dminfo=...)`) —
+decoded `DATA` matches CASA's own `getcol()` to float32 rounding
+precision, `WEIGHT_SPECTRUM` (a plain linear quantizer, no dictionary)
+matches exactly. `copyms`/`write_ms`/`copytable` of a Dysco-bound column
+falls back to a plain `StandardStMan` copy (decode-then-re-encode
+uncompressed) — writing Dysco is out of scope. Not yet implemented: RF/
+Row normalization; Gaussian/Uniform/StudentsT distributions (a clear
+`error`, not a silent misdecode); writing/compressing.
+
 ## Usage
 
 ```julia
