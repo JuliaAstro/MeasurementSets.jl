@@ -68,11 +68,13 @@ struct CompressFloat     <: CompressKind end
 struct CompressComplex   <: CompressKind end
 struct CompressComplexSD <: CompressKind end
 
-_prefix(::ScaledArray)       = "_ScaledArrayEngine_"
-_prefix(::ScaledComplex)     = "_ScaledComplexData_"
-_prefix(::CompressFloat)     = "_CompressFloat_"
-_prefix(::CompressComplex)   = "_CompressComplex_"
-_prefix(::CompressComplexSD) = "_CompressComplex_"   # SD reuses the CompressComplex prefix
+const PREFIXENGINE = Dict{EngineKind,String}(
+    ScaledArray()       => "_ScaledArrayEngine_",
+    ScaledComplex()     => "_ScaledComplexData_",
+    CompressFloat()     => "_CompressFloat_",
+    CompressComplex()   => "_CompressComplex_",
+    CompressComplexSD() => "_CompressComplex_",   # SD reuses the CompressComplex prefix
+)
 
 # --- reader -------------------------------------------------------
 
@@ -103,7 +105,7 @@ VirtualEngine(table::Table, kind::Mapped, vdesc::ColumnDesc, storedname::String,
 
 function VirtualEngine(table::Table, kind::CompressKind, vdesc::ColumnDesc,
                        storedname::String, kw::Record)
-    pfx = _prefix(kind)
+    pfx = PREFIXENGINE[kind]
     fixed = Bool(get(kw, pfx * "Fixed", true))
     autoscale = Bool(get(kw, pfx * "AutoScale", false))
     scale  = Float32(get(kw, pfx * "Scale", ENG_UNIT_SCALE))
@@ -116,12 +118,12 @@ end
 
 function VirtualEngine(table::Table, kind::ScaledKind, vdesc::ColumnDesc,
                        storedname::String, kw::Record)
-    fixed_scale  = Bool(get(kw, _prefix(kind) * "FixedScale", true))
-    fixed_offset = Bool(get(kw, _prefix(kind) * "FixedOffset", true))
-    scale  = get(kw, _prefix(kind) * "Scale", nothing)
-    offset = get(kw, _prefix(kind) * "Offset", nothing)
-    scalename  = String(get(kw, _prefix(kind) * "ScaleName", ""))
-    offsetname = String(get(kw, _prefix(kind) * "OffsetName", ""))
+    fixed_scale  = Bool(get(kw, PREFIXENGINE[kind] * "FixedScale", true))
+    fixed_offset = Bool(get(kw, PREFIXENGINE[kind] * "FixedOffset", true))
+    scale  = get(kw, PREFIXENGINE[kind] * "Scale", nothing)
+    offset = get(kw, PREFIXENGINE[kind] * "Offset", nothing)
+    scalename  = String(get(kw, PREFIXENGINE[kind] * "ScaleName", ""))
+    offsetname = String(get(kw, PREFIXENGINE[kind] * "OffsetName", ""))
     return VirtualEngine(table, kind, vdesc, storedname, false, fixed_scale, fixed_offset,
                          scale, offset, scalename, offsetname, nothing, nothing, nothing)
 end
@@ -419,7 +421,7 @@ _push_kw!(r::Record, ::Mapped, vtype, scale, offset, scalename, offsetname, auto
 
 function _push_kw!(r::Record, kind::CompressKind, vtype::CasaType, scale, offset,
                    scalename, offsetname, autoscale::Bool)
-    pfx = _prefix(kind)
+    pfx = PREFIXENGINE[kind]
     fixed = !autoscale
     _kwpush!(r, pfx * "Scale",  TpFloat, Float32(fixed ? scale  : ENG_UNIT_SCALE))
     _kwpush!(r, pfx * "Offset", TpFloat, Float32(fixed ? offset : ENG_ZERO_OFFSET))
@@ -439,7 +441,7 @@ _push_compresstype!(r::Record, ::CompressComplexSD) =
 
 function _push_kw!(r::Record, kind::ScaledKind, vtype::CasaType, scale, offset,
                    scalename, offsetname, autoscale::Bool)
-    pfx = _prefix(kind)
+    pfx = PREFIXENGINE[kind]
     S = _scaled_scaletype(kind, vtype)
     SJ = juliatype(S)
     _kwpush!(r, pfx * "Scale",  S, SJ(scale))

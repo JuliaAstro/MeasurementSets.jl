@@ -403,7 +403,7 @@ function _engine_spec_from_source(t::Table, c::ColumnDesc, dm::AbstractString)
     stored_type = columndesc(t, storedname).type
     kind isa Mapped && return (; kind, stored = occursin("Tiled", sd) ? :tsm : :ssm,
                                 stored_type, storedname)
-    pfx = _prefix(kind)
+    pfx = PREFIXENGINE[kind]
     autoscale = kind isa CompressKind && Bool(get(kw, pfx * "AutoScale", false))
     scale  = get(kw, pfx * "Scale", nothing)
     offset = get(kw, pfx * "Offset", nothing)
