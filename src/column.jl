@@ -10,26 +10,34 @@ _dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager"
 # on directly -- this is the one unavoidable name -> type lookup, isolated
 # here so the actual "open" logic can be ordinary multiple dispatch (see the
 # `Base.open(::Type{<:...}, t::Table, dm::DataManagerInfo)` methods in
-# datamanagers/{standard,tiled,incremental,virtual,dysco}.jl).  The virtual-
-# engine family isn't a fixed set of exact names (templated names like
-# `"ScaledArrayEngine<Float,Int>"`), so it stays a predicate fallback rather
-# than a table entry.
-const _DM_TYPES = Dict{String,Type}(
-    "StandardStMan"    => StandardStMan,
-    "SSM"              => StandardStMan,
-    "TiledShapeStMan"  => TiledStMan,
-    "TiledColumnStMan" => TiledStMan,
-    "TiledCellStMan"   => TiledStMan,
-    "TiledStMan"       => TiledStMan,
-    "IncrementalStMan" => IncrementalStMan,
-    "ISM"              => IncrementalStMan,
-    "DyscoStMan"       => DyscoStMan,
+# datamanagers/{standard,tiled,incremental,virtual,dysco}.jl).  Every *exact*
+# on-disk name -- including the three non-templated virtual engines -- has an
+# entry; the templated engine names (`"ScaledArrayEngine<Float,Int>"` and
+# friends, which can't be enumerated) fall back to `_is_engine_dm`'s prefix
+# check on a `KeyError`.
+const DATAMANAGERS = Dict{String,Type}(
+    "StandardStMan"     => StandardStMan,
+    "SSM"               => StandardStMan,
+    "TiledShapeStMan"   => TiledStMan,
+    "TiledColumnStMan"  => TiledStMan,
+    "TiledCellStMan"    => TiledStMan,
+    "TiledStMan"        => TiledStMan,
+    "IncrementalStMan"  => IncrementalStMan,
+    "ISM"               => IncrementalStMan,
+    "DyscoStMan"        => DyscoStMan,
+    "CompressFloat"     => VirtualEngine,
+    "CompressComplex"   => VirtualEngine,
+    "CompressComplexSD" => VirtualEngine,
 )
 
 function _dmtype(name::AbstractString)
-    haskey(_DM_TYPES, name) && return _DM_TYPES[name]
-    _is_engine_dm(name) && return VirtualEngine
-    return nothing
+    try
+        return DATAMANAGERS[name]
+    catch e
+        e isa KeyError || rethrow()
+        _is_engine_dm(name) && return VirtualEngine
+        return nothing
+    end
 end
 
 function _dm_instance(t::Table, sequ::Int)
