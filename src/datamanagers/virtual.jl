@@ -27,15 +27,24 @@
 # (`floor(x+0.5)` / `ceil(x-0.5)`), clamped.  1-based rows.
 
 # --- constants (casacore CompressComplex.cc / CompressFloat.cc) ------
-const ENG_NAN_C          = Int32(-32768) * Int32(65536)   # CompressComplex/SD sentinel (Int32)
-const ENG_NAN_F          = Int16(-32768)                  # CompressFloat sentinel
-const ENG_C_PART_MAX     = 32767                          # CompressComplex per-part clamp
-const ENG_SD_REAL_MAX    = 32767                          # CompressComplexSD real clamp (odd)
-const ENG_SD_IMAG_LO     = -16384                         # CompressComplexSD imag clamp (odd)
-const ENG_SD_IMAG_HI     = 16383
-const ENG_SD_EVEN_LO     = -32768.0 * 32768               # CompressComplexSD real clamp (even)
-const ENG_SD_EVEN_HI     = 32768.0 * 32768 - 1
-const ENG_AUTOSCALE_DIV  = 65534                          # (max - min) / 65534
+const ENG_C_HIWORD       = 65536             # CompressComplex/SD: `stored = s_re*65536 + s_im`
+const ENG_C_WRAP         = ENG_C_HIWORD ÷ 2  # 32768: imag-wrap threshold / |real NaN sentinel|
+const ENG_ROUND_HALF     = 0.5              # round half away from zero: `floor(x+0.5)` / `ceil(x-0.5)`
+const ENG_MIDPOINT       = 2                # autoScale offset = (min + max) / 2
+const ENG_UNIT_SCALE     = 1.0f0            # scale written to keywords when autoScale
+const ENG_ZERO_OFFSET    = 0.0f0
+const ENG_AUTOSCALE_DIV  = 65534            # autoScale: scale = (max - min) / 65534
+
+const ENG_NAN_C          = Int32(-ENG_C_WRAP) * Int32(ENG_C_HIWORD)  # CompressComplex/SD sentinel
+const ENG_NAN_F          = Int16(-ENG_C_WRAP)                        # CompressFloat sentinel
+const ENG_C_PART_MAX     = ENG_C_WRAP - 1                            # 32767: CompressComplex per-part clamp
+const ENG_SD_REAL_MAX    = ENG_C_WRAP - 1                            # CompressComplexSD real clamp (odd)
+const ENG_SD_IMAG_MULT   = 2                                         # SD odd: imag scaled by `scale*2`
+const ENG_SD_IMAG_HI     = ENG_C_WRAP ÷ ENG_SD_IMAG_MULT - 1         # 16383: SD imag clamp (odd)
+const ENG_SD_IMAG_LO     = -(ENG_SD_IMAG_HI + 1)                     # -16384
+const ENG_SD_REAL_BITS   = ENG_C_WRAP                                # SD even: `fullScale = scale/32768`
+const ENG_SD_EVEN_HI     = Float64(ENG_C_WRAP) * ENG_SD_REAL_BITS - 1  # SD real clamp (even)
+const ENG_SD_EVEN_LO     = -Float64(ENG_C_WRAP) * ENG_SD_REAL_BITS
 
 const _ENGINE_PREFIX = Dict(
     :scaledarray       => "_ScaledArrayEngine_",
@@ -111,8 +120,8 @@ function open_engine(t::Table, dm::DataManagerInfo)
         fixed = Bool(get(kw, pfx * "Fixed", true))
         e.fixed_scale = e.fixed_offset = fixed
         e.autoscale = Bool(get(kw, pfx * "AutoScale", false))
-        e.scale  = Float32(get(kw, pfx * "Scale", 1.0f0))
-        e.offset = Float32(get(kw, pfx * "Offset", 0.0f0))
+        e.scale  = Float32(get(kw, pfx * "Scale", ENG_UNIT_SCALE))
+        e.offset = Float32(get(kw, pfx * "Offset", ENG_ZERO_OFFSET))
         e.scalename  = String(get(kw, pfx * "ScaleName", ""))
         e.offsetname = String(get(kw, pfx * "OffsetName", ""))
     else                                                # scaledarray / scaledcomplex
@@ -139,7 +148,7 @@ _row_offset(e::VirtualEngine, row) =
     (e.fixed_offset && !e.autoscale) ? e.offset : _eng_offsetcol(e)[row]
 
 # round half away from zero (casacore `floor(x+0.5)` / `ceil(x-0.5)`)
-_rha(x) = x < 0 ? ceil(Float64(x) - 0.5) : floor(Float64(x) + 0.5)
+_rha(x) = x < 0 ? ceil(Float64(x) - ENG_ROUND_HALF) : floor(Float64(x) + ENG_ROUND_HALF)
 _round_clamp(x, lo, hi) = Int(clamp(_rha(x), lo, hi))
 
 # --- decode (inverse transform) --------------------------------
@@ -157,7 +166,7 @@ end
 function _decode_scaled(st::AbstractArray, scale, offset, J::Type)
     out = Array{J}(undef, size(st))
     @inbounds for i in eachindex(st)
-        out[i] = J(st[i] * scale + offset)
+        out[i] = J(muladd(st[i], scale, offset))
     end
     return out
 end
@@ -169,7 +178,7 @@ function _decode_scaledcomplex(st::AbstractArray, scale, offset, J::Type)
     vsh = size(st)[2:end]
     out = Array{J}(undef, vsh)
     @inbounds for i in eachindex(out)
-        out[i] = J(R(st[2i-1]) * sre + ore, R(st[2i]) * sim + oim)
+        out[i] = J(muladd(R(st[2i-1]), sre, ore), muladd(R(st[2i]), sim, oim))
     end
     return out
 end
@@ -177,7 +186,7 @@ end
 function _decode_cfloat(st::AbstractArray{<:Integer}, scale::Float32, offset::Float32, J::Type)
     out = Array{J}(undef, size(st))
     @inbounds for i in eachindex(st)
-        out[i] = st[i] == -32768 ? J(NaN) : J(st[i] * scale + offset)
+        out[i] = st[i] == -ENG_C_WRAP ? J(NaN) : J(muladd(Float32(st[i]), scale, offset))
     end
     return out
 end
@@ -187,17 +196,17 @@ function _decode_ccomplex(st::AbstractArray{<:Integer}, scale::Float32, offset::
     out = Array{J}(undef, size(st))
     @inbounds for i in eachindex(st)
         v = Int(st[i])
-        r = div(v, 65536)                       # trunc toward zero, as C++ `/`
-        if r == -32768
+        r = div(v, ENG_C_HIWORD)                    # trunc toward zero, as C++ `/`
+        if r == -ENG_C_WRAP
             out[i] = J(NaN, NaN)
         else
-            im = v - r * 65536
-            if im < -32768
-                r -= 1; im += 65536
-            elseif im >= 32768
-                r += 1; im -= 65536
+            im = v - r * ENG_C_HIWORD
+            if im < -ENG_C_WRAP
+                r -= 1; im += ENG_C_HIWORD
+            elseif im >= ENG_C_WRAP
+                r += 1; im -= ENG_C_HIWORD
             end
-            out[i] = J(R(r * scale + offset), R(im * scale + offset))
+            out[i] = J(R(muladd(r, scale, offset)), R(muladd(im, scale, offset)))
         end
     end
     return out
@@ -205,27 +214,26 @@ end
 
 function _decode_ccomplexsd(st::AbstractArray{<:Integer}, scale::Float32, offset::Float32, J::Type)
     R = real(J)
-    fullScale = scale / 32768f0
-    imagScale = scale * 2f0
+    fullScale = scale / Float32(ENG_SD_REAL_BITS)
+    imagScale = scale * Float32(ENG_SD_IMAG_MULT)
     out = Array{J}(undef, size(st))
     @inbounds for i in eachindex(st)
         v = Int(st[i])
         if iseven(v)
-            re = (v >> 1) * fullScale + offset
-            out[i] = J(R(re), zero(R))
+            out[i] = J(R(muladd(v >> 1, fullScale, offset)), zero(R))
         else
-            r = div(v, 65536)
-            if r == -32768
+            r = div(v, ENG_C_HIWORD)
+            if r == -ENG_C_WRAP
                 out[i] = J(NaN, NaN)
             else
-                im = v - r * 65536
-                if im < -32768
-                    r -= 1; im += 65536
-                elseif im >= 32768
-                    r += 1; im -= 65536
+                im = v - r * ENG_C_HIWORD
+                if im < -ENG_C_WRAP
+                    r -= 1; im += ENG_C_HIWORD
+                elseif im >= ENG_C_WRAP
+                    r += 1; im -= ENG_C_HIWORD
                 end
                 im >>= 1
-                out[i] = J(R(r * scale + offset), R(im * imagScale + offset))
+                out[i] = J(R(muladd(r, scale, offset)), R(muladd(im, imagScale, offset)))
             end
         end
     end
@@ -260,9 +268,9 @@ function _auto_scale_offset(cell::AbstractArray)
             im < mn && (mn = im); im > mx && (mx = im)
         end
     end
-    seen || return (0.0f0, 0.0f0)
-    mn == mx && return (1.0f0, Float32((mn + mx) / 2))
-    return (Float32((mx - mn) / ENG_AUTOSCALE_DIV), Float32((mx + mn) / 2))
+    seen || return (ENG_ZERO_OFFSET, ENG_ZERO_OFFSET)
+    mn == mx && return (ENG_UNIT_SCALE, Float32((mn + mx) / ENG_MIDPOINT))
+    return (Float32((mx - mn) / ENG_AUTOSCALE_DIV), Float32((mx + mn) / ENG_MIDPOINT))
 end
 
 _eng_stored_eltype(kind::Symbol, stored_type::CasaType) =
@@ -311,27 +319,27 @@ function _enc_ccomplex(cell::AbstractArray, scale::Float32, offset::Float32)
         else
             sre = _round_clamp((real(z) - offset) / scale, -ENG_C_PART_MAX, ENG_C_PART_MAX)
             sim = _round_clamp((imag(z) - offset) / scale, -ENG_C_PART_MAX, ENG_C_PART_MAX)
-            out[i] = Int32(sre * 65536 + sim)
+            out[i] = Int32(sre * ENG_C_HIWORD + sim)
         end
     end
     return out
 end
 
 function _enc_ccomplexsd(cell::AbstractArray, scale::Float32, offset::Float32)
-    fullScale = scale / 32768f0
-    imagScale = scale * 2f0
+    fullScale = scale / Float32(ENG_SD_REAL_BITS)
+    imagScale = scale * Float32(ENG_SD_IMAG_MULT)
     out = Array{Int32}(undef, size(cell))
     @inbounds for i in eachindex(cell)
         z = ComplexF32(cell[i])
         if !isfinite(real(z)) || !isfinite(imag(z)) || scale == 0
             out[i] = ENG_NAN_C
-        elseif imag(z) == 0
+        elseif imag(z) == 0                                  # even LSB flags imag == 0
             s = _round_clamp((real(z) - offset) / fullScale, ENG_SD_EVEN_LO, ENG_SD_EVEN_HI)
             out[i] = Int32(s << 1)
-        else
+        else                                                 # odd LSB flags imag != 0
             sre = _round_clamp((real(z) - offset) / scale, -ENG_SD_REAL_MAX, ENG_SD_REAL_MAX)
             sim = _round_clamp((imag(z) - offset) / imagScale, ENG_SD_IMAG_LO, ENG_SD_IMAG_HI)
-            out[i] = Int32(sre * 65536 + (sim << 1) + 1)
+            out[i] = Int32(sre * ENG_C_HIWORD + (sim << 1) + 1)
         end
     end
     return out
@@ -351,8 +359,8 @@ function _engine_keywords(kind::Symbol, vtype::CasaType, storedname, scale, offs
 
     if kind in (:compressfloat, :compresscomplex, :compresscomplexsd)
         fixed = !autoscale
-        _kwpush!(r, pfx * "Scale",  TpFloat, Float32(fixed ? scale  : 1.0f0))
-        _kwpush!(r, pfx * "Offset", TpFloat, Float32(fixed ? offset : 0.0f0))
+        _kwpush!(r, pfx * "Scale",  TpFloat, Float32(fixed ? scale  : ENG_UNIT_SCALE))
+        _kwpush!(r, pfx * "Offset", TpFloat, Float32(fixed ? offset : ENG_ZERO_OFFSET))
         _kwpush!(r, pfx * "ScaleName",  TpString, fixed ? "" : String(scalename))
         _kwpush!(r, pfx * "OffsetName", TpString, fixed ? "" : String(offsetname))
         _kwpush!(r, pfx * "Fixed",     TpBool, fixed)
@@ -408,10 +416,11 @@ function encode_engine(kind::Symbol, vdata::AbstractVector, vtype::CasaType;
         for r in 1:n
             cell = Array(vdata[r])
             sc[r], of[r] = _auto_scale_offset(cell)
-            s = sc[r] == 0 ? 1.0f0 : sc[r]
+            s = sc[r] == 0 ? ENG_UNIT_SCALE : sc[r]
             stored[r] = _enc_dispatch(kind, cell, s, of[r], T)
         end
-        kw = _engine_keywords(kind, vtype, storedname, 1.0f0, 0.0f0, scalename, offsetname, true)
+        kw = _engine_keywords(kind, vtype, storedname, ENG_UNIT_SCALE, ENG_ZERO_OFFSET,
+                              scalename, offsetname, true)
         return stored, kw, sc, of
     end
 
