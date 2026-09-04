@@ -28,6 +28,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
     include("indirect_tests.jl")
     include("ism_writer_tests.jl")
     include("tsm_multicol_tests.jl")
+    include("reftable_tests.jl")
     include("engine_tests.jl")
     include("edit_tests.jl")
     include("lock_tests.jl")
