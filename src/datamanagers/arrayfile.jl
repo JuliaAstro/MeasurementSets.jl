@@ -199,25 +199,3 @@ function arrayfile_bytes(w::ArrayFileWriter)
     seek(w.io, w.leng)
     return take!(w.io)
 end
-
-"""
-    af_append!(path, endian, t::CasaType, arr) -> Int64
-
-Append one array record to the existing `StManArrayFile` at `path` and
-return its byte offset (for the data-manager bucket cell).  The old
-`leng` pointer at byte `AF_INT` is advanced; existing records are never
-moved, so offsets already stored in SM buckets stay valid.
-"""
-function af_append!(path::AbstractString, endian::Symbol, t::CasaType, arr)
-    data = read(path)
-    version = Int((endian === :big ? ntoh : ltoh)(reinterpret(UInt32, @view data[1:AF_INT])[1]))
-    leng = Int((endian === :big ? ntoh : ltoh)(reinterpret(Int64, @view data[AF_INT+1:AF_INT+8])[1]))
-
-    w = ArrayFileWriter(; endian, version)
-    w.leng = leng
-    seek(w.io, 0); write(w.io, data)              # start from the current file
-    seek(w.io, leng)
-    off = af_put!(w, t, arr)
-    _atomic_write(path, arrayfile_bytes(w))
-    return off
-end
