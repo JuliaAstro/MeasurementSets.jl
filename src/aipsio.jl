@@ -117,6 +117,19 @@ function read_map(a::AipsIO, ::Type{K}, ::Type{V}) where {K,V}
     return out
 end
 
+# `n` raw big-endian integers of type `T` with no framing (casacore
+# `AipsIO::get(n, ptr)` / `put(n, ptr, False)`), returned as 1-based `Int`s.
+# Used for a RefTable's parent row numbers (0-based on disk).
+function _read_rownrs(a::AipsIO, ::Type{T}, n::Integer) where {T}
+    buf = Vector{T}(undef, Int(n))
+    read!(a.io, buf)
+    out = Vector{Int}(undef, Int(n))
+    @inbounds for i in 1:Int(n)
+        out[i] = Int(ntoh(buf[i])) + 1
+    end
+    return out
+end
+
 function read_array(a::AipsIO, ::Type{T}) where {T}
     tp = getnexttype(a)
     (tp == "Array" || startswith(tp, "Array<")) ||

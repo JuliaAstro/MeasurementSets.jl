@@ -22,6 +22,8 @@ function is_stale(t::Table)
 end
 is_stale(t::EditTable) = is_stale(t.reader)
 is_stale(ms::MeasurementSet) = is_stale(getfield(ms, :data))
+is_stale(t::RefTable) = is_stale(t.parent)
+is_stale(t::ConcatTable) = any(is_stale, t.parts)
 
 """
     resync(t) -> Table / MeasurementSet
@@ -36,6 +38,18 @@ function resync(t::Table)
         delete!(_DM_CACHE, t)
     end
     return fresh
+end
+
+# A RefTable / ConcatTable is re-opened wholesale (its parent(s) too); the
+# stale parent's cached data managers are evicted.
+function resync(t::Union{RefTable,ConcatTable})
+    is_stale(t) || return t
+    Base.@lock _REG_LOCK begin
+        for p in (t isa RefTable ? (t.parent,) : t.parts)
+            p isa Table && delete!(_DM_CACHE, p)
+        end
+    end
+    return readtable(t.path)
 end
 
 function resync(ms::MeasurementSet)

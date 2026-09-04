@@ -6,39 +6,33 @@ import Tables
 
 # --- column access ------------------------------------------------
 
-Tables.istable(::Type{Table}) = true
-Tables.columnaccess(::Type{Table}) = true
-Tables.rowaccess(::Type{Table}) = true
+Tables.istable(::Type{<:AbstractTable}) = true
+Tables.columnaccess(::Type{<:AbstractTable}) = true
+Tables.rowaccess(::Type{<:AbstractTable}) = true
 
-Tables.columns(t::Table) = t
-Tables.columnnames(t::Table) = Symbol.(columnnames(t))
-Tables.getcolumn(t::Table, nm::Symbol) = column(t, String(nm))
-Tables.getcolumn(t::Table, i::Int) = column(t, t.desc.columns[i].name)
+Tables.columns(t::AbstractTable) = t
+Tables.columnnames(t::AbstractTable) = Symbol.(columnnames(t))
+Tables.getcolumn(t::AbstractTable, nm::Symbol) = column(t, String(nm))
+Tables.getcolumn(t::AbstractTable, i::Int) = column(t, columnnames(t)[i])
 
-function _schema_eltype(t::Table, c::ColumnDesc)
-    c.sequ === nothing && return Any
-    try
-        _eltype(c, _dm_instance(t, c.sequ))
-    catch
-        Any
-    end
-end
+_col_eltype(t::AbstractTable, name::AbstractString) =
+    try eltype(column(t, name)) catch; Any end
 
-Tables.schema(t::Table) = Tables.Schema(
+Tables.schema(t::AbstractTable) = Tables.Schema(
     Symbol.(columnnames(t)),
-    Tuple(_schema_eltype(t, c) for c in t.desc.columns))
+    Tuple(_col_eltype(t, n) for n in columnnames(t)))
 
 # --- row access -------------------------------------------------
 
 struct CTDSRows
-    cols::Vector{Column}
+    cols::Vector{AbstractVector}
     names::Vector{Symbol}
     n::Int
 end
 
-function Tables.rows(t::Table)
-    CTDSRows(Column[column(t, c.name) for c in t.desc.columns],
-             Symbol.(columnnames(t)), t.rows)
+function Tables.rows(t::AbstractTable)
+    CTDSRows(AbstractVector[column(t, n) for n in columnnames(t)],
+             Symbol.(columnnames(t)), nrow(t))
 end
 
 Base.length(r::CTDSRows) = r.n
@@ -61,10 +55,10 @@ function Tables.getcolumn(row::CTDSRow, nm::Symbol)
 end
 
 # `for r in table`
-Base.length(t::Table) = t.rows
-Base.IteratorSize(::Type{Table}) = Base.HasLength()
-Base.eltype(::Type{Table}) = CTDSRow
-function Base.iterate(t::Table, state=(Tables.rows(t), 1))
+Base.length(t::AbstractTable) = nrow(t)
+Base.IteratorSize(::Type{<:AbstractTable}) = Base.HasLength()
+Base.eltype(::Type{<:AbstractTable}) = CTDSRow
+function Base.iterate(t::AbstractTable, state=(Tables.rows(t), 1))
     r, i = state
     i > r.n && return nothing
     (CTDSRow(r, i), (r, i + 1))

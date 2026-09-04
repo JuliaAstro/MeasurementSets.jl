@@ -2,8 +2,8 @@
 
 struct MeasurementSet
     path::String
-    data::Table                     # the MAIN table
-    tables::Dict{String,Table}      # subtable cache, lazily populated
+    data::AbstractTable                  # the MAIN table (may be a ConcatTable for an MMS)
+    tables::Dict{String,AbstractTable}   # subtable cache, lazily populated
 end
 
 """
@@ -14,7 +14,7 @@ Subtables are read on first access via `getproperty` / `subtable`.
 """
 function MeasurementSet(path::AbstractString)
     dir = String(rstrip(path, '/'))
-    MeasurementSet(dir, readtable(dir), Dict{String,Table}())
+    MeasurementSet(dir, readtable(dir), Dict{String,AbstractTable}())
 end
 
 Base.propertynames(ms::MeasurementSet) =
@@ -33,7 +33,24 @@ Read (and cache) the subtable referenced by keyword `name` in MAIN.
 function subtable(ms::MeasurementSet, name::String)
     cache = getfield(ms, :tables)
     haskey(cache, name) && return cache[name]
-    for (kw, p) in subtables(getfield(ms, :data))
+    data = getfield(ms, :data)
+
+    # MMS: a keyword subtable listed in the ConcatTable is itself concatenated
+    if data isa ConcatTable && name in data.subtabnames
+        subs = AbstractTable[]
+        for p in data.parts, (kw, pth) in subtables(p)
+            kw == name && (push!(subs, readtable(pth)); break)
+        end
+        isempty(subs) && throw(KeyError(name))
+        off = zeros(Int, length(subs) + 1)
+        for (i, s) in enumerate(subs); off[i+1] = off[i] + nrow(s); end
+        t = ConcatTable(joinpath(getfield(ms, :path), name), subs, off,
+                        String[], "", "", "")
+        cache[name] = t
+        return t
+    end
+
+    for (kw, p) in subtables(data)
         if kw == name
             t = readtable(p)
             cache[name] = t
@@ -51,6 +68,6 @@ Base.getindex(ms::MeasurementSet, name::Symbol) = getfield(ms, :data)[name]
 
 function Base.show(io::IO, ms::MeasurementSet)
     print(io, "MeasurementSet(\"", basename(getfield(ms, :path)), "\", ",
-          getfield(ms, :data).rows, " rows, ",
+          nrow(getfield(ms, :data)), " rows, ",
           length(subtablenames(ms)), " subtables)")
 end

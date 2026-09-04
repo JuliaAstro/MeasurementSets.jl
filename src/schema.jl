@@ -282,33 +282,34 @@ stdtable(name::AbstractString) = SCHEMAVER2[uppercase(name)]
 stdcolumns(name::AbstractString) = stdtable(name).columns
 
 """
-    validate(t::Table; table="MAIN") -> Vector{String}
+    validate(t::AbstractTable; table="MAIN") -> Vector{String}
 
 Check `t` against the standard schema for `table`.  Returns a list of
 issues (missing required column, element-type mismatch, missing required
 subtable, unexpected keyword value); empty means conformant.  Never throws.
 """
-function validate(t::Table; table::AbstractString="MAIN")
+function validate(t::AbstractTable; table::AbstractString="MAIN")
     issues = String[]
     std = get(SCHEMAVER2, uppercase(table), nothing)
     std === nothing && return ["no standard schema for table \"$table\""]
 
-    have = Dict(c.name => c for c in t.desc.columns)
+    have = Set(columnnames(t))
     for sc in std.columns
-        col = get(have, sc.name, nothing)
-        if col === nothing
+        if !(sc.name in have)
             sc.required && push!(issues, "missing required column $(sc.name)")
             continue
         end
+        col = columndesc(t, sc.name)
         sc.type == col.type || push!(issues,
             "column $(sc.name): type $(col.type), expected $(sc.type)")
     end
 
+    kws = keywords(t)
     for (kw, val) in std.keywords
-        if !haskey(t.desc.public, kw)
+        if !haskey(kws, kw)
             push!(issues, "missing required keyword $kw")
-        elseif val !== nothing && t.desc.public[kw] != val
-            push!(issues, "keyword $kw = $(t.desc.public[kw]), expected $val")
+        elseif val !== nothing && kws[kw] != val
+            push!(issues, "keyword $kw = $(kws[kw]), expected $val")
         end
     end
 

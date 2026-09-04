@@ -25,7 +25,8 @@ include("create.jl")
 include("edit.jl")
 include("resync.jl")
 
-export Table, readtable, columnnames, columndesc, keywords, subtables, nrow
+export AbstractTable, Table, RefTable, ConcatTable
+export readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames
 export Record, SubTable, ColumnDesc, TableDesc, CasaType
 export VariableShape, VariableDims, isarray

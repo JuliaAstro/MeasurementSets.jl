@@ -383,6 +383,8 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
     mkpath(dir)
 
     main = getfield(ms, :data)
+    main isa Table || error("write_ms: MAIN is a $(typeof(main)); " *
+                            "writing a reference / concat table is not supported")
     mrows = rows === Colon() ? (1:main.rows) : rows
     want(kw) = subtables === Colon() || kw in subtables
 
@@ -395,6 +397,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
         catch e
             @warn "skipping subtable $kw" err=e; continue
         end
+        sub isa Table || (@warn "skipping non-plain subtable $kw" typeof(sub); continue)
         _copy_table(joinpath(dir, kw), sub, 1:sub.rows)
         push!(written, kw)
     end

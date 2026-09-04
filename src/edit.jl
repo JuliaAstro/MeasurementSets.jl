@@ -50,6 +50,8 @@ Open the CTDS table at `path` for update.
 """
 function edit(path::AbstractString)
     r = readtable(String(rstrip(path, '/')))
+    r isa Table || error("edit: $(r isa RefTable ? "RefTable" : "ConcatTable") " *
+                         "at $path — in-place edit is not supported")
     EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
               Dict{String,Dict{Int,Any}}(),
               Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false)

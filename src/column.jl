@@ -111,6 +111,54 @@ end
 Base.getindex(c::Column, r::AbstractVector{<:Integer}) = [c[i] for i in r]
 Base.collect(c::Column) = c[:]
 
+# --- reference / concatenation views --------------------------------
+
+"A column of a [`RefTable`](@ref): row `i` reads parent row `rows[i]`."
+struct MappedColumn{T,P<:AbstractVector} <: AbstractVector{T}
+    parent::P                # a Column of the parent table
+    rows::Vector{Int}        # 1-based parent row per ref row
+end
+
+Base.size(m::MappedColumn) = (length(m.rows),)
+Base.IndexStyle(::Type{<:MappedColumn}) = IndexLinear()
+function Base.getindex(m::MappedColumn, i::Int)
+    @boundscheck checkbounds(m, i)
+    @inbounds m.parent[m.rows[i]]
+end
+Base.getindex(m::MappedColumn, ::Colon) = m.parent[m.rows]
+Base.getindex(m::MappedColumn, r::AbstractVector{<:Integer}) = m.parent[m.rows[r]]
+Base.collect(m::MappedColumn) = m[:]
+
+"A column of a [`ConcatTable`](@ref): rows run through `parts` per `offsets`."
+struct ConcatColumn{T} <: AbstractVector{T}
+    parts::Vector{<:AbstractVector}
+    offsets::Vector{Int}     # cumulative; offsets[end] == length
+end
+
+Base.size(c::ConcatColumn) = (c.offsets[end],)
+Base.IndexStyle(::Type{<:ConcatColumn}) = IndexLinear()
+function Base.getindex(c::ConcatColumn, i::Int)
+    @boundscheck checkbounds(c, i)
+    k = searchsortedlast(c.offsets, i - 1)
+    @inbounds c.parts[k][i - c.offsets[k]]
+end
+Base.getindex(c::ConcatColumn, ::Colon) =
+    isempty(c.parts) ? eltype(c)[] : reduce(vcat, (collect(p[:]) for p in c.parts))
+Base.getindex(c::ConcatColumn, r::AbstractVector{<:Integer}) = [c[i] for i in r]
+Base.collect(c::ConcatColumn) = c[:]
+
+function column(t::RefTable, name::AbstractString)
+    haskey(t.namemap, name) || throw(KeyError(name))
+    pc = column(t.parent, t.namemap[name])
+    MappedColumn{eltype(pc),typeof(pc)}(pc, t.rows)
+end
+
+function column(t::ConcatTable, name::AbstractString)
+    pcs = AbstractVector[column(p, name) for p in t.parts]
+    T = mapreduce(eltype, typejoin, pcs)
+    ConcatColumn{T}(pcs, t.offsets)
+end
+
 # Rows `r` of `c` as a `Vector{Any}` of plain values / dense `Array`s (lazy
 # wrappers collapsed so the reader's nested wrapper types stay out of
 # downstream inference).  Per-cell; a whole-column fast path here trips a
@@ -131,17 +179,17 @@ end
 
 Read an entire column's data (eager; equivalent to `column(t, name)[:]`).
 """
-getcolumn(t::Table, name::AbstractString) = column(t, name)[:]
+getcolumn(t::AbstractTable, name::AbstractString) = column(t, name)[:]
 
 """
     getcell(t, name, row) -> value
 
 Read one cell (`row` is 1-based).
 """
-getcell(t::Table, name::AbstractString, row::Integer) = column(t, name)[row]
+getcell(t::AbstractTable, name::AbstractString, row::Integer) = column(t, name)[row]
 
-Base.getindex(t::Table, name::AbstractString) = column(t, name)
-Base.getindex(t::Table, name::Symbol) = column(t, String(name))
+Base.getindex(t::AbstractTable, name::AbstractString) = column(t, name)
+Base.getindex(t::AbstractTable, name::Symbol) = column(t, String(name))
 
 getcolumn(ms::MeasurementSet, sub::AbstractString, name::AbstractString) =
     column(subtable(ms, sub), name)[:]

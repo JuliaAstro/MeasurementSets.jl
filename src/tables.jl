@@ -135,7 +135,17 @@ end
 
 # --- the table ---------------------------------------------------
 
-struct Table
+"""
+Common supertype of the casacore table kinds this package can read:
+[`Table`](@ref) (a plain table), [`RefTable`](@ref) (a row-number
+reference into a parent table), and [`ConcatTable`](@ref) (a virtual
+row-wise concatenation of same-schema tables).  All three answer
+`nrow` / `columnnames` / `columndesc` / `keywords` / `subtables` /
+`column` and interoperate with `Tables.jl`.
+"""
+abstract type AbstractTable end
+
+struct Table <: AbstractTable
     path::String
     type::String               # table.info Type
     subtype::String            # table.info SubType
@@ -147,6 +157,39 @@ struct Table
     managers::Vector{DataManagerInfo}
     syncmod::Int64             # table.lock modify counter at open (-1 = no sync blob)
     lockpath::String           # joinpath(path, "table.lock")
+end
+
+"""
+A casacore RefTable: a persistent row-number reference into a `parent`
+table (what a TaQL `SELECT ... GIVING '<path>'` row selection or
+`table.query` writes).  Stores no cell data of its own — every read
+delegates to `parent` through `rows` (1-based parent row per ref row).
+"""
+struct RefTable <: AbstractTable
+    path::String
+    parent::AbstractTable
+    rows::Vector{Int}                 # 1-based parent row per ref row
+    namemap::Dict{String,String}      # ref column name => parent column name
+    order::Vector{String}             # ref column order
+    type::String
+    subtype::String
+    readme::String
+end
+
+"""
+A casacore ConcatTable: a virtual row-wise concatenation of `parts`
+(same-schema tables — e.g. the MAIN table of a MultiMS).  `offsets` is
+the cumulative row map (`length(parts)+1` entries, `offsets[end]` = total
+rows).  Stores no cell data of its own.
+"""
+struct ConcatTable <: AbstractTable
+    path::String
+    parts::Vector{AbstractTable}
+    offsets::Vector{Int}              # cumulative; offsets[end] == nrow
+    subtabnames::Vector{String}      # keyword subtables to concatenate
+    type::String
+    subtype::String
+    readme::String
 end
 
 nrow(t::Table) = t.rows
@@ -163,6 +206,56 @@ function Base.show(io::IO, t::Table)
           length(t.desc.columns), " columns")
     isempty(t.type) || print(io, ", type=\"", t.type, "\"")
     print(io, ")")
+end
+
+# --- RefTable / ConcatTable accessors ---------------------------
+
+nrow(t::RefTable) = length(t.rows)
+nrow(t::ConcatTable) = t.offsets[end]
+
+columnnames(t::RefTable) = copy(t.order)
+columnnames(t::ConcatTable) = columnnames(t.parts[1])
+
+# Rebuild a ColumnDesc under a new name (the parent's DM binding is
+# irrelevant for a view and is carried through unused).
+function _rename_columndesc(c::ColumnDesc, newname::AbstractString)
+    ColumnDesc(String(newname), c.comment, c.manager, c.group, c.type,
+               c.classname, c.shape, c.option, c.maxlength, c.keywords,
+               c.default, c.sequ)
+end
+
+function columndesc(t::RefTable, name::AbstractString)
+    haskey(t.namemap, name) || throw(KeyError(name))
+    _rename_columndesc(columndesc(t.parent, t.namemap[name]), name)
+end
+
+function columndesc(t::ConcatTable, name::AbstractString)
+    c0 = columndesc(t.parts[1], name)
+    # casacore ConcatTable::initialize drops a fixed cell shape (and the
+    # FIXEDSHAPE option) when it differs across parts.
+    if c0.shape isa Dims && !isempty(c0.shape) &&
+       any(columndesc(p, name).shape != c0.shape for p in @view t.parts[2:end])
+        return ColumnDesc(c0.name, c0.comment, c0.manager, c0.group, c0.type,
+                          c0.classname, VariableShape(),
+                          c0.option & ~COLOPT_FIXEDSHAPE, c0.maxlength,
+                          c0.keywords, c0.default, c0.sequ)
+    end
+    return c0
+end
+
+keywords(t::RefTable) = keywords(t.parent)
+keywords(t::ConcatTable) = keywords(t.parts[1])
+
+subtables(t::RefTable) = subtables(t.parent)
+subtables(t::ConcatTable) = subtables(t.parts[1])
+
+function Base.show(io::IO, t::RefTable)
+    print(io, "RefTable(\"", basename(t.path), "\", ", nrow(t), " of ",
+          nrow(t.parent), " rows, ", length(t.order), " columns)")
+end
+function Base.show(io::IO, t::ConcatTable)
+    print(io, "ConcatTable(\"", basename(t.path), "\", ", nrow(t), " rows, ",
+          length(t.parts), " parts)")
 end
 
 """
@@ -182,7 +275,33 @@ end
 function _subtable_path(parent::String, stored::String)
     s = strip(stored)
     startswith(s, "Table:") && (s = strip(s[7:end]))
-    normpath(isabspath(s) ? String(s) : joinpath(parent, s))
+    normpath(isabspath(s) ? _expandpath(String(s)) : joinpath(parent, s))
+end
+
+# casacore expands `~` and `$VAR` in a stored table name (Path::expandedName).
+function _expandpath(s::AbstractString)
+    s = expanduser(String(s))
+    occursin('$', s) || return s
+    s = replace(s, r"\$\{(\w+)\}" => m -> get(ENV, m[3:end-1], m))
+    s = replace(s, r"\$(\w+)"     => m -> get(ENV, m[2:end], m))
+    return s
+end
+
+# Resolve a table name stored by casacore's Path::stripDirectory (used for a
+# RefTable's parent and a ConcatTable's parts) against `selfdir`, the
+# ref/concat table's own absolute directory.  casacore strips every leading
+# "./" pair, then: 2 chars removed => sibling; >=4 => inside selfdir;
+# 0 => the name is absolute / $VAR / ~ and used as-is.
+function _resolve_tabpath(stored::AbstractString, selfdir::AbstractString)
+    s = String(stored)
+    n = 0
+    while startswith(s[n+1:end], "./")
+        n += 2
+    end
+    rest = s[n+1:end]
+    n == 0 && return normpath(_expandpath(s))
+    n == 2 && return normpath(joinpath(dirname(String(selfdir)), rest))
+    return normpath(joinpath(String(selfdir), rest))
 end
 
 # --- readers ----------------------------------------------------
@@ -200,10 +319,14 @@ function read_tableinfo(dir::String)
 end
 
 """
-    readtable(path) -> Table
+    readtable(path) -> Table | RefTable | ConcatTable
 
 Read the metadata (description, keywords, data-manager bindings, row count)
 of the casacore table directory at `path`.  Column *data* is not read.
+
+Returns a [`RefTable`](@ref) or [`ConcatTable`](@ref) when `path` is a
+reference / concatenation table (its parent(s) are opened recursively);
+otherwise a plain [`Table`](@ref).
 
 A shared (read) lock on `<path>/table.lock` is held only while `table.dat`
 is slurped; the row count then comes from the `table.lock` sync blob when
@@ -233,7 +356,10 @@ function readtable(path::AbstractString)
     syncmod = sync.present ? sync.modifycounter : Int64(-1)
     format = read_u32(a)
     endian = format == 0 ? :big : :little
-    read_string(a)                                  # "PlainTable"
+    subtype = read_string(a)                         # "PlainTable" | "RefTable" | "ConcatTable"
+
+    subtype == "RefTable"    && return _read_reftable(a, dir, tp, st, readme)
+    subtype == "ConcatTable" && return _read_concattable(a, dir, tp, st, readme)
 
     desc = read_tabledesc(a)
     version == 1 && read_record(a)                  # legacy separate keyword set
@@ -252,6 +378,52 @@ function readtable(path::AbstractString)
                       desc.private, cols)
 
     return Table(dir, tp, st, readme, version, nr, endian, desc2, dms, syncmod, lockpath)
+end
+
+# open a parent / part table, adding context on failure
+function _open_referenced(stored::AbstractString, selfdir::AbstractString, what::AbstractString)
+    p = _resolve_tabpath(stored, selfdir)
+    isdir(p) || throw(ArgumentError(
+        "$what table not found: \"$p\" (stored as \"$stored\", referenced by $selfdir)"))
+    return readtable(p)
+end
+
+# RefTable body: str parent; SimpleOrderedMap nameMap; (rver>1) Array<str>
+# names; rootNrow; u8 rowOrder; nrrow; nrrow raw parent row numbers.
+function _read_reftable(a::AipsIO, dir::String, tp, st, readme)
+    rver = Int(getstart(a, "RefTable"))
+    rver <= 3 || error("RefTable version $rver not supported")
+    parent = _open_referenced(read_string(a), dir, "RefTable parent")
+    namemap = Dict{String,String}(read_map(a, String, String))
+    order = rver > 1 ? read_array(a, String)[2] : sort!(collect(keys(namemap)))
+    T = rver > 2 ? UInt64 : UInt32
+    read_scalar(a, T)                                # rootNrow (unused; parent.nrow wins)
+    read(a.io, UInt8)                                # rowOrder flag
+    nrrow = Int(read_scalar(a, T))
+    rows = _read_rownrs(a, T, nrrow)
+    getend(a)
+    # drop columns the parent no longer has (casacore RefTable::makeDesc)
+    pcols = Set(columnnames(parent))
+    filter!(n -> haskey(namemap, n) && namemap[n] in pcols, order)
+    return RefTable(dir, parent, rows, namemap, order, tp, st, readme)
+end
+
+# ConcatTable body: u32 nrtab; nrtab str subtable names; Block<str> keyword
+# subtable names.  Row offsets are recomputed from each part's nrow.
+function _read_concattable(a::AipsIO, dir::String, tp, st, readme)
+    cver = Int(getstart(a, "ConcatTable"))
+    cver == 0 || error("ConcatTable version $cver not supported")
+    nrtab = Int(read_u32(a))
+    names = [read_string(a) for _ in 1:nrtab]
+    subs = read_block(a, String)
+    getend(a)
+    isempty(names) && error("ConcatTable at $dir references no tables")
+    parts = AbstractTable[_open_referenced(n, dir, "ConcatTable part") for n in names]
+    offsets = zeros(Int, length(parts) + 1)
+    for (i, p) in enumerate(parts)
+        offsets[i+1] = offsets[i] + nrow(p)
+    end
+    return ConcatTable(dir, parts, offsets, subs, tp, st, readme)
 end
 
 function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})
