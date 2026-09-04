@@ -146,6 +146,13 @@ Locking is automatic and degrades to a silent no-op wherever it is
 unavailable (NFS without a lock daemon, a read-only directory,
 unsupported OS).  macOS + Linux.
 
+A contended acquire also announces itself in `table.lock`'s cooperative
+request-id list (and removes itself again once done), the same way a
+real casacore process would — so a real `casa` / python-casacore peer
+holding the table in its default `AutoLocking` mode can see us waiting
+and voluntarily release early, rather than us sitting out the full poll
+timeout (Phase 17).
+
 **Phase 14 — reference & concatenation tables (read).**
 `readtable` now recognises the other two first-class casacore table
 kinds and returns a matching view:
@@ -192,8 +199,10 @@ Not yet implemented: editing a persisted RefTable/ConcatTable in place;
 concatenating keyword subtables on write; hypercube coordinate / id
 columns; `TiledDataStMan`; `ForwardColumnEngine` / `VirtualTaQLColumn` /
 `BitFlagsEngine`; adding a column (or engine) to an existing table in an
-edit session; free-list bucket reuse; in-place per-data-manager `resync`;
-casacore's cooperative lock hand-off (request-id list).
+edit session; in-place per-data-manager `resync`. (Free-list bucket
+reuse doesn't apply here — every edit fully regenerates any touched
+storage-manager file from resolved data, so nothing accumulates across
+edits the way casacore's own in-place bucket model can.)
 
 **Phase 16 — `copyms` performance.** A full, in-order table/subtable copy
 (every subtable copy, and the default `copyms`/`copytable` with no `rows=`
@@ -202,6 +211,14 @@ path instead of cell by cell — roughly halves the time on a large,
 mostly-indirect-array subtable (925,645-row `POINTING`: 68 s → 35 s on
 the reference MS) and more on a scalar/fixed-shape/tiled-heavy one. A
 `RefTable` selection or an explicit partial row range is unaffected.
+
+**Phase 17 — cooperative lock hand-off.** Closes the one documented gap
+in Phase 13's locking: a contended acquire announces this process in
+`table.lock`'s request-id list and removes itself again once done
+(casacore `LockFile::addReqId`/`removeReqId`), so a real casacore peer
+holding the table in its default `AutoLocking` mode can see us waiting
+and release early. See the Phase 13 section above for the usage example
+— this is automatic, no API change.
 
 ## Usage
 
