@@ -266,7 +266,26 @@ function _copy_table(dir::AbstractString, t::Table, r;
     tiled = Dict{Int,Vector{String}}()       # source sequ -> column names (desc order)
     tiledkind = Dict{Int,String}()           # source sequ -> manager type string
     skipped = String[]
+
+    # --- virtual column engines: re-encode; skip the implied companions ---
+    engines = Dict{String,NamedTuple}()
+    implied = Set{String}()
     for c in t.desc.columns
+        _is_engine_dm(_source_dm(t, c)) || continue
+        kw = c.keywords
+        sn = String(get(kw, "_BaseMappedArrayEngine_Name", ""))
+        isempty(sn) || push!(implied, sn)
+        for k in ("_ScaledArrayEngine_", "_ScaledComplexData_",
+                  "_CompressComplex_", "_CompressFloat_")
+            for suf in ("ScaleName", "OffsetName")
+                nm = String(get(kw, k * suf, ""))
+                isempty(nm) || push!(implied, nm)
+            end
+        end
+    end
+
+    for c in t.desc.columns
+        c.name in implied && continue
         col = try
             column(t, c.name)
         catch
@@ -277,8 +296,13 @@ function _copy_table(dir::AbstractString, t::Table, r;
         catch
             push!(skipped, c.name); continue
         end
-        # preserve the source's storage-manager kind
         dm = _source_dm(t, c)
+        if _is_engine_dm(dm)
+            engines[c.name] = _engine_spec_from_source(t, c, dm)
+            push!(descs, c); push!(data, vals)
+            continue
+        end
+        # preserve the source's storage-manager kind
         if occursin("Tiled", dm)
             push!(get!(() -> String[], tiled, c.sequ), c.name)
             tiledkind[c.sequ] = dm
@@ -308,9 +332,32 @@ function _copy_table(dir::AbstractString, t::Table, r;
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(r), endian=:little,
                       public, private=Record(), tsm=tsmg, tcm=tcmg, tcell=tcellg, ism,
-                      tablename=t.desc.name, type=t.type, subtype=t.subtype,
+                      engines, tablename=t.desc.name, type=t.type, subtype=t.subtype,
                       readme=t.readme)
     return descs
+end
+
+# reconstruct the `engines=` spec for a source virtual column
+function _engine_spec_from_source(t::Table, c::ColumnDesc, dm::AbstractString)
+    kw = c.keywords
+    kind = _engine_kind(dm, kw)
+    pfx = get(_ENGINE_PREFIX, kind, "")
+    storedname = String(kw["_BaseMappedArrayEngine_Name"])
+    sd = _source_dm(t, columndesc(t, storedname))
+    stored_type = columndesc(t, storedname).type
+    kind === :mapped && return (; kind, stored = occursin("Tiled", sd) ? :tsm : :ssm,
+                                 stored_type, storedname)
+    autoscale = kind in (:compressfloat, :compresscomplex, :compresscomplexsd) &&
+                Bool(get(kw, pfx * "AutoScale", false))
+    scale  = get(kw, pfx * "Scale", nothing)
+    offset = get(kw, pfx * "Offset", nothing)
+    scalename  = String(get(kw, pfx * "ScaleName", ""))
+    offsetname = String(get(kw, pfx * "OffsetName", ""))
+    return (; kind, stored = occursin("Tiled", sd) ? :tsm : :ssm, stored_type,
+            scale = autoscale ? nothing : scale, offset = autoscale ? nothing : offset,
+            autoscale, storedname,
+            scalename = isempty(scalename) ? nothing : scalename,
+            offsetname = isempty(offsetname) ? nothing : offsetname)
 end
 
 # the storage-manager instance a source column is actually bound to

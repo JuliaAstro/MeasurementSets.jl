@@ -64,6 +64,7 @@ _nrows(t::EditTable) = length(t.rowmap)
 function _dmkind(inst)
     inst isa StandardStMan && return :ssm
     inst isa IncrementalStMan && return :ism
+    inst isa VirtualEngine && return :engine
     inst isa TiledStMan || return :ssm
     inst.kind === :column ? :tcm : inst.kind === :cell ? :tcell : :tsm
 end
@@ -322,10 +323,20 @@ function removecolumn!(t::EditTable, name::AbstractString)
         filter!(x -> x[1].name != name, t.addcols)
         return t
     end
-    columndesc(t.reader, name)                        # KeyError if absent
+    c = columndesc(t.reader, name)                    # KeyError if absent
     push!(t.dropcols, name)
     delete!(t.override, name)
     delete!(t.tsmedit, name)
+    if _is_engine_dm(c.manager)                       # drop the implied companion columns too
+        for kk in ("_BaseMappedArrayEngine_Name", "_ScaledArrayEngine_ScaleName",
+                   "_ScaledArrayEngine_OffsetName", "_ScaledComplexData_ScaleName",
+                   "_ScaledComplexData_OffsetName", "_CompressComplex_ScaleName",
+                   "_CompressComplex_OffsetName", "_CompressFloat_ScaleName",
+                   "_CompressFloat_OffsetName")
+            v = String(get(c.keywords, kk, ""))
+            isempty(v) || push!(t.dropcols, v)
+        end
+    end
     return t
 end
 
@@ -340,12 +351,26 @@ function _append_only(t::EditTable)
 end
 
 _has_tcell(t::EditTable) = any(m -> m.name == "TiledCellStMan", t.reader.managers)
+_has_engine(t::EditTable) = any(m -> _is_engine_dm(m.name), t.reader.managers)
+
+# a virtual-engine column that was overwritten this session
+function _engine_touched(t::EditTable)
+    for m in t.reader.managers
+        _is_engine_dm(m.name) || continue
+        vi = findfirst(c -> c.sequ == m.sequ, t.reader.desc.columns)
+        vi === nothing && continue
+        nm = t.reader.desc.columns[vi].name
+        (haskey(t.override, nm) || haskey(t.tsmedit, nm)) && return true
+    end
+    return false
+end
 
 function Base.flush(t::EditTable)
     t.flushed && return t
     grew = length(t.rowmap) > t.reader.rows
     if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
-       !(grew && _has_tcell(t))                       # TiledCellStMan can't grow in place
+       !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
+       !(grew && _has_engine(t)) && !_engine_touched(t)  # engines re-encode on regen
         _flush_fast(t)
     else
         _flush_regen(t)
@@ -464,6 +489,39 @@ function _flush_regen(t::EditTable)
     resolved = Dict{String,Vector{Any}}()
     getres(nm) = get!(() -> _resolve(t, nm), resolved, nm)
 
+    # --- virtual engines: re-encode a touched / row-changed engine column,
+    #     feeding the fresh stored / scale / offset arrays to their SM groups
+    engine_desc = Dict{String,ColumnDesc}()          # virtual name -> desc w/ refreshed keywords
+    engine_regen_sequ = Set{Int}()
+    for c in kept
+        kindof[c.name] === :engine || continue
+        (rows_changed || touched(c.name)) || continue
+        e = _dm_instance(rd, c.sequ)                  # VirtualEngine
+        kind = e.kind
+        vtype = c.type
+        st_kw = c.keywords
+        storedname  = e.storedname
+        scalename   = e.scalename
+        offsetname  = e.offsetname
+        vvals = getres(c.name)
+        storeddata, kw, sc, of = encode_engine(kind, vvals, vtype;
+            scale = e.autoscale ? nothing : e.scale,
+            offset = e.autoscale ? nothing : e.offset,
+            autoscale = e.autoscale,
+            stored_type = columndesc(rd, storedname).type,
+            storedname, scalename, offsetname)
+        resolved[storedname] = storeddata
+        push!(engine_regen_sequ, seqof[storedname])
+        if sc !== nothing
+            resolved[scalename]  = Any[x for x in sc]
+            resolved[offsetname] = Any[x for x in of]
+            push!(engine_regen_sequ, seqof[scalename], seqof[offsetname])
+        end
+        engine_desc[c.name] = ColumnDesc(c.name, c.comment, c.manager, c.group,
+            c.type, c.classname, VariableShape(), c.option, c.maxlength,
+            _merge_kw(c.keywords, kw), c.default, c.sequ)
+    end
+
     varndim = Dict{String,Int}()
     for nm in order
         descfor(nm).shape isa VariableShape || continue
@@ -477,7 +535,14 @@ function _flush_regen(t::EditTable)
     for sequ in sort!(collect(keys(groups)))
         names = groups[sequ]
         k = kindof[names[1]]
-        regen = rows_changed || lost(sequ) || any(touched, names)
+        regen = rows_changed || lost(sequ) || any(touched, names) || sequ in engine_regen_sequ
+
+        if k === :engine                              # writes no file, empty block
+            nm = names[1]
+            push!(dms, DMWrite(descfor(nm).manager, sequ, UInt8[]))
+            normof[nm] = _withsequ(get(engine_desc, nm, descfor(nm)), sequ)
+            continue
+        end
 
         if !regen
             mi = findfirst(m -> m.sequ == sequ, rd.managers)
