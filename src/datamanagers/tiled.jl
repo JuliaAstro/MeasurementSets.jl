@@ -128,7 +128,7 @@ function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::Table)
     return version
 end
 
-function open_tiledstman(t::Table, dm::DataManagerInfo)
+function Base.open(::Type{TiledStMan}, t::Table, dm::DataManagerInfo)
     path = joinpath(t.path, "table.f$(dm.sequ)")
     a = AipsIO(read(path); endian=:big)             # header file is big-endian
     tsm = TiledStMan(path, t.endian, :column, dm.sequ, CasaType[], "", 0,
@@ -292,9 +292,12 @@ function read_cube_whole(tsm::TiledStMan, colidx::Int, cube::TSMCube)
 end
 
 """
-    tsm_getcell(tsm, colidx, coldesc, row) -> Array   (1-based row)
+    getcell(tsm::TiledStMan, colidx, coldesc, row, cols) -> Array   (1-based row)
+
+`cols` is unused (see [`StandardStMan`'s `getcell`](@ref) for why every
+data-manager's `getcell` method shares this signature).
 """
-function tsm_getcell(tsm::TiledStMan, colidx::Int, ::ColumnDesc, row::Integer)
+function getcell(tsm::TiledStMan, colidx::Int, ::ColumnDesc, row::Integer, ::Integer)
     cube, p = _cube_for_row(tsm, row)
     isnull(cube) && error("row $row of this column has no stored data " *
                           "(the tiled cell is undefined)")
@@ -342,9 +345,11 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
 end
 
 """
-    tsm_getcolumn(tsm, colidx, coldesc, nrow) -> Vector{Array}
+    getcolumn(tsm::TiledStMan, colidx, coldesc, nrow, cols) -> Vector{Array}
+
+`cols` is unused (see [`getcell`](@ref)).
 """
-function tsm_getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Integer)
+function getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Integer, ::Integer)
     if tsm.kind === :cell
         return [read_cube_whole(tsm, colidx, tsm.cubes[r]) for r in 1:nrow]
     end
@@ -366,7 +371,7 @@ function tsm_getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Intege
             fast === nothing || return fast
         end
     end
-    return [tsm_getcell(tsm, colidx, c, r) for r in 1:nrow]
+    return [getcell(tsm, colidx, c, r, 1) for r in 1:nrow]
 end
 
 # =====================  writer  ====================================

@@ -100,7 +100,7 @@ function _engine_typestr(kind::Symbol, vtype::CasaType, stored_type::CasaType)
     error("unknown engine kind $kind")
 end
 
-function open_engine(t::Table, dm::DataManagerInfo)
+function Base.open(::Type{VirtualEngine}, t::Table, dm::DataManagerInfo)
     vi = findfirst(c -> c.sequ == dm.sequ, t.desc.columns)
     vi === nothing &&
         error("virtual engine \"$(dm.name)\" (seq $(dm.sequ)) has no bound column")
@@ -241,15 +241,20 @@ function _decode_ccomplexsd(st::AbstractArray{<:Integer}, scale::Float32, offset
 end
 
 # --- Column dispatch entry points -----------------------------
+#
+# A virtual engine binds exactly one (virtual) column per instance, so
+# the DM-local `index`/`cols` that every other data manager's `getcell`/
+# `getcolumn` method takes (for dispatch-signature uniformity -- see
+# `column.jl`) are always `(1, 1)` here and unused.
 
-function engine_getcell(e::VirtualEngine, ::ColumnDesc, row::Integer)
+function getcell(e::VirtualEngine, ::Integer, ::ColumnDesc, row::Integer, ::Integer)
     st = Array(_eng_stored(e)[row])
     return _decode(e.kind, st, _row_scale(e, row), _row_offset(e, row),
                    juliatype(e.vdesc.type))
 end
 
-engine_getcolumn(e::VirtualEngine, c::ColumnDesc, nrow::Integer) =
-    [engine_getcell(e, c, r) for r in 1:nrow]
+getcolumn(e::VirtualEngine, index::Integer, c::ColumnDesc, nrow::Integer, cols::Integer) =
+    [getcell(e, index, c, r, cols) for r in 1:nrow]
 
 # =====================  writer  ==================================
 

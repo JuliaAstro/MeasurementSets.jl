@@ -117,14 +117,14 @@ mutable struct DyscoStMan
 end
 
 """
-    open_dyscostman(t::Table, dm::DataManagerInfo) -> DyscoStMan
+    open(::Type{DyscoStMan}, t::Table, dm::DataManagerInfo) -> DyscoStMan
 
 Parse the private `table.f<seq>` header + per-column headers.  `error`s
 clearly (naming the unsupported code) for any file-format version,
 distribution, or normalization outside the supported AF +
 TruncatedGaussian, version-1.0 combo.
 """
-function open_dyscostman(t::Table, dm::DataManagerInfo)
+function Base.open(::Type{DyscoStMan}, t::Table, dm::DataManagerInfo)
     path = joinpath(t.path, "table.f$(dm.sequ)")
     isfile(path) || error("DyscoStMan: missing file \"$path\"")
     sz = filesize(path)
@@ -290,14 +290,16 @@ function _dysco_decode_block(dm::DyscoStMan, colidx::Int, blockIndex::Int, nvali
 end
 
 """
-    dysco_getcell(dm, colidx, c, row) -> Array
+    getcell(dm::DyscoStMan, colidx, c, row, cols) -> Array
 
 Decode `row`'s block and return that one cell (1-based `row`).  Re-decodes
-the whole block on every call -- the same trade-off `ssm_getcell`'s
-indirect-array branch already accepts.  A whole-column caller should
-prefer [`dysco_getcolumn`](@ref).
+the whole block on every call -- the same trade-off `StandardStMan`'s
+`getcell` indirect-array branch already accepts.  A whole-column caller
+should prefer [`getcolumn`](@ref).  `cols` is unused (see `StandardStMan`'s
+`getcell` docstring for why every data manager's `getcell` shares one
+signature).
 """
-function dysco_getcell(dm::DyscoStMan, colidx::Int, ::ColumnDesc, row::Integer)
+function getcell(dm::DyscoStMan, colidx::Int, ::ColumnDesc, row::Integer, ::Integer)
     npol, nchan = dm.colShape[colidx]
     T = dm.colKind[colidx] === :weight ? Float32 : ComplexF32
     rpb = dm.rowsPerBlock
@@ -311,13 +313,13 @@ function dysco_getcell(dm::DyscoStMan, colidx::Int, ::ColumnDesc, row::Integer)
 end
 
 """
-    dysco_getcolumn(dm, colidx, c, nrow) -> Vector{<:Array}
+    getcolumn(dm::DyscoStMan, colidx, c, nrow, cols) -> Vector{<:Array}
 
 Decode each block exactly once and collect all `nrow` cells -- the
 efficient whole-column path `copyms`/`copytable` use via the identity-copy
-fast path (Phase 16).
+fast path (Phase 16).  `cols` is unused (see [`getcell`](@ref)).
 """
-function dysco_getcolumn(dm::DyscoStMan, colidx::Int, ::ColumnDesc, nrow::Integer)
+function getcolumn(dm::DyscoStMan, colidx::Int, ::ColumnDesc, nrow::Integer, ::Integer)
     npol, nchan = dm.colShape[colidx]
     T = dm.colKind[colidx] === :weight ? Float32 : ComplexF32
     rpb = dm.rowsPerBlock

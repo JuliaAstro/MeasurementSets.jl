@@ -107,15 +107,15 @@ end
     _try(f) = try; f(); nothing; catch e; e; end
 
     write_header(path; version=(2, 0))
-    e1 = _try(() -> MSv2.open_dyscostman(tbl, dm))
+    e1 = _try(() -> open(MSv2.DyscoStMan, tbl, dm))
     @test e1 isa ErrorException && occursin("2.0", e1.msg)
 
     write_header(path; distribution=0)
-    e2 = _try(() -> MSv2.open_dyscostman(tbl, dm))
+    e2 = _try(() -> open(MSv2.DyscoStMan, tbl, dm))
     @test e2 isa ErrorException && occursin("distribution code 0", e2.msg)
 
     write_header(path; normalization=1)
-    e3 = _try(() -> MSv2.open_dyscostman(tbl, dm))
+    e3 = _try(() -> open(MSv2.DyscoStMan, tbl, dm))
     @test e3 isa ErrorException && occursin("normalization code 1", e3.msg)
 end
 

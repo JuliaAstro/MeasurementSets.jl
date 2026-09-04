@@ -6,23 +6,39 @@ const _DM_CACHE = IdDict{Table,Dict{Int,Any}}()
 
 _dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager")
 
+# The on-disk `DataManagerInfo.name` is a string, which Julia can't dispatch
+# on directly -- this is the one unavoidable name -> type lookup, isolated
+# here so the actual "open" logic can be ordinary multiple dispatch (see the
+# `Base.open(::Type{<:...}, t::Table, dm::DataManagerInfo)` methods in
+# datamanagers/{standard,tiled,incremental,virtual,dysco}.jl).  The virtual-
+# engine family isn't a fixed set of exact names (templated names like
+# `"ScaledArrayEngine<Float,Int>"`), so it stays a predicate fallback rather
+# than a table entry.
+const _DM_TYPES = Dict{String,Type}(
+    "StandardStMan"    => StandardStMan,
+    "SSM"              => StandardStMan,
+    "TiledShapeStMan"  => TiledStMan,
+    "TiledColumnStMan" => TiledStMan,
+    "TiledCellStMan"   => TiledStMan,
+    "TiledStMan"       => TiledStMan,
+    "IncrementalStMan" => IncrementalStMan,
+    "ISM"              => IncrementalStMan,
+    "DyscoStMan"       => DyscoStMan,
+)
+
+function _dmtype(name::AbstractString)
+    haskey(_DM_TYPES, name) && return _DM_TYPES[name]
+    _is_engine_dm(name) && return VirtualEngine
+    return nothing
+end
+
 function _dm_instance(t::Table, sequ::Int)
     cache = get!(() -> Dict{Int,Any}(), _DM_CACHE, t)
     haskey(cache, sequ) && return cache[sequ]
     dm = t.managers[findfirst(d -> d.sequ == sequ, t.managers)]
-    inst = if dm.name in ("StandardStMan", "SSM")
-        open_standardstman(t, dm)
-    elseif dm.name in ("TiledShapeStMan", "TiledColumnStMan", "TiledCellStMan", "TiledStMan")
-        open_tiledstman(t, dm)
-    elseif dm.name in ("IncrementalStMan", "ISM")
-        open_incrementalstman(t, dm)
-    elseif _is_engine_dm(dm.name)
-        open_engine(t, dm)
-    elseif dm.name == "DyscoStMan"
-        open_dyscostman(t, dm)
-    else
-        error("data manager \"$(dm.name)\" not yet supported (column data)")
-    end
+    T = _dmtype(dm.name)
+    T === nothing && error("data manager \"$(dm.name)\" not yet supported (column data)")
+    inst = open(T, t, dm)
     cache[sequ] = inst
     return inst
 end
@@ -85,33 +101,11 @@ Base.IndexStyle(::Type{<:Column}) = IndexLinear()
 
 function Base.getindex(c::Column, i::Int)
     @boundscheck checkbounds(c, i)
-    inst = c.inst
-    if inst isa StandardStMan
-        ssm_getcell(inst, c.index, c.desc, i)
-    elseif inst isa TiledStMan
-        tsm_getcell(inst, c.index, c.desc, i)
-    elseif inst isa VirtualEngine
-        engine_getcell(inst, c.desc, i)
-    elseif inst isa DyscoStMan
-        dysco_getcell(inst, c.index, c.desc, i)
-    else
-        ism_getcell(inst, c.index, c.desc, i, c.cols)
-    end
+    getcell(c.inst, c.index, c.desc, i, c.cols)
 end
 
 function Base.getindex(c::Column, ::Colon)
-    inst = c.inst
-    if inst isa StandardStMan
-        ssm_getcolumn(inst, c.index, c.desc, c.table.rows)
-    elseif inst isa TiledStMan
-        tsm_getcolumn(inst, c.index, c.desc, c.table.rows)
-    elseif inst isa VirtualEngine
-        engine_getcolumn(inst, c.desc, c.table.rows)
-    elseif inst isa DyscoStMan
-        dysco_getcolumn(inst, c.index, c.desc, c.table.rows)
-    else
-        ism_getcolumn(inst, c.index, c.desc, c.table.rows, c.cols)
-    end
+    getcolumn(c.inst, c.index, c.desc, c.table.rows, c.cols)
 end
 
 Base.getindex(c::Column, r::AbstractVector{<:Integer}) = [c[i] for i in r]

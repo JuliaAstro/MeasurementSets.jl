@@ -128,7 +128,7 @@ function read_ssm_header!(hdr::AipsIO)
     return (; version, size, buckets, indices, first, offset, last, length, nrinx)
 end
 
-function open_standardstman(t::Table, dm::DataManagerInfo)
+function Base.open(::Type{StandardStMan}, t::Table, dm::DataManagerInfo)
     path = joinpath(t.path, "table.f$(dm.sequ)")
     bytes = read(path)
     endian = t.endian
@@ -235,11 +235,14 @@ function _read_bits(ssm::StandardStMan, off::Int, bitstart::Int, n::Int)
 end
 
 """
-    ssm_getcell(ssm, ssmcol, coldesc, row) -> value
+    getcell(ssm::StandardStMan, ssmcol, coldesc, row, cols) -> value
 
-`ssmcol` and `row` are 1-based.
+`ssmcol` and `row` are 1-based.  `cols` (the column count bound to this DM
+instance) is unused here -- SSM columns are addressed by `ssmcol` alone --
+and present only so every data-manager's `getcell` method shares one
+signature for dispatch (see `column.jl`).
 """
-function ssm_getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Integer)
+function getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Integer, ::Integer)
     kind = _ssmkind(c)
     ext = cell_extsize(c)
     off, firstrow = locate(ssm, ssmcol, row)
@@ -363,15 +366,16 @@ function _foreach_bucket(f, ssm::StandardStMan, ssmcol::Int)
 end
 
 """
-    ssm_getcolumn(ssm, ssmcol, coldesc, nrow) -> Vector / Array
+    getcolumn(ssm::StandardStMan, ssmcol, coldesc, nrow, cols) -> Vector / Array
 
 Read all `nrow` cells of column `ssmcol` (1-based).  Returns a `Vector`
-for scalars and a `Vector{Array}` for direct-array columns.
+for scalars and a `Vector{Array}` for direct-array columns.  `cols` is
+unused (see [`getcell`](@ref)).
 """
-function ssm_getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer)
+function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer, ::Integer)
     kind = _ssmkind(c)
     if kind === :indarr || kind === :indstr
-        return [ssm_getcell(ssm, ssmcol, c, r) for r in 1:nrow]   # small side tables
+        return [getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]   # small side tables
     end
 
     dims = _dims(c)
@@ -389,7 +393,7 @@ function ssm_getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Int
                [reshape(out[(r-1)*nrelem+1 : r*nrelem], dims...) for r in 1:nrow]
 
     elseif c.type == TpString
-        return [ssm_getcell(ssm, ssmcol, c, r) for r in 1:nrow]
+        return [getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]
 
     else
         T = juliatype(c.type)

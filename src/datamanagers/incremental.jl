@@ -82,7 +82,7 @@ end
 _ismkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : :direct
 _ismkind(c::ColumnDesc) = :ind
 
-function open_incrementalstman(t::Table, dm::DataManagerInfo)
+function Base.open(::Type{IncrementalStMan}, t::Table, dm::DataManagerInfo)
     path = joinpath(t.path, "table.f$(dm.sequ)")
     bytes = read(path)
     endian = t.endian
@@ -181,13 +181,13 @@ function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
 end
 
 """
-    ism_getcell(ism, colnr, coldesc, row, ncol) -> value
+    getcell(ism::IncrementalStMan, colnr, coldesc, row, ncol) -> value
 
 `colnr` and `row` are 1-based; `ncol` is the number of columns bound to this
 ISM instance.
 """
-function ism_getcell(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
-                     row::Integer, ncol::Int)
+function getcell(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
+                 row::Integer, ncol::Int)
     bi = _ism_bucket(ism.index, Int(row))
     bucketnr = ism.index.bucket[bi]
     bstart = ism.index.rows[bi]                  # 1-based first row of the bucket
@@ -197,12 +197,12 @@ function ism_getcell(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
 end
 
 """
-    ism_getcolumn(ism, colnr, coldesc, nrow, ncol) -> Vector / Vector{Array}
+    getcolumn(ism::IncrementalStMan, colnr, coldesc, nrow, ncol) -> Vector / Vector{Array}
 
 Whole-column read: walk buckets and run-length-fill from the stored values.
 """
-function ism_getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
-                       nrow::Integer, ncol::Int)
+function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
+                   nrow::Integer, ncol::Int)
     kind = _ismkind(c)
     scalar = kind === :scalar && c.type != TpString
     out = scalar ? Vector{juliatype(c.type)}(undef, nrow) :
