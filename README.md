@@ -195,6 +195,14 @@ columns; `TiledDataStMan`; `ForwardColumnEngine` / `VirtualTaQLColumn` /
 edit session; free-list bucket reuse; in-place per-data-manager `resync`;
 casacore's cooperative lock hand-off (request-id list).
 
+**Phase 16 — `copyms` performance.** A full, in-order table/subtable copy
+(every subtable copy, and the default `copyms`/`copytable` with no `rows=`
+override) now reads each source column via its own whole-column fast
+path instead of cell by cell — roughly halves the time on a large,
+mostly-indirect-array subtable (925,645-row `POINTING`: 68 s → 35 s on
+the reference MS) and more on a scalar/fixed-shape/tiled-heavy one. A
+`RefTable` selection or an explicit partial row range is unaffected.
+
 ## Usage
 
 ```julia
