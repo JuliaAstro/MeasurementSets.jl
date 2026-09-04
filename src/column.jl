@@ -16,6 +16,8 @@ function _dm_instance(t::Table, sequ::Int)
         open_tiledstman(t, dm)
     elseif dm.name in ("IncrementalStMan", "ISM")
         open_incrementalstman(t, dm)
+    elseif _is_engine_dm(dm.name)
+        open_engine(t, dm)
     else
         error("data manager \"$(dm.name)\" not yet supported (column data)")
     end
@@ -61,6 +63,8 @@ function _eltype(c::ColumnDesc, inst)
     return Array{E}
 end
 
+_eltype(c::ColumnDesc, ::VirtualEngine) = Array{juliatype(c.type)}
+
 """
     column(t::Table, name) -> Column
 
@@ -84,6 +88,8 @@ function Base.getindex(c::Column, i::Int)
         ssm_getcell(inst, c.index, c.desc, i)
     elseif inst isa TiledStMan
         tsm_getcell(inst, c.index, c.desc, i)
+    elseif inst isa VirtualEngine
+        engine_getcell(inst, c.desc, i)
     else
         ism_getcell(inst, c.index, c.desc, i, c.cols)
     end
@@ -95,6 +101,8 @@ function Base.getindex(c::Column, ::Colon)
         ssm_getcolumn(inst, c.index, c.desc, c.table.rows)
     elseif inst isa TiledStMan
         tsm_getcolumn(inst, c.index, c.desc, c.table.rows)
+    elseif inst isa VirtualEngine
+        engine_getcolumn(inst, c.desc, c.table.rows)
     else
         ism_getcolumn(inst, c.index, c.desc, c.table.rows, c.cols)
     end

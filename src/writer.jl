@@ -168,7 +168,9 @@ function _write_plaincolumn(w::AipsWriter, c::ColumnDesc)
     wr_u32(w, V_COL_DERIVED)             # ...ColumnData::putFileDerived
     wr_u32(w, c.sequ)                     # data-manager sequence number
     if isarray(c)
-        if c.shape isa Dims && !isempty(c.shape)
+        # a virtual-engine column is not a stored/direct array, even if its
+        # cell shape is fixed -> always SHAPECOL_VARIES
+        if c.shape isa Dims && !isempty(c.shape) && !_is_engine_dm(c.manager)
             write(w.io, SHAPECOL_FIXED)   # cell shape is fixed
             wr_iposition(w, c.shape)      # -> casacore uses a direct-array column
         else

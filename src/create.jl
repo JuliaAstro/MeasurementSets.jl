@@ -63,15 +63,34 @@ function _tsm_groups(x)
                                   [String[String(c) for c in g] for g in x]
 end
 
+# keyword-set merge: drop `_`-prefixed keys from `base`, append `extra`
+function _merge_kw(base::Record, extra::Record)
+    r = Record()
+    for i in 1:length(base)
+        startswith(base.names[i], "_") && continue
+        push!(r.names, base.names[i]); push!(r.types, base.types[i])
+        push!(r.values, base.values[i]); push!(r.comments, base.comments[i])
+    end
+    append!(r.names, extra.names); append!(r.types, extra.types)
+    append!(r.values, copy(extra.values)); append!(r.comments, extra.comments)
+    return r
+end
+
+_stored_casatype(::Type{Int16}) = TpShort
+_stored_casatype(::Type{Int32}) = TpInt
+_stored_casatype(::Type{ComplexF64}) = TpDComplex
+
 """
     _write_table_core(dir, descs, data; nrow, endian, public, private,
-                      tsm, tcm, tcell, ism, tablename, type, subtype, readme)
+                      tsm, tcm, tcell, ism, engines, tablename, type, subtype, readme)
 
 Write a CTDS table from explicit column descriptions + per-column data
-vectors.  Columns not named in `tsm` / `tcm` / `tcell` / `ism` go to one
-StandardStMan.  `tsm` / `tcm` / `tcell` each take either a flat list of
-names (one hypercube per column) or a list of name groups (one shared
-hypercube per group).
+vectors.  Columns not named in `tsm` / `tcm` / `tcell` / `ism` /
+`engines` go to one StandardStMan.  `tsm` / `tcm` / `tcell` each take
+either a flat list of names (one hypercube per column) or a list of name
+groups (one shared hypercube per group).  `engines` maps a virtual
+column name to `(; kind, stored=:tsm, scale=nothing, offset=nothing,
+autoscale=false, stored_type=TpInt, storedname=nothing)`.
 """
 function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            data::Vector; nrow::Integer, endian::Symbol=:little,
@@ -79,11 +98,52 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            private::Record=Record(),
                            tsm=Set{String}(), tcm=Set{String}(), tcell=Set{String}(),
                            ism::AbstractSet{<:AbstractString}=Set{String}(),
+                           engines::AbstractDict=Dict{String,NamedTuple}(),
                            tablename::AbstractString="",
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
     mkpath(dir)
-    tiledgroups = [(:tsm, "TiledShapeStMan", write_tiledshapestman, _tsm_groups(tsm)),
+    tsmg = _tsm_groups(tsm)
+
+    # --- virtual column engines: synthesise the stored / scale / offset
+    #     columns, stamp the `_<Engine>_*` keywords on the virtual column
+    engine_seq = Tuple{Int,String}[]        # (virtual desc index, engine type string)
+    engine_virtual = Set{String}()
+    for (vname, spec) in engines
+        vi = findfirst(c -> c.name == vname, descs)
+        vi === nothing && error("engines: no column \"$vname\"")
+        vdesc = descs[vi]; vdata = data[vi]
+        push!(engine_virtual, vname)
+        kind = spec.kind
+        autoscale = get(spec, :autoscale, false)
+        stored_type = get(spec, :stored_type, TpInt)
+        storedname  = something(get(spec, :storedname, nothing), vname * "_COMPRESSED")
+        scalename   = something(get(spec, :scalename, nothing), vname * "_SCALE")
+        offsetname  = something(get(spec, :offsetname, nothing), vname * "_OFFSET")
+
+        storeddata, kw, sc, of = encode_engine(kind, vdata, vdesc.type;
+            scale = get(spec, :scale, nothing), offset = get(spec, :offset, nothing),
+            autoscale, stored_type, storedname, scalename, offsetname)
+
+        typestr = _engine_typestr(kind, vdesc.type, stored_type)
+        descs[vi] = ColumnDesc(vname, vdesc.comment, typestr, vname, vdesc.type,
+            _classname(vdesc.type, true), VariableShape(), Int32(0), UInt32(0),
+            _merge_kw(vdesc.keywords, kw), nothing, nothing)
+        push!(engine_seq, (vi, typestr))
+
+        st_ct = _stored_casatype(eltype(storeddata[1]))
+        push!(descs, _mkdesc(storedname, st_ct, VariableShape()))
+        push!(data, storeddata)
+        if get(spec, :stored, :tsm) === :tsm
+            push!(tsmg, String[storedname])
+        end
+        if sc !== nothing
+            push!(descs, _mkdesc(scalename,  TpFloat, ())); push!(data, collect(sc))
+            push!(descs, _mkdesc(offsetname, TpFloat, ())); push!(data, collect(of))
+        end
+    end
+
+    tiledgroups = [(:tsm, "TiledShapeStMan", write_tiledshapestman, tsmg),
                    (:tcm, "TiledColumnStMan", write_tiledcolumnstman, _tsm_groups(tcm)),
                    (:tcell, "TiledCellStMan", write_tiledcellstman, _tsm_groups(tcell))]
     tiledn = Set{String}()
@@ -91,7 +151,9 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         push!(tiledn, n)
     end
     ism_i = findall(c -> c.name in ism, descs)
-    ssm_i = setdiff(1:length(descs), vcat(findall(c -> c.name in tiledn, descs), ism_i))
+    ssm_i = setdiff(1:length(descs),
+                    vcat(findall(c -> c.name in tiledn || c.name in engine_virtual, descs),
+                         ism_i))
 
     out = Vector{ColumnDesc}(undef, length(descs))
     dms = DMWrite[]
@@ -133,6 +195,11 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         for (k, i) in enumerate(idxs); out[i] = cols[k]; end
         seq += 1
     end
+    for (vi, typestr) in engine_seq         # virtual engines write no file, empty block
+        out[vi] = _withsequ(descs[vi], seq)
+        push!(dms, DMWrite(typestr, seq, UInt8[]))
+        seq += 1
+    end
 
     td = TableDesc(isempty(tablename) ? "" : String(tablename), "2.0", "",
                    public, private, out)
@@ -150,6 +217,7 @@ exact class names) is taken from `SCHEMAVER2[name]` when available.
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
                      tsm=String[], tcm=String[], tcell=String[], ism=String[],
+                     engines::AbstractDict=Dict{String,NamedTuple}(),
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
     pairs = columns isa AbstractDict ? collect(columns) :
@@ -181,7 +249,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
     end
 
     _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,
-                      ism = Set(String.(ism)),
+                      ism = Set(String.(ism)), engines,
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
 
