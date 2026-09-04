@@ -145,6 +145,8 @@ struct Table
     endian::Symbol             # :big or :little (storage-manager files)
     desc::TableDesc
     managers::Vector{DataManagerInfo}
+    syncmod::Int64             # table.lock modify counter at open (-1 = no sync blob)
+    lockpath::String           # joinpath(path, "table.lock")
 end
 
 nrow(t::Table) = t.rows
@@ -202,16 +204,33 @@ end
 
 Read the metadata (description, keywords, data-manager bindings, row count)
 of the casacore table directory at `path`.  Column *data* is not read.
+
+A shared (read) lock on `<path>/table.lock` is held only while `table.dat`
+is slurped; the row count then comes from the `table.lock` sync blob when
+present (as casacore does), else from `table.dat`.  The lazy
+storage-manager reads that a later `column()` triggers are *not* locked --
+they rely on the writers' atomic renames.
 """
 function readtable(path::AbstractString)
     dir = String(rstrip(path, '/'))
     isdir(dir) || throw(ArgumentError("not a table directory: $dir"))
+    lockpath = joinpath(dir, "table.lock")
     tp, st, readme = read_tableinfo(dir)
 
-    a = AipsIO(read(joinpath(dir, "table.dat")))
+    local datbytes, sync
+    withlock(dir, :read; create=false) do lk
+        datbytes = read(joinpath(dir, "table.dat"))
+        sync = read_syncinfo(lk)
+    end
+
+    a = AipsIO(datbytes)
     version = Int(getstart(a, "Table"))
     version <= 3 || error("Table version $version not supported")
-    nr = version > 2 ? Int(read_scalar(a, UInt64)) : Int(read_u32(a))
+    nr_dat = version > 2 ? Int(read_scalar(a, UInt64)) : Int(read_u32(a))
+    nr = (sync.present && sync.nrow !== nothing) ? sync.nrow : nr_dat
+    (sync.present && sync.nrow !== nothing && sync.nrow != nr_dat) &&
+        @debug "readtable: table.lock nrow=$(sync.nrow) overrides table.dat nrow=$nr_dat" dir
+    syncmod = sync.present ? sync.modifycounter : Int64(-1)
     format = read_u32(a)
     endian = format == 0 ? :big : :little
     read_string(a)                                  # "PlainTable"
@@ -232,7 +251,7 @@ function readtable(path::AbstractString)
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.public,
                       desc.private, cols)
 
-    return Table(dir, tp, st, readme, version, nr, endian, desc2, dms)
+    return Table(dir, tp, st, readme, version, nr, endian, desc2, dms, syncmod, lockpath)
 end
 
 function read_columnset(a::AipsIO, columns::Vector{ColumnDesc})

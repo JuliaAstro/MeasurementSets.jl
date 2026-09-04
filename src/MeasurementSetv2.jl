@@ -7,6 +7,7 @@ version 2 data format — casacore Table Data System tables.
 module MeasurementSetv2
 
 include("aipsio.jl")
+include("lock.jl")
 include("typeenum.jl")
 include("record.jl")
 include("tables.jl")
@@ -31,5 +32,6 @@ export Column, column, getcolumn, getcell
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 export write_table, write_ms, copyms, create_ms
 export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!
+export resync, is_stale, is_multiused
 
 end
