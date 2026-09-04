@@ -116,6 +116,8 @@ mutable struct DyscoStMan
     ant2::Vector{Int}
 end
 
+DATAMANAGERS["DyscoStMan"] = DyscoStMan
+
 """
     open(::Type{DyscoStMan}, t::Table, dm::DataManagerInfo) -> DyscoStMan
 

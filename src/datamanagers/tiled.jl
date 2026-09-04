@@ -59,6 +59,11 @@ mutable struct TiledStMan
     pos::Vector{Int}              # 1-based last last-axis position per interval
 end
 
+DATAMANAGERS["TiledShapeStMan"]  = TiledStMan
+DATAMANAGERS["TiledColumnStMan"] = TiledStMan
+DATAMANAGERS["TiledCellStMan"]   = TiledStMan
+DATAMANAGERS["TiledStMan"]       = TiledStMan
+
 # --- tile column layout -------------------------------------------
 
 # canonical (on-disk) pixel size; the sort key only — `Bool` => 0 (bit-packed).

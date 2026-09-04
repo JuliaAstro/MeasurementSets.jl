@@ -6,39 +6,10 @@ const _DM_CACHE = IdDict{Table,Dict{Int,Any}}()
 
 _dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager")
 
-# The on-disk `DataManagerInfo.name` is a string, which Julia can't dispatch
-# on directly -- this is the one unavoidable name -> type lookup, isolated
-# here so the actual "open" logic can be ordinary multiple dispatch (see the
-# `Base.open(::Type{<:...}, t::Table, dm::DataManagerInfo)` methods in
-# datamanagers/{standard,tiled,incremental,virtual,dysco}.jl).  Every *exact*
-# on-disk name -- including the three non-templated virtual engines -- has an
-# entry; the templated engine names (`"ScaledArrayEngine<Float,Int>"` and
-# friends, which can't be enumerated) fall back to `_is_engine_dm`'s prefix
-# check on a `KeyError`.
-const DATAMANAGERS = Dict{String,Type}(
-    "StandardStMan"     => StandardStMan,
-    "SSM"               => StandardStMan,
-    "TiledShapeStMan"   => TiledStMan,
-    "TiledColumnStMan"  => TiledStMan,
-    "TiledCellStMan"    => TiledStMan,
-    "TiledStMan"        => TiledStMan,
-    "IncrementalStMan"  => IncrementalStMan,
-    "ISM"               => IncrementalStMan,
-    "DyscoStMan"        => DyscoStMan,
-    "CompressFloat"     => VirtualEngine,
-    "CompressComplex"   => VirtualEngine,
-    "CompressComplexSD" => VirtualEngine,
-)
-
-function _dmtype(name::AbstractString)
-    try
-        return DATAMANAGERS[name]
-    catch e
-        e isa KeyError || rethrow()
-        _is_engine_dm(name) && return VirtualEngine
-        return nothing
-    end
-end
+# `DATAMANAGERS` / `DATAMANAGER_PATTERNS` / `_dmtype` (the on-disk
+# data-manager name -> Julia type lookup) live in
+# datamanagers/datamanager.jl; each data manager registers itself into
+# them from its own file (e.g. standard.jl, virtual.jl).
 
 function _dm_instance(t::Table, sequ::Int)
     cache = get!(() -> Dict{Int,Any}(), _DM_CACHE, t)

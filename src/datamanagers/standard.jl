@@ -91,6 +91,9 @@ mutable struct StandardStMan
     arrayfile::Union{ArrayFile,Nothing}   # lazily opened `table.f<seq>i`
 end
 
+DATAMANAGERS["StandardStMan"] = StandardStMan
+DATAMANAGERS["SSM"]           = StandardStMan
+
 bucketptr(ssm::StandardStMan, n::Integer) = SSM_LEADER + Int(n) * ssm.length
 
 # `table.f<seq>i` --- opened on first indirect-array access, then memoized.

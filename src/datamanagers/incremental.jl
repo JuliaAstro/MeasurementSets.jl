@@ -65,6 +65,9 @@ mutable struct IncrementalStMan
     arrayfile::Union{ArrayFile,Nothing}   # lazily opened `table.f<seq>i`
 end
 
+DATAMANAGERS["IncrementalStMan"] = IncrementalStMan
+DATAMANAGERS["ISM"]              = IncrementalStMan
+
 _u32(ism, off) = (ism.endian === :big ? ntoh : ltoh)(reinterpret(UInt32, view(ism.data, off+1:off+4))[1])
 _ism_i64(ism, off) = (ism.endian === :big ? ntoh : ltoh)(reinterpret(Int64, view(ism.data, off+1:off+8))[1])
 

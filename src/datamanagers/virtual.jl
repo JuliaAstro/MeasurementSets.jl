@@ -74,6 +74,19 @@ mutable struct VirtualEngine
     offsetcol::Any
 end
 
+# The three Compress* engines have a fixed, non-templated on-disk name.
+DATAMANAGERS["CompressFloat"]     = VirtualEngine
+DATAMANAGERS["CompressComplex"]   = VirtualEngine
+DATAMANAGERS["CompressComplexSD"] = VirtualEngine
+
+# The other three are casacore C++ template instantiations -- their on-disk
+# name (e.g. `"ScaledArrayEngine<Float,Int>"`) depends on the scalar types
+# the column was created with, so there's no fixed set of exact strings to
+# enumerate; matched by prefix pattern instead.
+DATAMANAGER_PATTERNS[r"^ScaledArrayEngine<"]  = VirtualEngine
+DATAMANAGER_PATTERNS[r"^ScaledComplexData<"]  = VirtualEngine
+DATAMANAGER_PATTERNS[r"^MappedArrayEngine<"]  = VirtualEngine
+
 _is_engine_dm(name::AbstractString) =
     startswith(name, "ScaledArrayEngine") || startswith(name, "ScaledComplexData") ||
     startswith(name, "MappedArrayEngine") ||
