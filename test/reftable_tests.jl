@@ -315,7 +315,7 @@ end
     n = 12
     vals = [ComplexF32.(reshape(1:8, 2, 4)) .* Float32(0.01i) .+ ComplexF32(0, 1e-3) for i in 1:n]
     write_table(tdir, "T", ["V" => vals]; nrow=n,
-                engines=Dict("V" => (; kind=:compresscomplex, autoscale=true)))
+                engines=Dict("V" => (; kind=MSv2.CompressComplex(), autoscale=true)))
     t = readtable(tdir)
     bound = 0.02
 

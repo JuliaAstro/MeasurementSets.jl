@@ -398,14 +398,13 @@ end
 function _engine_spec_from_source(t::Table, c::ColumnDesc, dm::AbstractString)
     kw = c.keywords
     kind = _engine_kind(dm, kw)
-    pfx = get(_ENGINE_PREFIX, kind, "")
     storedname = String(kw["_BaseMappedArrayEngine_Name"])
     sd = _source_dm(t, columndesc(t, storedname))
     stored_type = columndesc(t, storedname).type
-    kind === :mapped && return (; kind, stored = occursin("Tiled", sd) ? :tsm : :ssm,
-                                 stored_type, storedname)
-    autoscale = kind in (:compressfloat, :compresscomplex, :compresscomplexsd) &&
-                Bool(get(kw, pfx * "AutoScale", false))
+    kind isa Mapped && return (; kind, stored = occursin("Tiled", sd) ? :tsm : :ssm,
+                                stored_type, storedname)
+    pfx = _prefix(kind)
+    autoscale = kind isa CompressKind && Bool(get(kw, pfx * "AutoScale", false))
     scale  = get(kw, pfx * "Scale", nothing)
     offset = get(kw, pfx * "Offset", nothing)
     scalename  = String(get(kw, pfx * "ScaleName", ""))

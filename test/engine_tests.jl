@@ -11,7 +11,7 @@ _engine_manager(r, vname) =
         dir = joinpath(mktempdir(), "sa.tab")
         V = [J.(reshape(1:(2k), 2, k)) .* J(0.5) for k in 2:4]     # multiples of scale
         write_table(dir, "T", ["V" => V]; nrow=3,
-            engines = Dict("V" => (; kind=:scaledarray, scale=J(0.5), offset=J(1.0),
+            engines = Dict("V" => (; kind=MSv2E.ScaledArray(), scale=J(0.5), offset=J(1.0),
                                     stored=:tsm, stored_type=ST)))
         r = readtable(dir)
         m = _engine_manager(r, "V")
@@ -31,7 +31,7 @@ end
     sc = ComplexF32(0.25, 0.5)
     W = [ComplexF32.(reshape(1:4, 2, 2)) .* sc for _ in 1:3]       # on-grid
     write_table(dir, "T", ["W" => W]; nrow=3,
-        engines = Dict("W" => (; kind=:scaledcomplex, scale=sc, offset=ComplexF32(0),
+        engines = Dict("W" => (; kind=MSv2E.ScaledComplex(), scale=sc, offset=ComplexF32(0),
                                 stored_type=MSv2E.TpShort)))
     r = readtable(dir)
     @test startswith(_engine_manager(r, "W").name, "ScaledComplexData")
@@ -42,11 +42,12 @@ end
 @testset "engine — CompressFloat / CompressComplex / SD vs Casacore.jl" begin
     d = mktempdir()
     cases = [
-        (:compressfloat, "F", [Float32.(reshape(range(-3, 3, length=6), 2, 3)) .* k
-                               for k in 1:4], 0.001f0),
-        (:compresscomplex, "C", [ComplexF32.(fill(k, 2, 3)) .+ ComplexF32(0, 2k)
-                                 for k in 1:4], 0.01f0),
-        (:compresscomplexsd, "S", [ComplexF32[k 2k+0im; 3k+1im 0-2k*im] for k in 1:4], 0.005f0),
+        (MSv2E.CompressFloat(), "F", [Float32.(reshape(range(-3, 3, length=6), 2, 3)) .* k
+                                      for k in 1:4], 0.001f0),
+        (MSv2E.CompressComplex(), "C", [ComplexF32.(fill(k, 2, 3)) .+ ComplexF32(0, 2k)
+                                        for k in 1:4], 0.01f0),
+        (MSv2E.CompressComplexSD(), "S",
+         [ComplexF32[k 2k+0im; 3k+1im 0-2k*im] for k in 1:4], 0.005f0),
     ]
     for (kind, nm, vals, scale) in cases
         dir = joinpath(d, "$nm.tab")
@@ -69,7 +70,7 @@ end
     dir = joinpath(mktempdir(), "m.tab")
     X = [ComplexF32.(reshape(1:6, 2, 3)) .+ ComplexF32(0.5, -0.5) for _ in 1:3]
     write_table(dir, "T", ["X" => X]; nrow=3,
-        engines = Dict("X" => (; kind=:mapped, stored_type=MSv2E.TpDComplex)))
+        engines = Dict("X" => (; kind=MSv2E.Mapped(), stored_type=MSv2E.TpDComplex)))
     r = readtable(dir)
     @test startswith(_engine_manager(r, "X").name, "MappedArrayEngine")
     @test [column(r, "X")[i] for i in 1:3] == X
@@ -88,7 +89,7 @@ end
         fill(ComplexF32(NaN), 2, 3),                                # all NaN -> scale 0
     ]
     write_table(dir, "T", ["W" => rows]; nrow=3,
-        engines = Dict("W" => (; kind=:compresscomplex, autoscale=true)))
+        engines = Dict("W" => (; kind=MSv2E.CompressComplex(), autoscale=true)))
     r = readtable(dir)
     @test Set(("W", "W_COMPRESSED", "W_SCALE", "W_OFFSET")) ⊆ Set(columnnames(r))
     scol = column(r, "W_SCALE"); ocol = column(r, "W_OFFSET")
@@ -110,7 +111,7 @@ end
     dir = joinpath(mktempdir(), "nan.tab")
     F = [Float32[1.0 NaN; 2.0 3.0], Float32[NaN NaN; NaN NaN]]
     write_table(dir, "T", ["F" => F]; nrow=2,
-        engines = Dict("F" => (; kind=:compressfloat, scale=0.001f0, offset=0.0f0)))
+        engines = Dict("F" => (; kind=MSv2E.CompressFloat(), scale=0.001f0, offset=0.0f0)))
     r = readtable(dir)
     f1 = column(r, "F")[1]
     @test isnan(f1[1, 2]) && f1[1, 1] ≈ 1.0f0
@@ -120,7 +121,7 @@ end
     dir2 = joinpath(mktempdir(), "nanc.tab")
     C = [ComplexF32[1+1im NaN; 2+2im 3+3im]]
     write_table(dir2, "T", ["C" => C]; nrow=1,
-        engines = Dict("C" => (; kind=:compresscomplex, scale=0.001f0, offset=0.0f0)))
+        engines = Dict("C" => (; kind=MSv2E.CompressComplex(), scale=0.001f0, offset=0.0f0)))
     c1 = column(readtable(dir2), "C")[1]
     @test isnan(real(c1[1, 2])) && isnan(imag(c1[1, 2]))
     @test c1[1, 1] ≈ ComplexF32(1, 1)
@@ -131,7 +132,7 @@ end
     X = collect(1.0:5.0)
     V = [ComplexF32.(fill(k, 2, 3)) .+ ComplexF32(0, k) for k in 1:5]
     write_table(src, "T", ["X" => X, "V" => V]; nrow=5,
-        engines = Dict("V" => (; kind=:compresscomplex, scale=0.0008f0, offset=0.0f0)))
+        engines = Dict("V" => (; kind=MSv2E.CompressComplex(), scale=0.0008f0, offset=0.0f0)))
     dst = joinpath(mktempdir(), "dst.tab")
     MSv2E._copy_table(dst, readtable(src), 1:5)
 
@@ -153,7 +154,7 @@ end
     X = collect(1.0:6.0)
     V = [ComplexF32.(fill(k, 2, 3)) for k in 1:6]
     write_table(dir, "T", ["X" => X, "V" => V]; nrow=6,
-        engines = Dict("V" => (; kind=:compresscomplex, scale=0.01f0, offset=0.0f0)))
+        engines = Dict("V" => (; kind=MSv2E.CompressComplex(), scale=0.01f0, offset=0.0f0)))
 
     edit(dir) do t
         t[:V][3] = ComplexF32.(fill(50, 2, 3))

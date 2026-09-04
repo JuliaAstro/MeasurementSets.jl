@@ -25,6 +25,12 @@
 # Rounding on write: ScaledArray/ScaledComplex truncate toward zero
 # (C++ `T(x)`); Compress* round half away from zero
 # (`floor(x+0.5)` / `ceil(x-0.5)`), clamped.  1-based rows.
+#
+# Which engine a column is bound to is a singleton type (below), not a
+# `Symbol` -- `_decode`/`_encode` (one method per engine, dispatched on
+# that type) do the actual array transform; there is no separately-named
+# `_decode_<engine>` helper for multiple dispatch to pick between, the
+# `_decode(::SomeEngine, ...)` method *is* that engine's transform.
 
 # --- constants (casacore CompressComplex.cc / CompressFloat.cc) ------
 const ENG_C_HIWORD       = 65536             # CompressComplex/SD: `stored = s_re*65536 + s_im`
@@ -46,20 +52,33 @@ const ENG_SD_REAL_BITS   = ENG_C_WRAP                                # SD even: 
 const ENG_SD_EVEN_HI     = Float64(ENG_C_WRAP) * ENG_SD_REAL_BITS - 1  # SD real clamp (even)
 const ENG_SD_EVEN_LO     = -Float64(ENG_C_WRAP) * ENG_SD_REAL_BITS
 
-const _ENGINE_PREFIX = Dict(
-    :scaledarray       => "_ScaledArrayEngine_",
-    :scaledcomplex     => "_ScaledComplexData_",
-    :compressfloat     => "_CompressFloat_",
-    :compresscomplex   => "_CompressComplex_",
-    :compresscomplexsd => "_CompressComplex_",   # SD reuses the CompressComplex prefix
-)
+# --- engine kind: singleton types, one per casacore engine -----------
+#
+# `ScaledKind` / `CompressKind` group the two families that share an
+# initialisation / keyword-writing shape (see `_init!` / `_push_kw!`
+# below); `Mapped` (a plain cast, no scale/offset at all) stands alone.
+abstract type EngineKind end
+abstract type ScaledKind   <: EngineKind end
+abstract type CompressKind <: EngineKind end
+
+struct Mapped            <: EngineKind end
+struct ScaledArray       <: ScaledKind end
+struct ScaledComplex     <: ScaledKind end
+struct CompressFloat     <: CompressKind end
+struct CompressComplex   <: CompressKind end
+struct CompressComplexSD <: CompressKind end
+
+_prefix(::ScaledArray)       = "_ScaledArrayEngine_"
+_prefix(::ScaledComplex)     = "_ScaledComplexData_"
+_prefix(::CompressFloat)     = "_CompressFloat_"
+_prefix(::CompressComplex)   = "_CompressComplex_"
+_prefix(::CompressComplexSD) = "_CompressComplex_"   # SD reuses the CompressComplex prefix
 
 # --- reader -------------------------------------------------------
 
 mutable struct VirtualEngine
     table::Table
-    kind::Symbol                  # :scaledarray|:scaledcomplex|:compressfloat|
-                                  # :compresscomplex|:compresscomplexsd|:mapped
+    kind::EngineKind
     vdesc::ColumnDesc             # the virtual column
     storedname::String
     autoscale::Bool
@@ -92,26 +111,27 @@ _is_engine_dm(name::AbstractString) =
     startswith(name, "MappedArrayEngine") ||
     name in ("CompressFloat", "CompressComplex", "CompressComplexSD")
 
-function _engine_kind(name::AbstractString, kw::Record)
-    startswith(name, "ScaledArrayEngine") && return :scaledarray
-    startswith(name, "ScaledComplexData") && return :scaledcomplex
-    startswith(name, "MappedArrayEngine") && return :mapped
-    name == "CompressFloat" && return :compressfloat
+"The `EngineKind` for a bound engine's on-disk name (an exact string for
+Compress*, a `ScaledArrayEngine<...>`-style prefix otherwise)."
+function _engine_kind(name::AbstractString, kw::Record)::EngineKind
+    startswith(name, "ScaledArrayEngine") && return ScaledArray()
+    startswith(name, "ScaledComplexData") && return ScaledComplex()
+    startswith(name, "MappedArrayEngine") && return Mapped()
+    name == "CompressFloat" && return CompressFloat()
     get(kw, "_CompressComplex_Type", name) == "CompressComplexSD" ?
-        :compresscomplexsd : :compresscomplex
+        CompressComplexSD() : CompressComplex()
 end
 
 # the engine type string as it appears in the ColumnSet DM list
-function _engine_typestr(kind::Symbol, vtype::CasaType, stored_type::CasaType)
-    kind === :compressfloat     && return "CompressFloat"
-    kind === :compresscomplex   && return "CompressComplex"
-    kind === :compresscomplexsd && return "CompressComplexSD"
-    sid = _TYPEID[vtype]; tid = _TYPEID[stored_type]
-    kind === :mapped        && return "MappedArrayEngine<$sid,$tid>"
-    kind === :scaledarray   && return "ScaledArrayEngine<$sid,$tid>"
-    kind === :scaledcomplex && return "ScaledComplexData<$sid,$tid>"
-    error("unknown engine kind $kind")
-end
+_engine_typestr(::CompressFloat,     ::CasaType, ::CasaType) = "CompressFloat"
+_engine_typestr(::CompressComplex,   ::CasaType, ::CasaType) = "CompressComplex"
+_engine_typestr(::CompressComplexSD, ::CasaType, ::CasaType) = "CompressComplexSD"
+_engine_typestr(::Mapped, vtype::CasaType, stored_type::CasaType) =
+    "MappedArrayEngine<$(_TYPEID[vtype]),$(_TYPEID[stored_type])>"
+_engine_typestr(::ScaledArray, vtype::CasaType, stored_type::CasaType) =
+    "ScaledArrayEngine<$(_TYPEID[vtype]),$(_TYPEID[stored_type])>"
+_engine_typestr(::ScaledComplex, vtype::CasaType, stored_type::CasaType) =
+    "ScaledComplexData<$(_TYPEID[vtype]),$(_TYPEID[stored_type])>"
 
 function Base.open(::Type{VirtualEngine}, t::Table, dm::DataManagerInfo)
     vi = findfirst(c -> c.sequ == dm.sequ, t.desc.columns)
@@ -126,25 +146,31 @@ function Base.open(::Type{VirtualEngine}, t::Table, dm::DataManagerInfo)
 
     e = VirtualEngine(t, kind, vdesc, storedname, false, true, true,
                       nothing, nothing, "", "", nothing, nothing, nothing)
-    kind === :mapped && return e
+    return _init!(e, kind, kw)
+end
 
-    pfx = _ENGINE_PREFIX[kind]
-    if kind in (:compressfloat, :compresscomplex, :compresscomplexsd)
-        fixed = Bool(get(kw, pfx * "Fixed", true))
-        e.fixed_scale = e.fixed_offset = fixed
-        e.autoscale = Bool(get(kw, pfx * "AutoScale", false))
-        e.scale  = Float32(get(kw, pfx * "Scale", ENG_UNIT_SCALE))
-        e.offset = Float32(get(kw, pfx * "Offset", ENG_ZERO_OFFSET))
-        e.scalename  = String(get(kw, pfx * "ScaleName", ""))
-        e.offsetname = String(get(kw, pfx * "OffsetName", ""))
-    else                                                # scaledarray / scaledcomplex
-        e.fixed_scale  = Bool(get(kw, pfx * "FixedScale", true))
-        e.fixed_offset = Bool(get(kw, pfx * "FixedOffset", true))
-        e.scale  = get(kw, pfx * "Scale", nothing)
-        e.offset = get(kw, pfx * "Offset", nothing)
-        e.scalename  = String(get(kw, pfx * "ScaleName", ""))
-        e.offsetname = String(get(kw, pfx * "OffsetName", ""))
-    end
+_init!(e::VirtualEngine, ::Mapped, ::Record) = e
+
+function _init!(e::VirtualEngine, kind::CompressKind, kw::Record)
+    pfx = _prefix(kind)
+    fixed = Bool(get(kw, pfx * "Fixed", true))
+    e.fixed_scale = e.fixed_offset = fixed
+    e.autoscale = Bool(get(kw, pfx * "AutoScale", false))
+    e.scale  = Float32(get(kw, pfx * "Scale", ENG_UNIT_SCALE))
+    e.offset = Float32(get(kw, pfx * "Offset", ENG_ZERO_OFFSET))
+    e.scalename  = String(get(kw, pfx * "ScaleName", ""))
+    e.offsetname = String(get(kw, pfx * "OffsetName", ""))
+    return e
+end
+
+function _init!(e::VirtualEngine, kind::ScaledKind, kw::Record)
+    pfx = _prefix(kind)
+    e.fixed_scale  = Bool(get(kw, pfx * "FixedScale", true))
+    e.fixed_offset = Bool(get(kw, pfx * "FixedOffset", true))
+    e.scale  = get(kw, pfx * "Scale", nothing)
+    e.offset = get(kw, pfx * "Offset", nothing)
+    e.scalename  = String(get(kw, pfx * "ScaleName", ""))
+    e.offsetname = String(get(kw, pfx * "OffsetName", ""))
     return e
 end
 
@@ -164,19 +190,13 @@ _row_offset(e::VirtualEngine, row) =
 _rha(x) = x < 0 ? ceil(Float64(x) - ENG_ROUND_HALF) : floor(Float64(x) + ENG_ROUND_HALF)
 _round_clamp(x, lo, hi) = Int(clamp(_rha(x), lo, hi))
 
-# --- decode (inverse transform) --------------------------------
+# --- decode (inverse transform): one method per engine, no separately
+#     named `_decode_<engine>` helpers -- dispatch on `kind` picks the body
+#     directly. ------------------------------------------------------
 
-function _decode(kind::Symbol, st, scale, offset, J::Type)
-    kind === :mapped        && return convert(Array{J}, st)
-    kind === :scaledarray   && return _decode_scaled(st, scale, offset, J)
-    kind === :scaledcomplex && return _decode_scaledcomplex(st, scale, offset, J)
-    kind === :compressfloat && return _decode_cfloat(st, Float32(scale), Float32(offset), J)
-    kind === :compresscomplex   && return _decode_ccomplex(st, Float32(scale), Float32(offset), J)
-    kind === :compresscomplexsd && return _decode_ccomplexsd(st, Float32(scale), Float32(offset), J)
-    error("unknown engine kind $kind")
-end
+_decode(::Mapped, st, scale, offset, J::Type) = convert(Array{J}, st)
 
-function _decode_scaled(st::AbstractArray, scale, offset, J::Type)
+function _decode(::ScaledArray, st::AbstractArray, scale, offset, J::Type)
     out = Array{J}(undef, size(st))
     @inbounds for i in eachindex(st)
         out[i] = J(muladd(st[i], scale, offset))
@@ -184,7 +204,7 @@ function _decode_scaled(st::AbstractArray, scale, offset, J::Type)
     return out
 end
 
-function _decode_scaledcomplex(st::AbstractArray, scale, offset, J::Type)
+function _decode(::ScaledComplex, st::AbstractArray, scale, offset, J::Type)
     R = real(J)
     sre, sim = R(real(scale)), R(imag(scale))
     ore, oim = R(real(offset)), R(imag(offset))
@@ -196,15 +216,17 @@ function _decode_scaledcomplex(st::AbstractArray, scale, offset, J::Type)
     return out
 end
 
-function _decode_cfloat(st::AbstractArray{<:Integer}, scale::Float32, offset::Float32, J::Type)
+function _decode(::CompressFloat, st::AbstractArray{<:Integer}, scale, offset, J::Type)
+    sc, of = Float32(scale), Float32(offset)
     out = Array{J}(undef, size(st))
     @inbounds for i in eachindex(st)
-        out[i] = st[i] == -ENG_C_WRAP ? J(NaN) : J(muladd(Float32(st[i]), scale, offset))
+        out[i] = st[i] == -ENG_C_WRAP ? J(NaN) : J(muladd(Float32(st[i]), sc, of))
     end
     return out
 end
 
-function _decode_ccomplex(st::AbstractArray{<:Integer}, scale::Float32, offset::Float32, J::Type)
+function _decode(::CompressComplex, st::AbstractArray{<:Integer}, scale, offset, J::Type)
+    sc, of = Float32(scale), Float32(offset)
     R = real(J)
     out = Array{J}(undef, size(st))
     @inbounds for i in eachindex(st)
@@ -219,21 +241,22 @@ function _decode_ccomplex(st::AbstractArray{<:Integer}, scale::Float32, offset::
             elseif im >= ENG_C_WRAP
                 r += 1; im -= ENG_C_HIWORD
             end
-            out[i] = J(R(muladd(r, scale, offset)), R(muladd(im, scale, offset)))
+            out[i] = J(R(muladd(r, sc, of)), R(muladd(im, sc, of)))
         end
     end
     return out
 end
 
-function _decode_ccomplexsd(st::AbstractArray{<:Integer}, scale::Float32, offset::Float32, J::Type)
+function _decode(::CompressComplexSD, st::AbstractArray{<:Integer}, scale, offset, J::Type)
+    sc, of = Float32(scale), Float32(offset)
     R = real(J)
-    fullScale = scale / Float32(ENG_SD_REAL_BITS)
-    imagScale = scale * Float32(ENG_SD_IMAG_MULT)
+    fullScale = sc / Float32(ENG_SD_REAL_BITS)
+    imagScale = sc * Float32(ENG_SD_IMAG_MULT)
     out = Array{J}(undef, size(st))
     @inbounds for i in eachindex(st)
         v = Int(st[i])
         if iseven(v)
-            out[i] = J(R(muladd(v >> 1, fullScale, offset)), zero(R))
+            out[i] = J(R(muladd(v >> 1, fullScale, of)), zero(R))
         else
             r = div(v, ENG_C_HIWORD)
             if r == -ENG_C_WRAP
@@ -246,7 +269,7 @@ function _decode_ccomplexsd(st::AbstractArray{<:Integer}, scale::Float32, offset
                     r += 1; im -= ENG_C_HIWORD
                 end
                 im >>= 1
-                out[i] = J(R(muladd(r, scale, offset)), R(muladd(im, imagScale, offset)))
+                out[i] = J(R(muladd(r, sc, of)), R(muladd(im, imagScale, of)))
             end
         end
     end
@@ -291,14 +314,15 @@ function _auto_scale_offset(cell::AbstractArray)
     return (Float32((mx - mn) / ENG_AUTOSCALE_DIV), Float32((mx + mn) / ENG_MIDPOINT))
 end
 
-_eng_stored_eltype(kind::Symbol, stored_type::CasaType) =
-    kind === :compressfloat ? Int16 :
-    kind in (:compresscomplex, :compresscomplexsd) ? Int32 :
-    kind === :mapped ? ComplexF64 : juliatype(stored_type)
+_eng_stored_eltype(::CompressFloat, ::CasaType)     = Int16
+_eng_stored_eltype(::CompressComplex, ::CasaType)   = Int32
+_eng_stored_eltype(::CompressComplexSD, ::CasaType) = Int32
+_eng_stored_eltype(::Mapped, ::CasaType)            = ComplexF64
+_eng_stored_eltype(::ScaledKind, stored_type::CasaType) = juliatype(stored_type)
 
-# --- per-kind pack (inverse transform) ------------------------
+# --- encode (inverse of decode): one method per engine, same pattern --
 
-function _enc_scaled(cell::AbstractArray, scale, offset, T::Type)
+function _encode(::ScaledArray, cell::AbstractArray, scale, offset, T::Type)
     out = Array{T}(undef, size(cell))
     @inbounds for i in eachindex(cell)
         out[i] = trunc(T, (cell[i] - offset) / scale)      # C++ static_cast: toward zero
@@ -306,7 +330,7 @@ function _enc_scaled(cell::AbstractArray, scale, offset, T::Type)
     return out
 end
 
-function _enc_scaledcomplex(cell::AbstractArray, scale, offset, T::Type)
+function _encode(::ScaledComplex, cell::AbstractArray, scale, offset, T::Type)
     sre, sim = real(scale), imag(scale)
     ore, oim = real(offset), imag(offset)
     out = Array{T}(undef, 2, size(cell)...)
@@ -318,45 +342,48 @@ function _enc_scaledcomplex(cell::AbstractArray, scale, offset, T::Type)
     return out
 end
 
-function _enc_cfloat(cell::AbstractArray, scale::Float32, offset::Float32)
+function _encode(::CompressFloat, cell::AbstractArray, scale, offset, ::Type)
+    sc, of = Float32(scale), Float32(offset)
     out = Array{Int16}(undef, size(cell))
     @inbounds for i in eachindex(cell)
         v = Float32(cell[i])
-        out[i] = (!isfinite(v) || scale == 0) ? ENG_NAN_F :
-                 Int16(_round_clamp((v - offset) / scale, -ENG_C_PART_MAX, ENG_C_PART_MAX))
+        out[i] = (!isfinite(v) || sc == 0) ? ENG_NAN_F :
+                 Int16(_round_clamp((v - of) / sc, -ENG_C_PART_MAX, ENG_C_PART_MAX))
     end
     return out
 end
 
-function _enc_ccomplex(cell::AbstractArray, scale::Float32, offset::Float32)
+function _encode(::CompressComplex, cell::AbstractArray, scale, offset, ::Type)
+    sc, of = Float32(scale), Float32(offset)
     out = Array{Int32}(undef, size(cell))
     @inbounds for i in eachindex(cell)
         z = ComplexF32(cell[i])
-        if !isfinite(real(z)) || !isfinite(imag(z)) || scale == 0
+        if !isfinite(real(z)) || !isfinite(imag(z)) || sc == 0
             out[i] = ENG_NAN_C
         else
-            sre = _round_clamp((real(z) - offset) / scale, -ENG_C_PART_MAX, ENG_C_PART_MAX)
-            sim = _round_clamp((imag(z) - offset) / scale, -ENG_C_PART_MAX, ENG_C_PART_MAX)
+            sre = _round_clamp((real(z) - of) / sc, -ENG_C_PART_MAX, ENG_C_PART_MAX)
+            sim = _round_clamp((imag(z) - of) / sc, -ENG_C_PART_MAX, ENG_C_PART_MAX)
             out[i] = Int32(sre * ENG_C_HIWORD + sim)
         end
     end
     return out
 end
 
-function _enc_ccomplexsd(cell::AbstractArray, scale::Float32, offset::Float32)
-    fullScale = scale / Float32(ENG_SD_REAL_BITS)
-    imagScale = scale * Float32(ENG_SD_IMAG_MULT)
+function _encode(::CompressComplexSD, cell::AbstractArray, scale, offset, ::Type)
+    sc, of = Float32(scale), Float32(offset)
+    fullScale = sc / Float32(ENG_SD_REAL_BITS)
+    imagScale = sc * Float32(ENG_SD_IMAG_MULT)
     out = Array{Int32}(undef, size(cell))
     @inbounds for i in eachindex(cell)
         z = ComplexF32(cell[i])
-        if !isfinite(real(z)) || !isfinite(imag(z)) || scale == 0
+        if !isfinite(real(z)) || !isfinite(imag(z)) || sc == 0
             out[i] = ENG_NAN_C
         elseif imag(z) == 0                                  # even LSB flags imag == 0
-            s = _round_clamp((real(z) - offset) / fullScale, ENG_SD_EVEN_LO, ENG_SD_EVEN_HI)
+            s = _round_clamp((real(z) - of) / fullScale, ENG_SD_EVEN_LO, ENG_SD_EVEN_HI)
             out[i] = Int32(s << 1)
         else                                                 # odd LSB flags imag != 0
-            sre = _round_clamp((real(z) - offset) / scale, -ENG_SD_REAL_MAX, ENG_SD_REAL_MAX)
-            sim = _round_clamp((imag(z) - offset) / imagScale, ENG_SD_IMAG_LO, ENG_SD_IMAG_HI)
+            sre = _round_clamp((real(z) - of) / sc, -ENG_SD_REAL_MAX, ENG_SD_REAL_MAX)
+            sim = _round_clamp((imag(z) - of) / imagScale, ENG_SD_IMAG_LO, ENG_SD_IMAG_HI)
             out[i] = Int32(sre * ENG_C_HIWORD + (sim << 1) + 1)
         end
     end
@@ -368,41 +395,61 @@ end
 _kwpush!(r::Record, name, t::CasaType, v) =
     (push!(r.names, name); push!(r.types, t); push!(r.values, v); push!(r.comments, ""))
 
-function _engine_keywords(kind::Symbol, vtype::CasaType, storedname, scale, offset,
+"""
+    _engine_keywords(kind::EngineKind, vtype, storedname, scale, offset,
+                     scalename, offsetname, autoscale) -> Record
+
+The `_<Engine>_*` keyword record to stamp onto the virtual `ColumnDesc`.
+"""
+function _engine_keywords(kind::EngineKind, vtype::CasaType, storedname, scale, offset,
                           scalename, offsetname, autoscale::Bool)
     r = Record()
     _kwpush!(r, "_BaseMappedArrayEngine_Name", TpString, String(storedname))
-    kind === :mapped && return r
-    pfx = _ENGINE_PREFIX[kind]
-
-    if kind in (:compressfloat, :compresscomplex, :compresscomplexsd)
-        fixed = !autoscale
-        _kwpush!(r, pfx * "Scale",  TpFloat, Float32(fixed ? scale  : ENG_UNIT_SCALE))
-        _kwpush!(r, pfx * "Offset", TpFloat, Float32(fixed ? offset : ENG_ZERO_OFFSET))
-        _kwpush!(r, pfx * "ScaleName",  TpString, fixed ? "" : String(scalename))
-        _kwpush!(r, pfx * "OffsetName", TpString, fixed ? "" : String(offsetname))
-        _kwpush!(r, pfx * "Fixed",     TpBool, fixed)
-        _kwpush!(r, pfx * "AutoScale", TpBool, autoscale)
-        kind !== :compressfloat &&
-            _kwpush!(r, "_CompressComplex_Type", TpString,
-                     kind === :compresscomplexsd ? "CompressComplexSD" : "CompressComplex")
-    else                                                # scaledarray / scaledcomplex
-        S = kind === :scaledcomplex ?
-            (vtype == TpDComplex ? TpDComplex : TpComplex) :
-            (vtype == TpDouble ? TpDouble : TpFloat)
-        SJ = juliatype(S)
-        _kwpush!(r, pfx * "Scale",  S, SJ(scale))
-        _kwpush!(r, pfx * "Offset", S, SJ(offset))
-        _kwpush!(r, pfx * "ScaleName",   TpString, "")
-        _kwpush!(r, pfx * "OffsetName",  TpString, "")
-        _kwpush!(r, pfx * "FixedScale",  TpBool, true)
-        _kwpush!(r, pfx * "FixedOffset", TpBool, true)
-    end
+    _push_kw!(r, kind, vtype, scale, offset, scalename, offsetname, autoscale)
     return r
 end
 
+_push_kw!(r::Record, ::Mapped, vtype, scale, offset, scalename, offsetname, autoscale) = r
+
+function _push_kw!(r::Record, kind::CompressKind, vtype::CasaType, scale, offset,
+                   scalename, offsetname, autoscale::Bool)
+    pfx = _prefix(kind)
+    fixed = !autoscale
+    _kwpush!(r, pfx * "Scale",  TpFloat, Float32(fixed ? scale  : ENG_UNIT_SCALE))
+    _kwpush!(r, pfx * "Offset", TpFloat, Float32(fixed ? offset : ENG_ZERO_OFFSET))
+    _kwpush!(r, pfx * "ScaleName",  TpString, fixed ? "" : String(scalename))
+    _kwpush!(r, pfx * "OffsetName", TpString, fixed ? "" : String(offsetname))
+    _kwpush!(r, pfx * "Fixed",     TpBool, fixed)
+    _kwpush!(r, pfx * "AutoScale", TpBool, autoscale)
+    _push_compresstype!(r, kind)
+    return r
+end
+
+_push_compresstype!(::Record, ::CompressFloat) = nothing
+_push_compresstype!(r::Record, ::CompressComplex) =
+    _kwpush!(r, "_CompressComplex_Type", TpString, "CompressComplex")
+_push_compresstype!(r::Record, ::CompressComplexSD) =
+    _kwpush!(r, "_CompressComplex_Type", TpString, "CompressComplexSD")
+
+function _push_kw!(r::Record, kind::ScaledKind, vtype::CasaType, scale, offset,
+                   scalename, offsetname, autoscale::Bool)
+    pfx = _prefix(kind)
+    S = _scaled_scaletype(kind, vtype)
+    SJ = juliatype(S)
+    _kwpush!(r, pfx * "Scale",  S, SJ(scale))
+    _kwpush!(r, pfx * "Offset", S, SJ(offset))
+    _kwpush!(r, pfx * "ScaleName",   TpString, "")
+    _kwpush!(r, pfx * "OffsetName",  TpString, "")
+    _kwpush!(r, pfx * "FixedScale",  TpBool, true)
+    _kwpush!(r, pfx * "FixedOffset", TpBool, true)
+    return r
+end
+
+_scaled_scaletype(::ScaledComplex, vtype::CasaType) = vtype == TpDComplex ? TpDComplex : TpComplex
+_scaled_scaletype(::ScaledArray,   vtype::CasaType) = vtype == TpDouble   ? TpDouble   : TpFloat
+
 """
-    encode_engine(kind, vdata, vtype; scale, offset, autoscale, stored_type,
+    encode_engine(kind::EngineKind, vdata, vtype; scale, offset, autoscale, stored_type,
                   storedname, scalename, offsetname)
         -> (storeddata, keywords, scaledata, offsetdata)
 
@@ -411,7 +458,14 @@ integers.  `scaledata` / `offsetdata` are `Vector{Float32}` (one per row)
 when `autoscale`, else `nothing`.  `keywords` is the `_<Engine>_*` record
 to merge onto the virtual `ColumnDesc`.
 """
-function encode_engine(kind::Symbol, vdata::AbstractVector, vtype::CasaType;
+function encode_engine(kind::Mapped, vdata::AbstractVector, vtype::CasaType;
+                       storedname::AbstractString="", kwargs...)
+    n = length(vdata)
+    stored = Any[convert(Array{ComplexF64}, Array(vdata[r])) for r in 1:n]
+    return stored, _engine_keywords(kind, vtype, storedname, 0, 0, "", "", false), nothing, nothing
+end
+
+function encode_engine(kind::EngineKind, vdata::AbstractVector, vtype::CasaType;
                        scale=nothing, offset=nothing, autoscale::Bool=false,
                        stored_type::CasaType=TpInt,
                        storedname::AbstractString="", scalename::AbstractString="",
@@ -419,12 +473,7 @@ function encode_engine(kind::Symbol, vdata::AbstractVector, vtype::CasaType;
     n = length(vdata)
     T = _eng_stored_eltype(kind, stored_type)
 
-    if kind === :mapped
-        stored = Any[convert(Array{ComplexF64}, Array(vdata[r])) for r in 1:n]
-        return stored, _engine_keywords(kind, vtype, storedname, 0, 0, "", "", false), nothing, nothing
-    end
-
-    (kind in (:scaledarray, :scaledcomplex) && autoscale) &&
+    (kind isa ScaledKind && autoscale) &&
         error("autoscale is only supported for CompressFloat / CompressComplex[SD]")
 
     if autoscale
@@ -435,7 +484,7 @@ function encode_engine(kind::Symbol, vdata::AbstractVector, vtype::CasaType;
             cell = Array(vdata[r])
             sc[r], of[r] = _auto_scale_offset(cell)
             s = sc[r] == 0 ? ENG_UNIT_SCALE : sc[r]
-            stored[r] = _enc_dispatch(kind, cell, s, of[r], T)
+            stored[r] = _encode(kind, cell, s, of[r], T)
         end
         kw = _engine_keywords(kind, vtype, storedname, ENG_UNIT_SCALE, ENG_ZERO_OFFSET,
                               scalename, offsetname, true)
@@ -444,15 +493,7 @@ function encode_engine(kind::Symbol, vdata::AbstractVector, vtype::CasaType;
 
     scale === nothing && error("encode_engine: fixed engine needs a `scale`")
     off = offset === nothing ? zero(scale) : offset
-    stored = Any[_enc_dispatch(kind, Array(vdata[r]), scale, off, T) for r in 1:n]
+    stored = Any[_encode(kind, Array(vdata[r]), scale, off, T) for r in 1:n]
     kw = _engine_keywords(kind, vtype, storedname, scale, off, "", "", false)
     return stored, kw, nothing, nothing
 end
-
-_enc_dispatch(kind, cell, scale, offset, T) =
-    kind === :scaledarray       ? _enc_scaled(cell, scale, offset, T) :
-    kind === :scaledcomplex     ? _enc_scaledcomplex(cell, scale, offset, T) :
-    kind === :compressfloat     ? _enc_cfloat(cell, Float32(scale), Float32(offset)) :
-    kind === :compresscomplex   ? _enc_ccomplex(cell, Float32(scale), Float32(offset)) :
-    kind === :compresscomplexsd ? _enc_ccomplexsd(cell, Float32(scale), Float32(offset)) :
-    error("unknown engine kind $kind")
