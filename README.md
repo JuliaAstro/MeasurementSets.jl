@@ -293,6 +293,28 @@ this package's existing non-container `mmap` performance exactly) and
 materialized otherwise; `MultiHDF5` always materializes (no `mmap`
 equivalent for HDF5).
 
+**Phase 21 — `MultiFile`/`MultiHDF5` container write support.** Completes
+Phase 20: `write_table`/`create_ms`/`copytable`/`copyms`/`write_ms` all
+take `storage=:sepfile|:multifile|:multihdf5` and `blocksize=` (default
+4 MiB, matching casacore's own default) to pack every `StandardStMan`/
+`IncrementalStMan`/`TiledStMan` private file into one `table.mf`/
+`table.mfh5` — Dysco and virtual-engine files stay separate, matching
+real casacore. `write_ms`/`copyms`'s `storage=` packs **every** table
+(MAIN and each subtable), each into its own container, mirroring what a
+real casacore MS created under a global `StorageOption` looks like. The
+writer only ever creates a *fresh* container in one shot — `edit()`
+still refuses a container-backed table (Phase 20's guard). A real find
+along the way: a container file on disk isn't sufficient by itself for a
+genuine casacore reopen to use it — casacore's `ColumnSet::getFile`
+reads the storage option back out of `table.dat`'s own ColumnSet block
+(a version-gated field our writer wasn't emitting), not from probing
+`table.mf`'s presence, so `table.dat`'s ColumnSet block now carries that
+field too when `storage != :sepfile`. Verified with genuine
+write-direction interop for `MultiFile` (our own writer's output opened
+and read correctly by real Casacore.jl, mirroring the Dysco Phase 19
+write-interop pattern); `MultiHDF5` write output has no real-casacore
+oracle available on this machine (same gap as Phase 20's read side).
+
 ## Usage
 
 ```julia
