@@ -399,7 +399,27 @@ The result is a `GroupedTable` — an in-memory `Tables.jl` source:
 via the existing `write_table(dst, "T", result; nrow=…)` with no new
 machinery. Cross-checked against real TaQL's own `SELECT … GROUP BY …`.
 
-Still, across Phases 22–26: no bitwise operators (`& | ^ ~`),
+**Phase 27 — closure-form `groupby`.** For aggregates the `g*` set
+can't express, `groupby` also takes Julia closures — the analog of
+`query(f, t) do row … end`. A whole-group do-block returning a
+`NamedTuple` (the output row):
+
+```julia
+groupby(ms.MAIN, [:ANTENNA1]; cols=["ANTENNA1", "DATA", "WEIGHT"]) do g
+    (; ANT = first(g.ANTENNA1), N = length(g),
+       WAMP = sum(mean.(abs, g.DATA) .* g.WEIGHT) / sum(g.WEIGHT))
+end
+```
+
+`f(g)` receives a `GroupSlice` — `g.COLNAME` is a materialised vector of
+that column's values for the group, `length(g)` the group size. A
+closure can also appear as a `select=` RHS alongside strings/symbols
+(`select = [:K => :K, "N" => "gcount()", "W" => g -> sum(g.X.^2)]`), and
+`where` / `having` each accept a string **or** a predicate closure
+(`row -> Bool` / `g -> Bool`). `cols=` restricts which columns are
+loaded onto `g` (default: all of `t`). Same `GroupedTable` output.
+
+Still, across Phases 22–27: no bitwise operators (`& | ^ ~`),
 `BETWEEN`, `~=`, array indexing, units, date/time or measures
 functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, or
 joins.

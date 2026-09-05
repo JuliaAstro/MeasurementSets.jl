@@ -967,6 +967,26 @@ _geval(e::TQLFunc, cols, g) =
 _geval(::TQLRowNum, cols, g) =
     throw(ArgumentError("TaQL-lite: rownumber() is not valid in groupby(...)"))
 
+# The per-group accessor passed to a closure-form `groupby` (Phase 27):
+# `g.COLNAME` -> a materialised Vector of that column's values for this
+# group's rows; `length(g)` -> the group size.  `cols`/`rows` are the
+# struct fields (reached via getfield) so a column literally named
+# `cols` or `rows` is unreachable as `g.cols`/`g.rows` -- a non-issue
+# for MS column names.
+struct GroupSlice
+    cols::Dict{String,AbstractVector}
+    rows::Vector{Int}
+end
+Base.length(g::GroupSlice) = length(getfield(g, :rows))
+Base.propertynames(g::GroupSlice) = Tuple(Symbol.(keys(getfield(g, :cols))))
+function Base.getproperty(g::GroupSlice, s::Symbol)
+    (s === :cols || s === :rows) && return getfield(g, s)
+    c = get(getfield(g, :cols), String(s), nothing)
+    c === nothing && throw(ArgumentError(
+        "GroupSlice has no column $s -- pass it in `cols=` (a closure's column use can't be inferred)"))
+    return c[getfield(g, :rows)]
+end
+
 """
     GroupedTable
 
@@ -1008,67 +1028,20 @@ end
 _gb_names(c::Union{AbstractString,Symbol}) = String[String(c)]
 _gb_names(cs) = String[String(c) for c in cs]
 
-"""
-    groupby(t, groupcols; select, where=nothing, having=nothing, orderby=nothing) -> GroupedTable
-
-Group the rows of `t` by `groupcols` (a column name / `Symbol`, or a
-vector of them; an empty vector = one group over the whole table) and
-compute one result row per group.
-
-`select` is `outname => expr_string` pairs. Each `expr_string` is a
-TaQL-lite expression that may use `g`-prefixed aggregate functions over
-the group — `gcount()` / `gcount(x)` (row count), `gsum(x)`,
-`gproduct(x)`, `gmean(x)` / `gavg(x)`, `gmedian(x)`, `gmin(x)`,
-`gmax(x)`, `gvariance(x)` / `gsamplevariance(x)`, `gstddev(x)` /
-`gsamplestddev(x)`, `grms(x)`, `gany(x)`, `gall(x)`, `gntrue(x)`,
-`gnfalse(x)`, `gfirst(x)`, `glast(x)` — plus the group-key columns and
-any scalar expression of them. An aggregate's argument must reduce to a
-scalar per row (wrap an array cell in `mean(...)` / `sum(...)` etc.).
-
-`where` pre-filters rows (a WHERE string, as in [`query`](@ref); no
-aggregates). `having` filters groups (an expression over
-aggregates/keys). `orderby` sorts the result rows by output column
-name(s): `"N"` (ascending) or `"N" => :desc`.
-
-Returns a [`GroupedTable`](@ref).
-"""
-function groupby(t::AbstractTable, groupcols;
-                 select::AbstractVector{<:Pair},
-                 where::Union{Nothing,AbstractString}=nothing,
-                 having::Union{Nothing,AbstractString}=nothing,
-                 orderby::Union{Nothing,AbstractVector}=nothing)
-    validnames = Set(columnnames(t))
-    keys = _gb_names(groupcols)
-    for k in keys
-        k in validnames || throw(ArgumentError("groupby: no column \"$k\""))
+function _gb_keys(t::AbstractTable, groupcols)
+    ks = _gb_names(groupcols)
+    vn = Set(columnnames(t))
+    for k in ks
+        k in vn || throw(ArgumentError("groupby: no column \"$k\""))
     end
-    isempty(select) && throw(ArgumentError("groupby: `select` must not be empty"))
+    return ks
+end
 
-    outnames = String[String(first(p)) for p in select]
-    allunique(outnames) || throw(ArgumentError("groupby: duplicate output column name"))
-    selexprs = TQLExpr[_taqllite_parse(String(last(p)), validnames) for p in select]
-    whereast = where === nothing ? nothing : _taqllite_parse(where, validnames)
-    whereast === nothing || !_has_aggr(whereast) ||
-        throw(ArgumentError("groupby: `where` must not contain aggregate functions"))
-    havingast = having === nothing ? nothing : _taqllite_parse(having, validnames)
-
-    needed = Set{String}(keys)
-    for e in selexprs
-        _tqlrefs!(needed, e)
-    end
-    whereast === nothing || _tqlrefs!(needed, whereast)
-    havingast === nothing || _tqlrefs!(needed, havingast)
-    cols = Dict(n => column(t, n) for n in needed)
-
-    rows = whereast === nothing ? (1:nrow(t)) :
-           [i for i in 1:nrow(t) if _tqleval(whereast, cols, i)]
-
-    # group, preserving first-seen key order.  With no group columns the
-    # key is `()` for every row -> a single whole-table group.
+function _group_rows(keys::Vector{String}, loaded, rows)
     groups = Dict{Any,Vector{Int}}()
     seen = Any[]
     for i in rows
-        key = ntuple(j -> cols[keys[j]][i], length(keys))
+        key = ntuple(j -> loaded[keys[j]][i], length(keys))
         g = get(groups, key, nothing)
         if g === nothing
             groups[key] = Int[i]
@@ -1077,20 +1050,161 @@ function groupby(t::AbstractTable, groupcols;
             push!(g, i)
         end
     end
+    return groups, seen
+end
+
+# Shared preparation for both `groupby` methods: validate keys, parse
+# any string `where`/`having`, decide which columns to load (referenced
+# names ∪ keys ∪ -- when a closure is involved -- `cols` or every
+# column), load them, filter rows, group, and build a per-group HAVING
+# predicate.  `extrarefs` = the parsed string/symbol select ASTs (empty
+# for the do-block form).  `anyclosure` forces loading `cols`/all.
+function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
+                     extrarefs::Vector{TQLExpr}, cols, anyclosure::Bool)
+    vn = Set(columnnames(t))
+    keys = _gb_keys(t, groupcols)
+    whereast = wherearg isa AbstractString ? _taqllite_parse(wherearg, vn) : nothing
+    whereast === nothing || !_has_aggr(whereast) ||
+        throw(ArgumentError("groupby: `where` must not contain aggregate functions"))
+    havingast = havingarg isa AbstractString ? _taqllite_parse(havingarg, vn) : nothing
+
+    needed = Set{String}(keys)
+    for e in extrarefs
+        _tqlrefs!(needed, e)
+    end
+    whereast === nothing || _tqlrefs!(needed, whereast)
+    havingast === nothing || _tqlrefs!(needed, havingast)
+    if cols !== nothing
+        union!(needed, String.(cols))
+    elseif anyclosure
+        union!(needed, columnnames(t))
+    end
+    loaded = Dict{String,AbstractVector}(n => column(t, n) for n in needed)
+
+    rows =
+        wherearg === nothing ? collect(1:nrow(t)) :
+        wherearg isa Function ? begin
+            nms = collect(Base.keys(loaded))
+            rws = CTDSRows(AbstractVector[loaded[n] for n in nms], Symbol.(nms), nrow(t))
+            [i for (i, r) in enumerate(rws) if wherearg(r)]
+        end :
+        [i for i in 1:nrow(t) if _tqleval(whereast, loaded, i)]
+
+    groups, seen = _group_rows(keys, loaded, rows)
+    havingfn =
+        havingarg === nothing ? (g -> true) :
+        havingarg isa Function ? (g -> havingarg(GroupSlice(loaded, g))) :
+        (g -> _geval(havingast, loaded, g))
+    return loaded, groups, seen, havingfn
+end
+
+"""
+    groupby(t, groupcols; select, cols=nothing, where=nothing, having=nothing, orderby=nothing) -> GroupedTable
+
+Group the rows of `t` by `groupcols` (a column name / `Symbol`, or a
+vector of them; an empty vector = one group over the whole table) and
+compute one result row per group.
+
+`select` is `outname => rhs` pairs, where `rhs` is one of:
+
+* a **string** — a TaQL-lite expression that may use `g`-prefixed
+  aggregate functions over the group: `gcount()` / `gcount(x)` (row
+  count), `gsum(x)`, `gproduct(x)`, `gmean(x)` / `gavg(x)`,
+  `gmedian(x)`, `gmin(x)`, `gmax(x)`, `gvariance(x)` /
+  `gsamplevariance(x)`, `gstddev(x)` / `gsamplestddev(x)`, `grms(x)`,
+  `gany(x)`, `gall(x)`, `gntrue(x)`, `gnfalse(x)`, `gfirst(x)`,
+  `glast(x)` — plus the group-key columns and scalar expressions of
+  them. An aggregate's argument must reduce to a scalar per row (wrap
+  an array cell in `mean(...)` / `sum(...)`).
+* a **`Symbol`** — shorthand for a bare column name (`:K` ≡ `"K"`).
+* a **function** `g -> value` — called with a [`GroupSlice`](@ref) (see
+  the do-block form below); use for aggregates the `g*` set can't
+  express.
+
+`where` pre-filters rows (a WHERE string, or a `row -> Bool` closure).
+`having` filters groups (a HAVING string over aggregates/keys, or a
+`g -> Bool` closure). `cols` restricts which columns are loaded onto a
+`GroupSlice` — only relevant when `select`/`where`/`having` use a
+closure (default: every column of `t`). `orderby` sorts the result rows
+by output column name(s): `"N"` (ascending) or `"N" => :desc`.
+
+Returns a [`GroupedTable`](@ref).
+"""
+function groupby(t::AbstractTable, groupcols;
+                 select::AbstractVector{<:Pair}, cols=nothing,
+                 where=nothing, having=nothing,
+                 orderby::Union{Nothing,AbstractVector}=nothing)
+    isempty(select) && throw(ArgumentError("groupby: `select` must not be empty"))
+    outnames = String[String(first(p)) for p in select]
+    allunique(outnames) || throw(ArgumentError("groupby: duplicate output column name"))
+    vn = Set(columnnames(t))
+
+    # classify each select RHS: (:fn, closure) or (:ast, TQLExpr)
+    kinds = Tuple{Symbol,Any}[
+        last(p) isa Function ? (:fn, last(p)) :
+        (:ast, _taqllite_parse(String(last(p)), vn)) for p in select]
+    strasts = TQLExpr[a for (k, a) in kinds if k === :ast]
+    anyclosure = any(k === :fn for (k, _) in kinds) ||
+                 where isa Function || having isa Function
+
+    loaded, groups, seen, havingfn =
+        _gb_prepare(t, groupcols, where, having, strasts, cols, anyclosure)
 
     acc = [Any[] for _ in outnames]
     for key in seen
         g = groups[key]
-        havingast === nothing || _geval(havingast, cols, g) || continue
-        for (j, e) in enumerate(selexprs)
-            push!(acc[j], _geval(e, cols, g))
+        havingfn(g) || continue
+        for (j, (k, v)) in enumerate(kinds)
+            push!(acc[j], k === :fn ? v(GroupSlice(loaded, g)) : _geval(v, loaded, g))
         end
     end
 
-    outcols = AbstractVector[identity.(a) for a in acc]   # narrow eltypes off Any
-    gt = GroupedTable(Symbol.(outnames), outcols)
-    orderby === nothing && return gt
-    return _gt_sort(gt, orderby)
+    gt = GroupedTable(Symbol.(outnames), AbstractVector[identity.(a) for a in acc])
+    orderby === nothing ? gt : _gt_sort(gt, orderby)
+end
+
+"""
+    groupby(f, t, groupcols; cols=nothing, where=nothing, having=nothing, orderby=nothing) -> GroupedTable
+
+Closure form (do-block friendly). `f(g)` receives a [`GroupSlice`](@ref)
+for each group and returns a `NamedTuple` — that group's output row.
+Every group must return the same field names; they become the result's
+columns, in that order.
+
+```julia
+groupby(t, [:ANTENNA1]; cols=["ANTENNA1", "DATA"]) do g
+    (; ANT = first(g.ANTENNA1), N = length(g), AMP = mean(abs.(g.DATA)))
+end
+```
+
+`cols` restricts which columns are loaded onto `g` (default: every
+column of `t` — `f` is opaque). `where` / `having` — a string or a
+predicate closure (`row -> Bool` / `g -> Bool`). `orderby` — see the
+string form.
+"""
+function groupby(f::Function, t::AbstractTable, groupcols; cols=nothing,
+                 where=nothing, having=nothing,
+                 orderby::Union{Nothing,AbstractVector}=nothing)
+    loaded, groups, seen, havingfn =
+        _gb_prepare(t, groupcols, where, having, TQLExpr[], cols, true)
+
+    nts = NamedTuple[]
+    for key in seen
+        g = groups[key]
+        havingfn(g) || continue
+        nt = f(GroupSlice(loaded, g))
+        nt isa NamedTuple ||
+            throw(ArgumentError("groupby(f, ...): the closure must return a NamedTuple"))
+        isempty(nts) || Base.keys(nt) == Base.keys(nts[1]) ||
+            throw(ArgumentError(
+                "groupby(f, ...): every group must return the same NamedTuple field names"))
+        push!(nts, nt)
+    end
+
+    onames = isempty(nts) ? Symbol[] : collect(Base.keys(nts[1]))
+    gt = GroupedTable(onames,
+        AbstractVector[identity.([nt[n] for nt in nts]) for n in onames])
+    orderby === nothing ? gt : _gt_sort(gt, orderby)
 end
 
 function _gt_sort(gt::GroupedTable, orderby::AbstractVector)

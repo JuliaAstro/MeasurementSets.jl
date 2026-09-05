@@ -658,6 +658,136 @@ end
     @test_throws ArgumentError groupby(t, "K"; select=["N" => "gcount()"], orderby=["NOSUCH"])
 end
 
+# ---- Phase 27: closure-form groupby ----
+
+@testset "GroupSlice — unit" begin
+    gs = MSv2.GroupSlice(Dict{String,AbstractVector}("A" => [10, 20, 30, 40],
+                                                     "B" => ["p", "q", "r", "s"]), [2, 4])
+    @test gs.A == [20, 40]
+    @test gs.B == ["q", "s"]
+    @test length(gs) == 2
+    @test Set(propertynames(gs)) == Set([:A, :B])
+    @test_throws ArgumentError gs.NOPE
+end
+
+@testset "groupby — do-block form" begin
+    dir = joinpath(mktempdir(), "cb.tab")
+    K = Int32[1, 1, 1, 2, 2, 3, 3, 3, 3, 1]
+    X = Float64[10, 20, 30, 5, 15, 100, 200, 300, 400, 40]
+    W = Float64[1, 1, 2, 1, 3, 1, 1, 1, 1, 2]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X, "W" => W]; nrow=10)
+    t = readtable(dir)
+    grp = Dict{Int32,Vector{Int}}()
+    for (i, k) in enumerate(K)
+        push!(get!(grp, k, Int[]), i)
+    end
+    uk = sort(collect(keys(grp)))
+
+    r = groupby(t, "K"; cols=["K", "X", "W"], orderby=["K"]) do g
+        (; K=first(g.K), N=length(g), WMEAN=sum(g.X .* g.W) / sum(g.W),
+         P=Statistics.quantile(g.X, 0.75))
+    end
+    @test r isa GroupedTable
+    @test collect(r.K) == uk
+    @test collect(r.N) == [length(grp[k]) for k in uk]
+    @test collect(r.WMEAN) ≈ [sum(X[grp[k]] .* W[grp[k]]) / sum(W[grp[k]]) for k in uk]
+    @test collect(r.P) ≈ [Statistics.quantile(X[grp[k]], 0.75) for k in uk]
+
+    # default cols = load all
+    r2 = groupby(t, "K"; orderby=["K"]) do g
+        (; K=first(g.K), MED=Statistics.median(g.X))
+    end
+    @test collect(r2.MED) ≈ [Statistics.median(X[grp[k]]) for k in uk]
+
+    # do-block with closure where + having, orderby on an output column
+    r3 = groupby(t, "K"; cols=["K", "X"], where=row -> row.X >= 10,
+                 having=g -> length(g) >= 2, orderby=["S" => :desc]) do g
+        (; K=first(g.K), S=sum(g.X))
+    end
+    keep = Dict(k => sum(x for x in X[grp[k]] if x >= 10) for k in uk
+                if count(>=(10), X[grp[k]]) >= 2)
+    @test Set(collect(r3.K)) == Set(keys(keep))
+    @test issorted(collect(r3.S); rev=true)
+
+    # write_table round-trip
+    dst = joinpath(mktempdir(), "GT")
+    write_table(dst, "GT", r; nrow=length(r.K))
+    @test column(readtable(dst), "WMEAN")[:] ≈ collect(r.WMEAN)
+end
+
+@testset "groupby — closure select= entries mixed with strings" begin
+    dir = joinpath(mktempdir(), "cbs.tab")
+    K = Int32[1, 1, 2, 2, 2, 3]
+    X = Float64[10, 20, 3, 4, 5, 99]
+    W = Float64[2, 1, 1, 1, 2, 1]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X, "W" => W]; nrow=6)
+    t = readtable(dir)
+    grp = Dict(1 => [1, 2], 2 => [3, 4, 5], 3 => [6])
+
+    r = groupby(t, "K"; cols=["K", "X", "W"], orderby=["K"], select=[
+        :K => :K,
+        "N" => "gcount()",
+        "WSUM" => g -> sum(g.X .* g.W),
+        "MX" => "gmax(X)",
+        "R" => g -> maximum(g.X) - minimum(g.X)])
+    @test collect(r.K) == Int32[1, 2, 3]
+    @test collect(r.N) == [2, 3, 1]
+    @test collect(r.WSUM) ≈ [sum(X[grp[k]] .* W[grp[k]]) for k in 1:3]
+    @test collect(r.MX) == [maximum(X[grp[k]]) for k in 1:3]
+    @test collect(r.R) == [maximum(X[grp[k]]) - minimum(X[grp[k]]) for k in 1:3]
+end
+
+@testset "groupby — where/having string vs closure agree" begin
+    dir = joinpath(mktempdir(), "cbw.tab")
+    K = Int32[1, 1, 1, 2, 2, 3, 3, 3, 3, 1]
+    X = Float64[10, 20, 30, 5, 15, 100, 200, 300, 400, 40]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X]; nrow=10)
+    t = readtable(dir)
+
+    a = groupby(t, "K"; where="X > 15", select=["K" => :K, "N" => "gcount()"], orderby=["K"])
+    b = groupby(t, "K"; where=row -> row.X > 15, select=["K" => :K, "N" => "gcount()"], orderby=["K"])
+    @test collect(a.K) == collect(b.K) && collect(a.N) == collect(b.N)
+
+    c = groupby(t, "K"; having="gcount() >= 3", select=["K" => :K, "N" => "gcount()"], orderby=["K"])
+    d = groupby(t, "K"; having=g -> length(g) >= 3, select=["K" => :K, "N" => "gcount()"], orderby=["K"])
+    @test collect(c.K) == collect(d.K)
+end
+
+@testset "groupby — cols= restricts what a closure loads" begin
+    dir = joinpath(mktempdir(), "cbc.tab")
+    K = Int32[1, 1, 2, 2, 3]
+    X = Float64[1, 2, 3, 4, 5]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X]; nrow=5)
+    t = readtable(dir)
+    bogus = ColumnDesc("BOGUS", "", "NoSuchManager", "g", MSv2.TpInt,
+                       "ScalarColumnDesc<Int>", (), Int32(0), UInt32(0), Record(), nothing, 999)
+    td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
+                    t.desc.private, [t.desc.columns; bogus])
+    t2 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
+              td2, t.managers, t.syncmod, t.lockpath, t.container)
+    # BOGUS would error if read; cols= keeps it out
+    r = groupby(t2, "K"; cols=["K", "X"], orderby=["K"]) do g
+        (; K=first(g.K), S=sum(g.X))
+    end
+    @test collect(r.S) == Float64[3, 7, 5]
+    # a closure that needs a column not in cols= errors clearly
+    @test_throws ArgumentError groupby(t2, "K"; cols=["K"]) do g
+        (; K=first(g.K), S=sum(g.X))
+    end
+end
+
+@testset "groupby — do-block error cases" begin
+    dir = joinpath(mktempdir(), "cbe.tab")
+    write_table(dir, "T", Pair{String,Any}["K" => Int32[1, 1, 2], "X" => Float64[1, 2, 3]]; nrow=3)
+    t = readtable(dir)
+    @test_throws ArgumentError groupby(t, "K") do g
+        length(g)                       # not a NamedTuple
+    end
+    @test_throws ArgumentError groupby(t, "K"; orderby=["K"]) do g
+        isodd(first(g.K)) ? (; K=first(g.K), N=length(g)) : (; K=first(g.K), M=length(g))
+    end
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
