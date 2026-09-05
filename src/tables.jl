@@ -462,6 +462,20 @@ end
 
 # --- writers -------------------------------------------------------
 
+# `select` ("output_name => parent_name" pairs, in output order) ->
+# `(namemap, order)` for building a RefTable -- shared by `write_reftable`
+# and `query` (query.jl) so both use identical validation/error text.
+function _select_spec(parent::AbstractTable, select::AbstractVector{<:Pair})
+    order = String[String(first(p)) for p in select]
+    allunique(order) || throw(ArgumentError("duplicate output column name"))
+    namemap = Dict{String,String}(String(first(p)) => String(last(p)) for p in select)
+    pcols = Set(columnnames(parent))
+    for s in values(namemap)
+        s in pcols || throw(ArgumentError("parent has no column \"$s\""))
+    end
+    return namemap, order
+end
+
 """
     write_reftable(dir, parent, rows; select) -> dir
 
@@ -477,13 +491,7 @@ function write_reftable(dir::AbstractString, parent::AbstractTable,
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
 
-    order = String[String(first(p)) for p in select]
-    allunique(order) || throw(ArgumentError("write_reftable: duplicate output column name"))
-    namemap = Dict{String,String}(String(first(p)) => String(last(p)) for p in select)
-    pcols = Set(columnnames(parent))
-    for s in values(namemap)
-        s in pcols || throw(ArgumentError("write_reftable: parent has no column \"$s\""))
-    end
+    namemap, order = _select_spec(parent, select)
     any(x -> x < 1, rows) && throw(ArgumentError("write_reftable: row indices are 1-based"))
 
     mkpath(dir)

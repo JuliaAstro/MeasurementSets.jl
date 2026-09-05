@@ -22,6 +22,7 @@ include("datamanagers/incremental.jl")
 include("datamanagers/virtual.jl")
 include("datamanagers/dysco.jl")
 include("column.jl")
+include("query.jl")
 include("schema.jl")
 include("tables_interface.jl")
 include("create.jl")
@@ -39,5 +40,6 @@ export write_table, write_ms, copyms, create_ms
 export write_reftable, write_concattable, copytable
 export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!
 export resync, is_stale, is_multiused
+export query
 
 end
