@@ -142,6 +142,20 @@ insert!("/tmp/copy.ms/STATE"; values = (; OBS_MODE = "CALIBRATE_PHASE", SIG = tr
 taql("/tmp/copy.ms", "DELETE FROM t WHERE FLAG_ROW")
 ```
 
+## Documentation
+
+Every exported binding has a docstring — `?nrow`, `?query`, `?edit` in the
+REPL. The full HTML site (this README + a concepts overview, a task
+guide, and the API reference) builds locally:
+
+```
+julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+julia --project=docs docs/make.jl
+```
+
+Output lands in `docs/build/` (open `docs/build/index.html`). It is not
+deployed anywhere yet.
+
 ## Tests
 
 ```

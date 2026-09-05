@@ -967,12 +967,20 @@ _geval(e::TQLFunc, cols, g) =
 _geval(::TQLRowNum, cols, g) =
     throw(ArgumentError("TaQL-lite: rownumber() is not valid in groupby(...)"))
 
-# The per-group accessor passed to a closure-form `groupby` (Phase 27):
-# `g.COLNAME` -> a materialised Vector of that column's values for this
-# group's rows; `length(g)` -> the group size.  `cols`/`rows` are the
-# struct fields (reached via getfield) so a column literally named
-# `cols` or `rows` is unreachable as `g.cols`/`g.rows` -- a non-issue
-# for MS column names.
+"""
+    GroupSlice
+
+The per-group value passed to a closure-form [`groupby`](@ref) (the
+do-block argument, and the argument of a `select` / `where` / `having`
+closure). `g.COLNAME` is a materialised `Vector` of that column's values
+for the group's rows; `length(g)` is the group size; `propertynames(g)`
+lists the loaded columns.
+
+Only the columns named in `cols=` (or every column, when `cols` is
+omitted) are available — a closure's column use cannot be inferred. The
+names `cols` and `rows` are struct fields, so a column with either name
+is unreachable as `g.cols` / `g.rows` (a non-issue for MS column names).
+"""
 struct GroupSlice
     cols::Dict{String,AbstractVector}
     rows::Vector{Int}

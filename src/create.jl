@@ -281,9 +281,9 @@ Write a CTDS table at `dir`.  `columns` is an iterable of `name => vector`
 pairs (or a `Tables` columns source).  Column metadata (units, comments,
 exact class names) is taken from `SCHEMAVER2[name]` when available.
 `dysco`/`dysco_spec` compress one or more columns with `DyscoStMan` --
-see [`_write_table_core`](@ref) for the exact shape.  `storage`/
+see `_write_table_core` for the exact shape.  `storage`/
 `blocksize` pack every StandardStMan/IncrementalStMan/TiledStMan private
-file into one `table.mf`/`table.mfh5` -- see [`_write_table_core`](@ref).
+file into one `table.mf`/`table.mfh5` -- see `_write_table_core`.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
@@ -504,7 +504,7 @@ kind is preserved (casacore's `GIVING ... AS PLAIN`); for a
 `GroupedTable` the columns are materialised (`name` sets the table's
 schema name).  `rows` selects/reorders rows (1-based into `t`);
 `storage`/`blocksize` pack the destination into one `table.mf` /
-`table.mfh5` -- see [`_write_table_core`](@ref).  This is "SELECT ...
+`table.mfh5` -- see `_write_table_core`.  This is "SELECT ...
 INTO" for any query result.
 """
 function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
