@@ -1,7 +1,7 @@
 # Phase 5: lazy Column type + indexing sugar.
 
 @testset "Column API" begin
-    t = readtable(SAMPLE_MS)
+    t = readtable(SAMPLE_MS; precision=:full)   # exact eltype / value checks below
 
     tc = column(t, "TIME")
     @test tc isa AbstractVector{Float64}
@@ -23,7 +23,7 @@
     @test eltype(d) == Matrix{ComplexF32}
     @test size(d[42]) == (4, 64)
 
-    ms = MeasurementSet(SAMPLE_MS)
+    ms = MeasurementSet(SAMPLE_MS; precision=:full)
     @test ms[:DATA][10] == d[10]
     @test ms["ANTENNA1"][100] == column(t, "ANTENNA1")[100]
 

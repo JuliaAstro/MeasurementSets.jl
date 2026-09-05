@@ -4,8 +4,10 @@
 _casatype_of(::Type{Bool}) = TpBool
 _casatype_of(::Type{Int32}) = TpInt
 _casatype_of(::Type{Int64}) = TpInt64
+_casatype_of(::Type{Float16}) = TpFloat        # narrowed columns write back as Float32
 _casatype_of(::Type{Float32}) = TpFloat
 _casatype_of(::Type{Float64}) = TpDouble
+_casatype_of(::Type{ComplexF16}) = TpComplex
 _casatype_of(::Type{ComplexF32}) = TpComplex
 _casatype_of(::Type{ComplexF64}) = TpDComplex
 _casatype_of(::Type{<:AbstractString}) = TpString
@@ -370,7 +372,7 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
         srcname in implied && continue
         sc = columndesc(dmsrc, srcname)          # source column desc (pre-rename)
         col = try
-            column(valsrc, srcname)
+            _pcolumn(valsrc, srcname, :full)     # copies stay byte-exact (never Float16)
         catch
             push!(skipped, outname); continue
         end

@@ -35,6 +35,26 @@ keywords(t)["MS_VERSION"]                # 2.0f0
 columndesc(t, "UVW").keywords            # per-column keywords (units, MEASINFO)
 ```
 
+### Precision
+
+A MAIN table's `TpComplex` visibility columns — `DATA`, `MODEL_DATA`,
+`CORRECTED_DATA` — read back as `ComplexF16` **by default**. The on-disk
+bytes are `ComplexF32`; the visibilities derive from 8-bit samples, so
+nothing real is lost and the working set halves.
+
+```julia
+eltype(column(t, "DATA"))                     # Matrix{ComplexF16}
+eltype(column(t, "DATA"; precision=:full))    # Matrix{ComplexF32}
+readtable("my.ms"; precision=:full)           # every column wide
+MeasurementSet("my.ms"; precision=:full)
+```
+
+`TpFloat` columns (`WEIGHT`, `SIGMA`, `WEIGHT_SPECTRUM`) stay `Float32`
+(real weights exceed `Float16`'s range); `Float64` (`TIME`, `UVW`),
+`ComplexF64` and `Bool` are never narrowed. Non-MAIN tables default to
+`:full`. `copyms` / `copytable` / `edit` always read at full precision,
+so copies and in-place edits stay byte-exact.
+
 ## Tables.jl interop
 
 Every table is a `Tables.jl` source — column *and* row access — so

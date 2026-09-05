@@ -34,7 +34,7 @@ The returned object replaces `t` -- keep it and drop the old one.
 """
 function resync(t::Table)
     is_stale(t) || return t
-    fresh = readtable(t.path)
+    fresh = readtable(t.path; precision=t.precision)
     Base.@lock _REG_LOCK begin
         delete!(_DM_CACHE, t)
     end

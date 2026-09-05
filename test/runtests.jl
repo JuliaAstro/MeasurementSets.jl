@@ -20,6 +20,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
         include("api_tests.jl")
         include("tables_tests.jl")
         include("schema_tests.jl")
+        include("precision_tests.jl")
     else
         @info "SAMPLE_MS not found; skipping data-dependent tests" SAMPLE_MS
     end

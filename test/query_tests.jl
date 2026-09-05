@@ -102,7 +102,7 @@ end
     td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
                     t.desc.private, [t.desc.columns; bogus])
     t2 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
-              td2, t.managers, t.syncmod, t.lockpath, t.container)
+              td2, t.managers, t.syncmod, t.lockpath, t.container, t.precision)
     r8 = query(t2, "A > 15")   # BOGUS is never resolved -> never errors
     @test r8.rows == r1.rows
 end
@@ -239,7 +239,7 @@ end
     td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
                     t.desc.private, [t.desc.columns; bogus])
     t3 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
-              td2, t.managers, t.syncmod, t.lockpath, t.container)
+              td2, t.managers, t.syncmod, t.lockpath, t.container, t.precision)
     r5 = query(t3, "A >= 1 ORDER BY A")   # BOGUS never resolved -> never errors
     @test r5.rows == r1.rows
 end
@@ -386,7 +386,7 @@ end
     td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
                     t.desc.private, [t.desc.columns; bogus])
     t2 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
-              td2, t.managers, t.syncmod, t.lockpath, t.container)
+              td2, t.managers, t.syncmod, t.lockpath, t.container, t.precision)
     @test query(t2, "A + 1 > 6").rows == query(t, "A + 1 > 6").rows
 end
 
@@ -502,7 +502,7 @@ end
     td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
                     t.desc.private, [t.desc.columns; bogus])
     t2 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
-              td2, t.managers, t.syncmod, t.lockpath, t.container)
+              td2, t.managers, t.syncmod, t.lockpath, t.container, t.precision)
     @test query(t2, "sqrt(B) > 5").rows == query(t, "sqrt(B) > 5").rows
 end
 
@@ -764,7 +764,7 @@ end
     td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
                     t.desc.private, [t.desc.columns; bogus])
     t2 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
-              td2, t.managers, t.syncmod, t.lockpath, t.container)
+              td2, t.managers, t.syncmod, t.lockpath, t.container, t.precision)
     # BOGUS would error if read; cols= keeps it out
     r = groupby(t2, "K"; cols=["K", "X"], orderby=["K"]) do g
         (; K=first(g.K), S=sum(g.X))

@@ -25,7 +25,7 @@
     bt = MSv2.Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows,
                         t.endian, MSv2.TableDesc(t.desc.name, t.desc.version,
                         t.desc.comment, t.desc.public, t.desc.private, bad),
-                        t.managers, t.syncmod, t.lockpath, t.container)
+                        t.managers, t.syncmod, t.lockpath, t.container, t.precision)
     issues = validate(bt; table="ANTENNA")
     @test any(contains("missing required column NAME"), issues)
     @test any(contains("type"), issues)

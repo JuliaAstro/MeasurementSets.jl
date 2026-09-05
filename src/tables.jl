@@ -176,6 +176,9 @@ bound storage managers; cell reads go through [`column`](@ref) /
 [`getcell`](@ref) / `t[:NAME]`. See also [`RefTable`](@ref) and
 [`ConcatTable`](@ref) for the reference / concatenation kinds, and
 [`edit`](@ref) to open one for update.
+
+`precision` is `:half` (a MAIN table's `TpComplex` visibility columns
+read back as `ComplexF16` — see [`readtable`](@ref)) or `:full`.
 """
 struct Table <: AbstractTable
     path::String
@@ -190,6 +193,7 @@ struct Table <: AbstractTable
     syncmod::Int64             # table.lock modify counter at open (-1 = no sync blob)
     lockpath::String           # joinpath(path, "table.lock")
     container::Union{Nothing,Container}   # MultiFile/MultiHDF5, if present (Phase 20)
+    precision::Symbol          # :half -> narrow TpFloat/TpComplex reads to Float16/ComplexF16
 end
 
 # Fetch a data manager's private file's whole bytes, transparently
@@ -419,17 +423,34 @@ Returns a [`RefTable`](@ref) or [`ConcatTable`](@ref) when `path` is a
 reference / concatenation table (its parent(s) are opened recursively);
 otherwise a plain [`Table`](@ref).
 
+`precision` controls the in-memory element type of visibility columns.
+`:half` (the default for a MAIN table — `table.info` Type
+`"Measurement Set"`) reads the `TpComplex` columns (`DATA`,
+`MODEL_DATA`, `CORRECTED_DATA`, …) back as `ComplexF16` — the on-disk
+`ComplexF32` bytes are unchanged, and since the visibilities derive from
+8-bit samples nothing real is lost. `TpFloat` columns (`WEIGHT`,
+`SIGMA`, `WEIGHT_SPECTRUM`) stay `Float32` even under `:half` (real
+weights routinely exceed `Float16`'s range); `Float64` / `ComplexF64` /
+`Bool` are never narrowed. `:full` keeps everything wide. Non-MAIN
+tables default to `:full`. Override per column with
+[`column`](@ref)`(t, name; precision=…)` (an explicit `:half` there
+narrows a `TpFloat` column too).
+
 A shared (read) lock on `<path>/table.lock` is held only while `table.dat`
 is slurped; the row count then comes from the `table.lock` sync blob when
 present (as casacore does), else from `table.dat`.  The lazy
 storage-manager reads that a later `column()` triggers are *not* locked --
 they rely on the writers' atomic renames.
 """
-function readtable(path::AbstractString)
+function readtable(path::AbstractString; precision::Union{Nothing,Symbol}=nothing)
     dir = String(rstrip(path, '/'))
     isdir(dir) || throw(ArgumentError("not a table directory: $dir"))
     lockpath = joinpath(dir, "table.lock")
     tp, st, readme = read_tableinfo(dir)
+    prec = precision !== nothing ? precision :
+           (tp == "Measurement Set" ? :half : :full)
+    prec in (:half, :full) ||
+        throw(ArgumentError("readtable: precision must be :half or :full, got $(repr(prec))"))
     container = open_container(dir)
 
     local datbytes, sync
@@ -469,7 +490,8 @@ function readtable(path::AbstractString)
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.public,
                       desc.private, cols)
 
-    return Table(dir, tp, st, readme, version, nr, endian, desc2, dms, syncmod, lockpath, container)
+    return Table(dir, tp, st, readme, version, nr, endian, desc2, dms, syncmod,
+                 lockpath, container, prec)
 end
 
 # open a parent / part table, adding context on failure

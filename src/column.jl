@@ -54,12 +54,14 @@ struct Column{T} <: AbstractVector{T}
     inst::Any            # opened data-manager instance
     index::Int           # DM-local column index (SSM/ISM)
     cols::Int            # number of columns bound to the DM instance (ISM)
+    narrow::Bool         # Phase 34: convert Float32/ComplexF32 cells to Float16/ComplexF16
 end
 
 # Best-known element type: a scalar, a fixed-shape Array, or an Array of
-# (possibly unknown) dimensionality.
-function _eltype(c::ColumnDesc, inst)
-    E = juliatype(c.type)
+# (possibly unknown) dimensionality.  `narrow` maps Float32 -> Float16 /
+# ComplexF32 -> ComplexF16 in the element type.
+function _eltype(c::ColumnDesc, inst; narrow::Bool=false)
+    E = narrow ? _narrowtype(juliatype(c.type)) : juliatype(c.type)
     s = c.shape
     s isa Dims && isempty(s) && return E
     s isa Dims && return Array{E,length(s)}
@@ -70,19 +72,37 @@ function _eltype(c::ColumnDesc, inst)
     return Array{E}
 end
 
-_eltype(c::ColumnDesc, ::VirtualEngine) = Array{juliatype(c.type)}
+_eltype(c::ColumnDesc, ::VirtualEngine; narrow::Bool=false) =
+    Array{narrow ? _narrowtype(juliatype(c.type)) : juliatype(c.type)}
 
 """
-    column(t::Table, name) -> Column
+    column(t::Table, name; precision=nothing) -> Column
 
 A lazy `AbstractVector` over a column: `col[i]` reads one cell, `col[r]` a
 range, `col[:]` the whole column (fast path).
+
+`precision`:
+* `nothing` (default) — follow `t.precision`. When that is `:half` (a
+  MAIN table's default), only `TpComplex` **visibility** columns
+  (`DATA`, `MODEL_DATA`, `CORRECTED_DATA`, …) narrow to `ComplexF16`;
+  `TpFloat` columns (`WEIGHT`, `SIGMA`, `WEIGHT_SPECTRUM`) stay `Float32`
+  because real weights routinely exceed `Float16`'s range.
+* `:half` — narrow this column if it is `Float32` or `ComplexF32`
+  (forces it even for a `TpFloat` weight column — the caller's risk).
+* `:full` — keep `Float32` / `ComplexF32`.
 """
-function column(t::Table, name::AbstractString)
+function column(t::Table, name::AbstractString; precision::Union{Nothing,Symbol}=nothing)
     c = columndesc(t, name)
     inst = _dm_instance(t, c.sequ)
     idx, n = _dm_local(t, c)
-    Column{_eltype(c, inst)}(t, c, inst, idx, n)
+    nar = if precision === :half
+        _narrows(juliatype(c.type))                       # explicit: any Float32/ComplexF32
+    elseif precision === :full
+        false
+    else
+        t.precision === :half && juliatype(c.type) === ComplexF32   # default: complex only
+    end
+    Column{_eltype(c, inst; narrow=nar)}(t, c, inst, idx, n, nar)
 end
 
 Base.size(c::Column) = (c.table.rows,)
@@ -90,11 +110,13 @@ Base.IndexStyle(::Type{<:Column}) = IndexLinear()
 
 function Base.getindex(c::Column, i::Int)
     @boundscheck checkbounds(c, i)
-    getcell(c.inst, c.index, c.desc, i, c.cols)
+    v = getcell(c.inst, c.index, c.desc, i, c.cols)
+    c.narrow ? _narrowvalue(v) : v
 end
 
 function Base.getindex(c::Column, ::Colon)
-    getcolumn(c.inst, c.index, c.desc, c.table.rows, c.cols)
+    out = getcolumn(c.inst, c.index, c.desc, c.table.rows, c.cols)
+    c.narrow ? map(_narrowvalue, out) : out
 end
 
 Base.getindex(c::Column, r::AbstractVector{<:Integer}) = [c[i] for i in r]
@@ -136,17 +158,22 @@ Base.getindex(c::ConcatColumn, ::Colon) =
 Base.getindex(c::ConcatColumn, r::AbstractVector{<:Integer}) = [c[i] for i in r]
 Base.collect(c::ConcatColumn) = c[:]
 
-function column(t::RefTable, name::AbstractString)
+function column(t::RefTable, name::AbstractString; precision::Union{Nothing,Symbol}=nothing)
     haskey(t.namemap, name) || throw(KeyError(name))
-    pc = column(t.parent, t.namemap[name])
+    pc = _pcolumn(t.parent, t.namemap[name], precision)
     MappedColumn{eltype(pc),typeof(pc)}(pc, t.rows)
 end
 
-function column(t::ConcatTable, name::AbstractString)
-    pcs = AbstractVector[column(p, name) for p in t.parts]
+function column(t::ConcatTable, name::AbstractString; precision::Union{Nothing,Symbol}=nothing)
+    pcs = AbstractVector[_pcolumn(p, name, precision) for p in t.parts]
     T = mapreduce(eltype, typejoin, pcs)
     ConcatColumn{T}(pcs, t.offsets)
 end
+
+# `column` with a `precision` override that may be `nothing` (= use the
+# table's own setting); works for every AbstractTable kind.
+_pcolumn(t::AbstractTable, name, precision::Union{Nothing,Symbol}) =
+    column(t, name; precision)
 
 # Rows `r` of `c` as a `Vector{Any}` of plain values / dense `Array`s (lazy
 # wrappers collapsed so the reader's nested wrapper types stay out of
@@ -173,18 +200,21 @@ end
 # --- convenience verbs + indexing ---------------------------------
 
 """
-    getcolumn(t, name) -> Vector / Vector{Array}
+    getcolumn(t, name; precision=nothing) -> Vector / Vector{Array}
 
-Read an entire column's data (eager; equivalent to `column(t, name)[:]`).
+Read an entire column's data (eager; equivalent to
+`column(t, name; precision)[:]`).
 """
-getcolumn(t::AbstractTable, name::AbstractString) = column(t, name)[:]
+getcolumn(t::AbstractTable, name::AbstractString; precision::Union{Nothing,Symbol}=nothing) =
+    _pcolumn(t, name, precision)[:]
 
 """
-    getcell(t, name, row) -> value
+    getcell(t, name, row; precision=nothing) -> value
 
 Read one cell (`row` is 1-based).
 """
-getcell(t::AbstractTable, name::AbstractString, row::Integer) = column(t, name)[row]
+getcell(t::AbstractTable, name::AbstractString, row::Integer;
+        precision::Union{Nothing,Symbol}=nothing) = _pcolumn(t, name, precision)[row]
 
 Base.getindex(t::AbstractTable, name::AbstractString) = column(t, name)
 Base.getindex(t::AbstractTable, name::Symbol) = column(t, String(name))

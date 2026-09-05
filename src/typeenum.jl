@@ -62,6 +62,29 @@ const ARRAYTYPE = Dict{CasaType,CasaType}(
 isarraytype(t::CasaType) = haskey(ARRAYTYPE, t)
 isscalartype(t::CasaType) = haskey(SCALARTYPE, t)
 
+# --- half-precision narrowing (Phase 34) --------------------------
+# MS visibility data is stored as ComplexF32 but derived from 8-bit
+# samples, so ComplexF16 loses no real information.  A MAIN table's
+# TpComplex columns (DATA, ...) read back narrowed by default; TpFloat
+# (WEIGHT/SIGMA -- real weights exceed Float16's range), Float64,
+# ComplexF64 and Bool are never narrowed by default (an explicit
+# `column(...; precision=:half)` still narrows any Float32/ComplexF32).
+
+_narrowtype(::Type{Float32})                = Float16
+_narrowtype(::Type{ComplexF32})             = ComplexF16
+_narrowtype(::Type{Array{E,N}}) where {E,N} = Array{_narrowtype(E),N}
+_narrowtype(::Type{Array{E}})   where {E}   = Array{_narrowtype(E)}
+_narrowtype(::Type{T})          where {T}   = T
+
+_narrows(::Type{T}) where {T} = _narrowtype(T) !== T
+
+function _narrowvalue(x::AbstractArray)
+    N = _narrowtype(eltype(x))
+    N === eltype(x) ? x : N.(x)
+end
+_narrowvalue(x::Number) = _narrowtype(typeof(x))(x)
+_narrowvalue(x)         = x
+
 """
     juliatype(t::CasaType)
 

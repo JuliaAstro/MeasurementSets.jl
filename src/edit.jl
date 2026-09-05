@@ -49,7 +49,7 @@ end
 Open the CTDS table at `path` for update.
 """
 function edit(path::AbstractString)
-    r = readtable(String(rstrip(path, '/')))
+    r = readtable(String(rstrip(path, '/')); precision=:full)   # edits work at native precision
     r isa Table || error("edit: $(r isa RefTable ? "RefTable" : "ConcatTable") " *
                          "at $path — in-place edit is not supported")
     r.container === nothing ||

@@ -7,14 +7,19 @@ struct MeasurementSet
 end
 
 """
-    MeasurementSet(path) -> MeasurementSet
+    MeasurementSet(path; precision=nothing) -> MeasurementSet
 
 Open the MAIN table of a Measurement Set directory and read its metadata.
 Subtables are read on first access via `getproperty` / `subtable`.
+
+`precision` is forwarded to [`readtable`](@ref) for the MAIN table:
+`:half` (the default) reads the `TpComplex` visibility columns (`DATA`,
+…) as `ComplexF16`, `:full` keeps `ComplexF32`. Subtables always open at
+`:full`.
 """
-function MeasurementSet(path::AbstractString)
+function MeasurementSet(path::AbstractString; precision::Union{Nothing,Symbol}=nothing)
     dir = String(rstrip(path, '/'))
-    MeasurementSet(dir, readtable(dir), Dict{String,AbstractTable}())
+    MeasurementSet(dir, readtable(dir; precision), Dict{String,AbstractTable}())
 end
 
 Base.propertynames(ms::MeasurementSet) =

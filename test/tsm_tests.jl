@@ -1,7 +1,7 @@
 # TiledStMan / TiledShapeStMan / TiledColumnStMan tests against the sample MS.
 
 @testset "TSM structural" begin
-    t = readtable(SAMPLE_MS)
+    t = readtable(SAMPLE_MS; precision=:full)   # byte-exact decode checks
 
     uvw = getcell(t, "UVW", 1)
     @test uvw isa AbstractVector{Float64} && size(uvw) == (3,)
@@ -29,7 +29,7 @@ if _HAVE_CASACORE
                     c[ntuple(_ -> Colon(), ndims(c) - 1)..., r]
 
     @testset "TSM vs casacore" begin
-        t = readtable(SAMPLE_MS)
+        t = readtable(SAMPLE_MS; precision=:full)   # byte-exact decode checks
         ct = CCT.Table(SAMPLE_MS)
         cols = Dict(n => ct[Symbol(n)] for n in
                     ("UVW", "DATA", "FLAG", "WEIGHT", "SIGMA"))

@@ -19,7 +19,11 @@ virtual scaling / compression engines (`ScaledArrayEngine`,
 `CompressComplex`, …).  `MultiFile` / `MultiHDF5` container tables, and
 `RefTable` / `ConcatTable` (TaQL selections, MultiMS MAIN), too.  Columns
 are lazy `AbstractVector`s; tables are `Tables.jl` sources
-(`DataFrame(subtable(ms, "ANTENNA"))`).
+(`DataFrame(subtable(ms, "ANTENNA"))`).  A MAIN table's `DATA` /
+`MODEL_DATA` / `CORRECTED_DATA` read back as `ComplexF16` by default
+(the visibilities derive from 8-bit samples — nothing real is lost, and
+the working set halves); `readtable(ms; precision=:full)` or
+`column(t, "DATA"; precision=:full)` for `ComplexF32`.
 
 **Write** — `write_table` / `create_ms` / `copyms` / `copytable` create
 conformant tables, preserving each column's storage-manager / engine /

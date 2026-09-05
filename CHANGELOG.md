@@ -552,3 +552,49 @@ Still, across Phases 22–31: no bitwise operators (`& | ^ ~`),
 functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, a
 general M:N cross-product join, `INSERT LIMIT`, or `UPDATE` array-slice
 assignment.
+
+### Phase 32 — docs / consolidation pass
+
+Documentation, no behaviour change: a docstring on every one of the 53
+exported bindings (`?nrow`, `?Table`, `?query`, …); the `README` cut from
+a 31-paragraph phase log to a task-oriented "At a glance" + "Concepts" +
+"Usage", with the phase-by-phase history moved to this `CHANGELOG`. Light
+code consolidation — the two byte-identical `_arrayfile!` bodies now
+share one helper; the casacore/TaQL `tableCommand` cross-check
+boilerplate (six copies across four test files) collapsed to one
+`_taqlcmd` helper.
+
+### Phase 33 — Documenter.jl site (local build)
+
+A `docs/` tree — `make.jl` + `Project.toml` + Home / Concepts / Guide /
+API reference / Changelog pages — that builds with
+`julia --project=docs docs/make.jl` (output in `docs/build/`, not
+deployed). The API page is curated `@docs` blocks covering all 53
+exports (`checkdocs = :exported`). No `deploydocs` / CI workflow / badge
+yet (the GitHub repo slug is still a placeholder).
+
+### Phase 34 — half-precision (ComplexF16) MAIN reads
+
+MS visibility data is stored on disk as `ComplexF32` (a historical
+choice) but derives from 8-bit-integer samples, so `ComplexF16` loses no
+real information and halves the working-set size. A MAIN table's
+`TpComplex` columns (`DATA`, `MODEL_DATA`, `CORRECTED_DATA`, …) now read
+back as `ComplexF16` **by default**; the on-disk bytes are unchanged.
+
+```julia
+t = readtable("my.ms")
+eltype(column(t, "DATA"))                    # Matrix{ComplexF16}
+eltype(column(t, "DATA"; precision=:full))   # Matrix{ComplexF32}
+readtable("my.ms"; precision=:full)          # every column wide
+```
+
+`TpFloat` columns (`WEIGHT`, `SIGMA`, `WEIGHT_SPECTRUM`) stay `Float32` —
+real weights routinely exceed `Float16`'s 65504 range; `Float64`
+(`TIME`, `UVW`), `ComplexF64` and `Bool` are never narrowed. Non-MAIN
+tables default to `:full`. `readtable(...; precision=…)`,
+`MeasurementSet(...; precision=…)` and `column(t, name; precision=…)`
+override; an explicit `column(...; precision=:half)` narrows a `TpFloat`
+column too (the caller's risk). `copyms` / `write_ms` / `copytable` and
+`edit` always read the source at full precision, so copies stay
+byte-exact. The narrowing is a post-read conversion — the storage-manager
+decode paths are untouched.
