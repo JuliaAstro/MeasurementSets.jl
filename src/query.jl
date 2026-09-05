@@ -1235,3 +1235,147 @@ function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
     end)
     return GroupedTable(copy(gt.names), AbstractVector[c[perm] for c in gt.cols])
 end
+
+# ======================================================================
+# join -- an N:1 lookup join  (Phase 28)
+# ======================================================================
+#
+# Not a general SQL cross-product: each `left` row maps to at most one
+# `right` row (via a key), and selected `right` columns are pulled in
+# per left row -- exactly what TaQL's own `JOIN ... ON` does.  The result
+# is a `GroupedTable` whose columns are lazy `MappedColumn` views
+# (zero-copy even joining onto a large left table); `unmatched=:missing`
+# forces the affected right columns to materialise.
+
+_mapcol(c::AbstractVector, rows::Vector{Int}) =
+    MappedColumn{eltype(c),typeof(c)}(c, rows)
+
+# column selectors: `"NAME"` or `"NAME" => "ANT_NAME"` (source => output,
+# DataFrames-style).  Normalised to `output => source` pairs internally.
+_norm_pairs(xs) = Pair{String,String}[
+    x isa Pair ? (String(last(x)) => String(first(x))) : (String(x) => String(x))
+    for x in xs]
+
+# left row -> right row (1-based), or 0 for no match
+function _join_matchrow(left::AbstractTable, right::AbstractTable, on)
+    nr = nrow(right)
+    if on isa Union{AbstractString,Symbol}
+        String(on) in columnnames(left) ||
+            throw(ArgumentError("join: left table has no column \"$(on)\""))
+        lc = column(left, String(on))
+        return Int[(v = lc[i]; 0 <= v < nr ? Int(v) + 1 : 0) for i in 1:nrow(left)]
+    end
+    pairs = on isa Pair ? [on] : collect(on)
+    isempty(pairs) && throw(ArgumentError("join: `on` must not be empty"))
+    lkeys = String[String(first(p)) for p in pairs]
+    rkeys = String[String(last(p)) for p in pairs]
+    for k in lkeys
+        k in columnnames(left) || throw(ArgumentError("join: left table has no column \"$k\""))
+    end
+    for k in rkeys
+        k in columnnames(right) || throw(ArgumentError("join: right table has no column \"$k\""))
+    end
+    rcols = [column(right, k) for k in rkeys]
+    lcols = [column(left, k) for k in lkeys]
+    idx = Dict{Any,Int}()
+    for j in 1:nr
+        key = ntuple(t -> rcols[t][j], length(rkeys))
+        haskey(idx, key) && throw(ArgumentError(
+            "join: right key $(key) is not unique (rows $(idx[key]) and $j) -- the lookup is ambiguous"))
+        idx[key] = j
+    end
+    return Int[get(idx, ntuple(t -> lcols[t][i], length(lkeys)), 0) for i in 1:nrow(left)]
+end
+
+# post-assembly WHERE over the RESULT column names (a renamed right
+# column is referenced by its output name).  String -> the TaQL-lite
+# expression engine; Function -> a `row -> Bool` predicate.
+function _result_filter(gt::GroupedTable, where)
+    n = isempty(gt.cols) ? 0 : length(gt.cols[1])
+    keep = if where isa Function
+        rws = CTDSRows(gt.cols, gt.names, n)
+        [i for (i, r) in enumerate(rws) if where(r)]
+    else
+        cd = Dict{String,AbstractVector}(String(nm) => c for (nm, c) in zip(gt.names, gt.cols))
+        ast = _taqllite_parse(String(where), Set(Base.keys(cd)))
+        !_has_aggr(ast) ||
+            throw(ArgumentError("join: `where` must not contain aggregate functions"))
+        [i for i in 1:n if _tqleval(ast, cd, i)]
+    end
+    return GroupedTable(copy(gt.names), AbstractVector[c[keep] for c in gt.cols])
+end
+
+"""
+    join(left, right; on, rightcols, leftcols=nothing, where=nothing,
+         unmatched=:error, orderby=nothing) -> GroupedTable
+
+N:1 lookup join (extends `Base.join`). Each `left` row is matched to at
+most one `right` row and the selected `right` columns are pulled in per
+left row — TaQL's `JOIN … ON` semantics, not a general cross product.
+
+`on` is either
+
+* a **column name** (`String` / `Symbol`) — that `left` column holds a
+  **0-based row index** into `right` (the MS subtable convention:
+  `ANTENNA1` → the `ANTENNA` subtable row);
+* a **`Pair`** `"LKEY" => "RKEY"` — equi-join, matching `left.LKEY`
+  against `right.RKEY` (which must be unique);
+* a **vector of pairs** — a composite key (all must match).
+
+`rightcols` lists the `right` columns to attach — `"NAME"` or
+`"NAME" => "ANT_NAME"` to rename. `leftcols` (default: every `left`
+column) likewise selects/renames left columns. Output names must be
+unique across both. `where` filters the assembled result (a string over
+the *output* column names, or a `row -> Bool` closure). `unmatched`:
+`:error` (default — throw on a dangling key), `:drop` (exclude that
+left row), or `:missing` (keep it; right columns get `missing`).
+`orderby` sorts the result by output column name (`"N"` / `"N" => :desc`).
+
+Returns a [`GroupedTable`](@ref) whose columns are lazy views unless
+`:missing` forces materialisation.
+"""
+function Base.join(left::AbstractTable, right::AbstractTable; on,
+                   rightcols::AbstractVector, leftcols=nothing,
+                   where=nothing, unmatched::Symbol=:error,
+                   orderby::Union{Nothing,AbstractVector}=nothing)
+    matchrow = _join_matchrow(left, right, on)
+
+    lrows =
+        unmatched === :error ? begin
+            b = findfirst(iszero, matchrow)
+            b === nothing ? collect(1:nrow(left)) :
+                throw(ArgumentError("join: left row $b has no match on the right " *
+                                    "(pass unmatched=:drop or :missing to allow it)"))
+        end :
+        unmatched === :drop ? [i for i in eachindex(matchrow) if matchrow[i] != 0] :
+        unmatched === :missing ? collect(1:nrow(left)) :
+        throw(ArgumentError("join: `unmatched` must be :error, :drop, or :missing"))
+    rrows = matchrow[lrows]
+
+    lpairs = leftcols === nothing ? Pair{String,String}[n => n for n in columnnames(left)] :
+             _norm_pairs(leftcols)
+    rpairs = _norm_pairs(rightcols)
+    for (_, s) in lpairs
+        s in columnnames(left) || throw(ArgumentError("join: left table has no column \"$s\""))
+    end
+    for (_, s) in rpairs
+        s in columnnames(right) || throw(ArgumentError("join: right table has no column \"$s\""))
+    end
+    outnames = String[first(p) for p in vcat(lpairs, rpairs)]
+    allunique(outnames) ||
+        throw(ArgumentError("join: duplicate output column name (left and right collide?)"))
+
+    cols = AbstractVector[]
+    for (_, s) in lpairs
+        push!(cols, _mapcol(column(left, s), lrows))
+    end
+    anymiss = unmatched === :missing && any(iszero, rrows)
+    for (_, s) in rpairs
+        rc = column(right, s)
+        push!(cols, anymiss ? [r == 0 ? missing : rc[r] for r in rrows] : _mapcol(rc, rrows))
+    end
+
+    gt = GroupedTable(Symbol.(outnames), cols)
+    where === nothing || (gt = _result_filter(gt, where))
+    orderby === nothing ? gt : _gt_sort(gt, orderby)
+end

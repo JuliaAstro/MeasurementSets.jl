@@ -41,5 +41,7 @@ export write_reftable, write_concattable, copytable
 export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!
 export resync, is_stale, is_multiused
 export query, groupby, GroupedTable
+# `join` is not exported -- it extends `Base.join` with an
+# N:1 lookup-join method for two `AbstractTable`s (see query.jl).
 
 end

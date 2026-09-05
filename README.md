@@ -419,10 +419,35 @@ closure can also appear as a `select=` RHS alongside strings/symbols
 (`row -> Bool` / `g -> Bool`). `cols=` restricts which columns are
 loaded onto `g` (default: all of `t`). Same `GroupedTable` output.
 
-Still, across Phases 22–27: no bitwise operators (`& | ^ ~`),
+**Phase 28 — joins.** `join(left, right; on, rightcols, …)` (a method
+added to `Base.join`) does an **N:1 lookup join** — each `left` row is
+matched to at most one `right` row and the chosen `right` columns are
+pulled in per left row. This is TaQL's own `JOIN … ON` semantics, not a
+general cross product, and it's exactly what an MS needs: `ANTENNA1` /
+`FIELD_ID` / `DATA_DESC_ID` in `MAIN` are keys into the subtables.
+
+```julia
+join(ms.MAIN, subtable(ms, "ANTENNA");
+     on = "ANTENNA1",                       # 0-based row index into ANTENNA
+     rightcols = ["NAME" => "ANT_NAME", "POSITION" => "ANT_POS"],
+     where = "ANT_NAME ~ p/DA*/")
+```
+
+`on` is a column name (that left column is a 0-based row index into
+`right` — the MS convention), a `"LKEY" => "RKEY"` pair (equi-join on a
+unique right key), or a vector of pairs (composite key). `rightcols` /
+`leftcols` pick and rename columns (`"src" => "out"`, DataFrames-style;
+`leftcols` defaults to every left column). `where` filters the
+assembled result (a string over the *output* names, or a `row -> Bool`
+closure); `orderby` sorts it; `unmatched` is `:error` (default — throw
+on a dangling key), `:drop`, or `:missing`. The result is a
+`GroupedTable` whose columns are lazy `MappedColumn` views (zero-copy
+even joining onto MAIN), cross-checked against real TaQL's `JOIN`.
+
+Still, across Phases 22–28: no bitwise operators (`& | ^ ~`),
 `BETWEEN`, `~=`, array indexing, units, date/time or measures
-functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, or
-joins.
+functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, or a
+general M:N cross-product join.
 
 ## Usage
 

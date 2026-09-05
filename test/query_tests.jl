@@ -788,6 +788,148 @@ end
     end
 end
 
+# ---- Phase 28: joins ----
+
+@testset "join — _join_matchrow unit" begin
+    dir = joinpath(mktempdir(), "jm")
+    A1 = Int32[0, 2, 1, 9, 0]           # 9 is out of range for a 3-row right
+    S = ["a", "b", "a", "c", "b"]
+    write_table(joinpath(dir, "L"), "L", Pair{String,Any}["A1" => A1, "S" => S]; nrow=5)
+    write_table(joinpath(dir, "R"), "R", Pair{String,Any}["K" => ["a", "b", "z"],
+                                                          "V" => Float64[1, 2, 3]]; nrow=3)
+    L = readtable(joinpath(dir, "L"))
+    R = readtable(joinpath(dir, "R"))
+
+    @test MSv2._join_matchrow(L, R, "A1") == [1, 3, 2, 0, 1]          # 0-based -> 1-based, 9 -> 0
+    @test MSv2._join_matchrow(L, R, "S" => "K") == [1, 2, 1, 0, 2]    # "c", "z" don't match
+    # composite
+    write_table(joinpath(dir, "L2"), "L2", Pair{String,Any}["P" => Int32[1, 1, 2],
+                                                            "Q" => Int32[10, 20, 10]]; nrow=3)
+    write_table(joinpath(dir, "R2"), "R2", Pair{String,Any}["P" => Int32[1, 2, 1],
+                                                            "Q" => Int32[10, 10, 20]]; nrow=3)
+    L2 = readtable(joinpath(dir, "L2"))
+    R2 = readtable(joinpath(dir, "R2"))
+    @test MSv2._join_matchrow(L2, R2, ["P" => "P", "Q" => "Q"]) == [1, 3, 2]
+
+    # duplicate right key errors
+    write_table(joinpath(dir, "RD"), "RD", Pair{String,Any}["K" => ["a", "b", "a"]]; nrow=3)
+    RD = readtable(joinpath(dir, "RD"))
+    @test_throws ArgumentError MSv2._join_matchrow(L, RD, "S" => "K")
+end
+
+@testset "join — index-lookup" begin
+    dir = joinpath(mktempdir(), "ji")
+    A1 = Int32[0, 1, 2, 0, 1, 3, 2, 0]
+    TIME = collect(Float64, 1:8)
+    write_table(joinpath(dir, "MAIN"), "MAIN",
+                Pair{String,Any}["ANTENNA1" => A1, "TIME" => TIME]; nrow=8)
+    AN = ["DA41", "DA42", "PM01", "PM02"]
+    POS = Float64[10, 20, 30, 40]
+    write_table(joinpath(dir, "ANT"), "ANT",
+                Pair{String,Any}["NAME" => AN, "POS" => POS]; nrow=4)
+    main = readtable(joinpath(dir, "MAIN"))
+    ant = readtable(joinpath(dir, "ANT"))
+
+    r = join(main, ant; on="ANTENNA1", rightcols=["NAME" => "AN", "POS" => "APOS"])
+    @test r isa GroupedTable
+    @test Set(r.names) == Set([:ANTENNA1, :TIME, :AN, :APOS])
+    @test collect(r.AN) == [AN[a+1] for a in A1]
+    @test collect(r.APOS) == [POS[a+1] for a in A1]
+    @test collect(r.TIME) == TIME
+    # lazy result columns
+    @test r.cols[findfirst(==(:AN), r.names)] isa MSv2.MappedColumn
+    @test r.cols[findfirst(==(:TIME), r.names)] isa MSv2.MappedColumn
+
+    # write_table round-trip
+    dst = joinpath(mktempdir(), "JT")
+    write_table(dst, "JT", r; nrow=8)
+    jt = readtable(dst)
+    @test column(jt, "AN")[:] == collect(r.AN)
+    @test column(jt, "APOS")[:] == collect(r.APOS)
+
+    # leftcols subset + rename; source => output convention
+    r2 = join(main, ant; on="ANTENNA1", leftcols=["TIME" => "T"], rightcols=["NAME" => "AN"])
+    @test Set(r2.names) == Set([:T, :AN])
+    @test collect(r2.T) == TIME
+
+    # output-name clash errors
+    @test_throws ArgumentError join(main, ant; on="ANTENNA1", rightcols=["NAME" => "TIME"])
+end
+
+@testset "join — equi-join" begin
+    dir = joinpath(mktempdir(), "je")
+    SRC = ["3C48", "3C286", "3C48", "cal", "3C286"]
+    X = Float64[1, 2, 3, 4, 5]
+    write_table(joinpath(dir, "MAIN"), "MAIN",
+                Pair{String,Any}["SRC" => SRC, "X" => X]; nrow=5)
+    FN = ["3C48", "3C286", "cal"]
+    RA = Float64[1.1, 2.2, 3.3]
+    write_table(joinpath(dir, "FLD"), "FLD",
+                Pair{String,Any}["NAME" => FN, "RA" => RA]; nrow=3)
+    main = readtable(joinpath(dir, "MAIN"))
+    fld = readtable(joinpath(dir, "FLD"))
+
+    r = join(main, fld; on="SRC" => "NAME", rightcols=["RA"])
+    @test collect(r.RA) == [RA[findfirst(==(s), FN)] for s in SRC]
+    @test Set(r.names) == Set([:SRC, :X, :RA])
+
+    # composite key
+    dc = joinpath(mktempdir(), "jc")
+    write_table(joinpath(dc, "L"), "L", Pair{String,Any}["S" => Int32[1, 1, 2, 2],
+        "P" => Int32[10, 20, 10, 20], "Z" => Float64[1, 2, 3, 4]]; nrow=4)
+    write_table(joinpath(dc, "R"), "R", Pair{String,Any}["S" => Int32[1, 1, 2, 2],
+        "P" => Int32[10, 20, 10, 20], "V" => ["w", "x", "y", "z"]]; nrow=4)
+    L = readtable(joinpath(dc, "L"))
+    R = readtable(joinpath(dc, "R"))
+    rc = join(L, R; on=["S" => "S", "P" => "P"], rightcols=["V"])
+    @test collect(rc.V) == ["w", "x", "y", "z"]
+end
+
+@testset "join — unmatched policy" begin
+    dir = joinpath(mktempdir(), "ju")
+    A1 = Int32[0, 1, 9, 0]             # 9 dangles
+    write_table(joinpath(dir, "M"), "M",
+                Pair{String,Any}["ANTENNA1" => A1, "X" => Float64[1, 2, 3, 4]]; nrow=4)
+    write_table(joinpath(dir, "A"), "A",
+                Pair{String,Any}["NAME" => ["DA41", "DA42", "PM01", "PM02"]]; nrow=4)
+    m = readtable(joinpath(dir, "M"))
+    a = readtable(joinpath(dir, "A"))
+
+    @test_throws ArgumentError join(m, a; on="ANTENNA1", rightcols=["NAME" => "AN"])
+
+    rd = join(m, a; on="ANTENNA1", rightcols=["NAME" => "AN"], unmatched=:drop)
+    @test length(rd.cols[1]) == 3
+    @test collect(rd.AN) == ["DA41", "DA42", "DA41"]
+    @test collect(rd.X) == Float64[1, 2, 4]
+
+    rmi = join(m, a; on="ANTENNA1", rightcols=["NAME" => "AN"], unmatched=:missing)
+    @test length(rmi.cols[1]) == 4
+    @test ismissing(collect(rmi.AN)[3])
+    @test Missing <: eltype(rmi.cols[findfirst(==(:AN), rmi.names)])
+
+    @test_throws ArgumentError join(m, a; on="ANTENNA1", rightcols=["NAME"], unmatched=:bogus)
+end
+
+@testset "join — post-join where and orderby" begin
+    dir = joinpath(mktempdir(), "jw")
+    A1 = Int32[0, 1, 2, 0, 1, 2, 0]
+    TIME = collect(Float64, 1:7)
+    write_table(joinpath(dir, "M"), "M",
+                Pair{String,Any}["ANTENNA1" => A1, "TIME" => TIME]; nrow=7)
+    AN = ["DA41", "DA42", "PM01"]
+    write_table(joinpath(dir, "A"), "A", Pair{String,Any}["NAME" => AN]; nrow=3)
+    m = readtable(joinpath(dir, "M"))
+    a = readtable(joinpath(dir, "A"))
+
+    w1 = join(m, a; on="ANTENNA1", rightcols=["NAME" => "AN"], where="AN == 'DA41'")
+    w2 = join(m, a; on="ANTENNA1", rightcols=["NAME" => "AN"], where=row -> row.AN == "DA41")
+    want = TIME[findall(x -> AN[x+1] == "DA41", A1)]
+    @test collect(w1.TIME) == collect(w2.TIME) == want
+
+    o = join(m, a; on="ANTENNA1", rightcols=["NAME" => "AN"], orderby=["AN", "TIME" => :desc])
+    @test issorted(collect(o.AN))
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
@@ -893,5 +1035,49 @@ if _HAVE_TAQL
             @test collect(got.XMN) ≈ ref.XMN
             @test collect(got.XMX) ≈ ref.XMX
         end
+    end
+
+    @testset "join — real TaQL cross-check" begin
+        d = mktempdir()
+        A1 = Int32[(i - 1) % 5 for i in 1:30]
+        X = collect(Float64, 1:30)
+        SRC = ["src$(A1[i])" for i in 1:30]
+        write_table(joinpath(d, "MAIN"), "MAIN",
+                    Pair{String,Any}["ANTENNA1" => A1, "X" => X, "SRC" => SRC]; nrow=30)
+        AN = ["DA4$i" for i in 0:4]
+        write_table(joinpath(d, "ANT"), "ANT", Pair{String,Any}["NAME" => AN]; nrow=5)
+        FN = ["src$i" for i in 0:4]
+        FR = Float64[10 + i for i in 0:4]
+        write_table(joinpath(d, "FLD"), "FLD",
+                    Pair{String,Any}["NAME" => FN, "FREQ" => FR]; nrow=5)
+
+        function _taql_join(sel, fromjoin)
+            rdir = joinpath(mktempdir(), "j")
+            v = CxxWrap.StdVector{CxxWrap.CxxWrapCore.ConstCxxPtr{Casacore.LibCasacore.Table}}()
+            m = CCT.Table(joinpath(d, "MAIN"))
+            r = CCT.Table(joinpath(d, fromjoin[1]))
+            push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(m.tableref)))
+            push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(r.tableref)))
+            GC.@preserve m r CCT.Table(Casacore.LibCasacore.tableCommand(
+                "SELECT $sel FROM \$1 JOIN \$2 $(fromjoin[2]) GIVING '$rdir'", v))
+            GC.gc(); GC.gc()
+            readtable(rdir)
+        end
+
+        main = readtable(joinpath(d, "MAIN"))
+        ant = readtable(joinpath(d, "ANT"))
+        fld = readtable(joinpath(d, "FLD"))
+
+        # index-lookup: ANTENNA1 == ANT.rowid()
+        tj = _taql_join("X, ANT.NAME AS AN", ("ANT", "ANT ON ANTENNA1 == ANT.rowid()"))
+        oj = join(main, ant; on="ANTENNA1", leftcols=["X"], rightcols=["NAME" => "AN"])
+        @test collect(oj.X) == column(tj, "X")[:]
+        @test collect(oj.AN) == column(tj, "AN")[:]
+
+        # equi-join: SRC == FLD.NAME
+        tj2 = _taql_join("X, FLD.FREQ AS FREQ", ("FLD", "FLD ON SRC == FLD.NAME"))
+        oj2 = join(main, fld; on="SRC" => "NAME", leftcols=["X"], rightcols=["FREQ"])
+        @test collect(oj2.X) == column(tj2, "X")[:]
+        @test collect(oj2.FREQ) ≈ column(tj2, "FREQ")[:]
     end
 end
