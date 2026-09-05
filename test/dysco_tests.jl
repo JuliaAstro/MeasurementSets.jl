@@ -95,7 +95,7 @@ end
     end
 end
 
-@testset "dysco -- StudentsT inverse CDF (hand-rolled bisection)" begin
+@testset "dysco -- StudentsT inverse CDF (Distributions.TDist + bisection)" begin
     # hand-checked quantiles against known Student-t table values
     @test isapprox(MSv2._studentt_quantile(0.975, 5.0), 2.5706; atol=1e-3)
     @test isapprox(MSv2._studentt_quantile(0.95, 10.0), 1.8125; atol=1e-3)

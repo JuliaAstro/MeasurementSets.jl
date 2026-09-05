@@ -255,11 +255,12 @@ write-direction interop. `dither=true` (the default, matching casacore's
 own always-dither write path) uses Julia's own `Random`, not casacore's
 `std::mt19937` bit-for-bit — a deliberate departure with no effect on
 decodability (dithering only affects which of two adjacent quantization
-symbols an in-between value rounds to). StudentsT's inverse CDF has no
-direct `SpecialFunctions.jl` equivalent (unlike the other three
-distributions, which use `erf`/`erfinv` matching casacore's own math) —
-implemented via a hand-rolled bisection on `SpecialFunctions.beta_inc`
-instead, self-consistent rather than GSL-bit-exact.
+symbols an in-between value rounds to). StudentsT's CDF comes from
+`Distributions.jl`'s `TDist` (unlike the other three distributions, which
+use `SpecialFunctions.jl`'s `erf`/`erfinv` matching casacore's own math);
+its inverse CDF is still our own bisection over that CDF (no direct
+`Distributions.jl` quantile call), self-consistent rather than
+GSL-bit-exact.
 
 ## Usage
 

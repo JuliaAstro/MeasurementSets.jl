@@ -32,7 +32,8 @@
 # behaviour for never-written trailing rows
 # (`threadeddyscocolumn.cc:109-118`).
 
-import SpecialFunctions: erf, erfinv, beta_inc
+import SpecialFunctions: erf, erfinv
+import Distributions: TDist, cdf
 import Random
 
 # --- primitive little-endian readers (no AipsIO framing here) --------
@@ -73,12 +74,8 @@ _dysco_dist_code(::Uniform) = 0x01
 _dysco_dist_code(::StudentsT) = 0x02
 _dysco_dist_code(::TruncatedGaussian) = 0x03
 
-# --- Student's t inverse CDF (no direct equivalent in SpecialFunctions;
-#     built from the regularized incomplete beta function, which it does
-#     provide) ------------------------------------------------------
-#
-# F(t;nu) = 1 - 0.5*I_x(nu/2, 1/2)  (t >= 0)
-# F(t;nu) =       0.5*I_x(nu/2, 1/2)  (t <  0),   x = nu/(nu+t^2)
+# --- Student's t inverse CDF (Distributions.jl's `TDist` supplies the
+#     CDF; the quantile is still our own bisection over it, below) -----
 #
 # Not GSL-bit-exact (casacore's own StudentsT path uses
 # `gsl_cdf_tdist_Pinv`) -- self-consistent instead: our own encode and
@@ -88,11 +85,7 @@ _dysco_dist_code(::TruncatedGaussian) = 0x03
 # decode of a StudentsT file written by real casacore, which the format's
 # own docs call a non-default, uncommon choice.
 
-function _studentt_cdf(t::Float64, nu::Float64)
-    x = nu / (nu + t * t)
-    p, _ = beta_inc(nu / 2, 0.5, x)
-    return t >= 0 ? 1.0 - 0.5 * p : 0.5 * p
-end
+_studentt_cdf(t::Float64, nu::Float64) = cdf(TDist(nu), t)
 
 function _studentt_quantile(p::Float64, nu::Float64)
     p == 0.5 && return 0.0
