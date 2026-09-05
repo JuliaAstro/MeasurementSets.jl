@@ -631,3 +631,14 @@ unchanged** — `DATA` → `ComplexF16`, `WEIGHT` stays `Float32`. `Float64`
 / `ComplexF64` / `Bool` are never narrowed. Copies and edits still read
 the source at full precision; a `BFloat16` column writes back as
 `TpFloat` (upcast to `Float32` on disk).
+
+### Phase 37 — `HDF5` is now a weak dependency
+
+`HDF5.jl` (a wrapper over the C `libhdf5`) was a hard dependency since
+Phase 20, only ever used for `MultiHDF5` (`table.mfh5`) container tables.
+It is now a **weak dependency**: the MultiHDF5 code lives in
+`ext/MeasurementSetv2HDF5Ext.jl`, a package extension that loads only
+when you `import HDF5` yourself. A plain `using MeasurementSetv2` pulls
+in no C libraries. Reading or writing a `table.mfh5` without `HDF5`
+loaded raises a clear, actionable error (`... run `import HDF5` first`).
+`MultiFile` (`table.mf`, pure Julia) is unaffected.

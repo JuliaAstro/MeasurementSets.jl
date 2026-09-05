@@ -50,7 +50,8 @@ ism=[...], engines=..., dysco=..., storage=...)`).
 
 Tables can also be packed into a single `MultiFile` (`table.mf`) or
 `MultiHDF5` (`table.mfh5`) container file; [`readtable`](@ref) detects and
-resolves through these transparently.
+resolves through these transparently. `MultiHDF5` needs `HDF5.jl` — do
+`import HDF5` first (it is an optional weak dependency).
 
 ## The query engine
 

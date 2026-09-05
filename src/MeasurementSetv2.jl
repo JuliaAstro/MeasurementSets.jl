@@ -4,8 +4,9 @@
 Pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for
 interferometric visibility data by ALMA, the VLA, LOFAR and others. No
-dependency on the casacore C++ library (the one exception is `HDF5.jl`,
-for `MultiHDF5` containers).
+C-library dependencies: `HDF5.jl` is an optional weak dependency, loaded
+via a package extension only when you `import HDF5` to read or write a
+`MultiHDF5` (`table.mfh5`) container.
 
 Entry points:
 

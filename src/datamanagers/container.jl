@@ -24,7 +24,10 @@
 # `<tabledir>/table.mfh5`, a sibling of `table.dat` (ColumnSet.cc:182,186).
 
 import Mmap
-import HDF5
+
+# MultiHDF5 (`table.mfh5`) support lives in `ext/MeasurementSetv2HDF5Ext.jl`
+# and is active only when the caller has loaded `HDF5.jl` (a weak
+# dependency).  The struct + entry-point stubs below are overridden there.
 
 abstract type Container end
 
@@ -448,108 +451,33 @@ function _finalize_multifile(dir::AbstractString, sink::ContainerBuilder)
 end
 
 # ======================================================================
-# MultiHDF5
+# MultiHDF5 -- weak-dependency entry points (real impl in
+# ext/MeasurementSetv2HDF5Ext.jl; loaded when the caller has `import`ed
+# HDF5.jl).  The struct stays in the core namespace so callers /
+# `test/container_tests.jl` can name it; `fid` holds an `HDF5.File`
+# handle (typed `Any` here because HDF5 is not loaded).
 # ======================================================================
 
 struct MultiHDF5Container <: Container
     path::String
     blocksize::Int64
     sizes::Dict{String,Int64}     # keyed by virtual-file basename
-    fid::HDF5.File
+    fid::Any                      # ::HDF5.File
 end
 
-function open_multihdf5(path::AbstractString)
-    fid = HDF5.h5open(String(path), "r")
-    g = fid["__MultiHDF5_Header__"]
-    blocksize = Int64(HDF5.read(HDF5.attributes(g)["blockSize"]))
-    names = Vector{String}(HDF5.read(HDF5.attributes(g)["names"]))
-    rawsizes = Vector{Int64}(HDF5.read(HDF5.attributes(g)["sizes"]))
-    sizes = Dict{String,Int64}(names[i] => rawsizes[i]
-                               for i in eachindex(names) if !isempty(names[i]))
-    return MultiHDF5Container(String(path), blocksize, sizes, fid)
-end
+const _NEED_HDF5 = "requires HDF5.jl — run `import HDF5` (or add it to your project) first"
 
-# Read block `blknr` (0-based) of virtual file `name`'s "FileData"
-# dataset.  Casacore's IPosition axes are reversed going into HDF5's
-# C-order dataspace (MultiHDF5.cc/HDF5DataType.cc `fromShape`), so the
-# growing "block" axis is axis 1 in HDF5.jl's own (native, un-transposed)
-# dimension order -- `d[blknr+1, :]`.  NOT independently verified against
-# a real casacore-written file: no casacore build on this machine has
-# HDF5 support compiled in (confirmed for both Casacore.jl's bundled
-# `casacorecxx_jll` and the real CASA.app install used as the Dysco
-# oracle), so this axis-order choice is only exercised by our own
-# self-authored fixture (test/container_tests.jl's `_pack_multihdf5!`,
-# built with HDF5.jl following this same convention) -- a documented,
-# standing gap.  Flip to `d[:, blknr+1]` here (and in `container_read`
-# below) if a genuine casacore-written `table.mfh5` ever disagrees.
-function container_read(c::MultiHDF5Container, name::AbstractString)
-    haskey(c.sizes, name) ||
-        error("MultiHDF5: no virtual file \"$name\" in \"$(c.path)\"")
-    fsize = c.sizes[name]
-    d = c.fid[name]["FileData"]
-    out = Vector{UInt8}(undef, fsize)
-    done = 0
-    nblk = size(d, 1)
-    for b in 1:nblk
-        done >= fsize && break
-        blk = Vector{UInt8}(d[b, :])
-        take = min(length(blk), fsize - done)
-        out[done+1:done+take] = blk[1:take]
-        done += take
-    end
-    return out
-end
+# Untyped fallbacks -- the extension adds a more-specific method
+# (`::AbstractString` / `::ContainerBuilder`) rather than overwriting
+# these (overwrites are forbidden during precompilation).  All the
+# `MultiHDF5Container` access methods (`container_read` / `container_mmap`)
+# live in the extension too -- a `MultiHDF5Container` can only be
+# constructed by `_open_multihdf5`, so they are unreachable without it.
+_open_multihdf5(_) =
+    error("MeasurementSetv2: reading a MultiHDF5 (`table.mfh5`) container $_NEED_HDF5")
 
-# HDF5 has no mmap equivalent for a virtual file's bytes -- always
-# materialize.  A known, documented performance follow-up for a huge
-# TiledStMan cube stored specifically in MultiHDF5 (Dysco/engines never
-# reach this path at all -- see the file header note).
-container_mmap(c::MultiHDF5Container, name::AbstractString) = container_read(c, name)
-
-# --- write side: assemble a whole `table.mfh5` in one shot ------------
-#
-# Verified against casacore's own `doAddFile`/`extend`/`put`: a freshly
-# added virtual file's dataset is created with 0 rows and only grows via
-# later `extend`+`put` calls -- nothing inspects that creation history, so
-# creating each dataset directly at its final size with one write is
-# bit-for-bit equivalent from any reader's point of view.  No block index,
-# free list, or CRC exists for MultiHDF5 at all; the header (4 attributes
-# on `__MultiHDF5_Header__`) can be written last with no effect on
-# readability (`MultiHDF5::readHeader` discovers files purely from the
-# `names`/`sizes` attributes, never by enumerating groups).
-function _finalize_multihdf5(dir::AbstractString, sink::ContainerBuilder)
-    bs = Int64(sink.blocksize)
-    path = joinpath(dir, "table.mfh5")
-    tmp = joinpath(dir, "." * basename(path) * ".tmp")
-    ispath(tmp) && rm(tmp)
-    names = String[]
-    sizes = Int64[]
-    HDF5.h5open(tmp, "w") do fid
-        for (name, data) in sink.files
-            n = length(data)
-            nblk = cld(n, bs)
-            g = HDF5.create_group(fid, name)
-            padded = vcat(data, zeros(UInt8, nblk * bs - n))
-            buf = Array{UInt8}(undef, nblk, bs)
-            for b in 1:nblk
-                s = (b - 1) * bs
-                buf[b, :] = padded[s+1:s+bs]
-            end
-            d = HDF5.create_dataset(g, "FileData", HDF5.datatype(UInt8),
-                                    HDF5.dataspace((nblk, bs)))
-            d[:, :] = buf
-            push!(names, name)
-            push!(sizes, Int64(n))
-        end
-        hdr = HDF5.create_group(fid, "__MultiHDF5_Header__")
-        HDF5.attributes(hdr)["blockSize"] = bs
-        HDF5.attributes(hdr)["hdrCounter"] = Int64(1)
-        HDF5.attributes(hdr)["names"] = names
-        HDF5.attributes(hdr)["sizes"] = sizes
-    end
-    mv(tmp, path; force=true)
-    return nothing
-end
+_finalize_multihdf5(_, _) =
+    error("MeasurementSetv2: writing a MultiHDF5 container (storage=:multihdf5) $_NEED_HDF5")
 
 # ======================================================================
 # detection
@@ -559,6 +487,6 @@ function open_container(dir::AbstractString)
     mf = joinpath(dir, "table.mf")
     isfile(mf) && return open_multifile(mf)
     h5 = joinpath(dir, "table.mfh5")
-    isfile(h5) && return open_multihdf5(h5)
+    isfile(h5) && return _open_multihdf5(h5)
     return nothing
 end
