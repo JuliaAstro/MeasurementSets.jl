@@ -163,6 +163,100 @@ end
     @test_throws ArgumentError taql(p3, "UPDATE t A = 1")
 end
 
+@testset "insert! -- Julia form" begin
+    dir = mktempdir()
+    mk(name) = (p = joinpath(dir, name);
+                write_table(p, name, Pair{String,Any}["A" => Int32[10, 20, 30],
+                    "B" => [1.0, 2.0, 3.0], "S" => ["x", "y", "z"],
+                    "V" => [Float64[i, i + 1] for i in 1:3]]; nrow=3, tsm=[["V"]]); p)
+
+    # one row, explicit
+    p1 = mk("t1")
+    @test insert!(p1; values=["A" => 40, "B" => 4.5]) == 1
+    t = readtable(p1)
+    @test nrow(t) == 4
+    @test column(t, "A")[:] == Int32[10, 20, 30, 40]
+    @test column(t, "B")[:] == [1.0, 2.0, 3.0, 4.5]
+    @test column(t, "S")[4] == ""              # default
+    @test column(t, "V")[4] == Float64[0, 0]   # default same-shape zero array
+    @test eltype(column(t, "A")[:]) == Int32   # Int64 40 coerced to Int32
+
+    # NamedTuple row
+    p2 = mk("t2")
+    @test insert!(p2; values=(; A=Int32(41), B=4.1)) == 1
+    @test column(readtable(p2), "A")[:] == Int32[10, 20, 30, 41]
+
+    # multi-row, mixed shapes, partial
+    p3 = mk("t3")
+    @test insert!(p3; values=[["A" => 50], (; A=60, B=6.5)]) == 2
+    t3 = readtable(p3)
+    @test nrow(t3) == 5
+    @test column(t3, "A")[:] == Int32[10, 20, 30, 50, 60]
+    @test column(t3, "B")[:] == [1.0, 2.0, 3.0, 0.0, 6.5]
+
+    # from another table (INSERT ... SELECT)
+    p4 = mk("t4")
+    s = joinpath(dir, "s")
+    write_table(s, "s", Pair{String,Any}["A" => Int32[100, 200], "B" => [10.0, 20.0],
+        "S" => ["p", "q"], "V" => [Float64[9, 9] for _ in 1:2]]; nrow=2, tsm=[["V"]])
+    @test insert!(p4, readtable(s)) == 2
+    t4 = readtable(p4)
+    @test column(t4, "A")[:] == Int32[10, 20, 30, 100, 200]
+    @test column(t4, "V")[5] == Float64[9, 9]
+
+    # from a query result
+    p5 = mk("t5")
+    @test insert!(p5, query(readtable(s), "A > 150")) == 1
+    @test column(readtable(p5), "A")[:] == Int32[10, 20, 30, 200]
+
+    # errors
+    @test_throws ArgumentError insert!(p5; values=["NOPE" => 1])
+    @test_throws ArgumentError insert!(p5; values=42)
+    @test insert!(p5; values=Pair{String,Any}[]) == 0
+
+    # target may be an open Table
+    p6 = mk("t6")
+    @test insert!(readtable(p6); values=["A" => 44]) == 1
+end
+
+@testset "insert! -- taql string commands" begin
+    dir = mktempdir()
+    mk(name) = (p = joinpath(dir, name);
+                write_table(p, name, Pair{String,Any}["A" => Int32[1, 2], "B" => [1.0, 2.0]];
+                    nrow=2); p)
+
+    p1 = mk("u1")
+    @test taql(p1, "INSERT INTO t (A, B) VALUES (3, 3.5)") == 1
+    @test column(readtable(p1), "A")[:] == Int32[1, 2, 3]
+
+    p2 = mk("u2")
+    @test taql(p2, "INSERT INTO t (A, B) VALUES (3, 3.5), (4, 4.5)") == 2
+    t2 = readtable(p2)
+    @test column(t2, "A")[:] == Int32[1, 2, 3, 4]
+    @test column(t2, "B")[:] == [1.0, 2.0, 3.5, 4.5]
+
+    p3 = mk("u3")                          # no column list -> positional
+    @test taql(p3, "INSERT INTO t VALUES (9, 9.9)") == 1
+    t3 = readtable(p3)
+    @test column(t3, "A")[end] == 9
+    @test column(t3, "B")[end] == 9.9
+
+    p4 = mk("u4")
+    @test taql(p4, "INSERT INTO t SET A = 7, B = 8.8") == 1
+    @test column(readtable(p4), "A")[end] == 7
+
+    p5 = mk("u5")                          # constant expression is fine
+    @test taql(p5, "INSERT INTO t (A, B) VALUES (2 + 3, sqrt(16.0))") == 1
+    t5 = readtable(p5)
+    @test column(t5, "A")[end] == 5
+    @test column(t5, "B")[end] == 4.0
+
+    # errors
+    @test_throws ArgumentError taql(p5, "INSERT INTO t (A, B) VALUES (A + 1, 2)")
+    @test_throws ArgumentError taql(p5, "INSERT INTO t (A, B) VALUES (1, 2, 3)")
+    @test_throws ArgumentError taql(p5, "INSERT INTO t FROBNICATE")
+end
+
 if _HAVE_TAQL
     @testset "write commands -- real TaQL cross-check" begin
         _run(path, cmd) = begin
@@ -207,6 +301,25 @@ if _HAVE_TAQL
             _run(joinpath(d, "ref"), "DELETE FROM \$1 WHERE $wherestr")
             @test column(readtable(joinpath(d, "ours")), "A")[:] ==
                   column(readtable(joinpath(d, "ref")), "A")[:]
+        end
+
+        for taql_cmd in ("INSERT INTO \$1 (A, B) VALUES (30.0, 3.5)",
+                         "INSERT INTO \$1 (A, B) VALUES (40.0, 4.5), (50.0, 5.5)",
+                         "INSERT INTO \$1 SET A = 60.0, B = 6.5")
+            d = mktempdir()
+            A = collect(Float64, 1:6)
+            B = collect(Float64, 6:-1:1)
+            for nm in ("ours", "ref")
+                write_table(joinpath(d, nm), nm,
+                            Pair{String,Any}["A" => copy(A), "B" => copy(B)]; nrow=6)
+            end
+            taql(joinpath(d, "ours"), replace(taql_cmd, "\$1" => "t"))
+            _run(joinpath(d, "ref"), taql_cmd)
+            ours = readtable(joinpath(d, "ours"))
+            ref = readtable(joinpath(d, "ref"))
+            @test nrow(ours) == nrow(ref)
+            @test column(ours, "A")[:] ≈ column(ref, "A")[:]
+            @test column(ours, "B")[:] ≈ column(ref, "B")[:]
         end
     end
 end

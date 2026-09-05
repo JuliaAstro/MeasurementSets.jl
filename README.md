@@ -480,15 +480,32 @@ empties the table. `copytable(dst, result)` persists any query /
 `groupby` / `join` result (DM-preserving for a `RefTable`, materialised
 for a `GroupedTable`) — that is `SELECT … INTO`.
 
-A `taql(target, "…")` string-command dispatcher wraps all three:
+**Phase 31 — INSERT.** `insert!(target; values)` appends rows, over the
+same `edit` / `addrows!` primitives:
+
+```julia
+insert!("/path/to.ms/ANTENNA"; values=(; NAME="DA99", DISH_DIAMETER=12.0))
+insert!(ms.MAIN, query(other.MAIN, "FIELD_ID == 3"))               # INSERT ... SELECT
+```
+
+`values` is one row (`["A" => 1, "B" => 2.5]` or `(; A=1, B=2.5)`), a
+vector of those, or any `Tables.jl` source (another table, a `query` /
+`groupby` / `join` result, a `Vector{NamedTuple}`). Unsupplied columns
+take their default (`0` / `""` / a same-shape zero array); scalars are
+coerced to the target column's type. Extends `Base.insert!`. Returns the
+row count inserted.
+
+A `taql(target, "…")` string-command dispatcher wraps all four:
 `taql(t, "UPDATE t SET UVW = UVW * 2 WHERE ANTENNA1 == 0")`,
 `taql(t, "DELETE FROM t WHERE FLAG_ROW")`,
-`taql(t, "SELECT A, B AS BB WHERE A > 5 INTO '/tmp/out'")`.
+`taql(t, "SELECT A, B AS BB WHERE A > 5 INTO '/tmp/out'")`,
+`taql(t, "INSERT INTO t (A, B) VALUES (1, 2.5), (3, 4.5)")` (VALUES must
+be constant expressions).
 
-Still, across Phases 22–30: no bitwise operators (`& | ^ ~`),
+Still, across Phases 22–31: no bitwise operators (`& | ^ ~`),
 `BETWEEN`, `~=`, array indexing, units, date/time or measures
 functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, a
-general M:N cross-product join, `INSERT`, or `UPDATE` array-slice
+general M:N cross-product join, `INSERT LIMIT`, or `UPDATE` array-slice
 assignment.
 
 ## Usage

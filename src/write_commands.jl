@@ -90,6 +90,69 @@ function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing
     return length(rows)
 end
 
+"""
+    insert!(target; values) -> Int
+
+Append rows to the CTDS table at `target` (a path or an open `Table`).
+`values` is one row (`["A" => 1, "B" => 2.5]` or `(; A = 1, B = 2.5)`),
+a vector of those, or any `Tables.jl` source (another table, a
+[`query`](@ref) result, a `Vector{NamedTuple}`). Columns of `target`
+not supplied get their default (`0` / `""` / a same-shape zero array).
+Scalar values are coerced to the target column's element type. Returns
+the number of rows inserted. Extends `Base.insert!`.
+"""
+function Base.insert!(target::Union{AbstractString,AbstractTable}; values)
+    path = _cmd_path(target)
+    rd = readtable(path)
+    vn = Set(columnnames(rd))
+    rows = _norm_ins_rows(values)
+    isempty(rows) && return 0
+    for r in rows, c in Base.keys(r)
+        c in vn || throw(ArgumentError("insert!: no column \"$c\""))
+    end
+    J = Dict(n => juliatype(columndesc(rd, n).type) for n in vn)
+    sc = Dict(n => (columndesc(rd, n).shape isa Dims && isempty(columndesc(rd, n).shape))
+              for n in vn)
+    old = nrow(rd)
+    k = length(rows)
+    edit(path) do t
+        addrows!(t, k)
+        for (ri, r) in enumerate(rows), (c, v) in r
+            t[c][old + ri] = (sc[c] && v isa Number) ? convert(J[c], v) : v
+        end
+    end
+    return k
+end
+
+Base.insert!(target::Union{AbstractString,AbstractTable}, source) =
+    insert!(target; values=source)
+
+_ins_row(x::NamedTuple) = Dict{String,Any}(String(k) => v for (k, v) in pairs(x))
+_ins_row(x::AbstractVector{<:Pair}) =
+    Dict{String,Any}(String(first(p)) => last(p) for p in x)
+
+function _norm_ins_rows(values)
+    values isa NamedTuple &&
+        return isempty(values) ? Dict{String,Any}[] : [_ins_row(values)]
+    values isa AbstractVector{<:Pair} &&
+        return isempty(values) ? Dict{String,Any}[] : [_ins_row(values)]
+    if Tables.istable(values)
+        ct = Tables.columntable(values)
+        nms = keys(ct)
+        n = isempty(nms) ? 0 : length(ct[first(nms)])
+        return [Dict{String,Any}(String(nm) => ct[nm][r] for nm in nms) for r in 1:n]
+    end
+    if values isa AbstractVector
+        out = Dict{String,Any}[]
+        for x in values
+            append!(out, _norm_ins_rows(x))
+        end
+        return out
+    end
+    throw(ArgumentError("insert!: `values` must be a NamedTuple, a Vector of Pairs, " *
+                        "a vector of those, or a Tables.jl source"))
+end
+
 # --- taql() string-command dispatcher --------------------------------
 
 # paren-aware comma split (so `iif(a, b, c)` survives)
@@ -122,7 +185,10 @@ open `Table`):
 * `DELETE [FROM t] [WHERE cond]`                  → [`delete!`](@ref), returns `Int`
 * `SELECT [*|col [AS a], …] [WHERE cond] (INTO|GIVING) 'path'`  → [`copytable`](@ref), returns the path
 * `SELECT …` with no `INTO`/`GIVING`              → [`query`](@ref), returns the result
+* `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…)`  → [`insert!`](@ref), returns `Int`
+* `INSERT INTO t SET c1 = v1, c2 = v2`             → [`insert!`](@ref), returns `Int`
 
+`INSERT` values must be constant expressions (no column references).
 Clause keywords (`SET` / `WHERE` / `INTO` / `GIVING` / `FROM`) are found
 by a case-insensitive split; a quoted literal containing one of them is
 not supported — use the Julia functions for that. `GROUP BY` /
@@ -172,7 +238,74 @@ function taql(target, command::AbstractString)
                  query(t, "TRUE"; select) : query(t, wherestr; select)
         dst === nothing && return result
         return copytable(dst, result)
+    elseif kw == "INSERT"
+        return _taql_insert(target, cmd)
     else
-        throw(ArgumentError("taql: unknown command \"$kw\" (expected UPDATE / DELETE / SELECT)"))
+        throw(ArgumentError(
+            "taql: unknown command \"$kw\" (expected UPDATE / DELETE / SELECT / INSERT)"))
     end
+end
+
+# inside of each top-level (…) / […] group, in order
+function _paren_groups(s::AbstractString)
+    out = String[]
+    depth = 0
+    buf = IOBuffer()
+    for c in s
+        if c == '(' || c == '['
+            depth += 1
+            depth == 1 && continue
+        elseif c == ')' || c == ']'
+            depth -= 1
+            depth == 0 && (push!(out, String(take!(buf))); continue)
+        end
+        depth >= 1 && print(buf, c)
+    end
+    return out
+end
+
+# evaluate a single TaQL-lite expression with no columns in scope
+function _taql_const(exprstr::AbstractString)
+    ast = try
+        _taqllite_parse(String(strip(exprstr)), Set{String}())
+    catch e
+        e isa ArgumentError && throw(ArgumentError(
+            "taql: INSERT values must be constant (no column references): $(e.msg)"))
+        rethrow()
+    end
+    !_has_aggr(ast) ||
+        throw(ArgumentError("taql: INSERT values must be constant, not aggregates"))
+    return _tqleval(ast, Dict{String,AbstractVector}(), 1)
+end
+
+function _taql_insert(target, cmd::AbstractString)
+    mv = match(r"^INSERT\s+INTO\s+\S+\s*(?:[([]([^)\]]*)[)\]]\s*)?VALUES\s+(.+)$"is, cmd)
+    if mv !== nothing
+        cols = mv.captures[1] === nothing ?
+               columnnames(target isa AbstractTable ? target : readtable(_cmd_path(target))) :
+               String.(strip.(split(mv.captures[1], ',')))
+        groups = _paren_groups(mv.captures[2])
+        isempty(groups) &&
+            throw(ArgumentError("taql: INSERT ... VALUES has no value tuples"))
+        rows = Vector{Pair{String,Any}}[]
+        for g in groups
+            vals = _split_commas(g)
+            length(vals) == length(cols) || throw(ArgumentError(
+                "taql: INSERT value count ($(length(vals))) != column count ($(length(cols)))"))
+            push!(rows, Pair{String,Any}[cols[i] => _taql_const(vals[i]) for i in eachindex(cols)])
+        end
+        return insert!(target; values=rows)
+    end
+    ms = match(r"^INSERT\s+INTO\s+\S+\s+SET\s+(.+)$"is, cmd)
+    if ms !== nothing
+        row = Pair{String,Any}[]
+        for piece in _split_commas(ms.captures[1])
+            am = match(r"^(\w+)\s*=\s*(.+)$"s, piece)
+            am === nothing &&
+                throw(ArgumentError("taql: malformed SET assignment \"$piece\""))
+            push!(row, String(am.captures[1]) => _taql_const(am.captures[2]))
+        end
+        return insert!(target; values=row)
+    end
+    throw(ArgumentError("taql: malformed INSERT command"))
 end

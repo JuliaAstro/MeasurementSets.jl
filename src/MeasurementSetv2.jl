@@ -43,8 +43,8 @@ export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolu
 export resync, is_stale, is_multiused
 export query, groupby, GroupedTable
 export update!, taql
-# `join` extends `Base.join` (N:1 lookup join, see query.jl) and
-# `delete!` extends `Base.delete!` (DELETE FROM, see write_commands.jl)
-# -- neither is exported.
+# `join` extends `Base.join` (N:1 lookup join, see query.jl);
+# `delete!` extends `Base.delete!` and `insert!` extends `Base.insert!`
+# (DELETE FROM / INSERT INTO, see write_commands.jl) -- none is exported.
 
 end
