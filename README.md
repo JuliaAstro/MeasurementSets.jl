@@ -1,6 +1,6 @@
-# MeasurementSetv2
+# MeasurementSets
 
-[![Build Status](https://github.com/Paul Barrett/MeasurementSetv2.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/Paul Barrett/MeasurementSetv2.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Build Status](https://github.com/Paul Barrett/MeasurementSets.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/Paul Barrett/MeasurementSets.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
 A pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for
@@ -88,7 +88,7 @@ supported.
 ## Usage
 
 ```julia
-using MeasurementSetv2
+using MeasurementSets
 
 ms = MeasurementSet("/path/to/my.ms")
 subtablenames(ms)                        # ["ANTENNA", "SPECTRAL_WINDOW", …]
@@ -170,5 +170,5 @@ julia --project -e 'using Pkg; Pkg.test()'
 
 The AipsIO unit tests always run. Metadata tests and a column-by-column
 cross-check against [`Casacore.jl`](https://github.com/JuliaAstro/Casacore.jl)
-run when a sample MS is available — set `MEASUREMENTSETV2_TEST_MS` to point
+run when a sample MS is available — set `MEASUREMENTSETS_TEST_MS` to point
 at one.

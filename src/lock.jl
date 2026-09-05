@@ -1,5 +1,5 @@
 # Cooperative file locking + row-count synchronisation via `table.lock`,
-# so MeasurementSetv2 shares a table safely with a concurrent reader or
+# so MeasurementSets shares a table safely with a concurrent reader or
 # writer (another Julia session, or a real casacore / python-casacore
 # process).
 #

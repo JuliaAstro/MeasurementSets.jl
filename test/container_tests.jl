@@ -18,7 +18,7 @@
 # cross-implementation proof the way the MultiFile tests are.  Flagged
 # as a known verification gap (see the Phase 20 plan's Risks section).
 
-using MeasurementSetv2: MultiFileContainer, MultiHDF5Container
+using MeasurementSets: MultiFileContainer, MultiHDF5Container
 import HDF5
 
 # Pack an already-written plain table's per-DM files into a hand-built
@@ -130,7 +130,7 @@ else
 end
 
 @testset "MultiFile — unpack-index round trip (unit)" begin
-    pack = MeasurementSetv2._mf_unpack_index
+    pack = MeasurementSets._mf_unpack_index
     @test pack(Int64[]) == Int64[]
     @test pack(Int64[5]) == Int64[5]
     @test pack(Int64[5, -2, 10, -1]) == Int64[5, 6, 7, 10, 11]
@@ -141,7 +141,7 @@ end
     # casacore's CRC32 is nonstandard (not zlib) -- a self-consistency
     # check (any nonzero input changes the checksum) is the honest amount
     # of unit coverage without a hand-computed reference vector.
-    crc = MeasurementSetv2._mf_crc32
+    crc = MeasurementSets._mf_crc32
     @test crc(UInt8[]) != crc(UInt8[0x00])
     @test crc(UInt8[1, 2, 3]) != crc(UInt8[1, 2, 4])
     @test crc(UInt8[1, 2, 3]) == crc(UInt8[1, 2, 3])
@@ -246,11 +246,11 @@ end
 
 @testset "MultiFile — unit: header bytes exceed one block for a tiny blocksize" begin
     # sanity-check the header-building block against a hand-sized 2-file case
-    infos = [MeasurementSetv2.MultiFileRawInfo("a", 300, false),
-             MeasurementSetv2.MultiFileRawInfo("b", 50, false)]
-    packed = [MeasurementSetv2._mf_pack_index(Int64[1, 2, 3, 4, 5]),
-              MeasurementSetv2._mf_pack_index(Int64[6])]
-    h0 = MeasurementSetv2._mf_header_bytes(infos, packed, 64, 7, Int64[])
+    infos = [MeasurementSets.MultiFileRawInfo("a", 300, false),
+             MeasurementSets.MultiFileRawInfo("b", 50, false)]
+    packed = [MeasurementSets._mf_pack_index(Int64[1, 2, 3, 4, 5]),
+              MeasurementSets._mf_pack_index(Int64[6])]
+    h0 = MeasurementSets._mf_header_bytes(infos, packed, 64, 7, Int64[])
     @test length(h0) > 64   # this tiny blocksize always overflows one block
 end
 
@@ -299,11 +299,11 @@ end
 
 @testset "no container created when nothing buffers into the sink" begin
     dir = mktempdir()
-    MeasurementSetv2.with_container_sink(dir, :multifile, 4096) do
+    MeasurementSets.with_container_sink(dir, :multifile, 4096) do
         # no _dmfile_write! call at all
     end
     @test !isfile(joinpath(dir, "table.mf"))
-    MeasurementSetv2.with_container_sink(dir, :multihdf5, 4096) do
+    MeasurementSets.with_container_sink(dir, :multihdf5, 4096) do
     end
     @test !isfile(joinpath(dir, "table.mfh5"))
 end

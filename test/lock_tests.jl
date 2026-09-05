@@ -1,6 +1,6 @@
 # Phase 13: cooperative locking + row-count synchronisation via table.lock.
 
-const MSv2L = MeasurementSetv2
+const MSv2L = MeasurementSets
 const _JULIA = Base.julia_cmd()
 const _PROJ  = dirname(@__DIR__)
 
@@ -51,7 +51,7 @@ if MSv2L.LOCK_SUPPORTED
         MSv2L.create_ms(joinpath(d, "x.ms"); nrow=2, nchan=2, ncorr=2, nant=2)
         ms = joinpath(d, "x.ms")
         grab = """
-        import MeasurementSetv2 as M
+        import MeasurementSets as M
         lk = M.open_lock(raw"$ms"; create=false)
         ok = M._acquire!(lk, M.F_WRLCK; wait=false)
         exit(ok ? 0 : 3)
@@ -69,7 +69,7 @@ if MSv2L.LOCK_SUPPORTED
         ms = joinpath(d, "x.ms")
         @test !is_multiused(ms)
         holder = """
-        import MeasurementSetv2 as M
+        import MeasurementSets as M
         lk = M.open_lock(raw"$ms"; create=false)   # takes the byte-1 "in use" lock
         println("held"); flush(stdout)
         sleep(5)
@@ -120,7 +120,7 @@ if MSv2L.LOCK_SUPPORTED
         MSv2L.lock_write!(lk)                                   # parent holds the write lock
 
         child = """
-        import MeasurementSetv2 as M
+        import MeasurementSets as M
         M.SYNC_MAXWAIT_S[] = 10.0
         lk = M.open_lock(raw"$ms"; create=false)
         M.lock_write!(lk)                       # blocks -> announces itself, retries

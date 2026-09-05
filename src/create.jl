@@ -578,7 +578,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
 
     # write subtables, remember which ones succeeded
     written = String[]
-    for (kw, path) in MeasurementSetv2.subtables(main)
+    for (kw, path) in MeasurementSets.subtables(main)
         want(kw) || continue
         sub = try
             subtable(ms, kw)

@@ -1,6 +1,6 @@
 # Guide
 
-The examples below assume `using MeasurementSetv2` and a Measurement Set
+The examples below assume `using MeasurementSets` and a Measurement Set
 at `/path/to/my.ms`. They are illustrative, not doctested.
 
 ## Opening a Measurement Set

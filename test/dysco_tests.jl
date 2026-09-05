@@ -7,7 +7,7 @@
 # table.create(...; dminfo=...) writes a real DyscoStMan-backed column, and
 # its own getcol() decode is the ground truth to compare against.  Skipped
 # cleanly wherever that CASA install isn't present (e.g. CI).
-const _CASA_PYTHON = get(ENV, "MEASUREMENTSETV2_CASA_PYTHON",
+const _CASA_PYTHON = get(ENV, "MEASUREMENTSETS_CASA_PYTHON",
     "/Volumes/casa-6.6.6.18-pipeline-2025.1.0.36-14.0-arm64-py310-py310.dmg/CASA.app/Contents/MacOS/python3")
 const _HAVE_CASA = isfile(_CASA_PYTHON)
 _HAVE_CASA || @info "CASA python3 not found; skipping Dysco real-interop test" _CASA_PYTHON

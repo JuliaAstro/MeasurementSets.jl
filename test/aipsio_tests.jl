@@ -1,7 +1,7 @@
 # Unit tests for the AipsIO primitives, using hand-built byte streams that
 # mirror what casacore's CanonicalIO writes.
 
-using MeasurementSetv2: AipsIO, getstart, getend, getnexttype, read_string,
+using MeasurementSets: AipsIO, getstart, getend, getnexttype, read_string,
              read_iposition, read_block, read_scalar
 
 be(x) = collect(reinterpret(UInt8, [hton(x)]))

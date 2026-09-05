@@ -1,6 +1,6 @@
 # Changelog
 
-`MeasurementSetv2.jl` is pre-1.0 (`1.0.0-DEV`). It has been built in
+`MeasurementSets.jl` is pre-1.0 (`1.0.0-DEV`). It has been built in
 numbered **phases** — each a self-contained slice of functionality,
 verified against `Casacore.jl` / real TaQL / a real CASA install before
 merging. These are development milestones, not tagged releases; the
@@ -637,8 +637,19 @@ the source at full precision; a `BFloat16` column writes back as
 `HDF5.jl` (a wrapper over the C `libhdf5`) was a hard dependency since
 Phase 20, only ever used for `MultiHDF5` (`table.mfh5`) container tables.
 It is now a **weak dependency**: the MultiHDF5 code lives in
-`ext/MeasurementSetv2HDF5Ext.jl`, a package extension that loads only
-when you `import HDF5` yourself. A plain `using MeasurementSetv2` pulls
+`ext/MeasurementSetsHDF5Ext.jl`, a package extension that loads only
+when you `import HDF5` yourself. A plain `using MeasurementSets` pulls
 in no C libraries. Reading or writing a `table.mfh5` without `HDF5`
 loaded raises a clear, actionable error (`... run `import HDF5` first`).
 `MultiFile` (`table.mf`, pure Julia) is unaffected.
+
+### Phase 39 — renamed `MeasurementSetv2` → `MeasurementSets`
+
+The package, module and repo are now **`MeasurementSets`** (plural). The
+"v2" was version noise. The plural keeps `struct MeasurementSet` (the
+`MeasurementSet(path)` MS-directory wrapper) from colliding with the
+module — `using MeasurementSets; ms = MeasurementSet("/path")` — the
+idiomatic Julia split (`Dates`/`Date`). Pure rename: same UUID, no API
+or behaviour change, all tests green. The test-only environment variables
+are now `MEASUREMENTSETS_TEST_MS` / `MEASUREMENTSETS_CASA_PYTHON`, and
+the HDF5 extension is `MeasurementSetsHDF5Ext`.

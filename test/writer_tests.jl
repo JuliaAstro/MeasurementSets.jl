@@ -1,6 +1,6 @@
 # Phase 6: writers (AipsIO write side, write_table, copyms, create_ms).
 
-using MeasurementSetv2: AipsWriter, putstart, putend, wr_u32, wr_i32, wr_string,
+using MeasurementSets: AipsWriter, putstart, putend, wr_u32, wr_i32, wr_string,
     wr_iposition, wr_block, wr_scalar, bytes, AipsIO, getstart, getend,
     read_u32, read_string, read_iposition, read_block, read_scalar
 

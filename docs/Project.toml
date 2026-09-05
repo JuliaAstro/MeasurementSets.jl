@@ -1,6 +1,6 @@
 [deps]
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
-MeasurementSetv2 = "3e921475-4ab2-4f24-819a-e54722cb9848"
+MeasurementSets = "3e921475-4ab2-4f24-819a-e54722cb9848"
 
 [compat]
 Documenter = "1"

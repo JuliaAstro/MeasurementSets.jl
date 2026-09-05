@@ -1,7 +1,7 @@
 # API reference
 
 ```@meta
-CurrentModule = MeasurementSetv2
+CurrentModule = MeasurementSets
 ```
 
 ```@index
@@ -13,7 +13,7 @@ CurrentModule = MeasurementSetv2
 
 `BFloat16` is re-exported from
 [`BFloat16s.jl`](https://github.com/JuliaMath/BFloat16s.jl) so that
-`readtable(ms; precision = BFloat16)` works after `using MeasurementSetv2`.
+`readtable(ms; precision = BFloat16)` works after `using MeasurementSets`.
 
 ## Opening tables
 
@@ -40,8 +40,8 @@ SubTable
 ```@docs
 column
 Column
-getcolumn(::MeasurementSetv2.AbstractTable, ::AbstractString)
-getcell(::MeasurementSetv2.AbstractTable, ::AbstractString, ::Integer)
+getcolumn(::MeasurementSets.AbstractTable, ::AbstractString)
+getcell(::MeasurementSets.AbstractTable, ::AbstractString, ::Integer)
 nrow
 columnnames
 ```
@@ -56,7 +56,7 @@ keywords
 subtables
 Record
 CasaType
-MeasurementSetv2.CellShape
+MeasurementSets.CellShape
 VariableShape
 VariableDims
 isarray
@@ -116,7 +116,7 @@ taql
 ```
 
 ```@docs
-Base.join(::MeasurementSetv2.AbstractTable, ::MeasurementSetv2.AbstractTable)
-Base.delete!(::Union{AbstractString, MeasurementSetv2.AbstractTable})
-Base.insert!(::Union{AbstractString, MeasurementSetv2.AbstractTable})
+Base.join(::MeasurementSets.AbstractTable, ::MeasurementSets.AbstractTable)
+Base.delete!(::Union{AbstractString, MeasurementSets.AbstractTable})
+Base.insert!(::Union{AbstractString, MeasurementSets.AbstractTable})
 ```

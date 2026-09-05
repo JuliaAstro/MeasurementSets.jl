@@ -1,5 +1,5 @@
 """
-    MeasurementSetv2
+    MeasurementSets
 
 Pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for
@@ -27,7 +27,7 @@ Entry points:
 
 See the README and `CHANGELOG.md` for the full picture.
 """
-module MeasurementSetv2
+module MeasurementSets
 
 include("aipsio.jl")
 include("datamanagers/container.jl")

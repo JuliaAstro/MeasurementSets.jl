@@ -1,6 +1,6 @@
 # Phase 7: StandardStMan indirect (variable-shape) + string arrays.
 
-using MeasurementSetv2: ArrayFileWriter, af_put!, arrayfile_bytes, open_arrayfile,
+using MeasurementSets: ArrayFileWriter, af_put!, arrayfile_bytes, open_arrayfile,
     af_read
 
 @testset "StManArrayFile codec round-trip" begin

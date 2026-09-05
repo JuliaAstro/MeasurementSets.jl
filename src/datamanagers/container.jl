@@ -25,7 +25,7 @@
 
 import Mmap
 
-# MultiHDF5 (`table.mfh5`) support lives in `ext/MeasurementSetv2HDF5Ext.jl`
+# MultiHDF5 (`table.mfh5`) support lives in `ext/MeasurementSetsHDF5Ext.jl`
 # and is active only when the caller has loaded `HDF5.jl` (a weak
 # dependency).  The struct + entry-point stubs below are overridden there.
 
@@ -452,7 +452,7 @@ end
 
 # ======================================================================
 # MultiHDF5 -- weak-dependency entry points (real impl in
-# ext/MeasurementSetv2HDF5Ext.jl; loaded when the caller has `import`ed
+# ext/MeasurementSetsHDF5Ext.jl; loaded when the caller has `import`ed
 # HDF5.jl).  The struct stays in the core namespace so callers /
 # `test/container_tests.jl` can name it; `fid` holds an `HDF5.File`
 # handle (typed `Any` here because HDF5 is not loaded).
@@ -474,10 +474,10 @@ const _NEED_HDF5 = "requires HDF5.jl — run `import HDF5` (or add it to your pr
 # live in the extension too -- a `MultiHDF5Container` can only be
 # constructed by `_open_multihdf5`, so they are unreachable without it.
 _open_multihdf5(_) =
-    error("MeasurementSetv2: reading a MultiHDF5 (`table.mfh5`) container $_NEED_HDF5")
+    error("MeasurementSets: reading a MultiHDF5 (`table.mfh5`) container $_NEED_HDF5")
 
 _finalize_multihdf5(_, _) =
-    error("MeasurementSetv2: writing a MultiHDF5 container (storage=:multihdf5) $_NEED_HDF5")
+    error("MeasurementSets: writing a MultiHDF5 container (storage=:multihdf5) $_NEED_HDF5")
 
 # ======================================================================
 # detection

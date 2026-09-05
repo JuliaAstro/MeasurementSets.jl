@@ -6,10 +6,10 @@
 # for the format notes and the standing "no real casacore oracle for
 # MultiHDF5 on this machine" caveat.
 
-module MeasurementSetv2HDF5Ext
+module MeasurementSetsHDF5Ext
 
 import HDF5
-import MeasurementSetv2 as MS
+import MeasurementSets as MS
 
 # --- read: open a `table.mfh5` -----------------------------------------
 

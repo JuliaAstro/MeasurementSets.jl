@@ -1,4 +1,4 @@
-using Documenter, MeasurementSetv2
+using Documenter, MeasurementSets
 
 # Keep the site's Changelog page in step with the repo's CHANGELOG.md
 # (git-ignored; regenerated on every build).  Rewrite the one repo-root
@@ -9,8 +9,8 @@ let src = read(joinpath(@__DIR__, "..", "CHANGELOG.md"), String)
 end
 
 makedocs(
-    sitename = "MeasurementSetv2.jl",
-    modules  = [MeasurementSetv2],
+    sitename = "MeasurementSets.jl",
+    modules  = [MeasurementSets],
     authors  = "Paul Barrett",
     format   = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
@@ -31,6 +31,6 @@ makedocs(
 # Deployment is intentionally not wired yet -- the GitHub repo slug is a
 # placeholder (`github.com/Paul Barrett/...`).  Once it is real, append:
 #
-#   deploydocs(repo = "github.com/<owner>/MeasurementSetv2.jl", devbranch = "main")
+#   deploydocs(repo = "github.com/<owner>/MeasurementSets.jl", devbranch = "main")
 #
 # and add a docs job to .github/workflows/ (see the PkgTemplates default).

@@ -1,4 +1,4 @@
-# MeasurementSetv2.jl
+# MeasurementSets.jl
 
 A pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for
@@ -14,13 +14,13 @@ The package is not yet registered. Add it by path or URL:
 
 ```julia
 using Pkg
-Pkg.develop(path = "/path/to/MeasurementSetv2.jl")   # or Pkg.add(url = "...")
+Pkg.develop(path = "/path/to/MeasurementSets.jl")   # or Pkg.add(url = "...")
 ```
 
 Then:
 
 ```julia
-using MeasurementSetv2
+using MeasurementSets
 ms = MeasurementSet("/path/to/my.ms")
 ```
 

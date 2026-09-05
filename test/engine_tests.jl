@@ -1,7 +1,7 @@
 # Phase 12: virtual column engines (ScaledArrayEngine, ScaledComplexData,
 # CompressFloat, CompressComplex, CompressComplexSD, MappedArrayEngine).
 
-const MSv2E = MeasurementSetv2
+const MSv2E = MeasurementSets
 
 _engine_manager(r, vname) =
     r.managers[findfirst(m -> m.sequ == columndesc(r, vname).sequ, r.managers)]

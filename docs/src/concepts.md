@@ -31,7 +31,7 @@ subtablenames(ms)
 ## Storage managers
 
 A *storage manager* is how casacore lays one column's data out on disk.
-MeasurementSetv2 reads and writes all of the ones a real MS uses, and
+MeasurementSets reads and writes all of the ones a real MS uses, and
 picks a sensible one for you when you create a table:
 
 | manager | used for |
