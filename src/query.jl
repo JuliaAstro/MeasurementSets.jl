@@ -14,7 +14,12 @@
 # lexer -- `==`/`=`/`!=`/`<>`/`<`/`<=`/`>`/`>=`, `AND`/`&&`, `OR`/`||`,
 # `NOT`/`!`, both case-insensitive keyword forms). Not supported (see the
 # Phase 22 plan's non-goals): arithmetic expressions, string pattern
-# matching, ORDER BY, GROUP BY, joins, computed output columns.
+# matching, GROUP BY, joins, computed output columns.
+#
+# Phase 23 adds ORDER BY (bare column references only, optional per-key
+# ASC/DESC -- verified against `tables/TaQL/TableGram.{ll,yy}`'s
+# `sortlist`/`sortexpr` grammar; no arithmetic sort keys, no leading
+# global default-direction shortcut, no NODUPL/DISTINCT).
 
 # ======================================================================
 # AST -- dispatch, not branching (see [[julia-dispatch-style]]): a
@@ -299,6 +304,83 @@ function _parse_atom!(p::TQLParser)
     end
 end
 
+# ======================================================================
+# ORDER BY
+# ======================================================================
+#
+# sortlist := sortexpr (',' sortexpr)*
+# sortexpr := column ('ASC'|'DESC')?
+#
+# `ORDER BY` is lexed by real TaQL as a single two-word token; this
+# package's tokenizer has no multi-word-token mechanism, so the two
+# idents "ORDER"/"BY" are recognised as a literal sequence at the parser
+# level instead.
+
+struct TQLOrderKey
+    name::String
+    desc::Bool
+end
+
+_at_orderby(p::TQLParser) =
+    _iskw(p.toks[p.pos], "ORDER") && p.pos < length(p.toks) &&
+    _iskw(p.toks[p.pos+1], "BY")
+
+# Parses an optional WHERE expression followed by an optional ORDER BY
+# clause. `ast === nothing` means "no WHERE" (match every row) -- covers
+# a bare `"ORDER BY ..."` string with no filter at all.
+function _taqllite_parse_query(s::AbstractString, validnames::AbstractSet{String})
+    p = TQLParser(_taqllite_tokenize(s), 1, validnames, String(s))
+    ast = _at_orderby(p) ? nothing : _parse_or!(p)
+    orderby = TQLOrderKey[]
+    if _at_orderby(p)
+        _advance!(p)
+        _advance!(p)
+        push!(orderby, _parse_orderkey!(p))
+        while _peek(p).kind === :comma
+            _advance!(p)
+            push!(orderby, _parse_orderkey!(p))
+        end
+    end
+    _peek(p).kind === :eof || throw(ArgumentError(
+        "TaQL-lite: unexpected trailing input near \"$(_peek(p).text)\" in \"$s\""))
+    return ast, orderby
+end
+
+function _parse_orderkey!(p::TQLParser)
+    t = _expect_kind!(p, :ident, "a column name in ORDER BY")
+    t.text in p.validnames || throw(ArgumentError(
+        "TaQL-lite: unknown column \"$(t.text)\" in \"$(p.src)\""))
+    nt = _peek(p)
+    desc = if _iskw(nt, "DESC")
+        _advance!(p)
+        true
+    elseif _iskw(nt, "ASC")
+        _advance!(p)
+        false
+    else
+        false
+    end
+    return TQLOrderKey(t.text, desc)
+end
+
+# Stable multi-key sort over matched row indices; ties on every key keep
+# the original (pre-sort) row order (`alg=MergeSort` -- Julia's default
+# algorithm choice is type/size-dependent and not guaranteed stable, and
+# a stable tie-break is the intuitive, TaQL-consistent behaviour).
+function _apply_orderby(matched::Vector{Int}, orderby::Vector{TQLOrderKey},
+                        cols::AbstractDict)
+    isempty(orderby) && return matched
+    lt = function (i, j)
+        for k in orderby
+            vi, vj = cols[k.name][i], cols[k.name][j]
+            vi == vj && continue
+            return k.desc ? isless(vj, vi) : isless(vi, vj)
+        end
+        return false
+    end
+    return sort(matched; lt, alg=Base.Sort.MergeSort)
+end
+
 # A query result's `path` is `""` (in-memory, never persisted on its
 # own -- see the module docs). Composing a further `query` on top of one
 # would otherwise nest a RefTable whose PARENT has no real path, which
@@ -328,30 +410,54 @@ end
 
 Row-filter `t` with a small TaQL-like WHERE expression: comparisons
 (`==`/`=`, `!=`/`<>`, `<`, `<=`, `>`, `>=`), `AND`/`&&`, `OR`/`||`,
-`NOT`/`!`, parentheses, and `col IN [v1, v2, ...]`. Column names are
-case-sensitive and must name a column of `t`; keywords are
-case-insensitive. Only the columns the expression actually references
-are read. `select` projects/renames columns exactly like
-[`write_reftable`](@ref)'s own `select=`. Returns a `RefTable` (no data
-copied); persist it with `write_reftable(dst, result)`.
+`NOT`/`!`, parentheses, `col IN [v1, v2, ...]`, and an optional trailing
+`ORDER BY col [ASC|DESC], ...` (bare column references only). Column
+names are case-sensitive and must name a column of `t`; keywords are
+case-insensitive. Only the columns actually referenced (by the WHERE
+expression or an ORDER BY key) are read. `select` projects/renames
+columns exactly like [`write_reftable`](@ref)'s own `select=`. Returns a
+`RefTable` (no data copied); persist it with `write_reftable(dst, result)`.
 
-Deliberately a *subset* of real TaQL's WHERE grammar, not a look-alike:
-no arithmetic, no string pattern matching, no `ORDER BY`/`GROUP BY`/joins.
+A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
+
+Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
+arithmetic, no string pattern matching, no `GROUP BY`/joins, no
+arbitrary-expression or leading-global-direction ORDER BY.
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
-    ast = _taqllite_parse(wherestr, Set(columnnames(t)))
+    validnames = Set(columnnames(t))
+    ast, orderby = _taqllite_parse_query(wherestr, validnames)
     needed = Set{String}()
-    _tqlrefs!(needed, ast)
+    ast === nothing || _tqlrefs!(needed, ast)
+    for k in orderby
+        push!(needed, k.name)
+    end
     cols = Dict(n => column(t, n) for n in needed)
-    matched = [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
+    matched = ast === nothing ? collect(1:nrow(t)) :
+              [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
+    matched = _apply_orderby(matched, orderby, cols)
     namemap, order = _select_spec(t, select)
     parent, rows, namemap = _flatten_query_parent(t, matched, namemap)
     return RefTable("", parent, rows, namemap, order, parent.type, parent.subtype, parent.readme)
 end
 
+_normalize_orderkey(t::AbstractTable, s::Union{AbstractString,Symbol}) = begin
+    n = String(s)
+    n in columnnames(t) || throw(ArgumentError("orderby: no column \"$n\""))
+    TQLOrderKey(n, false)
+end
+function _normalize_orderkey(t::AbstractTable, p::Pair)
+    n = String(first(p))
+    n in columnnames(t) || throw(ArgumentError("orderby: no column \"$n\""))
+    d = last(p)
+    d isa Symbol && d in (:asc, :desc) || throw(ArgumentError(
+        "orderby: direction must be :asc or :desc, got $(repr(d))"))
+    return TQLOrderKey(n, d === :desc)
+end
+
 """
-    query(f::Function, t::AbstractTable; cols=nothing,
+    query(f::Function, t::AbstractTable; cols=nothing, orderby=nothing,
          select=[n=>n for n in columnnames(t)]) -> RefTable
 
 Row-filter `t` with a Julia predicate `f(row) -> Bool` (do-block
@@ -360,15 +466,24 @@ friendly: `query(t; cols=[...]) do row ... end`). `row` is a
 restricts which columns are actually read (default: every column — `f`
 is an opaque closure, so unlike the string-based `query` its column use
 can't be inferred; pass `cols` explicitly on a wide table to avoid
-materialising columns `f` never touches). `select` — see the string-based
-`query` above.
+materialising columns `f` never touches). `orderby` sorts the matched
+rows by one or more columns: each entry is a bare column name/`Symbol`
+(ascending) or a `name => :asc`/`name => :desc` pair. `select` — see the
+string-based `query` above.
 """
 function query(f::Function, t::AbstractTable;
               cols::Union{Nothing,AbstractVector}=nothing,
+              orderby::Union{Nothing,AbstractVector}=nothing,
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
     names = cols === nothing ? columnnames(t) : String.(cols)
-    rows = CTDSRows(AbstractVector[column(t, n) for n in names], Symbol.(names), nrow(t))
+    orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(t, o) for o in orderby]
+    extra = [k.name for k in orderkeys if !(k.name in names)]
+    allnames = vcat(collect(names), extra)
+    allcols = AbstractVector[column(t, n) for n in allnames]
+    rows = CTDSRows(allcols, Symbol.(allnames), nrow(t))
     matched = [i for (i, row) in enumerate(rows) if f(row)]
+    cols_by_name = Dict(n => c for (n, c) in zip(allnames, allcols))
+    matched = _apply_orderby(matched, orderkeys, cols_by_name)
     namemap, order = _select_spec(t, select)
     parent, rows2, namemap = _flatten_query_parent(t, matched, namemap)
     return RefTable("", parent, rows2, namemap, order, parent.type, parent.subtype, parent.readme)

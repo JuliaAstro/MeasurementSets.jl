@@ -329,7 +329,23 @@ Every operator/keyword spelling accepted is a genuine subset of real
 TaQL's own (verified against its lexer, and against a live TaQL
 cross-check test that runs the *same* WHERE string through both engines
 and compares the row selections) — no arithmetic, string pattern
-matching, `ORDER BY`, `GROUP BY`, or joins.
+matching, `GROUP BY`, or joins.
+
+**Phase 23 — TaQL-lite `ORDER BY`.** Both `query` entry points now sort
+their matched rows before building the result `RefTable`. In the
+string form, an optional trailing `ORDER BY col [ASC|DESC], ...` (bare
+column references only, verified against TaQL's own `sortlist`/
+`sortexpr` grammar) — `query(t, "A > 5 ORDER BY B DESC")`, or a bare
+`query(t, "ORDER BY B")` to sort every row with no filter. In the
+closure form, a new `orderby=` keyword takes bare names (ascending) or
+`name => :asc`/`name => :desc` pairs. The sort is a stable multi-key
+sort (`Base.Sort.MergeSort`, explicit — ties keep original row order),
+so a sort key list with several columns tie-breaks left to right. Sort
+keys are read (and de-duplicated against `WHERE`-referenced columns)
+through the same only-what's-needed column resolution Phase 22
+established. Cross-checked against real TaQL for row *order*, not just
+row-set membership. No arithmetic sort keys, no leading global
+default-direction shortcut, no `NODUPL`/`DISTINCT`.
 
 ## Usage
 

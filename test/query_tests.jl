@@ -166,6 +166,120 @@ end
     end
 end
 
+@testset "TaQL-lite parser — ORDER BY unit" begin
+    validnames = Set(["A", "B", "C"])
+    parseq(s) = MSv2._taqllite_parse_query(s, validnames)
+
+    ast, ob = parseq("A > 5 ORDER BY B")
+    @test ast isa MSv2.TQLCmp
+    @test ob == [MSv2.TQLOrderKey("B", false)]
+
+    ast2, ob2 = parseq("A > 5 ORDER BY B DESC")
+    @test ob2 == [MSv2.TQLOrderKey("B", true)]
+
+    ast3, ob3 = parseq("ORDER BY B, C DESC")
+    @test ast3 === nothing
+    @test ob3 == [MSv2.TQLOrderKey("B", false), MSv2.TQLOrderKey("C", true)]
+
+    ast4, ob4 = parseq("ORDER BY A")
+    @test ast4 === nothing
+    @test ob4 == [MSv2.TQLOrderKey("A", false)]
+
+    # ASC/DESC case-insensitivity
+    _, ob5 = parseq("ORDER BY A asc")
+    @test ob5 == [MSv2.TQLOrderKey("A", false)]
+    _, ob6 = parseq("ORDER BY A desc")
+    @test ob6 == [MSv2.TQLOrderKey("A", true)]
+
+    @test_throws ArgumentError parseq("ORDER BY ZZZ")
+    @test_throws ArgumentError parseq("A > 5 ORDER BY B garbage")
+end
+
+@testset "TaQL-lite query — ORDER BY string form" begin
+    dir = joinpath(mktempdir(), "ob1.tab")
+    A = Int32[5, 3, 1, 3, 2]
+    B = ["e", "c", "a", "d", "b"]
+    write_table(dir, "T", ["A" => A, "B" => B]; nrow=5)
+    t = readtable(dir)
+
+    r1 = query(t, "A >= 1 ORDER BY A")
+    expected1 = sort(collect(1:5); lt=(i, j) -> A[i] < A[j], alg=Base.Sort.MergeSort)
+    @test r1.rows == expected1
+    @test issorted(A[r1.rows])
+
+    r2 = query(t, "A >= 1 ORDER BY A DESC")
+    @test issorted(A[r2.rows]; rev=true)
+    # stable tie-break: A has a tie at value 3 (original rows 2 and 4) —
+    # descending order must keep row 2 before row 4 among the ties.
+    tiepos = findall(==(3), A[r2.rows])
+    @test r2.rows[tiepos] == [2, 4]
+
+    # multi-key
+    dir2 = joinpath(mktempdir(), "ob2.tab")
+    A2 = Int32[1, 1, 1, 2, 2, 2]
+    C2 = Int32[5, 3, 9, 1, 1, 2]
+    write_table(dir2, "T2", ["A" => A2, "C" => C2]; nrow=6)
+    t2 = readtable(dir2)
+    r3 = query(t2, "A >= 1 ORDER BY A, C DESC")
+    @test A2[r3.rows] == [1, 1, 1, 2, 2, 2]
+    @test C2[r3.rows] == [9, 5, 3, 2, 1, 1]
+    @test r3.rows[end-1:end] == [4, 5]   # stable tie-break within the A=2,C=1 group
+
+    # bare "ORDER BY" (no WHERE) matches every row, sorted
+    r4 = query(t, "ORDER BY B")
+    @test B[r4.rows] == sort(B)
+
+    # only referenced-or-sorted-by columns are read
+    bogus = ColumnDesc("BOGUS", "", "NoSuchManager", "g", MSv2.TpInt,
+                       "ScalarColumnDesc<Int>", (), Int32(0), UInt32(0), Record(), nothing, 999)
+    td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
+                    t.desc.private, [t.desc.columns; bogus])
+    t3 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
+              td2, t.managers, t.syncmod, t.lockpath, t.container)
+    r5 = query(t3, "A >= 1 ORDER BY A")   # BOGUS never resolved -> never errors
+    @test r5.rows == r1.rows
+end
+
+@testset "TaQL-lite query — ORDER BY closure form" begin
+    dir = joinpath(mktempdir(), "ob3.tab")
+    A = Int32[5, 3, 1, 3, 2]
+    write_table(dir, "T", ["A" => A]; nrow=5)
+    t = readtable(dir)
+
+    r1 = query(t; orderby=["A" => :desc]) do row
+        row.A >= 1
+    end
+    @test issorted(A[r1.rows]; rev=true)
+
+    r2 = query(t; orderby=["A"]) do row   # bare name = ascending
+        row.A >= 1
+    end
+    @test issorted(A[r2.rows])
+
+    # matches the equivalent string-form order
+    rstr = query(t, "A >= 1 ORDER BY A DESC")
+    @test r1.rows == rstr.rows
+
+    @test_throws ArgumentError query(t; orderby=["NOPE"]) do row
+        true
+    end
+    @test_throws ArgumentError query(t; orderby=["A" => :bogus]) do row
+        true
+    end
+end
+
+@testset "TaQL-lite query — ORDER BY composability" begin
+    dir = joinpath(mktempdir(), "ob4.tab")
+    A = collect(Int32, 1:30)
+    write_table(dir, "T", ["A" => A]; nrow=30)
+    t = readtable(dir)
+
+    r1 = query(t, "A > 10")                          # rows 11:30, in order
+    r2 = query(r1, "A < 25 ORDER BY A DESC")          # flattens through r1's parent
+    expected = filter(i -> A[i] > 10 && A[i] < 25, 1:30)
+    @test A[r2.rows] == sort(A[expected]; rev=true)
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
@@ -189,6 +303,13 @@ if _HAVE_TAQL
         t = readtable(pdir)
         for wherestr in ("A > 5", "A >= 15 OR A <= 2", "A > 3 AND A < 10",
                          "C == 'x'", "NOT (A > 10)", "A IN [1,5,10,20]")
+            @test query(t, wherestr).rows == _taql_rows(wherestr)
+        end
+
+        # ORDER BY -- row ORDER matters here (unlike the WHERE-only cross-
+        # check above, which only needs set equality since it never sorts).
+        for wherestr in ("A > 5 ORDER BY A DESC", "A > 3 AND A < 15 ORDER BY B",
+                         "A > 0 ORDER BY B DESC, A")
             @test query(t, wherestr).rows == _taql_rows(wherestr)
         end
     end
