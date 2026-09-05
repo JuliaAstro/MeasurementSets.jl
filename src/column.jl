@@ -111,12 +111,15 @@ Base.IndexStyle(::Type{<:Column}) = IndexLinear()
 function Base.getindex(c::Column, i::Int)
     @boundscheck checkbounds(c, i)
     v = getcell(c.inst, c.index, c.desc, i, c.cols)
-    c.narrow ? _narrowvalue(v) : v
+    c.narrow ? _narrowvalue(v) : v          # single cell: cheap post-convert
 end
 
 function Base.getindex(c::Column, ::Colon)
-    out = getcolumn(c.inst, c.index, c.desc, c.table.rows, c.cols)
-    c.narrow ? map(_narrowvalue, out) : out
+    # whole column: hand the narrowed element type down so the storage
+    # manager decodes straight into a Float16/ComplexF16 buffer (no wide
+    # intermediate).  `astype === nothing` is byte-identical to before.
+    astype = c.narrow ? _narrowtype(juliatype(c.desc.type)) : nothing
+    getcolumn(c.inst, c.index, c.desc, c.table.rows, c.cols; astype)
 end
 
 Base.getindex(c::Column, r::AbstractVector{<:Integer}) = [c[i] for i in r]

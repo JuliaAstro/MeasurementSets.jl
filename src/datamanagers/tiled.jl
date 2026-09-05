@@ -268,12 +268,14 @@ end
 Read an entire hypercube (TiledCellStMan: one cube == one cell) for the
 `colidx`-th bound column.
 """
-function read_cube_whole(tsm::TiledStMan, colidx::Int, cube::TSMCube)
+function read_cube_whole(tsm::TiledStMan, colidx::Int, cube::TSMCube;
+                         astype::Union{Nothing,Type}=nothing)
     T = juliatype(tsm.types[colidx])
+    Tout = astype === nothing ? T : astype
     nd = length(cube.cubeshape)
     cs, ts = cube.cubeshape, cube.tileshape
     tpd = Int[cld(cs[d], ts[d]) for d in 1:nd]
-    out = Array{T}(undef, cs...)
+    out = Array{Tout}(undef, cs...)
 
     bytes = _tsmbytes(tsm, cube.sequ)
     bbytes, offs = _tile_layout(tsm, cube)
@@ -294,7 +296,7 @@ function read_cube_whole(tsm::TiledStMan, colidx::Int, cube::TSMCube)
                 out[dst] = (byte >> (k & 7)) & 0x01 == 0x01
             else
                 b = base + k * esz
-                out[dst] = swap(reinterpret(T, @view bytes[b+1 : b+esz])[1])
+                out[dst] = Tout(swap(reinterpret(T, @view bytes[b+1 : b+esz])[1]))
             end
         end
     end
@@ -323,9 +325,10 @@ alldefined_none(tsm::TiledStMan) =
 # leading axes are not tiled (tilesPerDim == 1 there), so each on-disk tile
 # is a contiguous run of whole cells along the last (row) axis.
 function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
-                         nrow::Int, colidx::Int)
+                         nrow::Int, colidx::Int; astype::Union{Nothing,Type}=nothing)
     T = juliatype(tsm.types[colidx])
     T === Bool && return nothing            # bit unpacking: use the slow path
+    Tout = astype === nothing ? T : astype
     nd = length(cube.cubeshape)
     cs, ts = cube.cubeshape, cube.tileshape
     all(cld(cs[d], ts[d]) == 1 for d in 1:nd-1) || return nothing
@@ -338,7 +341,7 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
     coloff = offs[colidx]
     swap = tsm.endian === :big ? ntoh : ltoh
 
-    backing = Vector{T}(undef, nrow * planelen)
+    backing = Vector{Tout}(undef, nrow * planelen)
     for r in 1:nrow
         p = rowpos(r) - 1                    # 0-based last-axis position
         tile = p ÷ rowspertile
@@ -347,7 +350,7 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
         raw = reinterpret(T, @view bytes[b+1 : b + planelen*sizeof(T)])
         dst = (r - 1) * planelen
         @inbounds for k in 1:planelen
-            backing[dst + k] = swap(raw[k])
+            backing[dst + k] = Tout(swap(raw[k]))
         end
     end
     return [reshape(view(backing, (r-1)*planelen+1 : r*planelen), planeshape...)
@@ -355,13 +358,16 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
 end
 
 """
-    getcolumn(tsm::TiledStMan, colidx, coldesc, nrow, cols) -> Vector{Array}
+    getcolumn(tsm::TiledStMan, colidx, coldesc, nrow, cols; astype=nothing) -> Vector{Array}
 
+`astype` (a scalar element type) narrows the decode in place — the cells
+come back with that element type instead of the column's native one.
 `cols` is unused (see [`getcell`](@ref)).
 """
-function getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Integer, ::Integer)
+function getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Integer, ::Integer;
+                   astype::Union{Nothing,Type}=nothing)
     if tsm.kind === :cell
-        return [read_cube_whole(tsm, colidx, tsm.cubes[r]) for r in 1:nrow]
+        return [read_cube_whole(tsm, colidx, tsm.cubes[r]; astype) for r in 1:nrow]
     end
     alldefined_none(tsm) &&
         error("column has no stored data (all tiled cells are undefined)")
@@ -377,11 +383,12 @@ function getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Integer, :
             nothing
         end
         if rowpos !== nothing
-            fast = _read_cube_bulk(tsm, cube, rowpos, Int(nrow), colidx)
+            fast = _read_cube_bulk(tsm, cube, rowpos, Int(nrow), colidx; astype)
             fast === nothing || return fast
         end
     end
-    return [getcell(tsm, colidx, c, r, 1) for r in 1:nrow]
+    astype === nothing && return [getcell(tsm, colidx, c, r, 1) for r in 1:nrow]
+    return [astype.(getcell(tsm, colidx, c, r, 1)) for r in 1:nrow]
 end
 
 # =====================  writer  ====================================

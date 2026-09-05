@@ -64,6 +64,19 @@ end
     @test column(cp, "DATA")[:]   == column(src, "DATA")[1:80]     # not ComplexF16-rounded
     @test column(cp, "WEIGHT")[:] == column(src, "WEIGHT")[1:80]
 
+    # Phase 35: the narrow col[:] holds a half-size buffer (decoded straight
+    # into ComplexF16 -- no wide intermediate) and allocates less than the
+    # old "read wide then convert" would.
+    th = readtable(dst); tf = readtable(dst; precision=:full)
+    dh = column(th, "DATA")[:]
+    df = column(tf, "DATA")[:]
+    @test eltype(eltype(dh)) == ComplexF16
+    @test Base.summarysize(dh) < 0.6 * Base.summarysize(df)
+    column(th, "DATA")[:]; column(tf, "DATA")[:]                 # warm caches
+    GC.gc(); a_new = @allocated column(th, "DATA")[:]
+    GC.gc(); a_old = @allocated map(x -> ComplexF16.(x), column(tf, "DATA")[:])
+    @test a_new < a_old
+
     # a Float16 / ComplexF16 column is writable (upcast to the Float32 CTDS type)
     p = joinpath(dir, "half")
     write_table(p, "T", Pair{String,Any}["X" => Float16[1, 2, 3],

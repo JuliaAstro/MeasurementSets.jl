@@ -291,14 +291,17 @@ end
 # `getcolumn` method takes (for dispatch-signature uniformity -- see
 # `column.jl`) are always `(1, 1)` here and unused.
 
-function getcell(e::VirtualEngine, ::Integer, ::ColumnDesc, row::Integer, ::Integer)
-    st = Array(_eng_stored(e)[row])
-    return _decode(e.kind, st, _row_scale(e, row), _row_offset(e, row),
-                   juliatype(e.vdesc.type))
-end
+_engine_decode(e::VirtualEngine, row::Integer, T::Type) =
+    _decode(e.kind, Array(_eng_stored(e)[row]), _row_scale(e, row), _row_offset(e, row), T)
 
-getcolumn(e::VirtualEngine, index::Integer, c::ColumnDesc, nrow::Integer, cols::Integer) =
-    [getcell(e, index, c, r, cols) for r in 1:nrow]
+getcell(e::VirtualEngine, ::Integer, ::ColumnDesc, row::Integer, ::Integer) =
+    _engine_decode(e, row, juliatype(e.vdesc.type))
+
+function getcolumn(e::VirtualEngine, ::Integer, ::ColumnDesc, nrow::Integer, ::Integer;
+                   astype::Union{Nothing,Type}=nothing)
+    T = astype === nothing ? juliatype(e.vdesc.type) : astype
+    return [_engine_decode(e, r, T) for r in 1:nrow]
+end
 
 # =====================  writer  ==================================
 

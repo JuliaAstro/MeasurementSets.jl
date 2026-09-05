@@ -373,11 +373,12 @@ _dysco_factor(::RowNorm, meta::Vector{Float64}, ch::Int, pl::Int, br::Int,
 # real table row -- padding slots beyond it (the tail of a partially-
 # filled last block) are zero-filled without touching the antenna arrays,
 # which are only sized to the table's own row count.
-function _dysco_decode_block(dm::DyscoStMan, colidx::Int, blockIndex::Int, nvalid::Int)
+function _dysco_decode_block(dm::DyscoStMan, colidx::Int, blockIndex::Int, nvalid::Int;
+                             astype::Union{Nothing,Type}=nothing)
     npol, nchan = dm.colShape[colidx]
     rpb = dm.rowsPerBlock
     kind = dm.colKind[colidx]
-    T = kind === :weight ? Float32 : ComplexF32
+    T = astype === nothing ? (kind === :weight ? Float32 : ComplexF32) : astype
     out = Vector{Array{T,2}}(undef, rpb)
 
     if blockIndex >= dm.nBlocksInFile
@@ -413,7 +414,7 @@ function _dysco_decode_block(dm::DyscoStMan, colidx::Int, blockIndex::Int, nvali
             end
             row0 = blockIndex * rpb + br
             a1 = dm.ant1[row0+1]; a2 = dm.ant2[row0+1]
-            cell = Matrix{ComplexF32}(undef, npol, nchan)
+            cell = Matrix{T}(undef, npol, nchan)
             base = br * (nchan * npol * 2)
             for ch in 0:nchan-1
                 for pl in 0:npol-1
@@ -422,7 +423,7 @@ function _dysco_decode_block(dm::DyscoStMan, colidx::Int, blockIndex::Int, nvali
                     si = base + (ch*npol + pl) * 2
                     re = dict[syms[si+1] + 1]
                     im = dict[syms[si+2] + 1]
-                    cell[pl+1, ch+1] = ComplexF32(re * factor, im * factor)
+                    cell[pl+1, ch+1] = T(re * factor, im * factor)
                 end
             end
             out[br+1] = cell
@@ -443,10 +444,10 @@ function _dysco_decode_block(dm::DyscoStMan, colidx::Int, blockIndex::Int, nvali
                 out[br+1] = zeros(T, npol, nchan)
                 continue
             end
-            cell = Matrix{Float32}(undef, npol, nchan)
+            cell = Matrix{T}(undef, npol, nchan)
             base = br * nchan
             for ch in 0:nchan-1
-                v = Float32(syms[base+ch+1] * scale)
+                v = T(syms[base+ch+1] * scale)
                 for pl in 1:npol
                     cell[pl, ch+1] = v
                 end
@@ -482,15 +483,17 @@ function getcell(dm::DyscoStMan, colidx::Int, ::ColumnDesc, row::Integer, ::Inte
 end
 
 """
-    getcolumn(dm::DyscoStMan, colidx, c, nrow, cols) -> Vector{<:Array}
+    getcolumn(dm::DyscoStMan, colidx, c, nrow, cols; astype=nothing) -> Vector{<:Array}
 
 Decode each block exactly once and collect all `nrow` cells -- the
 efficient whole-column path `copyms`/`copytable` use via the identity-copy
-fast path (Phase 16).  `cols` is unused (see [`getcell`](@ref)).
+fast path (Phase 16).  `astype` (a scalar element type) decodes straight
+into that type.  `cols` is unused (see [`getcell`](@ref)).
 """
-function getcolumn(dm::DyscoStMan, colidx::Int, ::ColumnDesc, nrow::Integer, ::Integer)
+function getcolumn(dm::DyscoStMan, colidx::Int, ::ColumnDesc, nrow::Integer, ::Integer;
+                   astype::Union{Nothing,Type}=nothing)
     npol, nchan = dm.colShape[colidx]
-    T = dm.colKind[colidx] === :weight ? Float32 : ComplexF32
+    T = astype === nothing ? (dm.colKind[colidx] === :weight ? Float32 : ComplexF32) : astype
     rpb = dm.rowsPerBlock
     out = Vector{Array{T,2}}(undef, nrow)
     if rpb == 0
@@ -504,7 +507,7 @@ function getcolumn(dm::DyscoStMan, colidx::Int, ::ColumnDesc, nrow::Integer, ::I
     idx = 1
     @inbounds for b in 0:nblocks-1
         nvalid = min(rpb, nrow - b * rpb)
-        block = _dysco_decode_block(dm, colidx, b, nvalid)
+        block = _dysco_decode_block(dm, colidx, b, nvalid; astype)
         for k in 1:nvalid
             out[idx] = block[k]
             idx += 1

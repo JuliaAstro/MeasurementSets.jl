@@ -202,15 +202,17 @@ function getcell(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
 end
 
 """
-    getcolumn(ism::IncrementalStMan, colnr, coldesc, nrow, ncol) -> Vector / Vector{Array}
+    getcolumn(ism::IncrementalStMan, colnr, coldesc, nrow, ncol; astype=nothing) -> Vector / Vector{Array}
 
 Whole-column read: walk buckets and run-length-fill from the stored values.
+`astype` narrows a numeric scalar column's element type (an array-valued
+ISM column is post-converted).
 """
 function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
-                   nrow::Integer, ncol::Int)
+                   nrow::Integer, ncol::Int; astype::Union{Nothing,Type}=nothing)
     kind = _ismkind(c)
     scalar = kind === :scalar && c.type != TpString
-    out = scalar ? Vector{juliatype(c.type)}(undef, nrow) :
+    out = scalar ? Vector{astype === nothing ? juliatype(c.type) : astype}(undef, nrow) :
           Vector{Any}(undef, nrow)
 
     ix = ism.index
@@ -227,7 +229,8 @@ function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
             end
         end
     end
-    return out
+    (scalar || astype === nothing) && return out
+    return [astype.(x) for x in out]         # array-valued ISM column: post-convert
 end
 
 # =====================  writer  =====================================

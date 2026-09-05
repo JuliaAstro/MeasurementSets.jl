@@ -371,16 +371,19 @@ function _foreach_bucket(f, ssm::StandardStMan, ssmcol::Int)
 end
 
 """
-    getcolumn(ssm::StandardStMan, ssmcol, coldesc, nrow, cols) -> Vector / Array
+    getcolumn(ssm::StandardStMan, ssmcol, coldesc, nrow, cols; astype=nothing) -> Vector / Array
 
 Read all `nrow` cells of column `ssmcol` (1-based).  Returns a `Vector`
-for scalars and a `Vector{Array}` for direct-array columns.  `cols` is
-unused (see [`getcell`](@ref)).
+for scalars and a `Vector{Array}` for direct-array columns.  `astype` (a
+scalar element type) narrows a numeric column's decode in place.  `cols`
+is unused (see [`getcell`](@ref)).
 """
-function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer, ::Integer)
+function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer, ::Integer;
+                   astype::Union{Nothing,Type}=nothing)
     kind = _ssmkind(c)
     if kind === :indarr || kind === :indstr
-        return [getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]   # small side tables
+        astype === nothing && return [getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]
+        return [astype.(getcell(ssm, ssmcol, c, r, 1)) for r in 1:nrow]
     end
 
     dims = _dims(c)
@@ -402,14 +405,15 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
 
     else
         T = juliatype(c.type)
-        flat = Vector{T}(undef, nrow * nrelem)
+        Tout = astype === nothing ? T : astype
+        flat = Vector{Tout}(undef, nrow * nrelem)
         _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
             n = (lastrow - firstrow + 1) * nrelem
             off = bucketptr(ssm, bkt) + coloff
             raw = reinterpret(T, @view ssm.data[off+1 : off + n*sizeof(T)])
             base = (firstrow - 1) * nrelem
             @inbounds for k in 1:n
-                flat[base + k] = _swap(ssm, raw[k])
+                flat[base + k] = Tout(_swap(ssm, raw[k]))
             end
         end
         isempty(dims) && return flat

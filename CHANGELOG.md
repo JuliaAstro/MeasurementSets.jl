@@ -596,5 +596,16 @@ tables default to `:full`. `readtable(...; precision=…)`,
 override; an explicit `column(...; precision=:half)` narrows a `TpFloat`
 column too (the caller's risk). `copyms` / `write_ms` / `copytable` and
 `edit` always read the source at full precision, so copies stay
-byte-exact. The narrowing is a post-read conversion — the storage-manager
-decode paths are untouched.
+byte-exact.
+
+### Phase 35 — decode straight into the narrow type
+
+A follow-up to Phase 34: the whole-column read (`column(t, "DATA")[:]`)
+now threads the target element type through the storage-manager decode
+path (a new `astype` keyword on the `getcolumn` family — `TiledStMan`,
+`DyscoStMan`, `StandardStMan`, the virtual engines, `IncrementalStMan`),
+so a narrowed column decodes straight into a `ComplexF16` buffer instead
+of building a `ComplexF32` one and converting. No API or value change;
+the `:full` path (`astype === nothing`) is byte-identical to before. The
+result buffer is half-size and there is no wide transient. Per-cell
+reads (`col[i]`) keep the cheap post-convert.
