@@ -1123,6 +1123,32 @@ function _group_rows(keys::Vector{String}, loaded, rows)
     return groups, seen
 end
 
+# column names a WHERE string references (for the caller to pre-load)
+function _tql_where_refs(wherestr::AbstractString, t::AbstractTable)
+    ast = _taqllite_parse(String(wherestr), Set(columnnames(t)))
+    !_has_aggr(ast) ||
+        throw(ArgumentError("WHERE must not contain aggregate functions"))
+    s = Set{String}()
+    _tqlrefs!(s, ast)
+    return s
+end
+
+# `where` (nothing / WHERE string / row->Bool closure) -> Vector{Int}.
+# `cols` must already hold every column the predicate touches (the
+# WHERE-string columns, or -- for a closure -- every column).
+function _where_rows(t::AbstractTable, where, cols::AbstractDict)
+    where === nothing && return collect(1:nrow(t))
+    if where isa Function
+        nms = collect(keys(cols))
+        rws = CTDSRows(AbstractVector[cols[n] for n in nms], Symbol.(nms), nrow(t))
+        return [i for (i, r) in enumerate(rws) if where(r)]
+    end
+    ast = _taqllite_parse(String(where), Set(columnnames(t)))
+    !_has_aggr(ast) ||
+        throw(ArgumentError("WHERE must not contain aggregate functions"))
+    return [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
+end
+
 # Shared preparation for both `groupby` methods: validate keys, parse
 # any string `where`/`having`, decide which columns to load (referenced
 # names ∪ keys ∪ -- when a closure is involved -- `cols` or every

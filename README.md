@@ -461,10 +461,35 @@ join(ms.MAIN, subtable(ms, "ANTENNA"); on="ANTENNA1",
 exactly as on a disk table. Persist any result with
 `write_table(dst, "T", r; nrow=nrow(r))`.
 
-Still, across Phases 22–29: no bitwise operators (`& | ^ ~`),
+**Phase 30 — the write commands.** `UPDATE` / `DELETE` / `SELECT INTO`,
+over the Phase 9-11 `edit` primitives:
+
+```julia
+update!("/path/to.ms/ANTENNA"; set=["MOUNT" => "'ALT-AZ'"], where="STATION ~ p/PM*/")
+delete!(subtable(ms, "FLAG_CMD"); where="APPLIED")
+copytable("/tmp/cal.tab", query(ms.MAIN, "FIELD_ID == 3"))          # SELECT ... INTO
+```
+
+`update!(target; set, where)` — `target` is a path or an open `Table` /
+`subtable(…)`; `set` is `"COL" => "expr"` pairs (TaQL-lite expressions
+over the row's columns, evaluated against the *pre-update* values, so
+`["A" => "B", "B" => "A"]` swaps); `where` is a WHERE string, a
+`row -> Bool` closure, or `nothing` (every row). Returns the row count
+changed. `delete!(target; where)` extends `Base.delete!`; `where=nothing`
+empties the table. `copytable(dst, result)` persists any query /
+`groupby` / `join` result (DM-preserving for a `RefTable`, materialised
+for a `GroupedTable`) — that is `SELECT … INTO`.
+
+A `taql(target, "…")` string-command dispatcher wraps all three:
+`taql(t, "UPDATE t SET UVW = UVW * 2 WHERE ANTENNA1 == 0")`,
+`taql(t, "DELETE FROM t WHERE FLAG_ROW")`,
+`taql(t, "SELECT A, B AS BB WHERE A > 5 INTO '/tmp/out'")`.
+
+Still, across Phases 22–30: no bitwise operators (`& | ^ ~`),
 `BETWEEN`, `~=`, array indexing, units, date/time or measures
-functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, or a
-general M:N cross-product join.
+functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, a
+general M:N cross-product join, `INSERT`, or `UPDATE` array-slice
+assignment.
 
 ## Usage
 

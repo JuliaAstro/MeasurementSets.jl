@@ -484,21 +484,37 @@ function _copy_table(dir::AbstractString, ct::ConcatTable, r=1:nrow(ct);
                      type=p1.type, subtype=p1.subtype, readme=p1.readme, storage, blocksize)
 end
 
+# A GroupedTable (from `groupby`/`join`/`query` on a result) has no CTDS
+# data-manager layout to preserve -- materialise its columns via the
+# generic Tables.jl `write_table` path.
+function _copy_table(dir::AbstractString, gt::GroupedTable, r=1:nrow(gt);
+                     name::AbstractString="TABLE", kwargs...)
+    nms = columnnames(gt)
+    cols = Pair{Symbol,Any}[Symbol(n) => collect(column(gt, n))[r] for n in nms]
+    write_table(dir, name, cols; nrow=length(r))
+end
+
 """
-    copytable(dst, t::Table|RefTable|ConcatTable; rows=Colon(),
+    copytable(dst, t; rows=Colon(), name="TABLE",
              storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE) -> dst
 
-Deep-copy `t` into a fresh plain table at `dst`, keeping each column's
-storage-manager / virtual-engine kind (mirrors what casacore's
-`GIVING ... AS PLAIN` does).  `rows` selects/reorders rows, 1-based into
-`t`.  `storage`/`blocksize` pack the destination into one `table.mf`/
-`table.mfh5` -- see [`_write_table_core`](@ref).
+Deep-copy `t` into a fresh plain table at `dst`.  For a `Table` /
+`RefTable` / `ConcatTable` each column's storage-manager / virtual-engine
+kind is preserved (casacore's `GIVING ... AS PLAIN`); for a
+`GroupedTable` the columns are materialised (`name` sets the table's
+schema name).  `rows` selects/reorders rows (1-based into `t`);
+`storage`/`blocksize` pack the destination into one `table.mf` /
+`table.mfh5` -- see [`_write_table_core`](@ref).  This is "SELECT ...
+INTO" for any query result.
 """
 function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
+                   name::AbstractString="TABLE",
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dst = String(rstrip(dst, '/'))
     ispath(dst) && error("$dst already exists")
-    _copy_table(dst, t, rows === Colon() ? (1:nrow(t)) : rows; storage, blocksize)
+    r = rows === Colon() ? (1:nrow(t)) : rows
+    t isa GroupedTable ? _copy_table(dst, t, r; name) :
+        _copy_table(dst, t, r; storage, blocksize)
     return dst
 end
 

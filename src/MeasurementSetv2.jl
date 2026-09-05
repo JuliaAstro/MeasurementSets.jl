@@ -28,6 +28,7 @@ include("tables_interface.jl")
 include("create.jl")
 include("edit.jl")
 include("resync.jl")
+include("write_commands.jl")
 
 export AbstractTable, Table, RefTable, ConcatTable
 export readtable, columnnames, columndesc, keywords, subtables, nrow
@@ -41,7 +42,9 @@ export write_reftable, write_concattable, copytable
 export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!
 export resync, is_stale, is_multiused
 export query, groupby, GroupedTable
-# `join` is not exported -- it extends `Base.join` with an
-# N:1 lookup-join method for two `AbstractTable`s (see query.jl).
+export update!, taql
+# `join` extends `Base.join` (N:1 lookup join, see query.jl) and
+# `delete!` extends `Base.delete!` (DELETE FROM, see write_commands.jl)
+# -- neither is exported.
 
 end
