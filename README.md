@@ -379,9 +379,30 @@ errors, exactly as TaQL requires `any(...)`/`all(...)` there. New
 stdlib dependency `Statistics`. The **closure form is unchanged**.
 Cross-checked against real TaQL.
 
-Still, across Phases 22–25: no bitwise operators (`& | ^ ~`),
+**Phase 26 — GROUP BY + aggregation.** A new `groupby(t, groupcols;
+select, where, having, orderby)` function — distinct from `query`
+because the result shape (one row per group, computed aggregate
+columns) is not a `RefTable`. `select` takes `outname => expr_string`
+pairs where each expression may use `g`-prefixed aggregate functions
+over the group — `gcount()`, `gsum(x)`, `gmean(x)`/`gavg(x)`,
+`gmedian(x)`, `gmin`/`gmax`, `gvariance`/`gsamplevariance`,
+`gstddev`/`gsamplestddev`, `grms`, `gany`/`gall`, `gntrue`/`gnfalse`,
+`gfirst`/`glast` — plus the group-key columns and any scalar
+expression of them (`gsum(X) / gcount()`). An aggregate's argument
+must reduce to a scalar per row, so array cells compose through the
+Phase-25 reductions: `"AMP" => "gmean(mean(abs(DATA)))"`. `where`
+pre-filters rows; `having` filters groups; `orderby` sorts the result.
+An empty `groupcols` gives one whole-table row.
+
+The result is a `GroupedTable` — an in-memory `Tables.jl` source:
+`result.OUTNAME` column access, `DataFrame(result)`, and persistence
+via the existing `write_table(dst, "T", result; nrow=…)` with no new
+machinery. Cross-checked against real TaQL's own `SELECT … GROUP BY …`.
+
+Still, across Phases 22–26: no bitwise operators (`& | ^ ~`),
 `BETWEEN`, `~=`, array indexing, units, date/time or measures
-functions, `GROUP BY`/aggregation-over-groups, or joins.
+functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, or
+joins.
 
 ## Usage
 

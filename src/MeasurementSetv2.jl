@@ -40,6 +40,6 @@ export write_table, write_ms, copyms, create_ms
 export write_reftable, write_concattable, copytable
 export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!
 export resync, is_stale, is_multiused
-export query
+export query, groupby, GroupedTable
 
 end

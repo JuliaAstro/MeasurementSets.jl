@@ -42,6 +42,7 @@
 # rowid(), substr, type conversions, UDFs, aggregates over row groups.
 
 import Statistics
+import Tables
 
 # ======================================================================
 # AST -- dispatch, not branching (see [[julia-dispatch-style]]): a
@@ -95,6 +96,10 @@ struct TQLFunc <: TQLExpr           # NAME(args...) -- resolved Julia callable +
     args::Vector{TQLExpr}
 end
 struct TQLRowNum <: TQLExpr end     # rownumber() / rownr() -- the 1-based row index
+struct TQLAggr <: TQLExpr           # g*(arg) -- reduces over a group's rows (groupby only)
+    fn::Base.Callable               # Vector-of-per-row-values -> scalar
+    arg::Union{Nothing,TQLExpr}     # nothing only for gcount()
+end
 
 # Arithmetic and comparison broadcast over an array-cell operand (TaQL
 # semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
@@ -118,6 +123,8 @@ _tqleval(e::TQLMatch, cols, i) =
 _tqleval(e::TQLFunc, cols, i) =
     e.fn(ntuple(k -> _tqleval(e.args[k], cols, i), length(e.args))...)
 _tqleval(::TQLRowNum, cols, i) = i
+_tqleval(::TQLAggr, cols, i) = throw(ArgumentError(
+    "TaQL-lite: aggregate functions (g*) are only valid in groupby(...), not query(...)"))
 
 # Collect every column name an expression actually references, so `query`
 # reads only those columns (not the whole table) -- the real point of the
@@ -134,6 +141,22 @@ _tqlrefs!(seen, e::TQLNeg) = _tqlrefs!(seen, e.a)
 _tqlrefs!(seen, e::TQLMatch) = _tqlrefs!(seen, e.lhs)
 _tqlrefs!(seen, e::TQLFunc) = foreach(a -> _tqlrefs!(seen, a), e.args)
 _tqlrefs!(seen, ::TQLRowNum) = nothing
+_tqlrefs!(seen, e::TQLAggr) = e.arg === nothing ? nothing : _tqlrefs!(seen, e.arg)
+
+# true if any TQLAggr node appears anywhere in the expression tree
+_has_aggr(e::TQLAggr) = true
+_has_aggr(e::TQLCol) = false
+_has_aggr(e::TQLLit) = false
+_has_aggr(::TQLRowNum) = false
+_has_aggr(e::TQLCmp) = _has_aggr(e.lhs) || _has_aggr(e.rhs)
+_has_aggr(e::TQLArith) = _has_aggr(e.lhs) || _has_aggr(e.rhs)
+_has_aggr(e::TQLAnd) = _has_aggr(e.a) || _has_aggr(e.b)
+_has_aggr(e::TQLOr) = _has_aggr(e.a) || _has_aggr(e.b)
+_has_aggr(e::TQLNot) = _has_aggr(e.a)
+_has_aggr(e::TQLNeg) = _has_aggr(e.a)
+_has_aggr(e::TQLIn) = _has_aggr(e.lhs)
+_has_aggr(e::TQLMatch) = _has_aggr(e.lhs)
+_has_aggr(e::TQLFunc) = any(_has_aggr, e.args)
 
 # ======================================================================
 # tokenizer
@@ -657,8 +680,37 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "iif" => (ifelse, 3:3),
 )
 
+# g-prefixed aggregate functions -- each reduces a Vector of per-row
+# values (collected over a group's rows) to a scalar.  Used only by
+# `groupby` (via `_geval`); `_tqleval(::TQLAggr, ...)` errors.
+# `gvariance`/`gstddev` are population (÷N); `gsample*` are ÷(N-1),
+# matching casacore's own `gvariance0`/`gvariance1` split.
+const _TQL_AGGRS = Dict{String,Base.Callable}(
+    "gcount" => length,
+    "gsum" => sum, "gproduct" => prod,
+    "gmean" => Statistics.mean, "gavg" => Statistics.mean,
+    "gmedian" => Statistics.median,
+    "gmin" => minimum, "gmax" => maximum,
+    "gvariance" => (v -> Statistics.var(v; corrected=false)),
+    "gsamplevariance" => Statistics.var,
+    "gstddev" => (v -> Statistics.std(v; corrected=false)),
+    "gsamplestddev" => Statistics.std,
+    "grms" => (v -> sqrt(sum(abs2, v) / length(v))),
+    "gany" => any, "gall" => all,
+    "gntrue" => (v -> count(identity, v)), "gnfalse" => (v -> count(!, v)),
+    "gfirst" => first, "glast" => last,
+)
+
 function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     n = length(args)
+    if haskey(_TQL_AGGRS, name)
+        if name == "gcount"
+            n in 0:1 || throw(ArgumentError("TaQL-lite: gcount() takes 0 or 1 arguments in \"$src\""))
+            return TQLAggr(length, n == 0 ? nothing : args[1])
+        end
+        n == 1 || throw(ArgumentError("TaQL-lite: $name() takes 1 argument, got $n, in \"$src\""))
+        return TQLAggr(_TQL_AGGRS[name], args[1])
+    end
     if name in ("rownumber", "rownr")
         n == 0 || throw(ArgumentError("TaQL-lite: $name() takes no arguments in \"$src\""))
         return TQLRowNum()
@@ -885,4 +937,187 @@ function query(f::Function, t::AbstractTable;
     namemap, order = _select_spec(t, select)
     parent, rows2, namemap = _flatten_query_parent(t, matched, namemap)
     return RefTable("", parent, rows2, namemap, order, parent.type, parent.subtype, parent.readme)
+end
+
+# ======================================================================
+# GROUP BY + aggregation  (Phase 26)
+# ======================================================================
+#
+# `_geval(e, cols, g)` evaluates an expression for one group: `g` is the
+# group's `Vector{Int}` of (filtered) row indices.  A `TQLAggr` reduces
+# over the whole group; every other node evaluates on the group's FIRST
+# row (a non-aggregate select expr is assumed constant across the group
+# because you grouped by it -- SQL-lenient, not strictly verified).
+
+_geval(e::TQLAggr, cols, g) =
+    e.fn(e.arg === nothing ? g : [_tqleval(e.arg, cols, i) for i in g])
+_geval(e::TQLCol, cols, g) = cols[e.name][g[1]]
+_geval(e::TQLLit, cols, g) = e.value
+_geval(e::TQLCmp, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
+_geval(e::TQLArith, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
+_geval(e::TQLNeg, cols, g) = _bcast(-, _geval(e.a, cols, g))
+_geval(e::TQLAnd, cols, g) = _geval(e.a, cols, g) && _geval(e.b, cols, g)
+_geval(e::TQLOr, cols, g) = _geval(e.a, cols, g) || _geval(e.b, cols, g)
+_geval(e::TQLNot, cols, g) = !_geval(e.a, cols, g)
+_geval(e::TQLIn, cols, g) = _geval(e.lhs, cols, g) in e.vals
+_geval(e::TQLMatch, cols, g) =
+    xor(occursin(e.regex, _geval(e.lhs, cols, g)::AbstractString), e.negate)
+_geval(e::TQLFunc, cols, g) =
+    e.fn(ntuple(k -> _geval(e.args[k], cols, g), length(e.args))...)
+_geval(::TQLRowNum, cols, g) =
+    throw(ArgumentError("TaQL-lite: rownumber() is not valid in groupby(...)"))
+
+"""
+    GroupedTable
+
+The result of [`groupby`](@ref): an in-memory columnar table (a
+`Tables.jl` source). Access columns with `gt.OUTNAME`,
+`Tables.getcolumn`, `DataFrame(gt)`, or persist with
+`write_table(dst, "T", gt; nrow=length(gt.cols[1]))`.
+"""
+struct GroupedTable
+    names::Vector{Symbol}
+    cols::Vector{AbstractVector}
+end
+
+Tables.istable(::Type{GroupedTable}) = true
+Tables.columnaccess(::Type{GroupedTable}) = true
+Tables.rowaccess(::Type{GroupedTable}) = true
+Tables.columns(x::GroupedTable) = x
+Tables.columnnames(x::GroupedTable) = x.names
+Tables.getcolumn(x::GroupedTable, i::Int) = x.cols[i]
+function Tables.getcolumn(x::GroupedTable, nm::Symbol)
+    j = findfirst(==(nm), x.names)
+    j === nothing && throw(ArgumentError("GroupedTable has no column $nm"))
+    return x.cols[j]
+end
+Tables.schema(x::GroupedTable) = Tables.Schema(x.names, [eltype(c) for c in x.cols])
+Tables.rows(x::GroupedTable) = Tables.rows(Tables.columntable(x))
+
+Base.getproperty(x::GroupedTable, s::Symbol) =
+    s === :names || s === :cols ? getfield(x, s) : Tables.getcolumn(x, s)
+Base.propertynames(x::GroupedTable) = Tuple(getfield(x, :names))
+
+function Base.show(io::IO, ::MIME"text/plain", x::GroupedTable)
+    nr = isempty(x.cols) ? 0 : length(x.cols[1])
+    println(io, "GroupedTable: $nr row", nr == 1 ? "" : "s", " × ",
+            length(x.names), " column", length(x.names) == 1 ? "" : "s")
+    print(io, "  ", join(x.names, ", "))
+end
+
+_gb_names(c::Union{AbstractString,Symbol}) = String[String(c)]
+_gb_names(cs) = String[String(c) for c in cs]
+
+"""
+    groupby(t, groupcols; select, where=nothing, having=nothing, orderby=nothing) -> GroupedTable
+
+Group the rows of `t` by `groupcols` (a column name / `Symbol`, or a
+vector of them; an empty vector = one group over the whole table) and
+compute one result row per group.
+
+`select` is `outname => expr_string` pairs. Each `expr_string` is a
+TaQL-lite expression that may use `g`-prefixed aggregate functions over
+the group — `gcount()` / `gcount(x)` (row count), `gsum(x)`,
+`gproduct(x)`, `gmean(x)` / `gavg(x)`, `gmedian(x)`, `gmin(x)`,
+`gmax(x)`, `gvariance(x)` / `gsamplevariance(x)`, `gstddev(x)` /
+`gsamplestddev(x)`, `grms(x)`, `gany(x)`, `gall(x)`, `gntrue(x)`,
+`gnfalse(x)`, `gfirst(x)`, `glast(x)` — plus the group-key columns and
+any scalar expression of them. An aggregate's argument must reduce to a
+scalar per row (wrap an array cell in `mean(...)` / `sum(...)` etc.).
+
+`where` pre-filters rows (a WHERE string, as in [`query`](@ref); no
+aggregates). `having` filters groups (an expression over
+aggregates/keys). `orderby` sorts the result rows by output column
+name(s): `"N"` (ascending) or `"N" => :desc`.
+
+Returns a [`GroupedTable`](@ref).
+"""
+function groupby(t::AbstractTable, groupcols;
+                 select::AbstractVector{<:Pair},
+                 where::Union{Nothing,AbstractString}=nothing,
+                 having::Union{Nothing,AbstractString}=nothing,
+                 orderby::Union{Nothing,AbstractVector}=nothing)
+    validnames = Set(columnnames(t))
+    keys = _gb_names(groupcols)
+    for k in keys
+        k in validnames || throw(ArgumentError("groupby: no column \"$k\""))
+    end
+    isempty(select) && throw(ArgumentError("groupby: `select` must not be empty"))
+
+    outnames = String[String(first(p)) for p in select]
+    allunique(outnames) || throw(ArgumentError("groupby: duplicate output column name"))
+    selexprs = TQLExpr[_taqllite_parse(String(last(p)), validnames) for p in select]
+    whereast = where === nothing ? nothing : _taqllite_parse(where, validnames)
+    whereast === nothing || !_has_aggr(whereast) ||
+        throw(ArgumentError("groupby: `where` must not contain aggregate functions"))
+    havingast = having === nothing ? nothing : _taqllite_parse(having, validnames)
+
+    needed = Set{String}(keys)
+    for e in selexprs
+        _tqlrefs!(needed, e)
+    end
+    whereast === nothing || _tqlrefs!(needed, whereast)
+    havingast === nothing || _tqlrefs!(needed, havingast)
+    cols = Dict(n => column(t, n) for n in needed)
+
+    rows = whereast === nothing ? (1:nrow(t)) :
+           [i for i in 1:nrow(t) if _tqleval(whereast, cols, i)]
+
+    # group, preserving first-seen key order.  With no group columns the
+    # key is `()` for every row -> a single whole-table group.
+    groups = Dict{Any,Vector{Int}}()
+    seen = Any[]
+    for i in rows
+        key = ntuple(j -> cols[keys[j]][i], length(keys))
+        g = get(groups, key, nothing)
+        if g === nothing
+            groups[key] = Int[i]
+            push!(seen, key)
+        else
+            push!(g, i)
+        end
+    end
+
+    acc = [Any[] for _ in outnames]
+    for key in seen
+        g = groups[key]
+        havingast === nothing || _geval(havingast, cols, g) || continue
+        for (j, e) in enumerate(selexprs)
+            push!(acc[j], _geval(e, cols, g))
+        end
+    end
+
+    outcols = AbstractVector[identity.(a) for a in acc]   # narrow eltypes off Any
+    gt = GroupedTable(Symbol.(outnames), outcols)
+    orderby === nothing && return gt
+    return _gt_sort(gt, orderby)
+end
+
+function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
+    keys = TQLOrderKey[]
+    for o in orderby
+        if o isa Pair
+            d = last(o)
+            d isa Symbol && d in (:asc, :desc) ||
+                throw(ArgumentError("groupby orderby: direction must be :asc or :desc"))
+            push!(keys, TQLOrderKey(String(first(o)), d === :desc))
+        else
+            push!(keys, TQLOrderKey(String(o), false))
+        end
+    end
+    for k in keys
+        k.name in String.(gt.names) ||
+            throw(ArgumentError("groupby orderby: no output column \"$(k.name)\""))
+    end
+    bycol = Dict(String(n) => c for (n, c) in zip(gt.names, gt.cols))
+    n = isempty(gt.cols) ? 0 : length(gt.cols[1])
+    perm = sort(collect(1:n); alg=Base.Sort.MergeSort, lt=function (i, j)
+        for k in keys
+            vi, vj = bycol[k.name][i], bycol[k.name][j]
+            vi == vj && continue
+            return k.desc ? isless(vj, vi) : isless(vi, vj)
+        end
+        return false
+    end)
+    return GroupedTable(copy(gt.names), AbstractVector[c[perm] for c in gt.cols])
 end

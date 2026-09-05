@@ -1,5 +1,9 @@
 # Phase 22: TaQL-lite query engine (WHERE row filtering + SELECT column
 # projection/rename, producing a RefTable).
+# Phase 26: GROUP BY + aggregation (groupby -> GroupedTable).
+
+import Statistics
+import Tables
 
 @testset "TaQL-lite parser — unit" begin
     validnames = Set(["A", "B", "C", "D"])
@@ -502,6 +506,158 @@ end
     @test query(t2, "sqrt(B) > 5").rows == query(t, "sqrt(B) > 5").rows
 end
 
+@testset "TaQL-lite parser — aggregate unit" begin
+    validnames = Set(["K", "X", "V"])
+    parse(s) = MSv2._taqllite_parse(s, validnames)
+
+    @test parse("gmean(X)") isa MSv2.TQLAggr
+    @test parse("gmean(X)").fn === Statistics.mean
+    @test parse("gcount()") isa MSv2.TQLAggr
+    @test parse("gcount()").arg === nothing
+    @test parse("gcount(X)").arg isa MSv2.TQLCol
+    @test parse("gsum(mean(abs(V)))").arg isa MSv2.TQLFunc   # aggregate over a nested function
+
+    @test MSv2._has_aggr(parse("gmean(X) > 5"))
+    @test !MSv2._has_aggr(parse("mean(X) > 5"))
+    @test MSv2._has_aggr(parse("gsum(X) / gcount() > 3"))
+
+    # aggregate in a plain query() errors at eval time
+    dir = joinpath(mktempdir(), "a.tab")
+    write_table(dir, "T", ["K" => Int32[1, 2, 3]]; nrow=3)
+    @test_throws ArgumentError query(readtable(dir), "gcount() > 0")
+
+    @test_throws ArgumentError parse("gfoo(X)")
+    @test_throws ArgumentError parse("gmean(X, K)")
+    @test_throws ArgumentError parse("gmean()")
+end
+
+@testset "groupby — correctness" begin
+    dir = joinpath(mktempdir(), "gb.tab")
+    K = Int32[1, 1, 1, 2, 2, 3, 3, 3, 3, 1]
+    X = Float64[10, 20, 30, 5, 15, 100, 200, 300, 400, 40]
+    Bc = Bool[true, false, true, true, true, false, false, true, false, true]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X, "B" => Bc]; nrow=10)
+    t = readtable(dir)
+
+    grp = Dict{Int32,Vector{Int}}()
+    for (i, k) in enumerate(K)
+        push!(get!(grp, k, Int[]), i)
+    end
+    uk = sort(collect(keys(grp)))
+
+    r = groupby(t, "K"; select=["K" => "K", "N" => "gcount()", "S" => "gsum(X)",
+        "MX" => "gmax(X)", "MN" => "gmin(X)", "AV" => "gmean(X)",
+        "MED" => "gmedian(X)", "SD" => "gstddev(X)"], orderby=["K"])
+    @test r isa GroupedTable
+    @test collect(r.K) == uk
+    @test collect(r.N) == [length(grp[k]) for k in uk]
+    @test collect(r.S) == [sum(X[grp[k]]) for k in uk]
+    @test collect(r.MX) == [maximum(X[grp[k]]) for k in uk]
+    @test collect(r.MN) == [minimum(X[grp[k]]) for k in uk]
+    @test collect(r.AV) ≈ [sum(X[grp[k]]) / length(grp[k]) for k in uk]
+    @test collect(r.MED) ≈ [Statistics.median(X[grp[k]]) for k in uk]
+    @test collect(r.SD) ≈ [Statistics.std(X[grp[k]]; corrected=false) for k in uk]
+
+    # gcount(col) == gcount() (no null concept)
+    @test collect(groupby(t, "K"; select=["N" => "gcount(X)"], orderby=["N"]).N) ==
+          sort([length(grp[k]) for k in uk])
+
+    # multi-key
+    L = Int32[i <= 5 ? 0 : 1 for i in 1:10]
+    dir2 = joinpath(mktempdir(), "gb2.tab")
+    write_table(dir2, "T", Pair{String,Any}["K" => K, "L" => L, "X" => X]; nrow=10)
+    t2 = readtable(dir2)
+    r2 = groupby(t2, ["K", "L"]; select=["K" => "K", "L" => "L", "N" => "gcount()"],
+                 orderby=["K", "L"])
+    mk = Dict{Tuple{Int32,Int32},Int}()
+    for i in 1:10
+        mk[(K[i], L[i])] = get(mk, (K[i], L[i]), 0) + 1
+    end
+    @test Dict((k, l) => n for (k, l, n) in zip(collect(r2.K), collect(r2.L), collect(r2.N))) == mk
+
+    # whole-table aggregate (empty group columns)
+    rw = groupby(t, String[]; select=["N" => "gcount()", "TOT" => "gsum(X)"])
+    @test collect(rw.N) == [10] && collect(rw.TOT) == [sum(X)]
+
+    # where pre-filter, having, orderby-desc-on-aggregate
+    rf = groupby(t, "K"; where="X > 15", select=["K" => "K", "N" => "gcount()"], orderby=["K"])
+    fg = Dict{Int32,Int}()
+    for i in 1:10
+        X[i] > 15 && (fg[K[i]] = get(fg, K[i], 0) + 1)
+    end
+    @test Dict(k => n for (k, n) in zip(collect(rf.K), collect(rf.N))) == fg
+
+    rh = groupby(t, "K"; select=["K" => "K", "N" => "gcount()"],
+                 having="gcount() >= 3", orderby=["K"])
+    @test collect(rh.K) == Int32[1, 3]
+
+    rd = groupby(t, "K"; select=["K" => "K", "S" => "gsum(X)"], orderby=["S" => :desc])
+    @test issorted(collect(rd.S); rev=true)
+
+    # bool aggregates, gfirst/glast, arithmetic in a select expr
+    rb = groupby(t, "K"; select=["K" => "K", "ANY" => "gany(B)", "ALL" => "gall(B)",
+        "NT" => "gntrue(B)", "F" => "gfirst(X)", "L" => "glast(X)",
+        "R" => "gsum(X) / gcount()"], orderby=["K"])
+    @test collect(rb.NT) == [count(Bc[grp[k]]) for k in uk]
+    @test collect(rb.ALL) == [all(Bc[grp[k]]) for k in uk]
+    @test collect(rb.F) == [X[grp[k][1]] for k in uk]
+    @test collect(rb.L) == [X[grp[k][end]] for k in uk]
+    @test collect(rb.R) ≈ [sum(X[grp[k]]) / length(grp[k]) for k in uk]
+end
+
+@testset "groupby — aggregate over an array cell" begin
+    dir = joinpath(mktempdir(), "gbv.tab")
+    K = Int32[1, 1, 2, 2, 2, 3]
+    V = [Float64[i, 2i, 3i] for i in 1:6]
+    write_table(dir, "TV", Pair{String,Any}["K" => K, "V" => V]; nrow=6, tsm=[["V"]])
+    t = readtable(dir)
+    grp = Dict(1 => [1, 2], 2 => [3, 4, 5], 3 => [6])
+    r = groupby(t, "K"; select=["K" => "K", "MA" => "gmean(mean(abs(V)))",
+        "MS" => "gmax(sum(V))"], orderby=["K"])
+    @test collect(r.MA) ≈ [Statistics.mean([Statistics.mean(abs.(V[i])) for i in grp[k]]) for k in 1:3]
+    @test collect(r.MS) == [maximum(sum(V[i]) for i in grp[k]) for k in 1:3]
+end
+
+@testset "groupby — GroupedTable is a Tables.jl source" begin
+    dir = joinpath(mktempdir(), "gt.tab")
+    K = Int32[1, 1, 2, 2, 2, 3, 3]
+    X = Float64[1, 2, 3, 4, 5, 6, 7]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X]; nrow=7)
+    t = readtable(dir)
+    r = groupby(t, "K"; select=["K" => "K", "N" => "gcount()", "S" => "gsum(X)"], orderby=["K"])
+
+    @test Tables.istable(typeof(r))
+    @test Tables.columnnames(r) == [:K, :N, :S]
+    @test Tables.getcolumn(r, :S) == collect(r.S)
+    @test Tables.getcolumn(r, 1) == collect(r.K)
+    @test propertynames(r) == (:K, :N, :S)
+    sch = Tables.schema(r)
+    @test sch.names == (:K, :N, :S)
+
+    ct = Tables.columntable(r)
+    @test ct.K == Int32[1, 2, 3]
+    @test ct.N == [2, 3, 2]
+
+    # persist via the existing write_table (no new machinery)
+    dst = joinpath(mktempdir(), "GT")
+    write_table(dst, "GT", r; nrow=length(r.K))
+    rt = readtable(dst)
+    @test column(rt, "K")[:] == Int32[1, 2, 3]
+    @test column(rt, "N")[:] == [2, 3, 2]
+    @test column(rt, "S")[:] == Float64[3, 12, 13]
+end
+
+@testset "groupby — error cases" begin
+    dir = joinpath(mktempdir(), "gbe.tab")
+    write_table(dir, "T", Pair{String,Any}["K" => Int32[1, 2, 2], "X" => Float64[1, 2, 3]]; nrow=3)
+    t = readtable(dir)
+    @test_throws ArgumentError groupby(t, "NOPE"; select=["N" => "gcount()"])
+    @test_throws ArgumentError groupby(t, "K"; select=Pair[])
+    @test_throws ArgumentError groupby(t, "K"; select=["A" => "K", "A" => "gcount()"])
+    @test_throws ArgumentError groupby(t, "K"; select=["N" => "gcount()"], where="gsum(X) > 0")
+    @test_throws ArgumentError groupby(t, "K"; select=["N" => "gcount()"], orderby=["NOSUCH"])
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
@@ -563,6 +719,49 @@ if _HAVE_TAQL
                          "iif(A > 10, A, 0) > 12", "min(A, 8) == 8",
                          "isfinite(B)")
             @test query(t, wherestr).rows == _taql_rows(wherestr)
+        end
+    end
+
+    @testset "groupby — real TaQL cross-check" begin
+        d = mktempdir(); pdir = joinpath(d, "T")
+        K = Int32[(i - 1) % 4 for i in 1:40]
+        X = Float64[sin(i) * 10 + i for i in 1:40]
+        write_table(pdir, "T", Pair{String,Any}["K" => K, "X" => X]; nrow=40)
+
+        # SELECT K, gcount(K) AS N, gsum(X) AS S, ... GROUP BY K -> a table;
+        # read it, index by K, compare to our groupby (sorted by K -- group
+        # ORDER is unspecified in both engines).
+        function _taql_group(wherestr)
+            rdir = joinpath(mktempdir(), "g")
+            v = CxxWrap.StdVector{CxxWrap.CxxWrapCore.ConstCxxPtr{Casacore.LibCasacore.Table}}()
+            parent = CCT.Table(pdir)
+            push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(parent.tableref)))
+            w = wherestr === nothing ? "" : "WHERE $wherestr "
+            GC.@preserve parent CCT.Table(Casacore.LibCasacore.tableCommand(
+                "SELECT K, gcount(K) AS N, gsum(X) AS S, gmean(X) AS MX, " *
+                "gmin(X) AS XMN, gmax(X) AS XMX FROM \$1 $(w)GROUP BY K GIVING '$rdir'", v))
+            GC.gc(); GC.gc()
+            g = readtable(rdir)
+            ks = column(g, "K")[:]
+            p = sortperm(ks)
+            return (K=ks[p], N=column(g, "N")[:][p], S=column(g, "S")[:][p],
+                    MX=column(g, "MX")[:][p], XMN=column(g, "XMN")[:][p],
+                    XMX=column(g, "XMX")[:][p])
+        end
+
+        t = readtable(pdir)
+        for wherestr in (nothing, "X > 5", "K != 2")
+            ref = _taql_group(wherestr)
+            got = groupby(t, "K"; where=wherestr,
+                select=["K" => "K", "N" => "gcount()", "S" => "gsum(X)",
+                        "MX" => "gmean(X)", "XMN" => "gmin(X)", "XMX" => "gmax(X)"],
+                orderby=["K"])
+            @test collect(got.K) == ref.K
+            @test collect(got.N) == ref.N
+            @test collect(got.S) ≈ ref.S
+            @test collect(got.MX) ≈ ref.MX
+            @test collect(got.XMN) ≈ ref.XMN
+            @test collect(got.XMX) ≈ ref.XMX
         end
     end
 end
