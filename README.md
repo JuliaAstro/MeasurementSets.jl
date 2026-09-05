@@ -328,8 +328,7 @@ projection/rename, matching `write_reftable`'s own convention exactly.
 Every operator/keyword spelling accepted is a genuine subset of real
 TaQL's own (verified against its lexer, and against a live TaQL
 cross-check test that runs the *same* WHERE string through both engines
-and compares the row selections) — no arithmetic, string pattern
-matching, `GROUP BY`, or joins.
+and compares the row selections).
 
 **Phase 23 — TaQL-lite `ORDER BY`.** Both `query` entry points now sort
 their matched rows before building the result `RefTable`. In the
@@ -346,6 +345,24 @@ through the same only-what's-needed column resolution Phase 22
 established. Cross-checked against real TaQL for row *order*, not just
 row-set membership. No arithmetic sort keys, no leading global
 default-direction shortcut, no `NODUPL`/`DISTINCT`.
+
+**Phase 24 — TaQL-lite arithmetic + pattern matching.** The string
+parser gains an arithmetic-expression layer between comparison and atom
+— `+ - * / % // **` and unary `-`, at TaQL's own precedence (`+ -` <
+`* / % //` < unary < `**`, right-assoc) — so a WHERE comparison operand
+can now be a computed expression: `query(t, "ANTENNA1 % 4 == 0")`,
+`query(t, "TIME - 4.6e9 > 0 AND (A + B) * 2 <= LIM")`. Arithmetic uses
+Julia numeric semantics (`/` yields a float, `//` truncates, `%` is
+`rem`). And pattern matching: `col LIKE 'pat'` / `ILIKE` / `NOT LIKE`
+(SQL glob — `%` any run, `_` one char) and TaQL's `col ~ p/glob/`,
+`~ m/regex/`, `~ f/regex/` operator (and `!~`), with `/ % @` delimiters
+and an optional trailing `i` for case-insensitive — each compiled to a
+Julia `Regex` mirroring casacore's `Regex::fromSQLPattern` /
+`fromPattern`. The **closure form (`query(f, t)`) is unchanged** —
+arithmetic and matching there are already plain Julia. Cross-checked
+against real TaQL for a spread of arithmetic and pattern strings.
+Still no bitwise operators (`& | ^ ~`), `BETWEEN`, `~=`, array
+indexing, units, functions, `GROUP BY`, or joins.
 
 ## Usage
 

@@ -280,13 +280,147 @@ end
     @test A[r2.rows] == sort(A[expected]; rev=true)
 end
 
+@testset "TaQL-lite parser — arithmetic + pattern unit" begin
+    validnames = Set(["A", "B", "C", "N"])
+    parse(s) = MSv2._taqllite_parse(s, validnames)
+
+    # arithmetic precedence: * binds tighter than +
+    e = parse("A + B * C == 0")
+    @test e isa MSv2.TQLCmp
+    @test e.lhs isa MSv2.TQLArith && e.lhs.op === (+)
+    @test e.lhs.rhs isa MSv2.TQLArith && e.lhs.rhs.op === (*)
+
+    # left-assoc for - : (A - B) - C
+    e2 = parse("A - B - C == 0").lhs
+    @test e2.op === (-) && e2.lhs isa MSv2.TQLArith && e2.lhs.op === (-)
+
+    # ** is right-assoc: A ** B ** C  ->  A ** (B ** C)
+    e3 = parse("A ** B ** C == 0").lhs
+    @test e3.op === (^) && e3.rhs isa MSv2.TQLArith && e3.rhs.op === (^)
+
+    # unary minus on an expression
+    e4 = parse("-(A + B) < 0")
+    @test e4.lhs isa MSv2.TQLNeg && e4.lhs.a isa MSv2.TQLArith
+    @test parse("A * -B < 0").lhs.rhs isa MSv2.TQLNeg
+
+    # parens let the comparison be seen after an arithmetic group
+    e5 = parse("(A + 1) > 2")
+    @test e5 isa MSv2.TQLCmp && e5.lhs isa MSv2.TQLArith
+
+    # / vs // vs %
+    @test parse("A / B == 1").lhs.op === (/)
+    @test parse("A // B == 1").lhs.op === div
+    @test parse("A % B == 1").lhs.op === rem
+
+    # LIKE / ILIKE / NOT LIKE build a TQLMatch
+    m1 = parse("N LIKE 'CAS%'")
+    @test m1 isa MSv2.TQLMatch && !m1.negate
+    @test occursin(m1.regex, "CASA") && !occursin(m1.regex, "XCASA")
+    @test !occursin(m1.regex, "casa")                          # LIKE is case-sensitive
+    @test occursin(parse("N ILIKE 'cas%'").regex, "CASA")      # ILIKE is not
+    @test parse("N NOT LIKE 'x%'").negate
+
+    # ~ / !~ operator with p/ m/ f/ literals
+    @test parse("N ~ p/DA*/") isa MSv2.TQLMatch
+    @test parse("N !~ p/DA*/").negate
+    mg = parse("N ~ p/da?/i").regex
+    @test occursin(mg, "DA1") && occursin(mg, "da9")
+    mp = parse("N ~ m/CAS/").regex           # partial (unanchored)
+    @test occursin(mp, "XCASY")
+    mf = parse("N ~ f/CAS/").regex           # full (anchored)
+    @test occursin(mf, "CAS") && !occursin(mf, "XCASY")
+
+    # rejected operators give clear errors
+    @test_throws ArgumentError parse("A ~= 5")
+    @test_throws ArgumentError parse("A & 1 == 0")
+    @test_throws ArgumentError parse("A ^ 2 > 3")
+end
+
+@testset "TaQL-lite pattern -> regex helpers" begin
+    sql = MSv2._sqlpattern_regex
+    r = sql("CAS%", false)
+    @test occursin(r, "CAS") && occursin(r, "CASABLANCA") && !occursin(r, "XCAS")
+    r2 = sql("_A_", false)
+    @test occursin(r2, "xAy") && !occursin(r2, "xAyz") && !occursin(r2, "AB")
+    @test occursin(sql("a%", true), "ABC")           # ILIKE-style case-insensitive
+    # a literal regex metacharacter in the pattern is escaped
+    @test occursin(sql("a.c", false), "a.c") && !occursin(sql("a.c", false), "abc")
+
+    glob = MSv2._glob_regex
+    @test occursin(glob("DA*", false), "DA42") && !occursin(glob("DA*", false), "XDA")
+    @test occursin(glob("DA0?", false), "DA0X") && !occursin(glob("DA0?", false), "DA0XY")
+    @test occursin(glob("[AB]NT", false), "ANT") && !occursin(glob("[AB]NT", false), "CNT")
+    @test occursin(glob("[!AB]NT", false), "CNT") && !occursin(glob("[!AB]NT", false), "ANT")
+    @test occursin(glob("da*", true), "DA1")
+end
+
+@testset "TaQL-lite query — arithmetic string form" begin
+    dir = joinpath(mktempdir(), "ar1.tab")
+    A = collect(Int32, 1:12)
+    B = collect(10.0:10.0:120.0)
+    write_table(dir, "T", ["A" => A, "B" => B]; nrow=12)
+    t = readtable(dir)
+
+    @test query(t, "A + 1 > 6").rows == findall(i -> A[i] + 1 > 6, 1:12)
+    @test query(t, "A * 2 <= 10").rows == findall(i -> A[i] * 2 <= 10, 1:12)
+    @test query(t, "A % 4 == 0").rows == findall(i -> A[i] % 4 == 0, 1:12)
+    @test query(t, "-A < -9").rows == findall(i -> -A[i] < -9, 1:12)
+    @test query(t, "A + B > 55 AND A < 10").rows ==
+          findall(i -> A[i] + B[i] > 55 && A[i] < 10, 1:12)
+    @test query(t, "(A + 2) * 2 > 20").rows == findall(i -> (A[i] + 2) * 2 > 20, 1:12)
+    @test query(t, "2 ** A > 500").rows == findall(i -> 2^A[i] > 500, 1:12)
+    @test query(t, "A // 5 == 1").rows == findall(i -> div(A[i], 5) == 1, 1:12)
+    # precedence: B * 0 evaluated before + A
+    @test query(t, "A + B * 0 == A").rows == collect(1:12)
+    # arithmetic composes with ORDER BY
+    r = query(t, "A % 2 == 0 ORDER BY A DESC")
+    @test A[r.rows] == Int32[12, 10, 8, 6, 4, 2]
+
+    # only-referenced-columns-read still holds
+    bogus = ColumnDesc("BOGUS", "", "NoSuchManager", "g", MSv2.TpInt,
+                       "ScalarColumnDesc<Int>", (), Int32(0), UInt32(0), Record(), nothing, 999)
+    td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
+                    t.desc.private, [t.desc.columns; bogus])
+    t2 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
+              td2, t.managers, t.syncmod, t.lockpath, t.container)
+    @test query(t2, "A + 1 > 6").rows == query(t, "A + 1 > 6").rows
+end
+
+@testset "TaQL-lite query — pattern matching string form" begin
+    dir = joinpath(mktempdir(), "pm1.tab")
+    NAME = ["3C48", "3C286", "CASA", "cas9", "src1", "src2", "cal_A", "cal_B",
+            "J1234+5678", "M87"]
+    write_table(dir, "T", Pair{String,Any}["NAME" => NAME]; nrow=10)
+    t = readtable(dir)
+
+    @test query(t, "NAME LIKE '3C%'").rows == findall(x -> startswith(x, "3C"), NAME)
+    # `_` is SQL "exactly one char" (no escape char in casacore's fromSQLPattern):
+    # 'cal_A' -> c a l <any> A, matches only "cal_A" here.
+    @test query(t, "NAME LIKE 'cal_A'").rows == findall(x -> occursin(r"^cal.A$", x), NAME)
+    @test query(t, "NAME LIKE '%A'").rows == findall(x -> endswith(x, "A"), NAME)
+    @test query(t, "NAME NOT LIKE '3C%'").rows == findall(x -> !startswith(x, "3C"), NAME)
+    @test query(t, "NAME ILIKE 'cas%'").rows ==
+          findall(x -> startswith(lowercase(x), "cas"), NAME)
+    @test query(t, "NAME ~ p/cal_*/").rows == findall(x -> startswith(x, "cal_"), NAME)
+    @test query(t, "NAME ~ p/CAS?/").rows == findall(x -> occursin(r"^CAS.$", x), NAME)
+    @test query(t, "NAME ~ m/C/").rows == findall(x -> occursin("C", x), NAME)
+    @test query(t, "NAME !~ p/src*/").rows == findall(x -> !startswith(x, "src"), NAME)
+    @test query(t, "NAME ~ f/[0-9]C.*/i").rows == findall(x -> occursin(r"^[0-9]C.*$"i, x), NAME)
+
+    # pattern composes with AND and ORDER BY
+    r = query(t, "NAME LIKE 'c%' ORDER BY NAME")
+    @test issorted(NAME[r.rows])
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
         A = collect(Int32, 1:20)
         B = collect(0.0:1.0:19.0)
         C = [isodd(i) ? "x" : "y" for i in 1:20]
-        write_table(pdir, "T", Pair{String,Any}["A" => A, "B" => B, "C" => C]; nrow=20)
+        NM = [i % 3 == 0 ? "cal_$i" : "src_$i" for i in 1:20]
+        write_table(pdir, "T", Pair{String,Any}["A" => A, "B" => B, "C" => C,
+                                                "NM" => NM]; nrow=20)
 
         function _taql_rows(wherestr)
             rdir = joinpath(mktempdir(), "sel")
@@ -310,6 +444,16 @@ if _HAVE_TAQL
         # check above, which only needs set equality since it never sorts).
         for wherestr in ("A > 5 ORDER BY A DESC", "A > 3 AND A < 15 ORDER BY B",
                          "A > 0 ORDER BY B DESC, A")
+            @test query(t, wherestr).rows == _taql_rows(wherestr)
+        end
+
+        # Phase 24 -- arithmetic + pattern matching, same string through
+        # both engines. (`/` on int columns avoided -- Julia yields a
+        # float where TaQL keeps ints, a documented semantic difference.)
+        for wherestr in ("A + 1 > 10", "A * 2 <= 30", "A % 3 == 0",
+                         "A - 5 > B - 4", "(A + B) > 25 AND A < 12",
+                         "NM LIKE 'cal%'", "NM NOT LIKE 'cal%'",
+                         "NM ~ p/src*/", "C ~ p/x/")
             @test query(t, wherestr).rows == _taql_rows(wherestr)
         end
     end

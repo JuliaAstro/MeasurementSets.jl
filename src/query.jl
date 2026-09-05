@@ -10,16 +10,26 @@
 #
 # This is a deliberate SUBSET of real TaQL's WHERE grammar, not a
 # look-alike: every operator/keyword spelling accepted here is also
-# accepted by real TaQL (verified against `tables/TaQL/TableGram.ll`'s
-# lexer -- `==`/`=`/`!=`/`<>`/`<`/`<=`/`>`/`>=`, `AND`/`&&`, `OR`/`||`,
-# `NOT`/`!`, both case-insensitive keyword forms). Not supported (see the
-# Phase 22 plan's non-goals): arithmetic expressions, string pattern
-# matching, GROUP BY, joins, computed output columns.
+# accepted by real TaQL (verified against `tables/TaQL/TableGram.{ll,yy}`'s
+# lexer + grammar -- `==`/`=`/`!=`/`<>`/`<`/`<=`/`>`/`>=`, `AND`/`&&`,
+# `OR`/`||`, `NOT`/`!`, `IN [...]`, arithmetic `+ - * / % // **`,
+# `LIKE`/`ILIKE`, the `~`/`!~` glob/regex operator, and a trailing
+# `ORDER BY`, all case-insensitive keyword forms). Not supported (see
+# the Phase 22/24 plan non-goals): bitwise operators (`& | ^ ~`),
+# `BETWEEN`, `~=` approximate equality, array indexing, units,
+# functions, GROUP BY, joins, computed output columns.
 #
 # Phase 23 adds ORDER BY (bare column references only, optional per-key
-# ASC/DESC -- verified against `tables/TaQL/TableGram.{ll,yy}`'s
-# `sortlist`/`sortexpr` grammar; no arithmetic sort keys, no leading
-# global default-direction shortcut, no NODUPL/DISTINCT).
+# ASC/DESC -- verified against the `sortlist`/`sortexpr` grammar; no
+# arithmetic sort keys, no leading global default-direction shortcut,
+# no NODUPL/DISTINCT).
+#
+# Phase 24 adds an arithmetic-expression layer (between comparison and
+# atom: `+ -` < `* / % //` < unary `-` < `**`, matching TaQL's own
+# precedence table) and pattern matching -- `LIKE`/`ILIKE`/`NOT LIKE`
+# (SQL glob: `%` `_`) and TaQL's `~`/`!~` operator with `p/glob/`,
+# `m/regex/`, `f/regex/` delimited literals (delimiters `/ % @`,
+# optional trailing `i` for case-insensitive).
 
 # ======================================================================
 # AST -- dispatch, not branching (see [[julia-dispatch-style]]): a
@@ -55,6 +65,19 @@ struct TQLIn <: TQLExpr
     lhs::TQLExpr
     vals::Vector{Any}
 end
+struct TQLArith{F} <: TQLExpr      # op ∈ {+, -, *, /, rem (%), div (//), ^ (**)}
+    op::F
+    lhs::TQLExpr
+    rhs::TQLExpr
+end
+struct TQLNeg <: TQLExpr           # unary minus on an expression
+    a::TQLExpr
+end
+struct TQLMatch <: TQLExpr         # LIKE / ILIKE / ~ / !~  (regex compiled at parse time)
+    lhs::TQLExpr
+    regex::Regex
+    negate::Bool
+end
 
 _tqleval(e::TQLCol, cols, i) = cols[e.name][i]
 _tqleval(e::TQLLit, cols, i) = e.value
@@ -63,6 +86,10 @@ _tqleval(e::TQLAnd, cols, i) = _tqleval(e.a, cols, i) && _tqleval(e.b, cols, i)
 _tqleval(e::TQLOr, cols, i) = _tqleval(e.a, cols, i) || _tqleval(e.b, cols, i)
 _tqleval(e::TQLNot, cols, i) = !_tqleval(e.a, cols, i)
 _tqleval(e::TQLIn, cols, i) = _tqleval(e.lhs, cols, i) in e.vals
+_tqleval(e::TQLArith, cols, i) = e.op(_tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
+_tqleval(e::TQLNeg, cols, i) = -_tqleval(e.a, cols, i)
+_tqleval(e::TQLMatch, cols, i) =
+    xor(occursin(e.regex, _tqleval(e.lhs, cols, i)::AbstractString), e.negate)
 
 # Collect every column name an expression actually references, so `query`
 # reads only those columns (not the whole table) -- the real point of the
@@ -74,19 +101,29 @@ _tqlrefs!(seen, e::TQLAnd) = (_tqlrefs!(seen, e.a); _tqlrefs!(seen, e.b))
 _tqlrefs!(seen, e::TQLOr) = (_tqlrefs!(seen, e.a); _tqlrefs!(seen, e.b))
 _tqlrefs!(seen, e::TQLNot) = _tqlrefs!(seen, e.a)
 _tqlrefs!(seen, e::TQLIn) = _tqlrefs!(seen, e.lhs)
+_tqlrefs!(seen, e::TQLArith) = (_tqlrefs!(seen, e.lhs); _tqlrefs!(seen, e.rhs))
+_tqlrefs!(seen, e::TQLNeg) = _tqlrefs!(seen, e.a)
+_tqlrefs!(seen, e::TQLMatch) = _tqlrefs!(seen, e.lhs)
 
 # ======================================================================
 # tokenizer
 # ======================================================================
 
 struct TQLToken
-    kind::Symbol     # :ident | :num | :str | :op | :lparen | :rparen |
-                      # :lbracket | :rbracket | :comma | :eof
+    kind::Symbol     # :ident | :num | :str | :op | :arithop | :patlit |
+                      # :lparen | :rparen | :lbracket | :rbracket | :comma | :eof
     text::String
-    value::Any        # parsed literal value for :num/:str, else nothing
+    value::Any        # :num/:str -> the literal value; :patlit ->
+                      # (; flavor::Symbol, pattern::String, icase::Bool); else nothing
 end
 
-const _TQL_OPCHARS = "=!<>&|"
+# comparison/logical/match operator chars -- grouped into one token
+# (`==`, `!=`, `<>`, `<=`, `>=`, `&&`, `||`, `~`, `!~`, ...).  `~` is
+# here (not a bitwise op in this subset) so `!~` lexes as one token.
+const _TQL_OPCHARS = "=!<>&|~"
+# `~ <flavor><delim>pattern<delim>[i]` literal delimiters / flavors.
+const _TQL_PAT_DELIMS = "/%@"
+const _TQL_PAT_FLAVORS = Dict{Char,Symbol}('p' => :glob, 'm' => :partial, 'f' => :full)
 
 function _taqllite_tokenize(s::AbstractString)
     toks = TQLToken[]
@@ -107,8 +144,16 @@ function _taqllite_tokenize(s::AbstractString)
             push!(toks, TQLToken(:rbracket, "]", nothing)); i += 1
         elseif c == ','
             push!(toks, TQLToken(:comma, ",", nothing)); i += 1
-        elseif c == '-'
-            push!(toks, TQLToken(:minus, "-", nothing)); i += 1
+        elseif c == '+' || c == '-' || c == '%' || c == '^'
+            push!(toks, TQLToken(:arithop, string(c), nothing)); i += 1
+        elseif c == '*'
+            twochar = i < n && cs[i+1] == '*'
+            push!(toks, TQLToken(:arithop, twochar ? "**" : "*", nothing))
+            i += twochar ? 2 : 1
+        elseif c == '/'
+            twochar = i < n && cs[i+1] == '/'
+            push!(toks, TQLToken(:arithop, twochar ? "//" : "/", nothing))
+            i += twochar ? 2 : 1
         elseif c == '\'' || c == '"'
             q = c
             j = i + 1
@@ -142,8 +187,12 @@ function _taqllite_tokenize(s::AbstractString)
             while j <= n && cs[j] in _TQL_OPCHARS
                 j += 1
             end
-            push!(toks, TQLToken(:op, join(cs[i:j-1]), nothing))
+            optext = join(cs[i:j-1])
+            push!(toks, TQLToken(:op, optext, nothing))
             i = j
+            if optext == "~" || optext == "!~"
+                i = _read_patlit!(toks, cs, i, n, s)
+            end
         else
             throw(ArgumentError("TaQL-lite: unexpected character '$c' in \"$s\""))
         end
@@ -154,6 +203,36 @@ end
 
 _isdigit_at(cs, j, n) = j <= n && isdigit(cs[j])
 
+# Consume a `~`/`!~` pattern literal: optional space, a flavor char
+# (`p` glob / `m` partial regex / `f` full regex), a delimiter (`/ % @`),
+# the pattern text up to the matching delimiter, an optional trailing
+# `i` (case-insensitive). Pushes one :patlit token; returns the new
+# cursor index.
+function _read_patlit!(toks, cs, i, n, s)
+    while i <= n && isspace(cs[i])
+        i += 1
+    end
+    i <= n && haskey(_TQL_PAT_FLAVORS, cs[i]) || throw(ArgumentError(
+        "TaQL-lite: expected a pattern literal (p/.../, m/.../, f/.../) after `~` in \"$s\""))
+    flavor = _TQL_PAT_FLAVORS[cs[i]]
+    i += 1
+    (i <= n && cs[i] in _TQL_PAT_DELIMS) || throw(ArgumentError(
+        "TaQL-lite: expected a pattern delimiter (one of / % @) in \"$s\""))
+    delim = cs[i]
+    i += 1
+    j = i
+    while j <= n && cs[j] != delim
+        j += 1
+    end
+    j > n && throw(ArgumentError("TaQL-lite: unterminated pattern literal in \"$s\""))
+    pat = join(cs[i:j-1])
+    i = j + 1
+    icase = i <= n && (cs[i] == 'i' || cs[i] == 'I')
+    icase && (i += 1)
+    push!(toks, TQLToken(:patlit, pat, (; flavor, pattern=pat, icase)))
+    return i
+end
+
 # ======================================================================
 # recursive-descent parser
 # ======================================================================
@@ -162,7 +241,14 @@ _isdigit_at(cs, j, n) = j <= n && isdigit(cs[j])
 # orExpr  := andExpr ( (OR|'||') andExpr )*
 # andExpr := notExpr ( (AND|'&&') notExpr )*
 # notExpr := (NOT|'!') notExpr | comparison
-# comparison := atom ( cmpop atom | IN '[' atom (',' atom)* ']' )?
+# comparison := addsub ( cmpop addsub
+#                      | [NOT] IN '[' litval (',' litval)* ']'
+#                      | [NOT] (LIKE|ILIKE) addsub
+#                      | ('~'|'!~') patlit )?
+# addsub  := muldiv ( ('+'|'-') muldiv )*
+# muldiv  := unary ( ('*'|'/'|'%'|'//') unary )*
+# unary   := ('-'|'+') unary | power
+# power   := atom ( '**' unary )?          # right-assoc
 # atom    := column | literal | '(' expr ')'
 
 mutable struct TQLParser
@@ -233,45 +319,133 @@ const _TQL_CMPOPS = Dict{String,Function}(
     "==" => (==), "=" => (==), "!=" => (!=), "<>" => (!=),
     "<" => (<), "<=" => (<=), ">" => (>), ">=" => (>=))
 
+# `/` is Julia's `/` (always Float); `%` -> `rem`; `//` -> `div`
+# (truncating, matching TaQL DIVIDETRUNC); `**` -> `^`.
+const _TQL_ARITHOPS = Dict{String,Function}(
+    "+" => (+), "-" => (-), "*" => (*), "/" => (/), "%" => rem, "//" => div)
+
+# operator tokens this subset deliberately rejects, with a clear message
+const _TQL_REJECTED_OPS = Dict{String,String}(
+    "~=" => "approximate equality (`~=`) is not supported",
+    "!~=" => "approximate inequality (`!~=`) is not supported",
+    "&" => "bitwise operators (`& | ^ ~`) are not supported",
+    "|" => "bitwise operators (`& | ^ ~`) are not supported")
+
 function _parse_comparison!(p::TQLParser)
-    if _peek(p).kind === :lparen
-        _advance!(p)
-        e = _parse_or!(p)
-        _expect_kind!(p, :rparen, "')'")
-        return e
-    end
-    lhs = _parse_atom!(p)
+    lhs = _parse_addsub!(p)
     t = _peek(p)
     if t.kind === :op && haskey(_TQL_CMPOPS, t.text)
         _advance!(p)
-        rhs = _parse_atom!(p)
-        return TQLCmp(_TQL_CMPOPS[t.text], lhs, rhs)
+        return TQLCmp(_TQL_CMPOPS[t.text], lhs, _parse_addsub!(p))
+    elseif t.kind === :op && haskey(_TQL_REJECTED_OPS, t.text)
+        throw(ArgumentError("TaQL-lite: $(_TQL_REJECTED_OPS[t.text]) in \"$(p.src)\""))
     elseif _iskw(t, "IN")
         _advance!(p)
-        _expect_kind!(p, :lbracket, "'['")
-        vals = Any[_parse_literal_value!(p)]
-        while _peek(p).kind === :comma
-            _advance!(p)
-            push!(vals, _parse_literal_value!(p))
-        end
-        _expect_kind!(p, :rbracket, "']'")
-        return TQLIn(lhs, vals)
+        return _parse_in_list!(p, lhs, false)
+    elseif _iskw(t, "LIKE") || _iskw(t, "ILIKE")
+        _advance!(p)
+        return _parse_like!(p, lhs, _iskw(t, "ILIKE"), false)
+    elseif _iskw(t, "NOT") && (_iskw(p.toks[p.pos+1], "IN") ||
+                               _iskw(p.toks[p.pos+1], "LIKE") ||
+                               _iskw(p.toks[p.pos+1], "ILIKE"))
+        _advance!(p)
+        kw = _advance!(p)
+        return _iskw(kw, "IN") ? _parse_in_list!(p, lhs, true) :
+               _parse_like!(p, lhs, _iskw(kw, "ILIKE"), true)
+    elseif t.kind === :op && (t.text == "~" || t.text == "!~")
+        _advance!(p)
+        pl = _expect_kind!(p, :patlit, "a pattern literal")
+        return TQLMatch(lhs, _patlit_regex(pl.value), t.text == "!~")
     else
-        # No comparison/IN follows -- treat the bare atom itself as the
-        # boolean expression (e.g. `WHERE D` / `WHERE NOT D` for a Bool
-        # column `D`, exactly as real TaQL allows). Not statically
-        # checked: a bare non-Bool column/literal here surfaces as an
-        # ordinary Julia `TypeError`/`MethodError` at query-evaluation
-        # time, not a parse error.
+        # No comparison/IN/LIKE/~ follows -- treat the bare expression
+        # itself as the boolean result (e.g. `WHERE D` / `WHERE NOT D`
+        # for a Bool column `D`, exactly as real TaQL allows). Not
+        # statically checked: a bare non-Bool expression here surfaces
+        # as an ordinary Julia `TypeError`/`MethodError` at
+        # query-evaluation time, not a parse error.
         return lhs
     end
 end
 
+function _parse_in_list!(p::TQLParser, lhs::TQLExpr, negate::Bool)
+    _expect_kind!(p, :lbracket, "'['")
+    vals = Any[_parse_literal_value!(p)]
+    while _peek(p).kind === :comma
+        _advance!(p)
+        push!(vals, _parse_literal_value!(p))
+    end
+    _expect_kind!(p, :rbracket, "']'")
+    e = TQLIn(lhs, vals)
+    return negate ? TQLNot(e) : e
+end
+
+function _parse_like!(p::TQLParser, lhs::TQLExpr, icase::Bool, negate::Bool)
+    rhs = _parse_addsub!(p)
+    rhs isa TQLLit && rhs.value isa AbstractString || throw(ArgumentError(
+        "TaQL-lite: LIKE/ILIKE needs a string-literal pattern in \"$(p.src)\""))
+    return TQLMatch(lhs, _sqlpattern_regex(rhs.value, icase), negate)
+end
+
+# ---- arithmetic precedence layers (addsub < muldiv < unary < power) ----
+
+function _parse_addsub!(p::TQLParser)
+    a = _parse_muldiv!(p)
+    while (t = _peek(p); t.kind === :arithop && (t.text == "+" || t.text == "-"))
+        _advance!(p)
+        a = TQLArith(_TQL_ARITHOPS[t.text], a, _parse_muldiv!(p))
+    end
+    return a
+end
+
+function _parse_muldiv!(p::TQLParser)
+    a = _parse_unary!(p)
+    while (t = _peek(p); t.kind === :arithop && t.text in ("*", "/", "%", "//"))
+        _advance!(p)
+        a = TQLArith(_TQL_ARITHOPS[t.text], a, _parse_unary!(p))
+    end
+    return a
+end
+
+function _parse_unary!(p::TQLParser)
+    t = _peek(p)
+    if t.kind === :arithop && t.text == "-"
+        _advance!(p)
+        inner = _parse_unary!(p)
+        # constant-fold `-<number literal>` so `A > -5` keeps a plain
+        # `TQLLit(-5)` rhs (matches pre-Phase-24 AST shape, and lets a
+        # negative literal appear anywhere an atom can).
+        return inner isa TQLLit && inner.value isa Number ? TQLLit(-inner.value) : TQLNeg(inner)
+    elseif t.kind === :arithop && t.text == "+"
+        _advance!(p)
+        return _parse_unary!(p)
+    end
+    return _parse_power!(p)
+end
+
+function _parse_power!(p::TQLParser)
+    base = _parse_atom!(p)
+    t = _peek(p)
+    if t.kind === :arithop && t.text == "**"
+        _advance!(p)
+        return TQLArith(^, base, _parse_unary!(p))   # right-assoc
+    elseif t.kind === :arithop && t.text == "^"
+        throw(ArgumentError("TaQL-lite: `^` (bitwise xor) is not supported; " *
+                            "use `**` for exponentiation in \"$(p.src)\""))
+    end
+    return base
+end
+
+# accepts an optional leading unary minus so `IN [-1, 2]` works
 function _parse_literal_value!(p::TQLParser)
+    neg = false
+    if (t = _peek(p); t.kind === :arithop && t.text == "-")
+        _advance!(p)
+        neg = true
+    end
     e = _parse_atom!(p)
     e isa TQLLit || throw(ArgumentError(
         "TaQL-lite: expected a literal value in an IN list in \"$(p.src)\""))
-    return e.value
+    return neg ? -e.value : e.value
 end
 
 function _parse_atom!(p::TQLParser)
@@ -280,11 +454,6 @@ function _parse_atom!(p::TQLParser)
         e = _parse_or!(p)
         _expect_kind!(p, :rparen, "')'")
         return e
-    end
-    if _peek(p).kind === :minus     # unary minus, numeric literals only (no general arithmetic)
-        _advance!(p)
-        t = _expect_kind!(p, :num, "a number after '-'")
-        return TQLLit(-t.value)
     end
     t = _advance!(p)
     if t.kind === :num
@@ -302,6 +471,81 @@ function _parse_atom!(p::TQLParser)
         throw(ArgumentError(
             "TaQL-lite: expected a column, literal, or '(' near \"$(t.text)\" in \"$(p.src)\""))
     end
+end
+
+# ======================================================================
+# pattern -> Regex  (mirrors casacore Regex::fromSQLPattern / fromPattern)
+# ======================================================================
+
+const _TQL_RE_SPECIAL = Set("^\$.|?*+()[]{}\\")
+
+# SQL LIKE glob: `%` = any run, `_` = one char, no escape char (casacore
+# `fromSQLPattern`). Anchored (full-string match).
+function _sqlpattern_regex(pat::AbstractString, icase::Bool)
+    io = IOBuffer()
+    print(io, '^')
+    for c in pat
+        if c == '%'
+            print(io, ".*")
+        elseif c == '_'
+            print(io, '.')
+        else
+            c in _TQL_RE_SPECIAL && print(io, '\\')
+            print(io, c)
+        end
+    end
+    print(io, '$')
+    return Regex(String(take!(io)), icase ? "i" : "")
+end
+
+# shell glob (casacore `fromPattern`, subset -- no `{a,b}` alternation):
+# `*` -> `.*`, `?` -> `.`, `[...]`/`[!...]` char class, `\x` literal.
+# Anchored (full-string match).
+function _glob_regex(pat::AbstractString, icase::Bool)
+    io = IOBuffer()
+    print(io, '^')
+    cs = collect(pat)
+    i = 1
+    while i <= length(cs)
+        c = cs[i]
+        if c == '\\' && i < length(cs)
+            nxt = cs[i+1]
+            nxt in _TQL_RE_SPECIAL && print(io, '\\')
+            print(io, nxt)
+            i += 2
+            continue
+        elseif c == '*'
+            print(io, ".*")
+        elseif c == '?'
+            print(io, '.')
+        elseif c == '['
+            print(io, '[')
+            i += 1
+            if i <= length(cs) && (cs[i] == '!' || cs[i] == '^')
+                print(io, '^')
+                i += 1
+            end
+            while i <= length(cs) && cs[i] != ']'
+                print(io, cs[i])
+                i += 1
+            end
+            print(io, ']')
+        else
+            c in _TQL_RE_SPECIAL && print(io, '\\')
+            print(io, c)
+        end
+        i += 1
+    end
+    print(io, '$')
+    return Regex(String(take!(io)), icase ? "i" : "")
+end
+
+# a `~ <flavor><delim>...<delim>[i]` :patlit token value -> Regex
+function _patlit_regex(v)
+    flags = v.icase ? "i" : ""
+    v.flavor === :glob && return _glob_regex(v.pattern, v.icase)
+    v.flavor === :partial && return Regex(v.pattern, flags)          # occursin anywhere
+    return Regex("^(?:" * v.pattern * ")\$", flags)                  # :full -> anchored
 end
 
 # ======================================================================
@@ -408,12 +652,22 @@ end
     query(t::AbstractTable, wherestr::AbstractString;
          select=[n=>n for n in columnnames(t)]) -> RefTable
 
-Row-filter `t` with a small TaQL-like WHERE expression: comparisons
-(`==`/`=`, `!=`/`<>`, `<`, `<=`, `>`, `>=`), `AND`/`&&`, `OR`/`||`,
-`NOT`/`!`, parentheses, `col IN [v1, v2, ...]`, and an optional trailing
-`ORDER BY col [ASC|DESC], ...` (bare column references only). Column
-names are case-sensitive and must name a column of `t`; keywords are
-case-insensitive. Only the columns actually referenced (by the WHERE
+Row-filter `t` with a small TaQL-like WHERE expression:
+
+* comparisons `==`/`=`, `!=`/`<>`, `<`, `<=`, `>`, `>=`;
+* `AND`/`&&`, `OR`/`||`, `NOT`/`!`, parentheses;
+* arithmetic `+ - * / % // **` and unary `-` on numeric operands
+  (`A + 1 > B`, `ANTENNA1 % 4 == 0`, `2 ** N`) — Julia numeric
+  semantics (`/` yields a float, `//` truncates, `%` is `rem`);
+* `col IN [v1, v2, ...]` / `col NOT IN [...]`;
+* `col LIKE 'pat'` / `ILIKE` (case-insensitive) / `NOT LIKE` — SQL glob
+  (`%` = any run, `_` = one char); and TaQL's `col ~ p/glob/`,
+  `~ m/regex/`, `~ f/regex/` (and `!~`), delimiters `/ % @`, optional
+  trailing `i`;
+* an optional trailing `ORDER BY col [ASC|DESC], ...` (bare columns).
+
+Column names are case-sensitive and must name a column of `t`; keywords
+are case-insensitive. Only the columns actually referenced (by the WHERE
 expression or an ORDER BY key) are read. `select` projects/renames
 columns exactly like [`write_reftable`](@ref)'s own `select=`. Returns a
 `RefTable` (no data copied); persist it with `write_reftable(dst, result)`.
@@ -421,8 +675,8 @@ columns exactly like [`write_reftable`](@ref)'s own `select=`. Returns a
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
-arithmetic, no string pattern matching, no `GROUP BY`/joins, no
-arbitrary-expression or leading-global-direction ORDER BY.
+bitwise operators, `BETWEEN`, `~=` approximate equality, array indexing,
+units, functions, `GROUP BY`, or joins.
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
