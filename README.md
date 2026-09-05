@@ -6,7 +6,9 @@ A pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for
 interferometric visibility data by ALMA, the VLA, LOFAR and others.
 
-No dependency on the casacore C++ library.
+No dependency on the casacore C++ library. One deliberate exception to
+"pure Julia": `HDF5.jl` (a thin wrapper over the C `libhdf5`), added in
+Phase 20 so `MultiHDF5` containers are readable too.
 
 ## Status
 
@@ -261,6 +263,35 @@ use `SpecialFunctions.jl`'s `erf`/`erfinv` matching casacore's own math);
 its inverse CDF is still our own bisection over that CDF (no direct
 `Distributions.jl` quantile call), self-consistent rather than
 GSL-bit-exact.
+
+**Phase 20 — `MultiFile`/`MultiHDF5` container read support.** casacore
+can pack every small per-storage-manager private file of a table
+(`table.f<seq>`, `table.f<seq>i`, `table.f<seq>_TSM<k>`) into one real
+file on disk (`table.mf` or `table.mfh5`), to cut open-file-descriptor
+counts and help filesystems like Lustre. Both formats are now
+transparently readable — `readtable` detects `table.mf`/`table.mfh5`
+alongside `table.dat` and every `StandardStMan`/`IncrementalStMan`/
+`TiledStMan` opener resolves its private file through the container
+instead of a real path (Dysco and the virtual engines are never
+container-packed, matching real casacore). **Read-only**; `edit()`
+refuses a container-backed table, and `copytable`/`copyms` transparently
+un-pack one into an ordinary plain table. `MultiFile` is a from-scratch
+byte-exact port (header, packed/run-length-compressed block index,
+casacore's own nonstandard CRC32) verified against a real
+casacore-authored `table.mf` (TaQL `storage="multifile"`) — genuine
+interop, cross-checked with Casacore.jl. `MultiHDF5` needed adding
+**`HDF5.jl`** as a dependency — the project's first non-pure-Julia
+dependency, a deliberate, explicit user decision — but has **no real
+casacore oracle on this machine**: neither Casacore.jl's bundled
+`casacorecxx_jll` nor the CASA.app install used for the Dysco oracle has
+HDF5 support compiled in, so it is verified only against a self-authored
+fixture built directly with HDF5.jl following the documented format — a
+known, standing verification gap. A container-backed virtual file's
+bytes are `mmap`'d zero-copy when its blocks are physically contiguous
+(the common case for a freshly-written, never-edited container; matches
+this package's existing non-container `mmap` performance exactly) and
+materialized otherwise; `MultiHDF5` always materializes (no `mmap`
+equivalent for HDF5).
 
 ## Usage
 
