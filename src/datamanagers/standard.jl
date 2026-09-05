@@ -89,6 +89,7 @@ mutable struct StandardStMan
     indices::Vector{SSMIndex}
     path::String               # the `table.f<seq>` path (for the `...i` array file)
     arrayfile::Union{ArrayFile,Nothing}   # lazily opened `table.f<seq>i`
+    container::Union{Nothing,Container}   # MultiFile/MultiHDF5, if present (Phase 20)
 end
 
 DATAMANAGERS["StandardStMan"] = StandardStMan
@@ -98,8 +99,12 @@ bucketptr(ssm::StandardStMan, n::Integer) = SSM_LEADER + Int(n) * ssm.length
 
 # `table.f<seq>i` --- opened on first indirect-array access, then memoized.
 function _arrayfile!(ssm::StandardStMan)
-    ssm.arrayfile === nothing &&
-        (ssm.arrayfile = open_arrayfile(ssm.path * "i", ssm.endian))
+    if ssm.arrayfile === nothing
+        name = basename(ssm.path) * "i"
+        bytes = ssm.container === nothing ? read(ssm.path * "i") :
+            container_read(ssm.container, name)
+        ssm.arrayfile = open_arrayfile(bytes, ssm.endian)
+    end
     return ssm.arrayfile
 end
 
@@ -132,8 +137,9 @@ function read_ssm_header!(hdr::AipsIO)
 end
 
 function Base.open(::Type{StandardStMan}, t::Table, dm::DataManagerInfo)
-    path = joinpath(t.path, "table.f$(dm.sequ)")
-    bytes = read(path)
+    name = "table.f$(dm.sequ)"
+    path = joinpath(t.path, name)
+    bytes = _dmfile_read(t, name)
     endian = t.endian
 
     # header lives in the first SSM_LEADER bytes
@@ -148,7 +154,7 @@ function Base.open(::Type{StandardStMan}, t::Table, dm::DataManagerInfo)
     getend(blk)
 
     ssm = StandardStMan(bytes, endian, h.size, h.buckets, h.last,
-                        offset, index, SSMIndex[], path, nothing)
+                        offset, index, SSMIndex[], path, nothing, t.container)
 
     # assemble and parse the index buckets
     idxbytes = _read_index_bytes(ssm, h)

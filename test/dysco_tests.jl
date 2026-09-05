@@ -117,7 +117,7 @@ end
     td = TableDesc("T", "2", "", Record(), Record(), [cdesc])
     dm = MSv2.DataManagerInfo("DyscoStMan", 0, UInt8[])
     tbl = MSv2.Table(dir, "", "", "", 2, 1, :little, td, [dm],
-                     Int64(-1), joinpath(dir, "table.lock"))
+                     Int64(-1), joinpath(dir, "table.lock"), nothing)
 
     # A minimal, otherwise-valid header + one zero-filled block; only the
     # field under test is varied.  Column-count / column-header bytes stay

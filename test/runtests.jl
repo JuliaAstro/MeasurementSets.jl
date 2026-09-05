@@ -33,4 +33,5 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
     include("edit_tests.jl")
     include("lock_tests.jl")
     include("dysco_tests.jl")
+    include("container_tests.jl")
 end

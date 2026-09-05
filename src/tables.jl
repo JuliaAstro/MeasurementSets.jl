@@ -2,6 +2,8 @@
 # data-manager bindings.  (casacore/tables/Tables/PlainTable.cc,
 # TableDesc.cc, ColumnDesc.cc, BaseColDesc.cc, ColumnSet.cc, PlainColumn.cc)
 
+import Mmap
+
 # `ColumnDesc.option` is a bit mask (casacore ColumnDesc::Option)
 const COLOPT_DIRECT     = Int32(1)   # array stored directly in the row (not indirect)
 const COLOPT_UNDEFINED  = Int32(2)   # a cell value may be undefined
@@ -157,7 +159,24 @@ struct Table <: AbstractTable
     managers::Vector{DataManagerInfo}
     syncmod::Int64             # table.lock modify counter at open (-1 = no sync blob)
     lockpath::String           # joinpath(path, "table.lock")
+    container::Union{Nothing,Container}   # MultiFile/MultiHDF5, if present (Phase 20)
 end
+
+# Fetch a data manager's private file's whole bytes, transparently
+# resolving through a MultiFile/MultiHDF5 container when the table uses
+# one (Phase 20).  `name` is the file's basename, e.g. "table.f0",
+# "table.f0i", "table.f0_TSM1" -- exactly what every data manager opener
+# already computes via `joinpath(t.path, ...)`.
+_dmfile_read(t::Table, name::AbstractString) =
+    t.container === nothing ? read(joinpath(t.path, name)) :
+    container_read(t.container, name)
+
+# Same, but returns a real zero-copy `mmap` view when possible (no
+# container, or a contiguous container-backed virtual file); otherwise a
+# materializing read.  Only `TiledStMan`'s tile-data files use this today.
+_dmfile_mmap(t::Table, name::AbstractString) =
+    t.container === nothing ? Mmap.mmap(joinpath(t.path, name), Vector{UInt8}) :
+    container_mmap(t.container, name)
 
 """
 A casacore RefTable: a persistent row-number reference into a `parent`
@@ -353,6 +372,7 @@ function readtable(path::AbstractString)
     isdir(dir) || throw(ArgumentError("not a table directory: $dir"))
     lockpath = joinpath(dir, "table.lock")
     tp, st, readme = read_tableinfo(dir)
+    container = open_container(dir)
 
     local datbytes, sync
     withlock(dir, :read; create=false) do lk
@@ -391,7 +411,7 @@ function readtable(path::AbstractString)
     desc2 = TableDesc(desc.name, desc.version, desc.comment, desc.public,
                       desc.private, cols)
 
-    return Table(dir, tp, st, readme, version, nr, endian, desc2, dms, syncmod, lockpath)
+    return Table(dir, tp, st, readme, version, nr, endian, desc2, dms, syncmod, lockpath, container)
 end
 
 # open a parent / part table, adding context on failure

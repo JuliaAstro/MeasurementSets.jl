@@ -12,15 +12,12 @@ using MeasurementSetv2: ArrayFileWriter, af_put!, arrayfile_bytes, open_arrayfil
         o4 = af_put!(w, MSv2.TpBool, Bool[true, false, true, true, false])
         raw = arrayfile_bytes(w)
 
-        mktemp() do path, io
-            write(io, raw); close(io)
-            af = open_arrayfile(path, endian)
-            @test af.version == 0
-            @test af_read(af, MSv2.TpDouble, o1) == collect(1.0:10.0)
-            @test af_read(af, MSv2.TpInt, o2) == reshape(Int32.(1:6), 2, 3)
-            @test af_read(af, MSv2.TpComplex, o3) == ComplexF32[1+2im, 3+4im]
-            @test af_read(af, MSv2.TpBool, o4) == Bool[true, false, true, true, false]
-        end
+        af = open_arrayfile(raw, endian)
+        @test af.version == 0
+        @test af_read(af, MSv2.TpDouble, o1) == collect(1.0:10.0)
+        @test af_read(af, MSv2.TpInt, o2) == reshape(Int32.(1:6), 2, 3)
+        @test af_read(af, MSv2.TpComplex, o3) == ComplexF32[1+2im, 3+4im]
+        @test af_read(af, MSv2.TpBool, o4) == Bool[true, false, true, true, false]
     end
 end
 

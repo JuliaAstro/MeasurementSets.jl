@@ -63,6 +63,7 @@ mutable struct IncrementalStMan
     index::ISMIndex
     path::String           # the `table.f<seq>` path (for the `...i` array file)
     arrayfile::Union{ArrayFile,Nothing}   # lazily opened `table.f<seq>i`
+    container::Union{Nothing,Container}   # MultiFile/MultiHDF5, if present (Phase 20)
 end
 
 DATAMANAGERS["IncrementalStMan"] = IncrementalStMan
@@ -73,8 +74,12 @@ _ism_i64(ism, off) = (ism.endian === :big ? ntoh : ltoh)(reinterpret(Int64, view
 
 # `table.f<seq>i` --- opened on first indirect-array access, then memoized.
 function _arrayfile!(ism::IncrementalStMan)
-    ism.arrayfile === nothing &&
-        (ism.arrayfile = open_arrayfile(ism.path * "i", ism.endian))
+    if ism.arrayfile === nothing
+        name = basename(ism.path) * "i"
+        bytes = ism.container === nothing ? read(ism.path * "i") :
+            container_read(ism.container, name)
+        ism.arrayfile = open_arrayfile(bytes, ism.endian)
+    end
     return ism.arrayfile
 end
 
@@ -86,8 +91,9 @@ _ismkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : :direct
 _ismkind(c::ColumnDesc) = :ind
 
 function Base.open(::Type{IncrementalStMan}, t::Table, dm::DataManagerInfo)
-    path = joinpath(t.path, "table.f$(dm.sequ)")
-    bytes = read(path)
+    name = "table.f$(dm.sequ)"
+    path = joinpath(t.path, name)
+    bytes = _dmfile_read(t, name)
     endian = t.endian
 
     h = AipsIO(IOBuffer(bytes); endian)
@@ -112,7 +118,7 @@ function Base.open(::Type{IncrementalStMan}, t::Table, dm::DataManagerInfo)
     getend(ia)
 
     return IncrementalStMan(bytes, endian, bucketsize, nbucket,
-                            ISMIndex(used, rows, bucket), path, nothing)
+                            ISMIndex(used, rows, bucket), path, nothing, t.container)
 end
 
 # --- bucket index parsing -----------------------------------------

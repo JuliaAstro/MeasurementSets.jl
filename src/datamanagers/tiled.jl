@@ -51,12 +51,15 @@ mutable struct TiledStMan
     hyper::String                  # hypercolumn name (a label; no Hypercolumn_ keyword written)
     dims::Int                      # hypercube dimensionality
     files::Dict{Int,String}        # _TSM sequence nr -> file path
-    data::Dict{Int,Vector{UInt8}}  # _TSM sequence nr -> lazily mmapped bytes
+    data::Dict{Int,AbstractVector{UInt8}}  # _TSM sequence nr -> lazily mmapped bytes
+                                    # (a `view` into a container's mmap when
+                                    # container-backed and contiguous, Phase 20)
     cubes::Vector{TSMCube}
     # TiledShapeStMan row -> cube mapping (empty for TiledColumnStMan / TiledCellStMan)
     row::Vector{Int}              # 1-based last row of each interval
     cube::Vector{Int}             # 1-based cube index per interval
     pos::Vector{Int}              # 1-based last last-axis position per interval
+    container::Union{Nothing,Container}   # MultiFile/MultiHDF5, if present (Phase 20)
 end
 
 DATAMANAGERS["TiledShapeStMan"]  = TiledStMan
@@ -134,11 +137,12 @@ function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::Table)
 end
 
 function Base.open(::Type{TiledStMan}, t::Table, dm::DataManagerInfo)
-    path = joinpath(t.path, "table.f$(dm.sequ)")
-    a = AipsIO(read(path); endian=:big)             # header file is big-endian
+    name = "table.f$(dm.sequ)"
+    path = joinpath(t.path, name)
+    a = AipsIO(_dmfile_read(t, name); endian=:big)   # header file is big-endian
     tsm = TiledStMan(path, t.endian, :column, dm.sequ, CasaType[], "", 0,
-                     Dict{Int,String}(), Dict{Int,Vector{UInt8}}(),
-                     TSMCube[], Int[], Int[], Int[])
+                     Dict{Int,String}(), Dict{Int,AbstractVector{UInt8}}(),
+                     TSMCube[], Int[], Int[], Int[], t.container)
 
     wrapper = getnexttype(a)                         # peek outer wrapper
     read_u32(a)                                      # wrapper version
@@ -195,7 +199,8 @@ end
 
 function _tsmbytes(tsm::TiledStMan, sequ::Int)
     get!(tsm.data, sequ) do
-        Mmap.mmap(tsm.files[sequ], Vector{UInt8})
+        tsm.container === nothing ? Mmap.mmap(tsm.files[sequ], Vector{UInt8}) :
+            container_mmap(tsm.container, basename(tsm.files[sequ]))
     end
 end
 

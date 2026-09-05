@@ -7,6 +7,7 @@ version 2 data format — casacore Table Data System tables.
 module MeasurementSetv2
 
 include("aipsio.jl")
+include("datamanagers/container.jl")
 include("lock.jl")
 include("typeenum.jl")
 include("record.jl")

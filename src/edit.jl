@@ -52,6 +52,9 @@ function edit(path::AbstractString)
     r = readtable(String(rstrip(path, '/')))
     r isa Table || error("edit: $(r isa RefTable ? "RefTable" : "ConcatTable") " *
                          "at $path — in-place edit is not supported")
+    r.container === nothing ||
+        error("edit: $path uses a MultiFile/MultiHDF5 container — in-place edit " *
+             "is not supported (Phase 20 is read-only)")
     EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
               Dict{String,Dict{Int,Any}}(),
               Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false)

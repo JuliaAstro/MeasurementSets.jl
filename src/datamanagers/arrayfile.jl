@@ -37,10 +37,17 @@ end
 _af_get(af::ArrayFile, ::Type{T}, off::Integer) where {T} =
     (af.endian === :big ? ntoh : ltoh)(reinterpret(T, @view af.data[off+1:off+sizeof(T)])[1])
 
-function open_arrayfile(path::AbstractString, endian::Symbol)
-    data = read(path)
+"""
+    open_arrayfile(data::Vector{UInt8}, endian::Symbol) -> ArrayFile
+
+Parse an already-materialized `table.f<seq>i` byte buffer.  Callers fetch
+`data` themselves (a plain `read(path)`, or `container_read` when the
+table is MultiFile/MultiHDF5-backed, Phase 20) -- this function does no
+I/O of its own.
+"""
+function open_arrayfile(data::Vector{UInt8}, endian::Symbol)
     length(data) >= AF_HEADER ||
-        error("StManArrayFile $path: truncated header ($(length(data)) bytes)")
+        error("StManArrayFile: truncated header ($(length(data)) bytes)")
     version = Int((endian === :big ? ntoh : ltoh)(reinterpret(UInt32, @view data[1:AF_INT])[1]))
     return ArrayFile(data, endian, version)
 end
