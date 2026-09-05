@@ -1017,7 +1017,7 @@ end
 nrow(gt::GroupedTable) = isempty(getfield(gt, :cols)) ? 0 : length(getfield(gt, :cols)[1])
 columnnames(gt::GroupedTable) = String.(getfield(gt, :names))
 function column(gt::GroupedTable, name::AbstractString;
-                precision::Union{Nothing,Symbol}=nothing)
+                precision::Union{Nothing,Symbol,Type}=nothing)
     j = findfirst(==(Symbol(name)), getfield(gt, :names))
     j === nothing && throw(KeyError(name))
     return getfield(gt, :cols)[j]          # already materialised; `precision` is a no-op

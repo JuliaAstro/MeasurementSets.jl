@@ -22,8 +22,9 @@ are lazy `AbstractVector`s; tables are `Tables.jl` sources
 (`DataFrame(subtable(ms, "ANTENNA"))`).  A MAIN table's `DATA` /
 `MODEL_DATA` / `CORRECTED_DATA` read back as `ComplexF16` by default
 (the visibilities derive from 8-bit samples — nothing real is lost, and
-the working set halves); `readtable(ms; precision=:full)` or
-`column(t, "DATA"; precision=:full)` for `ComplexF32`.
+the working set halves); `readtable(ms; precision=:full)` for
+`ComplexF32`, or `precision=BFloat16` to narrow `WEIGHT` / `SIGMA` too
+(`BFloat16` has `Float32`'s range, so no overflow).
 
 **Write** — `write_table` / `create_ms` / `copyms` / `copytable` create
 conformant tables, preserving each column's storage-manager / engine /

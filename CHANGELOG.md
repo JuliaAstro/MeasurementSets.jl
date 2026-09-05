@@ -609,3 +609,25 @@ of building a `ComplexF32` one and converting. No API or value change;
 the `:full` path (`astype === nothing`) is byte-identical to before. The
 result buffer is half-size and there is no wide transient. Per-cell
 reads (`col[i]`) keep the cheap post-convert.
+
+### Phase 36 — `BFloat16` support
+
+`precision` now accepts a **type**: `Float16` / `BFloat16` / `Float32`
+(with `:half` / `:full` the existing default-behaviour aliases). New
+dependency: `BFloat16s.jl`.
+
+```julia
+readtable("my.ms"; precision=BFloat16)    # DATA -> Complex{BFloat16}, WEIGHT -> BFloat16
+```
+
+`BFloat16` has `Float32`'s full exponent range, so it narrows `WEIGHT` /
+`SIGMA` / `WEIGHT_SPECTRUM` without the overflow that keeps them at
+`Float32` under `:half` / `Float16` — and its 7-bit mantissa matches
+8-bit-derived data. `readtable(ms; precision=BFloat16)` (or
+`MeasurementSet(...; precision=BFloat16)`, or `column(t, name;
+precision=BFloat16)`) narrows **every** `TpFloat`→`BFloat16` and
+`TpComplex`→`Complex{BFloat16}` MAIN column. **The default is
+unchanged** — `DATA` → `ComplexF16`, `WEIGHT` stays `Float32`. `Float64`
+/ `ComplexF64` / `Bool` are never narrowed. Copies and edits still read
+the source at full precision; a `BFloat16` column writes back as
+`TpFloat` (upcast to `Float32` on disk).

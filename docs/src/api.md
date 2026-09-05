@@ -11,6 +11,10 @@ CurrentModule = MeasurementSetv2
 `Base.delete!` / `Base.insert!` (an N:1 lookup join and the `DELETE` /
 `INSERT` write commands); they are not exported.
 
+`BFloat16` is re-exported from
+[`BFloat16s.jl`](https://github.com/JuliaMath/BFloat16s.jl) so that
+`readtable(ms; precision = BFloat16)` works after `using MeasurementSetv2`.
+
 ## Opening tables
 
 ```@docs

@@ -12,12 +12,12 @@ end
 Open the MAIN table of a Measurement Set directory and read its metadata.
 Subtables are read on first access via `getproperty` / `subtable`.
 
-`precision` is forwarded to [`readtable`](@ref) for the MAIN table:
-`:half` (the default) reads the `TpComplex` visibility columns (`DATA`,
-…) as `ComplexF16`, `:full` keeps `ComplexF32`. Subtables always open at
+`precision` is forwarded to [`readtable`](@ref) for the MAIN table
+(`:half` — the default — reads `DATA` etc. as `ComplexF16`; `:full`,
+`Float16` and `BFloat16` also accepted). Subtables always open at
 `:full`.
 """
-function MeasurementSet(path::AbstractString; precision::Union{Nothing,Symbol}=nothing)
+function MeasurementSet(path::AbstractString; precision::Union{Nothing,Symbol,Type}=nothing)
     dir = String(rstrip(path, '/'))
     MeasurementSet(dir, readtable(dir; precision), Dict{String,AbstractTable}())
 end

@@ -56,6 +56,7 @@ export AbstractTable, Table, RefTable, ConcatTable
 export readtable, columnnames, columndesc, keywords, subtables, nrow
 export MeasurementSet, subtable, subtablenames
 export Record, SubTable, ColumnDesc, TableDesc, CasaType
+export BFloat16                       # re-exported from BFloat16s (for `precision=BFloat16`)
 export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate

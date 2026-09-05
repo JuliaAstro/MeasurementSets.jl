@@ -1,6 +1,8 @@
 # casacore DataType enum  <->  Julia types
 # (casacore/casa/Utilities/DataType.h)
 
+using BFloat16s: BFloat16
+
 """
     CasaType
 
@@ -62,28 +64,29 @@ const ARRAYTYPE = Dict{CasaType,CasaType}(
 isarraytype(t::CasaType) = haskey(ARRAYTYPE, t)
 isscalartype(t::CasaType) = haskey(SCALARTYPE, t)
 
-# --- half-precision narrowing (Phase 34) --------------------------
+# --- half-precision narrowing (Phase 34-36) ----------------------
 # MS visibility data is stored as ComplexF32 but derived from 8-bit
-# samples, so ComplexF16 loses no real information.  A MAIN table's
-# TpComplex columns (DATA, ...) read back narrowed by default; TpFloat
-# (WEIGHT/SIGMA -- real weights exceed Float16's range), Float64,
-# ComplexF64 and Bool are never narrowed by default (an explicit
-# `column(...; precision=:half)` still narrows any Float32/ComplexF32).
+# samples, so a 16-bit float loses no real information.  A MAIN table's
+# TpComplex columns (DATA, ...) read back as ComplexF16 by default;
+# `readtable(...; precision=BFloat16)` (or Float16) narrows every
+# TpFloat/TpComplex column to that scalar type.  `_narrowtype(T, P)`
+# maps Float32 -> P and ComplexF32 -> Complex{P}; everything else
+# (Float64, ComplexF64, Bool, String, ...) is left alone.
 
-_narrowtype(::Type{Float32})                = Float16
-_narrowtype(::Type{ComplexF32})             = ComplexF16
-_narrowtype(::Type{Array{E,N}}) where {E,N} = Array{_narrowtype(E),N}
-_narrowtype(::Type{Array{E}})   where {E}   = Array{_narrowtype(E)}
-_narrowtype(::Type{T})          where {T}   = T
+_narrowtype(::Type{Float32},    ::Type{P}) where {P}   = P
+_narrowtype(::Type{ComplexF32}, ::Type{P}) where {P}   = Complex{P}
+_narrowtype(::Type{Array{E,N}}, P::Type)   where {E,N} = Array{_narrowtype(E, P),N}
+_narrowtype(::Type{Array{E}},   P::Type)   where {E}   = Array{_narrowtype(E, P)}
+_narrowtype(::Type{T},          ::Type)    where {T}   = T
 
-_narrows(::Type{T}) where {T} = _narrowtype(T) !== T
+_narrows(::Type{T}, P::Type) where {T} = _narrowtype(T, P) !== T
 
-function _narrowvalue(x::AbstractArray)
-    N = _narrowtype(eltype(x))
+function _narrowvalue(x::AbstractArray, P::Type)
+    N = _narrowtype(eltype(x), P)
     N === eltype(x) ? x : N.(x)
 end
-_narrowvalue(x::Number) = _narrowtype(typeof(x))(x)
-_narrowvalue(x)         = x
+_narrowvalue(x::Number, P::Type) = _narrowtype(typeof(x), P)(x)
+_narrowvalue(x, ::Type)          = x
 
 """
     juliatype(t::CasaType)

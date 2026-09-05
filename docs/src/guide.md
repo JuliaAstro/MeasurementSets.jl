@@ -46,14 +46,21 @@ nothing real is lost and the working set halves.
 eltype(column(t, "DATA"))                     # Matrix{ComplexF16}
 eltype(column(t, "DATA"; precision=:full))    # Matrix{ComplexF32}
 readtable("my.ms"; precision=:full)           # every column wide
+readtable("my.ms"; precision=BFloat16)        # DATA + WEIGHT + SIGMA all 16-bit
 MeasurementSet("my.ms"; precision=:full)
 ```
 
 `TpFloat` columns (`WEIGHT`, `SIGMA`, `WEIGHT_SPECTRUM`) stay `Float32`
-(real weights exceed `Float16`'s range); `Float64` (`TIME`, `UVW`),
-`ComplexF64` and `Bool` are never narrowed. Non-MAIN tables default to
-`:full`. `copyms` / `copytable` / `edit` always read at full precision,
-so copies and in-place edits stay byte-exact.
+under the default and under `precision=Float16` (real weights exceed
+`Float16`'s 65504 range). Pass **`precision=BFloat16`** to narrow them
+too — `BFloat16` has `Float32`'s exponent range (overflow-safe) and a
+7-bit mantissa that matches 8-bit-derived data; `DATA` then comes back
+as `Complex{BFloat16}` and `WEIGHT` as `BFloat16`.
+
+`Float64` (`TIME`, `UVW`), `ComplexF64` and `Bool` are never narrowed.
+Non-MAIN tables default to `:full`. `copyms` / `copytable` / `edit`
+always read at full precision, so copies and in-place edits stay
+byte-exact; a narrowed column written back upcasts to `Float32` on disk.
 
 ## Tables.jl interop
 
