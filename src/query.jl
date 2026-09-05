@@ -30,6 +30,18 @@
 # (SQL glob: `%` `_`) and TaQL's `~`/`!~` operator with `p/glob/`,
 # `m/regex/`, `f/regex/` delimited literals (delimiters `/ % @`,
 # optional trailing `i` for case-insensitive).
+#
+# Phase 25 adds a curated function library -- `NAME(args...)`,
+# case-insensitive, with TaQL's own aliases: scalar math (abs, sqrt,
+# exp, log, trig, floor/ceil/round, sign, ...), complex parts (real,
+# imag, arg/phase, conj, norm), array-cell reductions (mean/avg, sum,
+# median, stddev, variance, rms, min/max, any, all, ntrue, nelements),
+# string ops (strlength/len, upper, lower, trim), and specials
+# (rownumber(), pi, e, iif). Not supported: date/time, measures/cones,
+# sliding-window (`running*`/`boxed*`) ops, rand, array reshaping,
+# rowid(), substr, type conversions, UDFs, aggregates over row groups.
+
+import Statistics
 
 # ======================================================================
 # AST -- dispatch, not branching (see [[julia-dispatch-style]]): a
@@ -78,18 +90,34 @@ struct TQLMatch <: TQLExpr         # LIKE / ILIKE / ~ / !~  (regex compiled at p
     regex::Regex
     negate::Bool
 end
+struct TQLFunc <: TQLExpr           # NAME(args...) -- resolved Julia callable + parsed args
+    fn::Base.Callable
+    args::Vector{TQLExpr}
+end
+struct TQLRowNum <: TQLExpr end     # rownumber() / rownr() -- the 1-based row index
+
+# Arithmetic and comparison broadcast over an array-cell operand (TaQL
+# semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
+# WHERE that produces an array (e.g. `DATA > 0`) then errors on the
+# `if` -- correct, exactly as real TaQL requires `any(...)`/`all(...)`
+# there. `AND`/`OR`/`NOT` stay scalar (short-circuit).
+_bcast(f, x) = x isa AbstractArray ? f.(x) : f(x)
+_bcast(f, x, y) = (x isa AbstractArray || y isa AbstractArray) ? f.(x, y) : f(x, y)
 
 _tqleval(e::TQLCol, cols, i) = cols[e.name][i]
 _tqleval(e::TQLLit, cols, i) = e.value
-_tqleval(e::TQLCmp, cols, i) = e.op(_tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
+_tqleval(e::TQLCmp, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLAnd, cols, i) = _tqleval(e.a, cols, i) && _tqleval(e.b, cols, i)
 _tqleval(e::TQLOr, cols, i) = _tqleval(e.a, cols, i) || _tqleval(e.b, cols, i)
 _tqleval(e::TQLNot, cols, i) = !_tqleval(e.a, cols, i)
 _tqleval(e::TQLIn, cols, i) = _tqleval(e.lhs, cols, i) in e.vals
-_tqleval(e::TQLArith, cols, i) = e.op(_tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
-_tqleval(e::TQLNeg, cols, i) = -_tqleval(e.a, cols, i)
+_tqleval(e::TQLArith, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
+_tqleval(e::TQLNeg, cols, i) = _bcast(-, _tqleval(e.a, cols, i))
 _tqleval(e::TQLMatch, cols, i) =
     xor(occursin(e.regex, _tqleval(e.lhs, cols, i)::AbstractString), e.negate)
+_tqleval(e::TQLFunc, cols, i) =
+    e.fn(ntuple(k -> _tqleval(e.args[k], cols, i), length(e.args))...)
+_tqleval(::TQLRowNum, cols, i) = i
 
 # Collect every column name an expression actually references, so `query`
 # reads only those columns (not the whole table) -- the real point of the
@@ -104,6 +132,8 @@ _tqlrefs!(seen, e::TQLIn) = _tqlrefs!(seen, e.lhs)
 _tqlrefs!(seen, e::TQLArith) = (_tqlrefs!(seen, e.lhs); _tqlrefs!(seen, e.rhs))
 _tqlrefs!(seen, e::TQLNeg) = _tqlrefs!(seen, e.a)
 _tqlrefs!(seen, e::TQLMatch) = _tqlrefs!(seen, e.lhs)
+_tqlrefs!(seen, e::TQLFunc) = foreach(a -> _tqlrefs!(seen, a), e.args)
+_tqlrefs!(seen, ::TQLRowNum) = nothing
 
 # ======================================================================
 # tokenizer
@@ -461,6 +491,7 @@ function _parse_atom!(p::TQLParser)
     elseif t.kind === :str
         return TQLLit(t.value)
     elseif t.kind === :ident
+        _peek(p).kind === :lparen && return _parse_funcall!(p, t.text)
         up = uppercase(t.text)
         up == "TRUE" && return TQLLit(true)
         up == "FALSE" && return TQLLit(false)
@@ -471,6 +502,20 @@ function _parse_atom!(p::TQLParser)
         throw(ArgumentError(
             "TaQL-lite: expected a column, literal, or '(' near \"$(t.text)\" in \"$(p.src)\""))
     end
+end
+
+function _parse_funcall!(p::TQLParser, name::AbstractString)
+    _advance!(p)                                   # consume '('
+    args = TQLExpr[]
+    if _peek(p).kind !== :rparen
+        push!(args, _parse_or!(p))
+        while _peek(p).kind === :comma
+            _advance!(p)
+            push!(args, _parse_or!(p))
+        end
+    end
+    _expect_kind!(p, :rparen, "')'")
+    return _make_func(lowercase(name), args, p.src)
 end
 
 # ======================================================================
@@ -546,6 +591,95 @@ function _patlit_regex(v)
     v.flavor === :glob && return _glob_regex(v.pattern, v.icase)
     v.flavor === :partial && return Regex(v.pattern, flags)          # occursin anywhere
     return Regex("^(?:" * v.pattern * ")\$", flags)                  # :full -> anchored
+end
+
+# ======================================================================
+# functions -- NAME(args...).  A curated "lite" subset of TaQL's library
+# (scalar math, complex parts, array-cell reductions, string ops, a few
+# specials).  Function names are case-insensitive; many have aliases,
+# matching casacore's own `TableParseFunc::findFunc`.  Not supported:
+# date/time, measures/cones, sliding-window (`running*`/`boxed*`) ops,
+# `rand`, array reshaping, `rowid()`, `substr`, type conversions, UDFs.
+# ======================================================================
+
+# unary / binary elementwise (map over an array cell, apply directly to
+# a scalar) -- share the `_bcast` helper used by the arithmetic evaluator
+_ew(f) = x -> _bcast(f, x)
+_ew2(f) = (x, y) -> _bcast(f, x, y)
+# reduction: a scalar arg is wrapped in a 1-tuple so `f` still applies
+_red(f) = x -> f(x isa AbstractArray ? x : (x,))
+
+_tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y))(x))
+_tql_nelem(x) = x isa AbstractArray ? length(x) : 1
+_tql_ndim(x) = x isa AbstractArray ? ndims(x) : 0
+
+# name => (callable-over-arg-values, allowed arg count).  `min`/`max` are
+# arity-overloaded and handled in `_make_func`, not here.
+const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
+    # --- unary elementwise numeric ---
+    "abs" => (_ew(abs), 1:1), "amplitude" => (_ew(abs), 1:1), "ampl" => (_ew(abs), 1:1),
+    "sqrt" => (_ew(sqrt), 1:1), "square" => (_ew(abs2), 1:1), "sqr" => (_ew(abs2), 1:1),
+    "cube" => (_ew(x -> x^3), 1:1),
+    "exp" => (_ew(exp), 1:1), "log" => (_ew(log), 1:1), "ln" => (_ew(log), 1:1),
+    "log10" => (_ew(log10), 1:1),
+    "sin" => (_ew(sin), 1:1), "cos" => (_ew(cos), 1:1), "tan" => (_ew(tan), 1:1),
+    "asin" => (_ew(asin), 1:1), "acos" => (_ew(acos), 1:1), "atan" => (_ew(atan), 1:1),
+    "sinh" => (_ew(sinh), 1:1), "cosh" => (_ew(cosh), 1:1), "tanh" => (_ew(tanh), 1:1),
+    "sign" => (_ew(sign), 1:1), "floor" => (_ew(floor), 1:1), "ceil" => (_ew(ceil), 1:1),
+    "round" => (_ew(round), 1:1), "int" => (_ew(x -> trunc(Int, x)), 1:1),
+    "integer" => (_ew(x -> trunc(Int, x)), 1:1),
+    "real" => (_ew(real), 1:1), "imag" => (_ew(imag), 1:1),
+    "arg" => (_ew(angle), 1:1), "phase" => (_ew(angle), 1:1),
+    "conj" => (_ew(conj), 1:1), "norm" => (_ew(abs2), 1:1),
+    "isnan" => (_ew(isnan), 1:1), "isinf" => (_ew(isinf), 1:1),
+    "isfinite" => (_ew(isfinite), 1:1),
+    # --- binary elementwise ---
+    "pow" => (_ew2(^), 2:2), "atan2" => (_ew2((y, x) -> atan(y, x)), 2:2),
+    "fmod" => (_ew2(rem), 2:2),
+    # --- array-cell reductions ---
+    "sum" => (_red(sum), 1:1), "product" => (_red(prod), 1:1),
+    "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
+    "median" => (_red(Statistics.median), 1:1),
+    "variance" => (_red(x -> Statistics.var(x; corrected=false)), 1:1),
+    "stddev" => (_red(x -> Statistics.std(x; corrected=false)), 1:1),
+    "rms" => (_tql_rms, 1:1),
+    "any" => (_red(any), 1:1), "all" => (_red(all), 1:1),
+    "ntrue" => (_red(x -> count(identity, x)), 1:1),
+    "nfalse" => (_red(x -> count(!, x)), 1:1),
+    "nelements" => (_tql_nelem, 1:1), "count" => (_tql_nelem, 1:1),
+    "ndim" => (_tql_ndim, 1:1),
+    # --- string ---
+    "strlength" => (length, 1:1), "len" => (length, 1:1),
+    "upcase" => (uppercase, 1:1), "upper" => (uppercase, 1:1), "toupper" => (uppercase, 1:1),
+    "downcase" => (lowercase, 1:1), "lower" => (lowercase, 1:1), "tolower" => (lowercase, 1:1),
+    "trim" => (strip, 1:1), "ltrim" => (lstrip, 1:1), "rtrim" => (rstrip, 1:1),
+    # --- misc ---
+    "iif" => (ifelse, 3:3),
+)
+
+function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
+    n = length(args)
+    if name in ("rownumber", "rownr")
+        n == 0 || throw(ArgumentError("TaQL-lite: $name() takes no arguments in \"$src\""))
+        return TQLRowNum()
+    elseif name == "pi" && n == 0
+        return TQLLit(π)
+    elseif name == "e" && n == 0
+        return TQLLit(ℯ)
+    elseif name == "min" || name == "max"
+        n in 1:2 || throw(ArgumentError("TaQL-lite: $name() takes 1 or 2 arguments in \"$src\""))
+        base = name == "min" ? min : max
+        fn = n == 1 ? _red(x -> (name == "min" ? minimum : maximum)(x)) : _ew2(base)
+        return TQLFunc(fn, args)
+    end
+    haskey(_TQL_FUNCS, name) || throw(ArgumentError(
+        "TaQL-lite: unknown function \"$name\" in \"$src\""))
+    fn, arity = _TQL_FUNCS[name]
+    n in arity || throw(ArgumentError(
+        "TaQL-lite: $name() takes $(arity == 1:1 ? "1 argument" :
+         length(arity) == 1 ? "$(first(arity)) arguments" :
+         "$(first(arity))–$(last(arity)) arguments"), got $n, in \"$src\""))
+    return TQLFunc(fn, args)
 end
 
 # ======================================================================
@@ -664,19 +798,29 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   (`%` = any run, `_` = one char); and TaQL's `col ~ p/glob/`,
   `~ m/regex/`, `~ f/regex/` (and `!~`), delimiters `/ % @`, optional
   trailing `i`;
+* functions `NAME(args...)` (case-insensitive, TaQL's aliases) — scalar
+  math (`abs`, `sqrt`, `exp`, `log`/`ln`, `log10`, trig, `floor`/`ceil`/
+  `round`, `sign`, `int`, `pow`, `fmod`), complex parts (`real`, `imag`,
+  `arg`/`phase`, `conj`, `norm`), array-cell reductions (`mean`/`avg`,
+  `sum`, `product`, `median`, `variance`, `stddev`, `rms`, `min`/`max`,
+  `any`, `all`, `ntrue`/`nfalse`, `nelements`/`count`, `ndim`), string
+  ops (`strlength`/`len`, `upper`/`lower`, `trim`/`ltrim`/`rtrim`),
+  `isnan`/`isinf`/`isfinite`, `iif(cond, a, b)`, `rownumber()` (1-based),
+  `pi`, `e`;
 * an optional trailing `ORDER BY col [ASC|DESC], ...` (bare columns).
 
 Column names are case-sensitive and must name a column of `t`; keywords
-are case-insensitive. Only the columns actually referenced (by the WHERE
-expression or an ORDER BY key) are read. `select` projects/renames
-columns exactly like [`write_reftable`](@ref)'s own `select=`. Returns a
-`RefTable` (no data copied); persist it with `write_reftable(dst, result)`.
+and function names are case-insensitive. Only the columns actually
+referenced (by the WHERE expression or an ORDER BY key) are read.
+`select` projects/renames columns exactly like [`write_reftable`](@ref)'s
+own `select=`. Returns a `RefTable` (no data copied); persist it with
+`write_reftable(dst, result)`.
 
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 bitwise operators, `BETWEEN`, `~=` approximate equality, array indexing,
-units, functions, `GROUP BY`, or joins.
+units, date/time or measures functions, `GROUP BY`, or joins.
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])

@@ -361,8 +361,27 @@ Julia `Regex` mirroring casacore's `Regex::fromSQLPattern` /
 `fromPattern`. The **closure form (`query(f, t)`) is unchanged** —
 arithmetic and matching there are already plain Julia. Cross-checked
 against real TaQL for a spread of arithmetic and pattern strings.
-Still no bitwise operators (`& | ^ ~`), `BETWEEN`, `~=`, array
-indexing, units, functions, `GROUP BY`, or joins.
+
+**Phase 25 — TaQL-lite functions.** The string parser gains a curated
+subset of TaQL's function library — `NAME(args...)`, case-insensitive,
+with TaQL's own aliases: scalar math (`abs`, `sqrt`, `exp`, `log`/`ln`,
+`log10`, trig, `floor`/`ceil`/`round`, `sign`, `int`, `pow`, `fmod`),
+complex parts (`real`, `imag`, `arg`/`phase`, `conj`, `norm`),
+array-cell reductions (`mean`/`avg`, `sum`, `product`, `median`,
+`variance`, `stddev`, `rms`, `min`/`max`, `any`, `all`, `ntrue`/
+`nfalse`, `nelements`/`count`, `ndim`), string ops (`strlength`/`len`,
+`upper`/`lower`, `trim`/`ltrim`/`rtrim`), `isnan`/`isinf`/`isfinite`,
+`iif(cond, a, b)`, `rownumber()` (1-based, matching TaQL's default
+style), `pi()`, `e()`. Arithmetic and comparison now also broadcast
+over an array-cell operand (`mean(abs(DATA - MODEL_DATA)) > 3`,
+`ntrue(FLAG == True)`) — a top-level WHERE that yields an array still
+errors, exactly as TaQL requires `any(...)`/`all(...)` there. New
+stdlib dependency `Statistics`. The **closure form is unchanged**.
+Cross-checked against real TaQL.
+
+Still, across Phases 22–25: no bitwise operators (`& | ^ ~`),
+`BETWEEN`, `~=`, array indexing, units, date/time or measures
+functions, `GROUP BY`/aggregation-over-groups, or joins.
 
 ## Usage
 

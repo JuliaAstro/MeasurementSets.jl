@@ -412,8 +412,105 @@ end
     @test issorted(NAME[r.rows])
 end
 
+@testset "TaQL-lite parser — function unit" begin
+    validnames = Set(["A", "B", "NM", "V"])
+    parse(s) = MSv2._taqllite_parse(s, validnames)
+
+    e = parse("sqrt(A) > 2")
+    @test e.lhs isa MSv2.TQLFunc && length(e.lhs.args) == 1 && e.lhs.args[1] isa MSv2.TQLCol
+
+    # nested function calls
+    e2 = parse("mean(abs(V)) > 1").lhs
+    @test e2 isa MSv2.TQLFunc && e2.args[1] isa MSv2.TQLFunc
+
+    # case-insensitive names + aliases
+    @test parse("ABS(A) > 0").lhs isa MSv2.TQLFunc
+    @test parse("AvG(V) > 0").lhs isa MSv2.TQLFunc
+
+    # rownumber() -> TQLRowNum ; pi/e -> literal
+    @test parse("rownumber() > 1").lhs isa MSv2.TQLRowNum
+    @test parse("rownr() > 1").lhs isa MSv2.TQLRowNum
+    @test parse("pi() > 3").lhs isa MSv2.TQLLit
+    @test parse("e() > 2").lhs.value == ℯ
+
+    # errors: unknown function, wrong arity
+    @test_throws ArgumentError parse("bogus(A) > 0")
+    @test_throws ArgumentError parse("sqrt(A, B) > 0")
+    @test_throws ArgumentError parse("rownumber(A) > 0")
+    @test_throws ArgumentError parse("iif(A) > 0")
+end
+
+@testset "TaQL-lite — function wrappers unit" begin
+    ew = MSv2._ew(abs)
+    @test ew(-3) == 3
+    @test ew([-1.0 2.0; -3.0 4.0]) == [1.0 2.0; 3.0 4.0]
+    red = MSv2._red(sum)
+    @test red(5) == 5                       # scalar -> 1-tuple path
+    @test red([1, 2, 3]) == 6
+    ew2 = MSv2._ew2(^)
+    @test ew2(2, 3) == 8
+    @test ew2([1, 2, 3], 2) == [1, 4, 9]
+    @test MSv2._tql_nelem([1 2; 3 4]) == 4
+    @test MSv2._tql_nelem(7) == 1
+end
+
+@testset "TaQL-lite query — function string form" begin
+    dir = joinpath(mktempdir(), "fn1.tab")
+    A = collect(Int32, 1:12)
+    B = Float64[1.5, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144]
+    NM = [i % 4 == 0 ? "cal_$i" : "src_$i" for i in 1:12]
+    write_table(dir, "T", Pair{String,Any}["A" => A, "B" => B, "NM" => NM]; nrow=12)
+    t = readtable(dir)
+
+    @test query(t, "sqrt(B) > 5").rows == findall(i -> sqrt(B[i]) > 5, 1:12)
+    @test query(t, "abs(A - 7) <= 2").rows == findall(i -> abs(A[i] - 7) <= 2, 1:12)
+    @test query(t, "floor(B / 10) == 2").rows == findall(i -> floor(B[i] / 10) == 2, 1:12)
+    @test query(t, "sign(A - 6) >= 0").rows == findall(i -> sign(A[i] - 6) >= 0, 1:12)
+    @test query(t, "pow(A, 2) > 50").rows == findall(i -> A[i]^2 > 50, 1:12)
+    @test query(t, "rownumber() % 3 == 0").rows == findall(i -> i % 3 == 0, 1:12)
+    @test query(t, "rownumber() > 9").rows == collect(10:12)
+    @test query(t, "upper(NM) == 'CAL_4'").rows == findall(i -> uppercase(NM[i]) == "CAL_4", 1:12)
+    @test query(t, "strlength(NM) > 5").rows == findall(i -> length(NM[i]) > 5, 1:12)
+    @test query(t, "isfinite(B)").rows == collect(1:12)
+    @test query(t, "iif(A > 6, A, 0) > 8").rows == findall(i -> (A[i] > 6 ? A[i] : 0) > 8, 1:12)
+    @test query(t, "pi() > 3").rows == collect(1:12)
+    @test query(t, "min(A, 5) == 5").rows == findall(i -> min(A[i], 5) == 5, 1:12)
+
+    # array-cell reductions on a small tiled Float column
+    vdir = joinpath(mktempdir(), "fn2.tab")
+    V = [Float64[i, i + 0.5, i + 1.0, i - 0.5] for i in 1:12]
+    write_table(vdir, "TV", Pair{String,Any}["V" => V]; nrow=12, tsm=[["V"]])
+    tv = readtable(vdir)
+    @test query(tv, "mean(V) > 6").rows == findall(i -> sum(V[i]) / 4 > 6, 1:12)
+    @test query(tv, "sum(V) > 20").rows == findall(i -> sum(V[i]) > 20, 1:12)
+    @test query(tv, "max(V) > 10").rows == findall(i -> maximum(V[i]) > 10, 1:12)
+    @test query(tv, "any(V > 11)").rows == findall(i -> any(V[i] .> 11), 1:12)
+    @test query(tv, "nelements(V) == 4").rows == collect(1:12)
+    @test query(tv, "mean(abs(V)) > 6").rows == findall(i -> sum(abs.(V[i])) / 4 > 6, 1:12)
+
+    # composes with arithmetic + ORDER BY
+    r = query(t, "abs(A - 6) < 4 ORDER BY A DESC")
+    @test A[r.rows] == Int32[9, 8, 7, 6, 5, 4, 3]
+
+    # only-referenced-columns-read still holds
+    bogus = ColumnDesc("BOGUS", "", "NoSuchManager", "g", MSv2.TpInt,
+                       "ScalarColumnDesc<Int>", (), Int32(0), UInt32(0), Record(), nothing, 999)
+    td2 = TableDesc(t.desc.name, t.desc.version, t.desc.comment, t.desc.public,
+                    t.desc.private, [t.desc.columns; bogus])
+    t2 = Table(t.path, t.type, t.subtype, t.readme, t.version, t.rows, t.endian,
+              td2, t.managers, t.syncmod, t.lockpath, t.container)
+    @test query(t2, "sqrt(B) > 5").rows == query(t, "sqrt(B) > 5").rows
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
+        d = mktempdir(); pdir = joinpath(d, "T")
+        A = collect(Int32, 1:20)
+        B = collect(0.0:1.0:19.0)
+        C = [isodd(i) ? "x" : "y" for i in 1:20]
+        NM = [i % 3 == 0 ? "cal_$i" : "src_$i" for i in 1:20]
+        write_table(pdir, "T", Pair{String,Any}["A" => A, "B" => B, "C" => C,
+                                                "NM" => NM]; nrow=20)
         d = mktempdir(); pdir = joinpath(d, "T")
         A = collect(Int32, 1:20)
         B = collect(0.0:1.0:19.0)
@@ -454,6 +551,17 @@ if _HAVE_TAQL
                          "A - 5 > B - 4", "(A + B) > 25 AND A < 12",
                          "NM LIKE 'cal%'", "NM NOT LIKE 'cal%'",
                          "NM ~ p/src*/", "C ~ p/x/")
+            @test query(t, wherestr).rows == _taql_rows(wherestr)
+        end
+
+        # Phase 25 -- functions. Thresholds kept away from exact boundaries
+        # so Julia-vs-TaQL float promotion differences don't flip a row.
+        for wherestr in ("sqrt(A) > 3", "abs(A - 10) <= 4", "sin(A) > 0",
+                         "floor(B / 3) == 2", "sign(A - 10) >= 0",
+                         "rownumber() > 15", "rownumber() % 4 == 0",
+                         "upper(NM) == 'CAL_3'", "strlength(NM) > 5",
+                         "iif(A > 10, A, 0) > 12", "min(A, 8) == 8",
+                         "isfinite(B)")
             @test query(t, wherestr).rows == _taql_rows(wherestr)
         end
     end
