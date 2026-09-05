@@ -103,7 +103,12 @@ name to `(; normalization=AFNorm(), distribution=TruncatedGaussian(),
 dataBitCount=10, weightBitCount=12, distributionTruncation=2.5,
 studentTNu=5.0, antenna1, antenna2, rowsPerBlock=nrow, dither=true)` --
 `antenna1`/`antenna2` (0-based, length `nrow`) are mandatory (see
-[`write_dyscostman`](@ref)).
+[`write_dyscostman`](@ref)).  `storage` (`:sepfile` default, or
+`:multifile`/`:multihdf5`) packs every StandardStMan/IncrementalStMan/
+TiledStMan private file into one `table.mf`/`table.mfh5` (`blocksize`,
+default 4 MiB); Dysco and virtual-engine files are never packed, matching
+real casacore. No container is created if nothing in the table binds to
+one of those three managers.
 """
 function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            data::Vector; nrow::Integer, endian::Symbol=:little,
@@ -114,6 +119,8 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            engines::AbstractDict=Dict{String,NamedTuple}(),
                            dysco=Vector{String}[],
                            dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
+                           storage::Symbol=:sepfile,
+                           blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                            tablename::AbstractString="",
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
@@ -188,90 +195,102 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         varndim[d.name] = ndims(data[i][1])
     end
 
-    if !isempty(ssm_i)
-        cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ssm), seq) for i in ssm_i]
-        blk = write_standardstman(dir, seq, cols, data[ssm_i], Int(nrow), endian)
-        push!(dms, DMWrite("StandardStMan", seq, blk))
-        for (k, i) in enumerate(ssm_i); out[i] = cols[k]; end
-        seq += 1
-    end
-    if !isempty(ism_i)
-        cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ism), seq) for i in ism_i]
-        blk = write_incrementalstman(dir, seq, cols, data[ism_i], Int(nrow), endian)
-        push!(dms, DMWrite("IncrementalStMan", seq, blk))
-        for (k, i) in enumerate(ism_i); out[i] = cols[k]; end
-        seq += 1
-    end
-    for (kind, dmname, writer, groups) in tiledgroups, g in groups
-        idxs = Int[]
-        for nm in g
-            i = findfirst(c -> c.name == nm, descs)
-            i === nothing && error("$dmname group $g: unknown column \"$nm\"")
-            push!(idxs, i)
+    # The per-DM-writer section: wrapped so a container-eligible writer's
+    # `_dmfile_write!` calls buffer into a fresh container instead of
+    # touching disk when `storage != :sepfile`.  Runs (and, if anything
+    # was buffered, finalizes the real table.mf/table.mfh5) BEFORE
+    # `write_table_files` below writes table.dat -- table.dat stays the
+    # last thing written / the commit point, exactly as for `:sepfile`.
+    with_container_sink(dir, storage, blocksize) do
+        if !isempty(ssm_i)
+            cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ssm), seq) for i in ssm_i]
+            blk = write_standardstman(dir, seq, cols, data[ssm_i], Int(nrow), endian)
+            push!(dms, DMWrite("StandardStMan", seq, blk))
+            for (k, i) in enumerate(ssm_i); out[i] = cols[k]; end
+            seq += 1
         end
-        sort!(idxs)                       # bind in TableDesc column order (= header dtype order)
-        cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], kind), seq) for i in idxs]
-        blk = writer(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian)
-        push!(dms, DMWrite(dmname, seq, blk))
-        for (k, i) in enumerate(idxs); out[i] = cols[k]; end
-        seq += 1
-    end
-    for g in dyscog
-        idxs = Int[]
-        for nm in g
-            i = findfirst(c -> c.name == nm, descs)
-            i === nothing && error("DyscoStMan group $g: unknown column \"$nm\"")
-            push!(idxs, i)
+        if !isempty(ism_i)
+            cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ism), seq) for i in ism_i]
+            blk = write_incrementalstman(dir, seq, cols, data[ism_i], Int(nrow), endian)
+            push!(dms, DMWrite("IncrementalStMan", seq, blk))
+            for (k, i) in enumerate(ism_i); out[i] = cols[k]; end
+            seq += 1
         end
-        sort!(idxs)
-        cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :dysco), seq) for i in idxs]
-        spec = get(dysco_spec, g[1], NamedTuple())
-        haskey(spec, :antenna1) && haskey(spec, :antenna2) ||
-            error("dysco group $g: dysco_spec[\"$(g[1])\"] must supply antenna1/antenna2 " *
-                  "(0-based, length nrow)")
-        blk = write_dyscostman(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian;
-            normalization = get(spec, :normalization, AFNorm()),
-            distribution = get(spec, :distribution, TruncatedGaussian()),
-            dataBitCount = get(spec, :dataBitCount, 10),
-            weightBitCount = get(spec, :weightBitCount, 12),
-            distributionTruncation = get(spec, :distributionTruncation, 2.5),
-            studentTNu = get(spec, :studentTNu, 5.0),
-            antenna1 = spec.antenna1, antenna2 = spec.antenna2,
-            rowsPerBlock = get(spec, :rowsPerBlock, Int(nrow)),
-            dither = get(spec, :dither, true),
-            rng = get(spec, :rng, Random.default_rng()))
-        push!(dms, DMWrite("DyscoStMan", seq, blk))
-        for (k, i) in enumerate(idxs); out[i] = cols[k]; end
-        seq += 1
-    end
-    for (vi, typestr) in engine_seq         # virtual engines write no file, empty block
-        out[vi] = _withsequ(descs[vi], seq)
-        push!(dms, DMWrite(typestr, seq, UInt8[]))
-        seq += 1
+        for (kind, dmname, writer, groups) in tiledgroups, g in groups
+            idxs = Int[]
+            for nm in g
+                i = findfirst(c -> c.name == nm, descs)
+                i === nothing && error("$dmname group $g: unknown column \"$nm\"")
+                push!(idxs, i)
+            end
+            sort!(idxs)                       # bind in TableDesc column order (= header dtype order)
+            cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], kind), seq) for i in idxs]
+            blk = writer(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian)
+            push!(dms, DMWrite(dmname, seq, blk))
+            for (k, i) in enumerate(idxs); out[i] = cols[k]; end
+            seq += 1
+        end
+        for g in dyscog
+            idxs = Int[]
+            for nm in g
+                i = findfirst(c -> c.name == nm, descs)
+                i === nothing && error("DyscoStMan group $g: unknown column \"$nm\"")
+                push!(idxs, i)
+            end
+            sort!(idxs)
+            cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :dysco), seq) for i in idxs]
+            spec = get(dysco_spec, g[1], NamedTuple())
+            haskey(spec, :antenna1) && haskey(spec, :antenna2) ||
+                error("dysco group $g: dysco_spec[\"$(g[1])\"] must supply antenna1/antenna2 " *
+                      "(0-based, length nrow)")
+            blk = write_dyscostman(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian;
+                normalization = get(spec, :normalization, AFNorm()),
+                distribution = get(spec, :distribution, TruncatedGaussian()),
+                dataBitCount = get(spec, :dataBitCount, 10),
+                weightBitCount = get(spec, :weightBitCount, 12),
+                distributionTruncation = get(spec, :distributionTruncation, 2.5),
+                studentTNu = get(spec, :studentTNu, 5.0),
+                antenna1 = spec.antenna1, antenna2 = spec.antenna2,
+                rowsPerBlock = get(spec, :rowsPerBlock, Int(nrow)),
+                dither = get(spec, :dither, true),
+                rng = get(spec, :rng, Random.default_rng()))
+            push!(dms, DMWrite("DyscoStMan", seq, blk))
+            for (k, i) in enumerate(idxs); out[i] = cols[k]; end
+            seq += 1
+        end
+        for (vi, typestr) in engine_seq         # virtual engines write no file, empty block
+            out[vi] = _withsequ(descs[vi], seq)
+            push!(dms, DMWrite(typestr, seq, UInt8[]))
+            seq += 1
+        end
     end
 
     td = TableDesc(isempty(tablename) ? "" : String(tablename), "2.0", "",
                    public, private, out)
-    write_table_files(dir, td, Int(nrow), dms; type, subtype, readme, varndim)
+    write_table_files(dir, td, Int(nrow), dms; type, subtype, readme, varndim, storage, blocksize)
     return dir
 end
 
 """
     write_table(dir, name, columns; nrow, endian=:little,
                tsm, tcm, tcell, ism, engines, dysco, dysco_spec,
+               storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE,
                type="", subtype="", readme="")
 
 Write a CTDS table at `dir`.  `columns` is an iterable of `name => vector`
 pairs (or a `Tables` columns source).  Column metadata (units, comments,
 exact class names) is taken from `SCHEMAVER2[name]` when available.
 `dysco`/`dysco_spec` compress one or more columns with `DyscoStMan` --
-see [`_write_table_core`](@ref) for the exact shape.
+see [`_write_table_core`](@ref) for the exact shape.  `storage`/
+`blocksize` pack every StandardStMan/IncrementalStMan/TiledStMan private
+file into one `table.mf`/`table.mfh5` -- see [`_write_table_core`](@ref).
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
                      tsm=String[], tcm=String[], tcell=String[], ism=String[],
                      engines::AbstractDict=Dict{String,NamedTuple}(),
                      dysco=Vector{String}[], dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
+                     storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
     pairs = columns isa AbstractDict ? collect(columns) :
@@ -304,6 +323,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
 
     _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,
                       ism = Set(String.(ism)), engines, dysco, dysco_spec,
+                      storage, blocksize,
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
 
@@ -319,7 +339,8 @@ end
 function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTable,
                           cols::Vector{Tuple{String,String}}, rows;
                           public::Record, private::Record, tablename::AbstractString,
-                          type::AbstractString, subtype::AbstractString, readme::AbstractString)
+                          type::AbstractString, subtype::AbstractString, readme::AbstractString,
+                          storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     descs = ColumnDesc[]
     data = Vector{Any}[]
     ism = Set{String}()
@@ -404,7 +425,8 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(rows), endian=:little,
                       public, private=Record(), tsm=tsmg, tcm=tcmg, tcell=tcellg, ism,
-                      engines, dysco=dyscog, dysco_spec, tablename, type, subtype, readme)
+                      engines, dysco=dyscog, dysco_spec, storage, blocksize,
+                      tablename, type, subtype, readme)
     return descs
 end
 
@@ -433,43 +455,50 @@ preserving each column's storage-manager / virtual-engine kind.  For a
 casacore's own `RefTable::dataManagerInfo` / `ConcatTable::dataManagerInfo`.
 """
 function _copy_table(dir::AbstractString, t::Table, r=1:nrow(t);
-                     public::Record=t.desc.public, private::Record=t.desc.private)
+                     public::Record=t.desc.public, private::Record=t.desc.private,
+                     storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     cols = Tuple{String,String}[(c.name, c.name) for c in t.desc.columns]
     _copy_table_cols(dir, t, t, cols, r; public, private, tablename=t.desc.name,
-                     type=t.type, subtype=t.subtype, readme=t.readme)
+                     type=t.type, subtype=t.subtype, readme=t.readme, storage, blocksize)
 end
 
 function _copy_table(dir::AbstractString, rt::RefTable, r=1:nrow(rt);
-                     public::Record=keywords(rt), private::Record=Record())
+                     public::Record=keywords(rt), private::Record=Record(),
+                     storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     rt.parent isa Table || error("materialise: RefTable parent is a " *
                                  "$(typeof(rt.parent)); only a plain-table parent is supported")
     p = rt.parent
     cols = Tuple{String,String}[(nm, rt.namemap[nm]) for nm in rt.order]
     _copy_table_cols(dir, p, p, cols, rt.rows[r]; public, private, tablename=p.desc.name,
-                     type=p.type, subtype=p.subtype, readme=p.readme)
+                     type=p.type, subtype=p.subtype, readme=p.readme, storage, blocksize)
 end
 
 function _copy_table(dir::AbstractString, ct::ConcatTable, r=1:nrow(ct);
-                     public::Record=keywords(ct), private::Record=Record())
+                     public::Record=keywords(ct), private::Record=Record(),
+                     storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     p1 = ct.parts[1]
     p1 isa Table || error("materialise: ConcatTable's first part is a " *
                           "$(typeof(p1)); only a plain-table part is supported")
     cols = Tuple{String,String}[(c.name, c.name) for c in p1.desc.columns]
     _copy_table_cols(dir, p1, ct, cols, r; public, private, tablename=p1.desc.name,
-                     type=p1.type, subtype=p1.subtype, readme=p1.readme)
+                     type=p1.type, subtype=p1.subtype, readme=p1.readme, storage, blocksize)
 end
 
 """
-    copytable(dst, t::Table|RefTable|ConcatTable; rows=Colon()) -> dst
+    copytable(dst, t::Table|RefTable|ConcatTable; rows=Colon(),
+             storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE) -> dst
 
 Deep-copy `t` into a fresh plain table at `dst`, keeping each column's
 storage-manager / virtual-engine kind (mirrors what casacore's
-`GIVING ... AS PLAIN` does).  `rows` selects/reorders rows, 1-based into `t`.
+`GIVING ... AS PLAIN` does).  `rows` selects/reorders rows, 1-based into
+`t`.  `storage`/`blocksize` pack the destination into one `table.mf`/
+`table.mfh5` -- see [`_write_table_core`](@ref).
 """
-function copytable(dst::AbstractString, t::AbstractTable; rows=Colon())
+function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
+                   storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dst = String(rstrip(dst, '/'))
     ispath(dst) && error("$dst already exists")
-    _copy_table(dst, t, rows === Colon() ? (1:nrow(t)) : rows)
+    _copy_table(dst, t, rows === Colon() ? (1:nrow(t)) : rows; storage, blocksize)
     return dst
 end
 
@@ -504,15 +533,21 @@ function _source_dm(t::Table, c::ColumnDesc)
 end
 
 """
-    write_ms(dir, ms::MeasurementSet; rows=Colon(), subtables=Colon())
+    write_ms(dir, ms::MeasurementSet; rows=Colon(), subtables=Colon(),
+            storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE)
 
 Write `ms` to a new MeasurementSet directory `dir`: MAIN restricted to
 `rows`, and every subtable in full (or only those named in `subtables`, a
 collection of keyword names).  A column the reader cannot decode is skipped
-with a warning.
+with a warning.  `storage`/`blocksize`, if not `:sepfile`, pack **every**
+table written (MAIN and each subtable) into its own `table.mf`/
+`table.mfh5` -- matching what a real casacore MS created under a global
+`StorageOption` would look like (one container per table, not one shared
+container for the whole MS tree).
 """
 function write_ms(dir::AbstractString, ms::MeasurementSet;
-                  rows=Colon(), subtables=Colon())
+                  rows=Colon(), subtables=Colon(),
+                  storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
@@ -531,7 +566,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
             @warn "skipping subtable $kw" err=e; continue
         end
         try
-            _copy_table(joinpath(dir, kw), sub, 1:nrow(sub))
+            _copy_table(joinpath(dir, kw), sub, 1:nrow(sub); storage, blocksize)
             push!(written, kw)
         catch e
             @warn "skipping subtable $kw (unsupported source)" typeof(sub) err=e
@@ -554,18 +589,21 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
         end
     end
 
-    _copy_table(dir, main, mrows; public=pub)
+    _copy_table(dir, main, mrows; public=pub, storage, blocksize)
     return dir
 end
 
 """
-    copyms(src, dst; rows=Colon(), subtables=Colon())
+    copyms(src, dst; rows=Colon(), subtables=Colon(),
+          storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE)
 
 Copy the MeasurementSet at `src` to a new directory `dst` (MAIN rows
 optionally sliced; `subtables` optionally restricted to a set of names).
+`storage`/`blocksize` -- see [`write_ms`](@ref).
 """
-copyms(src::AbstractString, dst::AbstractString; rows=Colon(), subtables=Colon()) =
-    write_ms(dst, MeasurementSet(src); rows, subtables)
+copyms(src::AbstractString, dst::AbstractString; rows=Colon(), subtables=Colon(),
+      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE) =
+    write_ms(dst, MeasurementSet(src); rows, subtables, storage, blocksize)
 
 # --- synthesise a minimal standard MS -----------------------------
 
@@ -628,16 +666,20 @@ function _synth_table(tbl, nrows, nchan, ncorr, nrec)
 end
 
 """
-    create_ms(dir; nrow=10, nchan=4, ncorr=2, nant=3, nrec=2)
+    create_ms(dir; nrow=10, nchan=4, ncorr=2, nant=3, nrec=2,
+             storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE)
 
 Synthesise a minimal, `validate`-clean MeasurementSet v2 at `dir` (zero /
 default-valued data).  MAIN's `DATA`/`FLAG` go through TiledShapeStMan;
 scalars and fixed-shape arrays through StandardStMan direct cells;
 variable-shape array columns (`CHAN_FREQ`, `CORR_TYPE`, `POLARIZATION_TYPE`,
-…) through StandardStMan indirect arrays.
+…) through StandardStMan indirect arrays.  `storage`/`blocksize`, if not
+`:sepfile`, pack every table (MAIN and each subtable) into its own
+`table.mf`/`table.mfh5` -- see [`write_ms`](@ref).
 """
 function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
-                   ncorr::Integer=2, nant::Integer=3, nrec::Integer=2)
+                   ncorr::Integer=2, nant::Integer=3, nrec::Integer=2,
+                   storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
@@ -655,6 +697,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
             i === nothing || (data[i] = ["ANT$(k-1)" for k in 1:nr])
         end
         _write_table_core(joinpath(dir, tbl), descs, data; nrow=nr, endian=:little,
+                          storage, blocksize,
                           tablename=tbl * "Desc", type=titlecase(replace(tbl, '_'=>' ')))
     end
 
@@ -679,6 +722,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
     _write_table_core(dir, mdescs, mdata; nrow=nrow, endian=:little, public=pub,
                       tsm=[["DATA", "FLAG", "WEIGHT_SPECTRUM"]],
                       ism=intersect(ismcols, Set(c.name for c in mdescs)),
+                      storage, blocksize,
                       tablename="MSDesc", type="Measurement Set")
     return dir
 end

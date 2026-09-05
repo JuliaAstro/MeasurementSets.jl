@@ -545,7 +545,7 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int,
             _pack_planes!(buf, tilebase, (p % trow) * planelen, planelen, types, offs,
                           ntuple(k -> vec(coldata[k][r]), ncol), endian)
         end
-        _atomic_write(joinpath(dir, "table.f$(sequ)_TSM$si"), buf)
+        _dmfile_write!(dir, "table.f$(sequ)_TSM$si", buf)
         push!(files, _TSMFileSpec(true, si, length(buf)))
         push!(cubes, _TSMCubeSpec(cubeshape, tileshape, si, 0))
         si == 1 && (deftile = tileshape)
@@ -566,7 +566,7 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int,
     perm = sortperm(rowmap)                          # rowMap must be ascending
     rowmap, cubemap, posmap = rowmap[perm], cubemap[perm], posmap[perm]
 
-    _atomic_write(joinpath(dir, "table.f$sequ"),
+    _dmfile_write!(dir, "table.f$sequ",
           _tiledshape_header_bytes(sequ, types, _hyper_name(cols), nrdim, cubes,
                                    files, deftile, rowmap, cubemap, posmap, nrow, endian))
     return UInt8[]
@@ -603,7 +603,7 @@ function write_tiledcolumnstman(dir::AbstractString, sequ::Int,
         _pack_planes!(buf, tilebase, (r % trow) * planelen, planelen, types, offs,
                       ntuple(k -> vec(coldata[k][r+1]), ncol), endian)
     end
-    _atomic_write(joinpath(dir, "table.f$(sequ)_TSM0"), buf)
+    _dmfile_write!(dir, "table.f$(sequ)_TSM0", buf)
 
     w = AipsWriter(; endian=:big)
     putstart(w, "TiledColumnStMan", TSM_WRAPPER_VER)
@@ -613,7 +613,7 @@ function write_tiledcolumnstman(dir::AbstractString, sequ::Int,
                         _TSMCubeSpec[_TSMCubeSpec(cubeshape, tileshape, 0, 0)],
                         nrow, endian)
     putend(w)
-    _atomic_write(joinpath(dir, "table.f$sequ"), bytes(w))
+    _dmfile_write!(dir, "table.f$sequ", bytes(w))
     return UInt8[]
 end
 
@@ -672,7 +672,7 @@ function write_tiledcellstman(dir::AbstractString, sequ::Int,
         append!(buf, cbuf)
         push!(cubes, _TSMCubeSpec(cell, tile, 0, offset))
     end
-    _atomic_write(joinpath(dir, "table.f$(sequ)_TSM0"), buf)
+    _dmfile_write!(dir, "table.f$(sequ)_TSM0", buf)
 
     w = AipsWriter(; endian=:big)
     putstart(w, "TiledCellStMan", TSM_WRAPPER_VER)
@@ -681,7 +681,7 @@ function write_tiledcellstman(dir::AbstractString, sequ::Int,
                         _TSMFileSpec[_TSMFileSpec(true, 0, length(buf))],
                         cubes, nrow, endian; cube_extensible=false)
     putend(w)
-    _atomic_write(joinpath(dir, "table.f$sequ"), bytes(w))
+    _dmfile_write!(dir, "table.f$sequ", bytes(w))
     return UInt8[]
 end
 

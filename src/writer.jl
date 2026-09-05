@@ -16,9 +16,21 @@ const V_PLAINCOLUMN = 2    # PlainColumn::putFile
 const V_COL_DERIVED = 1    # {Scalar,Array}ColumnData::putFileDerived
 
 const COLUMNSET_SEPFILE    = -2    # ColumnSet::putFile version; negative => per-DM files
+const COLUMNSET_STORAGEOPT = -3    # ... when a StorageOption other than SepFile is used
 const SMFILE_LITTLE_ENDIAN = 1     # table.dat "endian format" flag for the SM files
 const SHAPECOL_FIXED  = 0x01       # PlainColumn shapeColDef byte: fixed cell shape
 const SHAPECOL_VARIES = 0x00       # ... variable / indirect
+
+# casacore's `StorageOption::Option` enum (StorageOption.h) -- the exact
+# integer written into table.dat's ColumnSet block (version -3 only,
+# ColumnSet.cc:770-773) so a real casacore reopen knows to route a
+# container-eligible DM's file access through `table.mf`/`table.mfh5`
+# instead of a plain file (Phase 21 -- this table.dat field, NOT file
+# presence, is what a real casacore *reopen* actually keys off; presence
+# alone is only consulted by our own reader, matching casacore's more
+# permissive/simpler read path).
+const STORAGEOPT_CODE = Dict{Symbol,Int32}(
+    :multifile => Int32(0), :multihdf5 => Int32(1), :sepfile => Int32(2))
 
 # fixed-width (8-char) casacore type id used in ColumnDesc class names
 const _TYPEID = Dict{CasaType,String}(
@@ -180,9 +192,17 @@ function _write_plaincolumn(w::AipsWriter, c::ColumnDesc)
 end
 
 function write_columnset(w::AipsWriter, cols::Vector{<:ColumnDesc},
-                         dms::Vector{DMWrite}, nrow::Integer)
-    wr_i32(w, COLUMNSET_SEPFILE)
-    wr_u32(w, nrow)
+                         dms::Vector{DMWrite}, nrow::Integer;
+                         storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+    if storage === :sepfile
+        wr_i32(w, COLUMNSET_SEPFILE)
+        wr_u32(w, nrow)
+    else
+        wr_i32(w, COLUMNSET_STORAGEOPT)
+        wr_u64(w, nrow)                   # version -3's nrow is 64-bit (ColumnSet.cc:772-773)
+        wr_i32(w, STORAGEOPT_CODE[storage])
+        wr_i32(w, Int32(blocksize))
+    end
     wr_u32(w, length(dms))                # seqCount
     wr_u32(w, length(dms))                # number of DMs with columns
     for dm in dms
@@ -201,14 +221,15 @@ end
 # --- table.dat / table.info ---------------------------------
 
 function table_dat_bytes(td::TableDesc, nrow::Integer, dms::Vector{DMWrite},
-                         varndim::Dict{String,Int}=Dict{String,Int}())
+                         varndim::Dict{String,Int}=Dict{String,Int}();
+                         storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     w = AipsWriter(; endian=:big)         # table.dat is always canonical
     putstart(w, "Table", V_TABLE)
     wr_u32(w, nrow)
     wr_u32(w, SMFILE_LITTLE_ENDIAN)       # SM files are little-endian
     wr_string(w, "PlainTable")
     write_tabledesc(w, td, varndim)
-    write_columnset(w, td.columns, dms, nrow)
+    write_columnset(w, td.columns, dms, nrow; storage, blocksize)
     putend(w)
     return bytes(w)
 end
@@ -292,11 +313,13 @@ managers in `dms` have already written their own `table.f<seq>*` files.
 """
 function write_table_files(dir::AbstractString, td::TableDesc, nrow::Integer,
                            dms::Vector{DMWrite}; type="", subtype="", readme="",
-                           varndim::Dict{String,Int}=Dict{String,Int}())
+                           varndim::Dict{String,Int}=Dict{String,Int}(),
+                           storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     mkpath(dir)
     withlock(dir, :write; create=true) do lk
         old = read_syncinfo(lk)
-        _atomic_write(joinpath(dir, "table.dat"), table_dat_bytes(td, nrow, dms, varndim))
+        _atomic_write(joinpath(dir, "table.dat"),
+                     table_dat_bytes(td, nrow, dms, varndim; storage, blocksize))
         write_tableinfo(dir; type, subtype, readme)
         write_syncinfo(lk, nrow; modifycounter = (old.present ? old.modifycounter : 0) + 1)
     end
