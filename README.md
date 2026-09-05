@@ -315,6 +315,22 @@ and read correctly by real Casacore.jl, mirroring the Dysco Phase 19
 write-interop pattern); `MultiHDF5` write output has no real-casacore
 oracle available on this machine (same gap as Phase 20's read side).
 
+**Phase 22 — TaQL-lite query engine.** `query(t, wherestr)` row-filters
+a `Table`/`RefTable`/`ConcatTable` with a small TaQL-like WHERE string
+(comparisons, `AND`/`&&`, `OR`/`||`, `NOT`/`!`, parentheses, `col IN
+[v1,v2,...]`), reading only the columns the expression references, and
+returns a `RefTable` — the same lazy, no-copy view real TaQL's own
+`SELECT ... GIVING` produces, persistable unchanged via the existing
+`write_reftable`. `query(f, t)` is the Julia-native counterpart: a
+predicate closure over a `Tables.AbstractRow` (`query(t; cols=[...]) do
+row; row.ANTENNA1 > 0; end`). Both take a `select=` for column
+projection/rename, matching `write_reftable`'s own convention exactly.
+Every operator/keyword spelling accepted is a genuine subset of real
+TaQL's own (verified against its lexer, and against a live TaQL
+cross-check test that runs the *same* WHERE string through both engines
+and compares the row selections) — no arithmetic, string pattern
+matching, `ORDER BY`, `GROUP BY`, or joins.
+
 ## Usage
 
 ```julia
