@@ -24,6 +24,7 @@ is_stale(t::EditTable) = is_stale(t.reader)
 is_stale(ms::MeasurementSet) = is_stale(getfield(ms, :data))
 is_stale(t::RefTable) = is_stale(t.parent)
 is_stale(t::ConcatTable) = any(is_stale, t.parts)
+is_stale(::GroupedTable) = false   # a materialised in-memory result
 
 """
     resync(t) -> Table / MeasurementSet
@@ -51,6 +52,8 @@ function resync(t::Union{RefTable,ConcatTable})
     end
     return readtable(t.path)
 end
+
+resync(gt::GroupedTable) = gt
 
 function resync(ms::MeasurementSet)
     is_stale(ms) || return ms

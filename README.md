@@ -444,7 +444,24 @@ on a dangling key), `:drop`, or `:missing`. The result is a
 `GroupedTable` whose columns are lazy `MappedColumn` views (zero-copy
 even joining onto MAIN), cross-checked against real TaQL's `JOIN`.
 
-Still, across Phases 22–28: no bitwise operators (`& | ^ ~`),
+**Phase 29 — chainable results.** `GroupedTable` (the result of
+`groupby`, `join`, or `query` on one of those) is itself an
+`AbstractTable`, so every query verb feeds the next — a full pipeline:
+
+```julia
+join(ms.MAIN, subtable(ms, "ANTENNA"); on="ANTENNA1",
+     rightcols=["NAME" => "ANT"]) |>
+  r -> groupby(r, "ANT"; select=["ANT" => :ANT, "N" => "gcount()",
+                                 "AMP" => "gmean(mean(abs(DATA)))"]) |>
+  r -> query(r, "N > 100 ORDER BY AMP DESC")
+```
+
+`query` on a `GroupedTable` returns a materialised `GroupedTable`
+("in-memory in, in-memory out"); `groupby` / `join` on one behave
+exactly as on a disk table. Persist any result with
+`write_table(dst, "T", r; nrow=nrow(r))`.
+
+Still, across Phases 22–29: no bitwise operators (`& | ^ ~`),
 `BETWEEN`, `~=`, array indexing, units, date/time or measures
 functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, or a
 general M:N cross-product join.

@@ -990,39 +990,109 @@ end
 """
     GroupedTable
 
-The result of [`groupby`](@ref): an in-memory columnar table (a
-`Tables.jl` source). Access columns with `gt.OUTNAME`,
-`Tables.getcolumn`, `DataFrame(gt)`, or persist with
-`write_table(dst, "T", gt; nrow=length(gt.cols[1]))`.
+An in-memory columnar table — the result of [`groupby`](@ref),
+[`join`](@ref), or `query` on one of those. It is a full
+[`AbstractTable`](@ref) (so it chains back into `query` / `groupby` /
+`join`) and a `Tables.jl` source. Access columns with `gt.OUTNAME`,
+`gt["OUTNAME"]`, `column(gt, "OUTNAME")`, `DataFrame(gt)`, or persist
+with `write_table(dst, "T", gt; nrow=nrow(gt))`.
+
+`names` and `cols` are reserved field names (reached via `getfield`);
+a column literally named `names` / `cols` is accessible only through
+`gt["names"]` / `column(gt, "cols")`.
 """
-struct GroupedTable
+struct GroupedTable <: AbstractTable
     names::Vector{Symbol}
     cols::Vector{AbstractVector}
 end
 
-Tables.istable(::Type{GroupedTable}) = true
-Tables.columnaccess(::Type{GroupedTable}) = true
-Tables.rowaccess(::Type{GroupedTable}) = true
-Tables.columns(x::GroupedTable) = x
-Tables.columnnames(x::GroupedTable) = x.names
-Tables.getcolumn(x::GroupedTable, i::Int) = x.cols[i]
-function Tables.getcolumn(x::GroupedTable, nm::Symbol)
-    j = findfirst(==(nm), x.names)
-    j === nothing && throw(ArgumentError("GroupedTable has no column $nm"))
-    return x.cols[j]
+nrow(gt::GroupedTable) = isempty(getfield(gt, :cols)) ? 0 : length(getfield(gt, :cols)[1])
+columnnames(gt::GroupedTable) = String.(getfield(gt, :names))
+function column(gt::GroupedTable, name::AbstractString)
+    j = findfirst(==(Symbol(name)), getfield(gt, :names))
+    j === nothing && throw(KeyError(name))
+    return getfield(gt, :cols)[j]
 end
-Tables.schema(x::GroupedTable) = Tables.Schema(x.names, [eltype(c) for c in x.cols])
-Tables.rows(x::GroupedTable) = Tables.rows(Tables.columntable(x))
+keywords(::GroupedTable) = Record()
+subtables(::GroupedTable) = Pair{String,String}[]
 
+# best-effort synthesis -- only consulted by `validate` / direct user
+# calls, never by the query verbs
+function columndesc(gt::GroupedTable, name::AbstractString)
+    col = column(gt, name)
+    ct = try
+        _casatype_of(Base.nonmissingtype(eltype(col)))
+    catch
+        TpOther
+    end
+    shp = _infer_shape(col)
+    isarr = shp isa VariableShape || (shp isa Dims && !isempty(shp))
+    return ColumnDesc(String(name), "", "", "", ct, _classname(ct, isarr), shp,
+                      Int32(0), UInt32(0), Record(), nothing, nothing)
+end
+
+# `.OUTNAME` sugar + display -- not part of the Tables.jl interface
+# (the generic `::AbstractTable` methods in tables_interface.jl cover
+# `istable`/`columns`/`columnnames`/`getcolumn`/`schema`/`rows`).
 Base.getproperty(x::GroupedTable, s::Symbol) =
-    s === :names || s === :cols ? getfield(x, s) : Tables.getcolumn(x, s)
+    s === :names || s === :cols ? getfield(x, s) : column(x, String(s))
 Base.propertynames(x::GroupedTable) = Tuple(getfield(x, :names))
 
 function Base.show(io::IO, ::MIME"text/plain", x::GroupedTable)
-    nr = isempty(x.cols) ? 0 : length(x.cols[1])
+    nr = nrow(x)
     println(io, "GroupedTable: $nr row", nr == 1 ? "" : "s", " × ",
-            length(x.names), " column", length(x.names) == 1 ? "" : "s")
-    print(io, "  ", join(x.names, ", "))
+            length(getfield(x, :names)), " column",
+            length(getfield(x, :names)) == 1 ? "" : "s")
+    print(io, "  ", join(getfield(x, :names), ", "))
+end
+
+# --- query on an already-in-memory result -----------------------------
+# `query` on a `GroupedTable` (from `groupby` / `join` / a prior
+# `query`) returns a *materialised* `GroupedTable` -- "in-memory in,
+# in-memory out" -- rather than the lazy `RefTable` the generic
+# `query(::AbstractTable, ...)` produces (which would need a disk-backed
+# parent for `write_reftable`).
+
+"""
+    query(gt::GroupedTable, wherestr; select=identity) -> GroupedTable
+
+Filter / project / sort an in-memory columnar result. `wherestr` is a
+TaQL-lite WHERE expression (+ optional trailing `ORDER BY`) over the
+result's column names; `select` is `outname => source_name` pairs.
+"""
+function query(gt::GroupedTable, wherestr::AbstractString;
+               select::AbstractVector{<:Pair}=[n => n for n in columnnames(gt)])
+    ast, orderby = _taqllite_parse_query(wherestr, Set(columnnames(gt)))
+    cd = Dict{String,AbstractVector}(n => column(gt, n) for n in columnnames(gt))
+    nr = nrow(gt)
+    keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tqleval(ast, cd, i)]
+    keep = _apply_orderby(keep, orderby, cd)
+    namemap, order = _select_spec(gt, select)
+    return GroupedTable(Symbol.(order),
+        AbstractVector[cd[namemap[o]][keep] for o in order])
+end
+
+"""
+    query(f, gt::GroupedTable; cols=nothing, orderby=nothing, select=identity) -> GroupedTable
+
+Closure form: keep the rows for which `f(row) -> Bool` (`row.OUTNAME`
+property access). See the string form above.
+"""
+function query(f::Function, gt::GroupedTable;
+               cols::Union{Nothing,AbstractVector}=nothing,
+               orderby::Union{Nothing,AbstractVector}=nothing,
+               select::AbstractVector{<:Pair}=[n => n for n in columnnames(gt)])
+    names = cols === nothing ? columnnames(gt) : String.(cols)
+    orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(gt, o) for o in orderby]
+    allnames = unique(vcat(collect(names), [k.name for k in orderkeys]))
+    cd = Dict{String,AbstractVector}(n => column(gt, n) for n in allnames)
+    rws = CTDSRows(AbstractVector[cd[n] for n in allnames], Symbol.(allnames), nrow(gt))
+    keep = [i for (i, row) in enumerate(rws) if f(row)]
+    keep = _apply_orderby(keep, orderkeys, cd)
+    fullcd = Dict{String,AbstractVector}(n => column(gt, n) for n in columnnames(gt))
+    namemap, order = _select_spec(gt, select)
+    return GroupedTable(Symbol.(order),
+        AbstractVector[fullcd[namemap[o]][keep] for o in order])
 end
 
 _gb_names(c::Union{AbstractString,Symbol}) = String[String(c)]

@@ -930,6 +930,130 @@ end
     @test issorted(collect(o.AN))
 end
 
+# ---- Phase 29: chainable query results ----
+
+@testset "GroupedTable is an AbstractTable" begin
+    dir = joinpath(mktempdir(), "ch.tab")
+    K = Int32[0, 1, 0, 1, 2, 0]
+    X = Float64[1, 2, 3, 4, 5, 6]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X]; nrow=6)
+    t = readtable(dir)
+    gt = groupby(t, "K"; select=["K" => :K, "N" => "gcount()", "S" => "gsum(X)"], orderby=["K"])
+
+    @test gt isa MSv2.AbstractTable
+    @test nrow(gt) == 3
+    @test columnnames(gt) == ["K", "N", "S"]
+    @test column(gt, "N")[:] == [3, 2, 1]
+    @test gt.S[:] == Float64[10, 6, 5]        # .OUTNAME sugar
+    @test gt[:S][:] == Float64[10, 6, 5]      # generic AbstractTable getindex
+    @test getcell(gt, "N", 1) == 3
+    @test keywords(gt) isa Record
+    @test subtables(gt) == Pair{String,String}[]
+    @test columndesc(gt, "N").type == MSv2.TpInt64
+    @test columndesc(gt, "S").type == MSv2.TpDouble
+
+    # Tables.jl regression -- the generic ::AbstractTable methods must
+    # fully cover what the deleted GroupedTable-specific ones did
+    @test Tables.istable(typeof(gt))
+    @test Tables.columnnames(gt) == [:K, :N, :S]
+    @test Tables.getcolumn(gt, :S) == column(gt, "S")
+    @test Tables.getcolumn(gt, 2) == column(gt, "N")
+    ct = Tables.columntable(gt)
+    @test ct.K == Int32[0, 1, 2] && ct.N == [3, 2, 1]
+    @test Tables.schema(gt).names == (:K, :N, :S)
+    dst = joinpath(mktempdir(), "GT2")
+    write_table(dst, "GT2", gt; nrow=nrow(gt))
+    @test column(readtable(dst), "S")[:] == Float64[10, 6, 5]
+
+    @test MSv2.resync(gt) === gt
+    @test MSv2.is_stale(gt) == false
+end
+
+@testset "chain — groupby(join(...))" begin
+    dir = joinpath(mktempdir(), "cj")
+    A1 = Int32[0, 1, 0, 1, 2, 0, 2, 1, 0, 2]
+    TIME = collect(Float64, 1:10)
+    write_table(joinpath(dir, "MAIN"), "MAIN",
+                Pair{String,Any}["ANTENNA1" => A1, "TIME" => TIME]; nrow=10)
+    AN = ["DA41", "DA42", "PM01"]
+    write_table(joinpath(dir, "ANT"), "ANT", Pair{String,Any}["NAME" => AN]; nrow=3)
+    main = readtable(joinpath(dir, "MAIN"))
+    ant = readtable(joinpath(dir, "ANT"))
+
+    j = join(main, ant; on="ANTENNA1", rightcols=["NAME" => "AN"])
+    g = groupby(j, "AN"; select=["AN" => :AN, "N" => "gcount()", "MT" => "gmean(TIME)"],
+                orderby=["AN"])
+    grp = Dict(n => Int[] for n in AN)
+    for i in 1:10
+        push!(grp[AN[A1[i]+1]], i)
+    end
+    uk = sort(AN)
+    @test collect(g.AN) == uk
+    @test collect(g.N) == [length(grp[k]) for k in uk]
+    @test collect(g.MT) ≈ [Statistics.mean(TIME[grp[k]]) for k in uk]
+end
+
+@testset "chain — join(groupby(...), right)" begin
+    dir = joinpath(mktempdir(), "jg")
+    SPW = Int32[0, 0, 1, 1, 0, 1, 0, 1, 0, 1]
+    X = collect(Float64, 1:10)
+    write_table(joinpath(dir, "MAIN"), "MAIN",
+                Pair{String,Any}["SPW" => SPW, "X" => X]; nrow=10)
+    FR = Float64[100, 200]
+    write_table(joinpath(dir, "SPW"), "SPW", Pair{String,Any}["FREQ" => FR]; nrow=2)
+    main = readtable(joinpath(dir, "MAIN"))
+    spw = readtable(joinpath(dir, "SPW"))
+
+    gs = groupby(main, "SPW"; select=["SPW" => :SPW, "N" => "gcount()", "SX" => "gsum(X)"],
+                 orderby=["SPW"])
+    js = join(gs, spw; on="SPW", rightcols=["FREQ"])
+    @test collect(js.FREQ) == FR
+    @test collect(js.N) == [count(==(Int32(0)), SPW), count(==(Int32(1)), SPW)]
+    @test collect(js.SX) == [sum(X[SPW.==0]), sum(X[SPW.==1])]
+end
+
+@testset "chain — query on a GroupedTable" begin
+    dir = joinpath(mktempdir(), "qg")
+    K = Int32[0, 1, 0, 1, 2, 0, 2, 1, 0, 2, 3, 3]
+    X = collect(Float64, 1:12)
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X]; nrow=12)
+    t = readtable(dir)
+    g = groupby(t, "K"; select=["K" => :K, "N" => "gcount()", "S" => "gsum(X)"], orderby=["K"])
+
+    # K counts: 0->4, 1->3, 2->3, 3->2  =>  N >= 3 keeps K in {0,1,2}
+    q = query(g, "N >= 3 ORDER BY N DESC")
+    @test q isa GroupedTable
+    @test issorted(collect(q.N); rev=true)
+    @test all(>=(3), collect(q.N))
+    @test Set(collect(q.K)) == Set(Int32[0, 1, 2])
+    @test collect(q.K)[1] == 0                       # the N=4 group sorts first
+
+    # closure form agrees
+    qc = query(g) do row
+        row.N >= 3
+    end
+    @test Set(collect(qc.K)) == Set(collect(query(g, "N >= 3").K))
+
+    # select= projection/rename
+    q2 = query(g, "N >= 2"; select=["key" => "K", "cnt" => "N"])
+    @test columnnames(q2) == ["key", "cnt"]
+    @test collect(q2.cnt) == [c for c in collect(g.N) if c >= 2]
+
+    # deep 3-step chain
+    dir2 = joinpath(mktempdir(), "dc")
+    A1 = Int32[0, 1, 0, 1, 2, 0, 2, 1, 0, 2]
+    write_table(joinpath(dir2, "M"), "M",
+                Pair{String,Any}["ANTENNA1" => A1, "V" => collect(Float64, 1:10)]; nrow=10)
+    AN = ["a", "b", "c"]
+    write_table(joinpath(dir2, "A"), "A", Pair{String,Any}["NAME" => AN]; nrow=3)
+    m = readtable(joinpath(dir2, "M"))
+    a = readtable(joinpath(dir2, "A"))
+    deep = query(groupby(join(m, a; on="ANTENNA1", rightcols=["NAME" => "AN"]),
+                         "AN"; select=["AN" => :AN, "N" => "gcount()"]),
+                 "N >= 3")
+    @test Set(collect(deep.AN)) == Set(["a", "b", "c"])
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
