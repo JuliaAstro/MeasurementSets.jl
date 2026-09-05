@@ -259,13 +259,7 @@ end
 
 if _HAVE_TAQL
     @testset "write commands -- real TaQL cross-check" begin
-        _run(path, cmd) = begin
-            v = CxxWrap.StdVector{CxxWrap.CxxWrapCore.ConstCxxPtr{Casacore.LibCasacore.Table}}()
-            tb = CCT.Table(path)
-            push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(tb.tableref)))
-            GC.@preserve tb Casacore.LibCasacore.tableCommand(cmd, v)
-            GC.gc(); GC.gc()
-        end
+        _run(path, cmd) = _taqlcmd(cmd, path)
 
         for (jl_cmd, taql_cmd, wherestr) in (
             (["A" => "A * 2"], "SET A = A * 2", "K == 0"),

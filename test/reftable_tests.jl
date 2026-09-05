@@ -6,14 +6,8 @@ import Tables
 # literal would promote Int32/Float64 columns to a common type).
 _cols(ps...) = Pair{String,Any}[p for p in ps]
 
-# TaQL SELECT ... GIVING '<path>' against a seed table -> persistent RefTable.
-if _HAVE_TAQL
-    function _taql_sel(q, parent::CCT.Table)
-        v = CxxWrap.StdVector{CxxWrap.CxxWrapCore.ConstCxxPtr{Casacore.LibCasacore.Table}}()
-        push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(parent.tableref)))
-        GC.@preserve parent CCT.Table(Casacore.LibCasacore.tableCommand(q, v))
-    end
-end
+# TaQL SELECT ... GIVING '<path>' -> persistent RefTable, via `_taqlcmd`
+# (test/taql_helpers.jl).
 
 # Hand-write a ConcatTable table.dat over `partnames` (relative "././" form).
 function _write_concat(dir, partnames)
@@ -48,8 +42,7 @@ if _HAVE_TAQL
         write_table(pdir, "T", _cols("A" => A, "B" => B); nrow=12)
 
         rdir = joinpath(d, "sel")
-        _taql_sel("SELECT FROM \$1 WHERE A IN [3,6,9,12] GIVING '$rdir'", CCT.Table(pdir))
-        GC.gc(); GC.gc()
+        _taqlcmd("SELECT FROM \$1 WHERE A IN [3,6,9,12] GIVING '$rdir'", pdir)
 
         rt = readtable(rdir)
         @test rt isa RefTable
@@ -76,8 +69,7 @@ if _HAVE_TAQL
         write_table(pdir, "T", _cols("A" => collect(Int32, 1:10), "B" => B); nrow=10)
 
         rdir = joinpath(d, "sel")
-        _taql_sel("SELECT A, B AS BR FROM \$1 WHERE A>6 GIVING '$rdir'", CCT.Table(pdir))
-        GC.gc(); GC.gc()
+        _taqlcmd("SELECT A, B AS BR FROM \$1 WHERE A>6 GIVING '$rdir'", pdir)
 
         rt = readtable(rdir)
         @test Set(columnnames(rt)) == Set(["A", "BR"])
@@ -96,8 +88,7 @@ if _HAVE_TAQL
                     nrow=n, tsm=[["DATA"]], ism=["TIME"])
 
         rdir = joinpath(d, "sel")
-        _taql_sel("SELECT FROM \$1 WHERE SC%2==0 GIVING '$rdir'", CCT.Table(pdir))
-        GC.gc(); GC.gc()
+        _taqlcmd("SELECT FROM \$1 WHERE SC%2==0 GIVING '$rdir'", pdir)
 
         rt = readtable(rdir)
         keep = 2:2:n
@@ -112,8 +103,7 @@ if _HAVE_TAQL
         d = mktempdir(); pdir = joinpath(d, "T")
         write_table(pdir, "T", _cols("A" => collect(Int32, 1:8), "B" => collect(1.0:8.0)); nrow=8)
         rdir = joinpath(d, "sel")
-        _taql_sel("SELECT FROM \$1 WHERE A>4 GIVING '$rdir'", CCT.Table(pdir))
-        GC.gc(); GC.gc()
+        _taqlcmd("SELECT FROM \$1 WHERE A>4 GIVING '$rdir'", pdir)
         rt = readtable(rdir)
 
         @test Tables.schema(rt).names == (:A, :B)

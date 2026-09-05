@@ -60,6 +60,12 @@ function subtable(ms::MeasurementSet, name::String)
     throw(KeyError(name))
 end
 
+"""
+    subtablenames(ms) -> Vector{String}
+
+The names of `ms`'s subtables (`"ANTENNA"`, `"SPECTRAL_WINDOW"`, …). Open
+one with [`subtable`](@ref)`(ms, name)` or `ms.NAME`.
+"""
 subtablenames(ms::MeasurementSet) = first.(subtables(getfield(ms, :data)))
 
 # `ms[:DATA]` / `ms["DATA"]` -> a lazy column of the MAIN table

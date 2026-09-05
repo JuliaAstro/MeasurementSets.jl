@@ -38,6 +38,16 @@ end
 
 # --- the lazy column -------------------------------------------------
 
+"""
+    Column{T} <: AbstractVector{T}
+
+A lazy view of one table column, returned by [`column`](@ref) and
+`t[:NAME]`. Indexing reads on demand: `col[i]` fetches one cell, `col[:]`
+takes the storage manager's whole-column fast path, `col[r]` a row
+subset. `T` is the best-known element type — a scalar, a fixed-shape
+`Array{E,N}`, or `Array{E}` when the rank is only known once a cell is
+read.
+"""
 struct Column{T} <: AbstractVector{T}
     table::Table
     desc::ColumnDesc

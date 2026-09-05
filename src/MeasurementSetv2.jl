@@ -1,8 +1,30 @@
 """
     MeasurementSetv2
 
-Pure-Julia reader (and, in later phases, writer) for the Measurement Set
-version 2 data format — casacore Table Data System tables.
+Pure-Julia reader and writer for the **Measurement Set version 2** data
+format — the casacore Table Data System (CTDS) tables used for
+interferometric visibility data by ALMA, the VLA, LOFAR and others. No
+dependency on the casacore C++ library (the one exception is `HDF5.jl`,
+for `MultiHDF5` containers).
+
+Entry points:
+
+* [`readtable`](@ref) — open one CTDS table (returns a [`Table`](@ref),
+  [`RefTable`](@ref) or [`ConcatTable`](@ref)).
+* [`MeasurementSet`](@ref) — open an MS directory; `ms.ANTENNA`,
+  `ms[:DATA]`, [`subtable`](@ref), [`subtablenames`](@ref).
+* [`column`](@ref) / [`columnnames`](@ref) / [`columndesc`](@ref) /
+  [`keywords`](@ref) / [`nrow`](@ref) — the read surface (also a
+  `Tables.jl` source).
+* [`write_table`](@ref) / [`copyms`](@ref) / [`create_ms`](@ref) /
+  [`copytable`](@ref) — create tables.
+* [`edit`](@ref) — open a table for in-place update ([`addrows!`](@ref),
+  [`removerows!`](@ref), [`addcolumn!`](@ref), …).
+* [`query`](@ref) / [`groupby`](@ref) / [`update!`](@ref) /
+  [`taql`](@ref) — the TaQL-lite query / write engine.
+* [`validate`](@ref) / [`SCHEMAVER2`](@ref) — the MS v2 standard schema.
+
+See the README and `CHANGELOG.md` for the full picture.
 """
 module MeasurementSetv2
 

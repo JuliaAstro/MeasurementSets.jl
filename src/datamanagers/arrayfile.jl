@@ -52,6 +52,14 @@ function open_arrayfile(data::Vector{UInt8}, endian::Symbol)
     return ArrayFile(data, endian, version)
 end
 
+# Fetch + parse the `table.f<seq>i` sibling of the storage-manager file
+# at `path` (the `<seq>` file's own path, without the `i`).  `container`
+# is the owning table's MultiFile/MultiHDF5 handle or `nothing`.  Shared
+# by StandardStMan and IncrementalStMan's `_arrayfile!` accessors.
+_load_arrayfile(path::AbstractString, container, endian::Symbol) =
+    open_arrayfile(container === nothing ? read(path * "i") :
+                   container_read(container, basename(path) * "i"), endian)
+
 # shape record at byte `offset` -> (dims::Dims, first-data-byte offset)
 function _af_shape(af::ArrayFile, offset::Integer)
     p = Int(offset)

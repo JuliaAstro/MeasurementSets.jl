@@ -36,6 +36,16 @@ Cell-shape descriptor for a column:
 """
 const CellShape = Union{Dims,VariableShape,VariableDims}
 
+"""
+    ColumnDesc
+
+Description of one table column: its `name`, element `type` (a
+[`CasaType`](@ref)), cell `shape` (a [`CellShape`](@ref) — `()` scalar,
+a `Dims` tuple, `VariableShape`, or `VariableDims`), `comment`, per-column
+`keywords` (a [`Record`](@ref), holding units / `MEASINFO` / engine
+config), and the storage-manager `manager` type + `group` (instance) it is
+bound to. Obtained from [`columndesc`](@ref); the fields are read-only.
+"""
 struct ColumnDesc{T<:CellShape}
     name::String
     comment::String
@@ -104,6 +114,15 @@ _cellshape(isarray::Bool, nrdim::Int, fixed::Dims)::CellShape =
 
 # --- table description --------------------------------------------
 
+"""
+    TableDesc
+
+A table's schema: its `name`, format `version`, the `public` and
+`private` keyword sets (each a [`Record`](@ref)), and the ordered list of
+[`ColumnDesc`](@ref) `columns`. Reachable as `t.desc` on a [`Table`](@ref);
+most code uses [`columnnames`](@ref) / [`columndesc`](@ref) /
+[`keywords`](@ref) instead.
+"""
 struct TableDesc
     name::String
     version::String
@@ -147,6 +166,17 @@ row-wise concatenation of same-schema tables).  All three answer
 """
 abstract type AbstractTable end
 
+"""
+    Table <: AbstractTable
+
+A plain on-disk casacore table, as returned by [`readtable`](@ref) for a
+`table.dat` of subtype `"PlainTable"` (the MS MAIN table and every
+standard subtable). Column data is read lazily and on demand through the
+bound storage managers; cell reads go through [`column`](@ref) /
+[`getcell`](@ref) / `t[:NAME]`. See also [`RefTable`](@ref) and
+[`ConcatTable`](@ref) for the reference / concatenation kinds, and
+[`edit`](@ref) to open one for update.
+"""
 struct Table <: AbstractTable
     path::String
     type::String               # table.info Type
@@ -211,13 +241,41 @@ struct ConcatTable <: AbstractTable
     readme::String
 end
 
+"""
+    nrow(t) -> Int
+
+Number of rows in table `t` (a [`Table`](@ref), [`RefTable`](@ref),
+[`ConcatTable`](@ref) or [`GroupedTable`](@ref)).
+"""
 nrow(t::Table) = t.rows
+
+"""
+    columnnames(t) -> Vector{String}
+
+The column names of table `t`, in schema order.
+"""
 columnnames(t::Table) = [c.name for c in t.desc.columns]
+
+"""
+    columndesc(t, name) -> ColumnDesc
+
+The [`ColumnDesc`](@ref) (type, cell shape, keywords, storage-manager
+binding) for column `name` of table `t`. Throws `KeyError` if there is no
+such column.
+"""
 function columndesc(t::Table, name::AbstractString)
     i = findfirst(c -> c.name == name, t.desc.columns)
     i === nothing && throw(KeyError(name))
     t.desc.columns[i]
 end
+
+"""
+    keywords(t) -> Record
+
+The table-level keyword set of `t` as a [`Record`](@ref) (`MS_VERSION`,
+`MEASURE_REFERENCE`, subtable references, …). Per-column keywords live on
+[`columndesc`](@ref)`(t, name).keywords`.
+"""
 keywords(t::Table) = t.desc.public
 
 function Base.show(io::IO, t::Table)

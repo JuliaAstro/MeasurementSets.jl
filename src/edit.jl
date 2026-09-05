@@ -147,8 +147,21 @@ function Base.setindex!(c::EditColumn, vals, ::Colon)
     return vals
 end
 
-"`setcell!(t, name, i, v)` / `setcolumn!(t, name, vals)` — verbs behind `t[name][i] = v`."
+"""
+    setcell!(t, name, i, v) -> t
+
+Set cell `i` of column `name` in the edit session `t` to `v` — the verb
+behind `t[name][i] = v`.
+"""
 setcell!(t::EditTable, name, i::Integer, v) = (t[name][Int(i)] = v; t)
+
+"""
+    setcolumn!(t, name, vals) -> t
+
+Replace the whole of column `name` in the edit session `t` with `vals`
+(length must equal the current row count) — the verb behind
+`t[name][:] = vals`.
+"""
 setcolumn!(t::EditTable, name, vals) = (t[name][:] = vals; t)
 
 # --- appended-row default -----------------------------------------

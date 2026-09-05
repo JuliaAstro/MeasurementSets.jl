@@ -24,6 +24,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETV2_TEST_MS",
         @info "SAMPLE_MS not found; skipping data-dependent tests" SAMPLE_MS
     end
 
+    include("taql_helpers.jl")              # defines _HAVE_TAQL / _taqlcmd / _taql_create
     include("writer_tests.jl")
     include("indirect_tests.jl")
     include("ism_writer_tests.jl")

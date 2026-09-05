@@ -1,17 +1,8 @@
 # Phase 11: multi-column tiled storage managers
 # (TiledShapeStMan shared hypercubes, TiledColumnStMan + TiledCellStMan writers).
 
-# Build a casacore-authored table via TaQL (CREATE TABLE, no seed table).
-const _HAVE_TAQL = _HAVE_CASACORE && try
-    @eval import CxxWrap
-    true
-catch
-    false
-end
-if _HAVE_TAQL
-    _taql_create(q) = CCT.Table(Casacore.LibCasacore.tableCommand(
-        q, CxxWrap.StdVector{CxxWrap.CxxWrapCore.ConstCxxPtr{Casacore.LibCasacore.Table}}()))
-end
+# `_HAVE_TAQL` / `_taql_create` (casacore-authored table via TaQL
+# CREATE TABLE) come from test/taql_helpers.jl.
 
 # ragged per-row cells (VariableShape) so Casacore.jl gives proper array columns
 _ragged(J, shapes) = [J.(reshape(1:prod(s), s)) .+ J(10i) for (i, s) in enumerate(shapes)]

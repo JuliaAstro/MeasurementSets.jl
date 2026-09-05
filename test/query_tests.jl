@@ -1073,14 +1073,8 @@ if _HAVE_TAQL
 
         function _taql_rows(wherestr)
             rdir = joinpath(mktempdir(), "sel")
-            v = CxxWrap.StdVector{CxxWrap.CxxWrapCore.ConstCxxPtr{Casacore.LibCasacore.Table}}()
-            parent = CCT.Table(pdir)
-            push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(parent.tableref)))
-            GC.@preserve parent CCT.Table(Casacore.LibCasacore.tableCommand(
-                "SELECT FROM \$1 WHERE $wherestr GIVING '$rdir'", v))
-            GC.gc(); GC.gc()
-            rows = readtable(rdir).rows
-            return rows
+            _taqlcmd("SELECT FROM \$1 WHERE $wherestr GIVING '$rdir'", pdir)
+            return readtable(rdir).rows
         end
 
         t = readtable(pdir)
@@ -1129,14 +1123,10 @@ if _HAVE_TAQL
         # ORDER is unspecified in both engines).
         function _taql_group(wherestr)
             rdir = joinpath(mktempdir(), "g")
-            v = CxxWrap.StdVector{CxxWrap.CxxWrapCore.ConstCxxPtr{Casacore.LibCasacore.Table}}()
-            parent = CCT.Table(pdir)
-            push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(parent.tableref)))
             w = wherestr === nothing ? "" : "WHERE $wherestr "
-            GC.@preserve parent CCT.Table(Casacore.LibCasacore.tableCommand(
-                "SELECT K, gcount(K) AS N, gsum(X) AS S, gmean(X) AS MX, " *
-                "gmin(X) AS XMN, gmax(X) AS XMX FROM \$1 $(w)GROUP BY K GIVING '$rdir'", v))
-            GC.gc(); GC.gc()
+            _taqlcmd("SELECT K, gcount(K) AS N, gsum(X) AS S, gmean(X) AS MX, " *
+                     "gmin(X) AS XMN, gmax(X) AS XMX FROM \$1 $(w)GROUP BY K GIVING '$rdir'",
+                     pdir)
             g = readtable(rdir)
             ks = column(g, "K")[:]
             p = sortperm(ks)
@@ -1177,14 +1167,8 @@ if _HAVE_TAQL
 
         function _taql_join(sel, fromjoin)
             rdir = joinpath(mktempdir(), "j")
-            v = CxxWrap.StdVector{CxxWrap.CxxWrapCore.ConstCxxPtr{Casacore.LibCasacore.Table}}()
-            m = CCT.Table(joinpath(d, "MAIN"))
-            r = CCT.Table(joinpath(d, fromjoin[1]))
-            push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(m.tableref)))
-            push!(v, Ref(CxxWrap.CxxWrapCore.ConstCxxPtr(r.tableref)))
-            GC.@preserve m r CCT.Table(Casacore.LibCasacore.tableCommand(
-                "SELECT $sel FROM \$1 JOIN \$2 $(fromjoin[2]) GIVING '$rdir'", v))
-            GC.gc(); GC.gc()
+            _taqlcmd("SELECT $sel FROM \$1 JOIN \$2 $(fromjoin[2]) GIVING '$rdir'",
+                     joinpath(d, "MAIN"), joinpath(d, fromjoin[1]))
             readtable(rdir)
         end
 

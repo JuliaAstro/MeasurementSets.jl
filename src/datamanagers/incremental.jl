@@ -74,12 +74,8 @@ _ism_i64(ism, off) = (ism.endian === :big ? ntoh : ltoh)(reinterpret(Int64, view
 
 # `table.f<seq>i` --- opened on first indirect-array access, then memoized.
 function _arrayfile!(ism::IncrementalStMan)
-    if ism.arrayfile === nothing
-        name = basename(ism.path) * "i"
-        bytes = ism.container === nothing ? read(ism.path * "i") :
-            container_read(ism.container, name)
-        ism.arrayfile = open_arrayfile(bytes, ism.endian)
-    end
+    ism.arrayfile === nothing &&
+        (ism.arrayfile = _load_arrayfile(ism.path, ism.container, ism.endian))
     return ism.arrayfile
 end
 

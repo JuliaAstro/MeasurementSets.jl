@@ -99,12 +99,8 @@ bucketptr(ssm::StandardStMan, n::Integer) = SSM_LEADER + Int(n) * ssm.length
 
 # `table.f<seq>i` --- opened on first indirect-array access, then memoized.
 function _arrayfile!(ssm::StandardStMan)
-    if ssm.arrayfile === nothing
-        name = basename(ssm.path) * "i"
-        bytes = ssm.container === nothing ? read(ssm.path * "i") :
-            container_read(ssm.container, name)
-        ssm.arrayfile = open_arrayfile(bytes, ssm.endian)
-    end
+    ssm.arrayfile === nothing &&
+        (ssm.arrayfile = _load_arrayfile(ssm.path, ssm.container, ssm.endian))
     return ssm.arrayfile
 end
 

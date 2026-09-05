@@ -6,6 +6,14 @@
 
 const MS_VERSION = 2.0f0        # the MAIN table's `MS_VERSION` keyword value
 
+"""
+    StdColumn
+
+One column of the MS v2 standard schema (NRAO Memo 229 §5): its `name`,
+`type` ([`CasaType`](@ref)), cell `shape`, `unit`, whether it is
+`required`, and a `comment`. Reachable via [`stdcolumns`](@ref) /
+`stdtable(name).columns`.
+"""
 struct StdColumn
     name::String
     type::CasaType
@@ -15,6 +23,13 @@ struct StdColumn
     comment::String
 end
 
+"""
+    StdTable
+
+The standard-schema definition of one MS table: its `name`, `columns`
+([`StdColumn`](@ref)), required `keywords`, and (MAIN only) required
+`subtables`. Looked up in [`SCHEMAVER2`](@ref) / via `stdtable(name)`.
+"""
 struct StdTable
     name::String
     columns::Vector{StdColumn}
@@ -30,6 +45,14 @@ optional(n, t, s=(); u="", doc="") = stdcol(n, t, s; u, req=false, doc)
 const VARSHAPE = VariableShape()
 const VARDIMS = VariableDims()
 
+"""
+    SCHEMAVER2 :: Dict{String,StdTable}
+
+The MS version 2 standard schema (NRAO Memo 229 §5), keyed by table name
+(`"MAIN"`, `"ANTENNA"`, `"SPECTRAL_WINDOW"`, …). Use [`stdtable`](@ref) /
+[`stdcolumns`](@ref) to query it and [`validate`](@ref) to check a table
+against it.
+"""
 const SCHEMAVER2 = Dict{String,StdTable}()
 
 definetable(name, cols; keywords=Pair{String,Any}[], subtables=String[]) =
@@ -279,6 +302,13 @@ definetable("WEATHER", [
 The standard MS v2 definition for table `name` ("MAIN", "ANTENNA", …).
 """
 stdtable(name::AbstractString) = SCHEMAVER2[uppercase(name)]
+
+"""
+    stdcolumns(name) -> Vector{StdColumn}
+
+The standard-schema columns of MS v2 table `name` — shorthand for
+`stdtable(name).columns`.
+"""
 stdcolumns(name::AbstractString) = stdtable(name).columns
 
 """

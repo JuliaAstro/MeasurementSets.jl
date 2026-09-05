@@ -1,6 +1,14 @@
 # casacore DataType enum  <->  Julia types
 # (casacore/casa/Utilities/DataType.h)
 
+"""
+    CasaType
+
+Enum mirroring casacore's `DataType` — the element type of a column or
+keyword value (`TpBool`, `TpInt`, `TpFloat`, `TpComplex`, `TpString`, the
+`TpArray*` variants, `TpInt64`, …). It is the `type` field of a
+[`ColumnDesc`](@ref); `juliatype(t)` gives the corresponding Julia type.
+"""
 @enum CasaType::Int32 begin
     TpBool          = 0
     TpChar          = 1
