@@ -719,9 +719,9 @@ expressions (Phase 41). Verified against real TaQL via `tableCommand`
 engine path, against `CCT.Table` decoding `virtualtaql=Dict("W" =>
 "UVW[3]")`.
 
-Not supported: boolean-mask subscripts (`DATA[FLAG]`), negative /
-`end`-relative indices (omit the range end to mean "to the end"), and
-assigning *into* an indexed cell.
+Not supported: boolean-mask subscripts (`DATA[FLAG]`) and assigning
+*into* an indexed cell. (Negative / `end`-relative indices landed in
+Phase 44.)
 
 ### Phase 43 — TaQL-lite `BETWEEN`
 
@@ -732,3 +732,17 @@ TaQL-lite expression surface. `lo`/`hi` are arithmetic expressions
 at the comparison level, so `x BETWEEN a AND b OR c` groups as
 `(x BETWEEN a AND b) OR c`. Verified against real TaQL via
 `tableCommand`.
+
+### Phase 44 — TaQL-lite negative / `end`-relative array indices
+
+`V[-1]` / `V[-2,1]` — a negative subscript counts from the end
+(`-1` == last), matching casacore's `Slicer` semantics, and
+`sum(V[-2:-1,1])` for the last two along an axis. Plus an `end` keyword
+(Julia-idiomatic, no casacore equivalent) usable in any subscript
+expression: `V[end,1]`, `V[end-2:end,1]` — `end` resolves to that
+axis's length. `end` outside a subscript raises a clear error. A
+non-positive slice step is rejected (casacore does too).
+
+Negative indices are cross-checked against real TaQL via `tableCommand`;
+`end` is exercised only against a hand-computed reference (no TaQL
+equivalent).

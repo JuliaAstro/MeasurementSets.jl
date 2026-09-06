@@ -1086,6 +1086,14 @@ end
     e8 = parse("V[rownumber(),1] > 0").lhs              # expression subscript
     @test e8.axes[1] isa MSv2.TQLRowNum
 
+    e9 = parse("V[-1,1] > 0").lhs                       # negative scalar index
+    @test e9.axes[1] isa MSv2.TQLLit && e9.axes[1].value == -1
+    e10 = parse("V[end,1] > 0").lhs                     # `end` keyword
+    @test e10.axes[1] isa MSv2.TQLEnd
+    e11 = parse("V[end-2:end,1] > 0").lhs               # `end` arithmetic in a range
+    @test e11.axes[1].lo isa MSv2.TQLArith && e11.axes[1].hi isa MSv2.TQLEnd
+    @test parse("end") isa MSv2.TQLEnd                  # parses; errors only at eval
+
     @test_throws ArgumentError parse("V[] > 0")
 end
 
@@ -1110,6 +1118,18 @@ end
 
     # only referenced columns read (K would be fine; V/UVW touched)
     @test query(t, "UVW[1] > 100").rows == Int[]
+
+    # Phase 44: negative / `end`-relative indices
+    @test query(t, "UVW[-1] > 6").rows == [i for i in 1:6 if UVW[i][end] > 6]
+    @test query(t, "UVW[end] > 6").rows == [i for i in 1:6 if UVW[i][end] > 6]
+    @test query(t, "V[end,1] > 25").rows == [i for i in 1:6 if V[i][end, 1] > 25]
+    @test query(t, "V[end-1,1] > 15").rows == [i for i in 1:6 if V[i][end - 1, 1] > 15]
+    @test query(t, "sum(V[-2:-1,1]) > 40").rows ==
+          [i for i in 1:6 if sum(V[i][end - 1:end, 1]) > 40]
+    @test query(t, "sum(V[end-2:end,1]) > 40").rows ==
+          [i for i in 1:6 if sum(V[i][end - 2:end, 1]) > 40]
+    @test_throws ArgumentError query(t, "end > 0")                  # bare `end`
+    @test_throws ArgumentError query(t, "V[1:5:0,1] > 0")           # non-positive step
 end
 
 @testset "TaQL-lite — array indexing in groupby / update!" begin
@@ -1242,7 +1262,10 @@ if _HAVE_TAQL
         # sum (exercises inclusive range), and a start:end:step range
         # (casacore order -> must match our a:b:s -> Julia a:s:b mapping).
         for w in ("UVW[3] > 30", "V[1,1] > 8", "V[2,3] - V[1,1] > 1",
-                  "sum(V[1:2,1]) > 12", "sum(V[1:3:2,1]) > 8")
+                  "sum(V[1:2,1]) > 12", "sum(V[1:3:2,1]) > 8",
+                  # Phase 44: negative-from-end (casacore-compatible; `end`
+                  # has no TaQL equivalent so it is not cross-checked here)
+                  "UVW[-1] > 30", "V[-1,1] > 8", "sum(V[-2:-1,1]) > 20")
             @test query(t, w).rows == _rows(w)
         end
     end

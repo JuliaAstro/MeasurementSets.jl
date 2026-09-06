@@ -19,7 +19,8 @@
 # `~=` approximate equality, boolean-mask array subscripts, units,
 # date/time or measures functions, computed output columns.
 # (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
-# 1-based -- landed in Phase 42; `BETWEEN` / `NOT BETWEEN` in Phase 43.)
+# 1-based, with negative-from-end and `end` -- landed in Phase 42/44;
+# `BETWEEN` / `NOT BETWEEN` in Phase 43.)
 #
 # Phase 23 adds ORDER BY (bare column references only, optional per-key
 # ASC/DESC -- verified against the `sortlist`/`sortexpr` grammar; no
@@ -113,6 +114,7 @@ struct TQLBetween <: TQLExpr        # x BETWEEN lo AND hi (inclusive both ends);
     hi::TQLExpr
     negate::Bool
 end
+struct TQLEnd <: TQLExpr end         # `end` inside a subscript -> that axis's length
 
 # Arithmetic and comparison broadcast over an array-cell operand (TaQL
 # semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
@@ -136,6 +138,8 @@ _tqleval(e::TQLMatch, cols, i) =
 _tqleval(e::TQLFunc, cols, i) =
     e.fn(ntuple(k -> _tqleval(e.args[k], cols, i), length(e.args))...)
 _tqleval(::TQLRowNum, cols, i) = i
+_tqleval(::TQLEnd, cols, i) = throw(ArgumentError(
+    "TaQL-lite: `end` is only valid inside an array subscript `[...]`"))
 _tqleval(::TQLAggr, cols, i) = throw(ArgumentError(
     "TaQL-lite: aggregate functions (g*) are only valid in groupby(...), not query(...)"))
 _tqleval(e::TQLIndex, cols, i) = _tql_do_index(_tqleval(e.base, cols, i), e.axes,
@@ -165,12 +169,28 @@ function _tql_do_index(arr, axes, ev)
 end
 
 function _tql_axis(ax, arr, k::Int, ev)
-    ax isa NamedTuple || return Int(ev(ax))                       # scalar index
-    lo = ax.lo === nothing ? 1           : Int(ev(ax.lo))
-    hi = ax.hi === nothing ? size(arr, k) : Int(ev(ax.hi))
-    st = ax.step === nothing ? 1          : Int(ev(ax.step))
+    n = size(arr, k)
+    # `end` inside this axis's subscript -> `n`; a negative resolved
+    # index counts from the end (casacore Slicer: -1 == last).
+    e(x) = _tql_fromend(Int(ev(_subst_end(x, n))), n)
+    ax isa NamedTuple || return e(ax)                             # scalar index
+    lo = ax.lo === nothing ? 1 : e(ax.lo)
+    hi = ax.hi === nothing ? n : e(ax.hi)
+    st = ax.step === nothing ? 1 : Int(ev(_subst_end(ax.step, n)))
+    st > 0 || throw(ArgumentError("TaQL-lite: array subscript step must be positive"))
     return lo:st:hi
 end
+
+_tql_fromend(v::Int, n::Int) = v < 0 ? n + v + 1 : v
+
+# rewrite `end` -> TQLLit(n) in one axis subscript expression; a nested
+# `V[W[end], k]` keeps its inner index untouched (it self-resolves via
+# its own `_tql_do_index`).
+_subst_end(e::TQLEnd, n) = TQLLit(n)
+_subst_end(e::TQLArith, n) = TQLArith(e.op, _subst_end(e.lhs, n), _subst_end(e.rhs, n))
+_subst_end(e::TQLNeg, n) = TQLNeg(_subst_end(e.a, n))
+_subst_end(e::TQLFunc, n) = TQLFunc(e.fn, TQLExpr[_subst_end(a, n) for a in e.args])
+_subst_end(e::TQLExpr, n) = e
 
 # Collect every column name an expression actually references, so `query`
 # reads only those columns (not the whole table) -- the real point of the
@@ -187,6 +207,7 @@ _tqlrefs!(seen, e::TQLNeg) = _tqlrefs!(seen, e.a)
 _tqlrefs!(seen, e::TQLMatch) = _tqlrefs!(seen, e.lhs)
 _tqlrefs!(seen, e::TQLFunc) = foreach(a -> _tqlrefs!(seen, a), e.args)
 _tqlrefs!(seen, ::TQLRowNum) = nothing
+_tqlrefs!(seen, ::TQLEnd) = nothing
 _tqlrefs!(seen, e::TQLAggr) = e.arg === nothing ? nothing : _tqlrefs!(seen, e.arg)
 function _tqlrefs!(seen, e::TQLIndex)
     _tqlrefs!(seen, e.base)
@@ -208,6 +229,7 @@ _has_aggr(e::TQLAggr) = true
 _has_aggr(e::TQLCol) = false
 _has_aggr(e::TQLLit) = false
 _has_aggr(::TQLRowNum) = false
+_has_aggr(::TQLEnd) = false
 _has_aggr(e::TQLCmp) = _has_aggr(e.lhs) || _has_aggr(e.rhs)
 _has_aggr(e::TQLArith) = _has_aggr(e.lhs) || _has_aggr(e.rhs)
 _has_aggr(e::TQLAnd) = _has_aggr(e.a) || _has_aggr(e.b)
@@ -645,6 +667,9 @@ function _parse_atom_base!(p::TQLParser)
         up = uppercase(t.text)
         up == "TRUE" && return TQLLit(true)
         up == "FALSE" && return TQLLit(false)
+        # `end` -- only meaningful inside an array subscript; it errors at
+        # evaluation if used anywhere else.
+        up == "END" && !(t.text in p.validnames) && return TQLEnd()
         t.text in p.validnames || throw(ArgumentError(
             "TaQL-lite: unknown column \"$(t.text)\" in \"$(p.src)\""))
         return TQLCol(t.text)
@@ -1000,8 +1025,8 @@ A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 bitwise operators, `~=` approximate equality, boolean-mask array
 subscripts, units, or date/time / measures functions.  Supported:
-1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`) and
-`BETWEEN` / `NOT BETWEEN` (inclusive both ends).
+1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
+`UVW[-1]`, `V[end-2:end,1]`) and `BETWEEN` / `NOT BETWEEN` (inclusive).
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
@@ -1095,6 +1120,8 @@ _geval(e::TQLFunc, cols, g) =
     e.fn(ntuple(k -> _geval(e.args[k], cols, g), length(e.args))...)
 _geval(::TQLRowNum, cols, g) =
     throw(ArgumentError("TaQL-lite: rownumber() is not valid in groupby(...)"))
+_geval(::TQLEnd, cols, g) = throw(ArgumentError(
+    "TaQL-lite: `end` is only valid inside an array subscript `[...]`"))
 _geval(e::TQLIndex, cols, g) = _tql_do_index(_geval(e.base, cols, g), e.axes,
                                              (x -> _geval(x, cols, g)))
 _geval(e::TQLBetween, cols, g) = _tql_between(
