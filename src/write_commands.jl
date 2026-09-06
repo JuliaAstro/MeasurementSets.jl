@@ -367,6 +367,12 @@ function taql(target, command::AbstractString)
         else
             select = Pair{String,String}[]
             for piece in _split_commas(collist)
+                mp = match(r"^(.+?)\s+AS\s+\(\s*(\w+)\s*,\s*(\w+)\s*\)$"is, piece)
+                if mp !== nothing              # expr AS (valname, maskname)
+                    push!(select, "($(mp.captures[2]), $(mp.captures[3]))" =>
+                          String(strip(mp.captures[1])))
+                    continue
+                end
                 cm = match(r"^(.+?)(?:\s+AS\s+(\w+))?$"is, piece)
                 cm === nothing && throw(ArgumentError("taql: malformed column \"$piece\""))
                 src = String(strip(cm.captures[1]))

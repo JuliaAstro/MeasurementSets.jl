@@ -608,6 +608,33 @@ end
     end
     write_table(dst, "MO", rd; nrow=nrow(rd))
     @test column(readtable(dst), "dd")[1] == 2 .* V[1]
+
+    # SELECT expr AS (val, mask): two output columns from a masked array
+    r5 = query(t; select=[("D", "M") => "marray(V, F)"]) do row
+        true
+    end
+    @test columnnames(r5) == ["D", "M"]
+    @test collect(r5.D)[1] == V[1]
+    @test collect(r5.M)[1] == F[1]                 # marray takes the mask as-is
+
+    r6 = query(t, "K >= 1"; select=["K" => "K", ("D", "M") => "V[V > 4.0]"])
+    @test columnnames(r6) == ["K", "D", "M"]
+    @test collect(r6.D)[1] == V[2]
+    @test collect(r6.M)[1] == .!(V[2] .> 4.0)
+
+    # non-masked RHS -> mask column is the non-finite flag
+    r7 = query(t; select=[("D", "M") => "1.0 / (V - 5.0)"]) do row
+        true
+    end
+    @test collect(r7.M)[1] == .!isfinite.(1.0 ./ (V[1] .- 5.0))
+
+    # duplicate output name (either side of the pair) errors
+    @test_throws ArgumentError query(t; select=[("D", "D") => "marray(V, F)"]) do row
+        true
+    end
+    @test_throws ArgumentError query(t; select=["W" => "K", ("D", "W") => "marray(V, F)"]) do row
+        true
+    end
 end
 
 @testset "TaQL-lite query — function string form" begin

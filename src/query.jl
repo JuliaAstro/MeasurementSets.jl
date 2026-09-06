@@ -1230,17 +1230,32 @@ function _flatten_query_parent(t::AbstractTable, rows::Vector{Int},
     return t, rows, namemap
 end
 
-# classify `select` pairs against `validnames` into 3-tuples
-# `(outname, :proj, srcname)` or `(outname, :expr, TQLExpr)`.
-# A `Symbol` RHS, or a `String` RHS naming a column, is a projection;
-# any other `String` is parsed as a computed expression (aggregates
-# rejected -- those need `groupby`).
+# classify `select` pairs against `validnames` into 3-tuples:
+# `(outname, :proj, srcname)`, `(outname, :expr, TQLExpr)`, or
+# `(valname, :mpair, (maskname, TQLExpr))` -- the last emits TWO output
+# columns (data + mask) from a masked-array expression (TaQL's
+# `expr AS (v, m)`). A `Symbol` LHS or a `(v, m)` tuple/`"(v, m)"` LHS
+# selects the kind; a `String` RHS naming a column is a projection,
+# any other `String` a computed expression (aggregates rejected).
 function _select_classify(select::AbstractVector{<:Pair}, validnames)
-    order = String[String(first(p)) for p in select]
-    allunique(order) || throw(ArgumentError("duplicate output column name"))
     out = Tuple{String,Symbol,Any}[]
+    names = String[]
     for p in select
-        nm = String(first(p)); rhs = last(p)
+        lk, rhs = first(p), last(p)
+        pn = lk isa Tuple ?
+            (length(lk) == 2 ? (String(lk[1]), String(lk[2])) :
+             throw(ArgumentError("select: a (val, mask) target takes exactly two names"))) :
+            (lk isa AbstractString ? _pair_split_names(lk) : nothing)
+        if pn !== nothing
+            ast = _taqllite_parse(String(rhs), validnames)
+            _has_aggr(ast) && throw(ArgumentError(
+                "select: aggregate functions need `groupby`, not `query` (\"$(rhs)\")"))
+            push!(out, (pn[1], :mpair, (pn[2], ast)))
+            append!(names, pn)
+            continue
+        end
+        nm = String(lk)
+        push!(names, nm)
         if rhs isa Symbol || String(rhs) in validnames
             s = String(rhs)
             s in validnames || throw(ArgumentError("select: no column \"$s\""))
@@ -1256,29 +1271,47 @@ function _select_classify(select::AbstractVector{<:Pair}, validnames)
             end
         end
     end
+    allunique(names) || throw(ArgumentError("duplicate output column name"))
     return out
+end
+
+# "(a, b)" -> ("a", "b"); a bare name or any other string -> nothing
+function _pair_split_names(s::AbstractString)
+    t = strip(s)
+    (startswith(t, "(") && endswith(t, ")")) || return nothing
+    p = split(chop(t; head=1, tail=1), ',')
+    length(p) == 2 || return nothing
+    return (String(strip(p[1])), String(strip(p[2])))
 end
 
 _select_all_proj(cls) = all(c -> c[2] === :proj, cls)
 
-# materialise the `select` output: `getcol(name)` fetches a source
-# column, `rows` are the surviving 1-based indices into it (already
-# ORDER BY-sorted). Returns column vectors in `select` order.
+# materialise the `select` output -> `Symbol => column` pairs in output
+# order (a `:mpair` entry contributes two). `getcol(name)` fetches a
+# source column; `rows` are the surviving 1-based indices (ORDER
+# BY-sorted).
 function _select_materialize(cls, getcol, rows::Vector{Int})
     refs = Set{String}()
     for (_, kind, v) in cls
         kind === :expr && _tqlrefs!(refs, v)
+        kind === :mpair && _tqlrefs!(refs, v[2])
     end
     cd = Dict{String,AbstractVector}(n => getcol(n) for n in refs)
-    cols = AbstractVector[]
-    for (_, kind, v) in cls
+    out = Pair{Symbol,AbstractVector}[]
+    for (nm, kind, v) in cls
         if kind === :proj
-            push!(cols, _mapcol(getcol(v), rows))
-        else
-            push!(cols, identity.(Any[_unwrap_marray(_tqleval(v, cd, i)) for i in rows]))
+            push!(out, Symbol(nm) => _mapcol(getcol(v), rows))
+        elseif kind === :expr
+            push!(out, Symbol(nm) =>
+                identity.(Any[_unwrap_marray(_tqleval(v, cd, i)) for i in rows]))
+        else                                       # :mpair -> data + mask
+            vals = Any[_tqleval(v[2], cd, i) for i in rows]
+            push!(out, Symbol(nm) => identity.(Any[_unwrap_marray(x) for x in vals]))
+            push!(out, Symbol(v[1]) => identity.(Any[
+                x isa TQLMArray ? x.mask : _bcast(!isfinite, _unwrap_marray(x)) for x in vals]))
         end
     end
-    return cols
+    return out
 end
 
 # ======================================================================
@@ -1326,7 +1359,10 @@ persist it with `write_reftable(dst, result)`). When any `rhs` is a
 0)"` — same grammar as WHERE, aggregates excepted) the result is an
 in-memory `GroupedTable` with those columns evaluated per matched row.
 A computed column that is a masked array (`"V[FLAG]"`) persists as its
-plain data — use `"arraymask(V[FLAG])"` for a separate mask column.
+plain data. A `("val", "mask") => "expr"` pair entry (TaQL's
+`expr AS (v, m)`) instead emits **two** columns — the data and the
+mask — so `[("D", "F") => "marray(DATA, FLAG)"]` reads a column
+together with its mask column.
 
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
@@ -1358,8 +1394,8 @@ function query(t::AbstractTable, wherestr::AbstractString;
         return RefTable("", parent, rows, namemap, order,
                         parent.type, parent.subtype, parent.readme)
     end
-    outcols = _select_materialize(cls, n -> column(t, n), matched)
-    return GroupedTable(Symbol[Symbol(c[1]) for c in cls], outcols)
+    ps = _select_materialize(cls, n -> column(t, n), matched)
+    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
 end
 
 _normalize_orderkey(t::AbstractTable, s::Union{AbstractString,Symbol}) = begin
@@ -1411,8 +1447,8 @@ function query(f::Function, t::AbstractTable;
         return RefTable("", parent, rows2, namemap, order,
                         parent.type, parent.subtype, parent.readme)
     end
-    outcols = _select_materialize(cls, n -> column(t, n), matched)
-    return GroupedTable(Symbol[Symbol(c[1]) for c in cls], outcols)
+    ps = _select_materialize(cls, n -> column(t, n), matched)
+    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
 end
 
 # ======================================================================
@@ -1588,8 +1624,8 @@ function query(gt::GroupedTable, wherestr::AbstractString;
     keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tqleval(ast, cd, i)]
     keep = _apply_orderby(keep, orderby, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
-    return GroupedTable(Symbol[Symbol(c[1]) for c in cls],
-        _select_materialize(cls, n -> column(gt, n), keep))
+    ps = _select_materialize(cls, n -> column(gt, n), keep)
+    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
 end
 
 """
@@ -1610,8 +1646,8 @@ function query(f::Function, gt::GroupedTable;
     keep = [i for (i, row) in enumerate(rws) if f(row)]
     keep = _apply_orderby(keep, orderkeys, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
-    return GroupedTable(Symbol[Symbol(c[1]) for c in cls],
-        _select_materialize(cls, n -> column(gt, n), keep))
+    ps = _select_materialize(cls, n -> column(gt, n), keep)
+    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
 end
 
 _gb_names(c::Union{AbstractString,Symbol}) = String[String(c)]

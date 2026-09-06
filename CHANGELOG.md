@@ -966,3 +966,15 @@ propagates the mask (union). So `mean(V[!FLAG])`,
 to the companion column — the faithful form Phase 59 approximated) all
 work. A computed `select` column of masked arrays persists as plain
 data (`arraymask(expr)` for a separate mask column).
+
+### Phase 61 — `SELECT expr AS (val, mask)`
+
+`query`'s `select` `("valname", "maskname") => "expr"` pair form (and
+`taql`'s `SELECT expr AS (v, m)`) emits **two** output columns from a
+masked-array expression — the data and the mask. So
+`query(t; select = [("D", "F") => "marray(DATA, FLAG)"])` reads a
+column together with its mask column, and `taql(t, "SELECT V[V > 0] AS
+(D, M)")` splits a masked selection into data + mask. A non-masked RHS
+gives a non-finite flag for the mask column (consistent with Phase 59).
+casacore has no on-disk column↔mask association — the mask is always
+named, so `marray(col, maskcol)` *is* "read a masked column".

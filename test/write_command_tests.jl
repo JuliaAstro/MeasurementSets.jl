@@ -158,6 +158,18 @@ end
     taql(s, "SELECT * INTO '$d5'")
     @test column(readtable(d5), "A")[:] == A
 
+    # SELECT expr AS (val, mask)
+    dm = mktempdir()
+    V = [Float64[i i+1; i+2 i+3] for i in 1:4]
+    F = [Bool[false true; true false] for _ in 1:4]
+    write_table(joinpath(dm, "mt"), "mt", Pair{String,Any}["V" => V, "F" => F];
+        nrow=4, tsm=[["V"], ["F"]])
+    mt = readtable(joinpath(dm, "mt"))
+    r = taql(mt, "SELECT V[V > 2.0] AS (D, M)")
+    @test columnnames(r) == ["D", "M"]
+    @test collect(r.D)[1] == V[1]
+    @test collect(r.M)[1] == .!(V[1] .> 2.0)
+
     # malformed
     @test_throws ArgumentError taql(p3, "FROBNICATE x")
     @test_throws ArgumentError taql(p3, "UPDATE t A = 1")

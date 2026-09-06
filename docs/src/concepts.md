@@ -76,6 +76,6 @@ briefly: 1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
 `UPDATE … SET col[i,j] = …` array-slice / boolean-mask
 (`SET col[maskexpr] = …`) / `(col, maskcol)` paired assignment, and
 computed `query` `select` columns (`"amp" => "sqrt(abs(V))"`), and
-masked arrays (`V[boolexpr]`, `marray` / `arraydata` / `arraymask`;
-reductions skip masked elements) *are* supported, but no units or
-date/time / measures functions.
+masked arrays (`V[boolexpr]`, `marray` / `arraydata` / `arraymask`,
+`SELECT expr AS (val, mask)`; reductions skip masked elements) *are*
+supported, but no units or date/time / measures functions.
