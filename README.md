@@ -1,6 +1,6 @@
 # MeasurementSets
 
-[![Build Status](https://github.com/Paul Barrett/MeasurementSets.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/Paul Barrett/MeasurementSets.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Build Status](https://github.com/JuliaAstro/MeasurementSets.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/JuliaAstro/MeasurementSets.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
 A pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for

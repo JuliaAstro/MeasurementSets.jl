@@ -8,16 +8,17 @@ let src = read(joinpath(@__DIR__, "..", "CHANGELOG.md"), String)
     write(joinpath(@__DIR__, "src", "changelog.md"), src)
 end
 
+const REPO = "github.com/JuliaAstro/MeasurementSets.jl"
+
 makedocs(
     sitename = "MeasurementSets.jl",
     modules  = [MeasurementSets],
     authors  = "Paul Barrett",
     format   = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
-        edit_link  = nothing,          # no valid repo slug yet -> no "Edit on GitHub" links
-        repolink   = nothing,
+        canonical  = "https://juliaastro.org/MeasurementSets/stable/",
     ),
-    remotes  = nothing,                # silence the `git remote` lookup (placeholder slug)
+    repo     = Documenter.Remotes.GitHub("JuliaAstro", "MeasurementSets.jl"),
     pages = [
         "Home"          => "index.md",
         "Concepts"      => "concepts.md",
@@ -28,9 +29,11 @@ makedocs(
     checkdocs = :exported,
 )
 
-# Deployment is intentionally not wired yet -- the GitHub repo slug is a
-# placeholder (`github.com/Paul Barrett/...`).  Once it is real, append:
-#
-#   deploydocs(repo = "github.com/<owner>/MeasurementSets.jl", devbranch = "main")
-#
-# and add a docs job to .github/workflows/ (see the PkgTemplates default).
+# Deployment: wired for JuliaAstro's shared docs host (needs a
+# DOCUMENTER_KEY secret + a docs job in .github/workflows/ — see
+# .github/workflows/TagBot.yml which already references DOCUMENTER_KEY).
+deploydocs(
+    repo = REPO,
+    devbranch = "main",
+    push_preview = true,
+)
