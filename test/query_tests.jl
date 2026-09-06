@@ -1129,6 +1129,43 @@ end
     @test column(r, "X")[:] == [V[i][2, 3] + 1 for i in 1:6]
 end
 
+# ---- Phase 43: BETWEEN ------------------------------------------------
+
+@testset "TaQL-lite parser — BETWEEN unit" begin
+    validnames = Set(["A", "B"])
+    parse(s) = MSv2._taqllite_parse(s, validnames)
+
+    e = parse("A BETWEEN 3 AND 7")
+    @test e isa MSv2.TQLBetween && !e.negate
+    @test e.lo isa MSv2.TQLLit && e.hi isa MSv2.TQLLit
+
+    e2 = parse("A NOT BETWEEN 3 AND 7")
+    @test e2 isa MSv2.TQLBetween && e2.negate
+
+    e3 = parse("A + 1 BETWEEN B AND B * 2")     # arithexpr operands
+    @test e3.lhs isa MSv2.TQLArith && e3.hi isa MSv2.TQLArith
+
+    # BETWEEN binds like a comparison: `x BETWEEN a AND b OR c` -> `(...) OR c`
+    e4 = parse("A BETWEEN 2 AND 4 OR A == 9")
+    @test e4 isa MSv2.TQLOr && e4.a isa MSv2.TQLBetween
+
+    @test_throws ArgumentError parse("A BETWEEN 3")
+    @test_throws ArgumentError parse("A BETWEEN 3 7")
+end
+
+@testset "TaQL-lite query — BETWEEN" begin
+    dir = joinpath(mktempdir(), "bt.tab")
+    A = collect(1:12)
+    B = collect(0.0:11.0)
+    write_table(dir, "T", Pair{String,Any}["A" => A, "B" => B]; nrow=12)
+    t = readtable(dir)
+    @test query(t, "A BETWEEN 3 AND 7").rows == 3:7
+    @test query(t, "A NOT BETWEEN 3 AND 7").rows == [1, 2, 8, 9, 10, 11, 12]
+    @test query(t, "A BETWEEN B AND B + 1").rows == 1:12          # A == B+1 always
+    @test query(t, "A BETWEEN 5 AND 5").rows == [5]               # inclusive both ends
+    @test query(t, "(A BETWEEN 2 AND 4) OR A == 10 ORDER BY A DESC").rows == [10, 4, 3, 2]
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
@@ -1154,7 +1191,10 @@ if _HAVE_TAQL
 
         t = readtable(pdir)
         for wherestr in ("A > 5", "A >= 15 OR A <= 2", "A > 3 AND A < 10",
-                         "C == 'x'", "NOT (A > 10)", "A IN [1,5,10,20]")
+                         "C == 'x'", "NOT (A > 10)", "A IN [1,5,10,20]",
+                         "A BETWEEN 5 AND 12", "A NOT BETWEEN 5 AND 12",
+                         "A BETWEEN 5 AND 12 OR A == 18",
+                         "B BETWEEN A - 1 AND A")
             @test query(t, wherestr).rows == _taql_rows(wherestr)
         end
 

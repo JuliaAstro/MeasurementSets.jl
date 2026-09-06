@@ -16,10 +16,10 @@
 # `LIKE`/`ILIKE`, the `~`/`!~` glob/regex operator, and a trailing
 # `ORDER BY`, all case-insensitive keyword forms). Not supported (see
 # the Phase 22/24 plan non-goals): bitwise operators (`& | ^ ~`),
-# `BETWEEN`, `~=` approximate equality, boolean-mask array subscripts,
-# units, date/time or measures functions, computed output columns.
+# `~=` approximate equality, boolean-mask array subscripts, units,
+# date/time or measures functions, computed output columns.
 # (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
-# 1-based -- landed in Phase 42.)
+# 1-based -- landed in Phase 42; `BETWEEN` / `NOT BETWEEN` in Phase 43.)
 #
 # Phase 23 adds ORDER BY (bare column references only, optional per-key
 # ASC/DESC -- verified against the `sortlist`/`sortexpr` grammar; no
@@ -107,6 +107,12 @@ struct TQLIndex <: TQLExpr          # base[i], base[i,j], base[a:b:step, k] -- 1
     axes::Vector{Any}               # each: a TQLExpr (scalar index, drops the axis) OR
                                     # (; lo, hi, step) of Union{Nothing,TQLExpr} (a range/colon)
 end
+struct TQLBetween <: TQLExpr        # x BETWEEN lo AND hi (inclusive both ends); NOT BETWEEN
+    lhs::TQLExpr
+    lo::TQLExpr
+    hi::TQLExpr
+    negate::Bool
+end
 
 # Arithmetic and comparison broadcast over an array-cell operand (TaQL
 # semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
@@ -134,6 +140,15 @@ _tqleval(::TQLAggr, cols, i) = throw(ArgumentError(
     "TaQL-lite: aggregate functions (g*) are only valid in groupby(...), not query(...)"))
 _tqleval(e::TQLIndex, cols, i) = _tql_do_index(_tqleval(e.base, cols, i), e.axes,
                                                (x -> _tqleval(x, cols, i)))
+_tqleval(e::TQLBetween, cols, i) = _tql_between(
+    _tqleval(e.lhs, cols, i), _tqleval(e.lo, cols, i), _tqleval(e.hi, cols, i), e.negate)
+
+# x BETWEEN lo AND hi -- inclusive both ends (casacore left/right-closed);
+# elementwise when `x` is an array cell.
+function _tql_between(x, lo, hi, negate::Bool)
+    both = _bcast(&, _bcast(>=, x, lo), _bcast(<=, x, hi))
+    return negate ? _bcast(!, both) : both
+end
 
 # 1-based array-cell indexing: a scalar axis drops that dimension, a
 # range axis `lo:hi:step` (casacore's start:end:step) maps to Julia's
@@ -185,6 +200,8 @@ function _tqlrefs!(seen, e::TQLIndex)
         end
     end
 end
+_tqlrefs!(seen, e::TQLBetween) =
+    (_tqlrefs!(seen, e.lhs); _tqlrefs!(seen, e.lo); _tqlrefs!(seen, e.hi))
 
 # true if any TQLAggr node appears anywhere in the expression tree
 _has_aggr(e::TQLAggr) = true
@@ -204,6 +221,7 @@ _has_aggr(e::TQLIndex) = _has_aggr(e.base) || any(e.axes) do ax
     ax isa NamedTuple ? any(v -> v !== nothing && _has_aggr(v), (ax.lo, ax.hi, ax.step)) :
     _has_aggr(ax)
 end
+_has_aggr(e::TQLBetween) = _has_aggr(e.lhs) || _has_aggr(e.lo) || _has_aggr(e.hi)
 
 # ======================================================================
 # tokenizer
@@ -444,15 +462,20 @@ function _parse_comparison!(p::TQLParser)
     elseif _iskw(t, "IN")
         _advance!(p)
         return _parse_in_list!(p, lhs, false)
+    elseif _iskw(t, "BETWEEN")
+        _advance!(p)
+        return _parse_between!(p, lhs, false)
     elseif _iskw(t, "LIKE") || _iskw(t, "ILIKE")
         _advance!(p)
         return _parse_like!(p, lhs, _iskw(t, "ILIKE"), false)
     elseif _iskw(t, "NOT") && (_iskw(p.toks[p.pos+1], "IN") ||
+                               _iskw(p.toks[p.pos+1], "BETWEEN") ||
                                _iskw(p.toks[p.pos+1], "LIKE") ||
                                _iskw(p.toks[p.pos+1], "ILIKE"))
         _advance!(p)
         kw = _advance!(p)
         return _iskw(kw, "IN") ? _parse_in_list!(p, lhs, true) :
+               _iskw(kw, "BETWEEN") ? _parse_between!(p, lhs, true) :
                _parse_like!(p, lhs, _iskw(kw, "ILIKE"), true)
     elseif t.kind === :op && (t.text == "~" || t.text == "!~")
         _advance!(p)
@@ -479,6 +502,18 @@ function _parse_in_list!(p::TQLParser, lhs::TQLExpr, negate::Bool)
     _expect_kind!(p, :rbracket, "']'")
     e = TQLIn(lhs, vals)
     return negate ? TQLNot(e) : e
+end
+
+# `lhs BETWEEN lo AND hi` -- the `AND` here is BETWEEN syntax, consumed
+# before control returns to `_parse_and!`. `lo`/`hi` are arithexpr-level
+# (casacore `arithexpr BETWEEN arithexpr AND arithexpr`).
+function _parse_between!(p::TQLParser, lhs::TQLExpr, negate::Bool)
+    lo = _parse_addsub!(p)
+    _iskw(_peek(p), "AND") || throw(ArgumentError(
+        "TaQL-lite: expected `AND` after `BETWEEN <lo>` in \"$(p.src)\""))
+    _advance!(p)
+    hi = _parse_addsub!(p)
+    return TQLBetween(lhs, lo, hi, negate)
 end
 
 function _parse_like!(p::TQLParser, lhs::TQLExpr, icase::Bool, negate::Bool)
@@ -963,9 +998,10 @@ own `select=`. Returns a `RefTable` (no data copied); persist it with
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
-bitwise operators, `BETWEEN`, `~=` approximate equality, boolean-mask
-array subscripts, units, or date/time / measures functions.  1-based
-array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`) is supported.
+bitwise operators, `~=` approximate equality, boolean-mask array
+subscripts, units, or date/time / measures functions.  Supported:
+1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`) and
+`BETWEEN` / `NOT BETWEEN` (inclusive both ends).
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
@@ -1061,6 +1097,8 @@ _geval(::TQLRowNum, cols, g) =
     throw(ArgumentError("TaQL-lite: rownumber() is not valid in groupby(...)"))
 _geval(e::TQLIndex, cols, g) = _tql_do_index(_geval(e.base, cols, g), e.axes,
                                              (x -> _geval(x, cols, g)))
+_geval(e::TQLBetween, cols, g) = _tql_between(
+    _geval(e.lhs, cols, g), _geval(e.lo, cols, g), _geval(e.hi, cols, g), e.negate)
 
 """
     GroupSlice

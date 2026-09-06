@@ -547,11 +547,11 @@ A `taql(target, "…")` string-command dispatcher wraps all four:
 `taql(t, "INSERT INTO t (A, B) VALUES (1, 2.5), (3, 4.5)")` (VALUES must
 be constant expressions).
 
-Still, across Phases 22–31 (array indexing landed in Phase 42): no
-bitwise operators (`& | ^ ~`), `BETWEEN`, `~=`, units, date/time or
-measures functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates,
-a general M:N cross-product join, `INSERT LIMIT`, or `UPDATE`
-array-slice assignment.
+Still, across Phases 22–31 (array indexing landed in Phase 42,
+`BETWEEN` in Phase 43): no bitwise operators (`& | ^ ~`), `~=`, units,
+date/time or measures functions, `GROUP BY ROLLUP`, the `gs*`
+per-element aggregates, a general M:N cross-product join, `INSERT
+LIMIT`, or `UPDATE` array-slice assignment.
 
 ### Phase 32 — docs / consolidation pass
 
@@ -722,3 +722,13 @@ engine path, against `CCT.Table` decoding `virtualtaql=Dict("W" =>
 Not supported: boolean-mask subscripts (`DATA[FLAG]`), negative /
 `end`-relative indices (omit the range end to mean "to the end"), and
 assigning *into* an indexed cell.
+
+### Phase 43 — TaQL-lite `BETWEEN`
+
+`x BETWEEN lo AND hi` (inclusive both ends, matching casacore's
+left/right-closed range) and `x NOT BETWEEN lo AND hi`, in every
+TaQL-lite expression surface. `lo`/`hi` are arithmetic expressions
+(`B BETWEEN A - 1 AND A`); `x` may be an array cell (elementwise). Binds
+at the comparison level, so `x BETWEEN a AND b OR c` groups as
+`(x BETWEEN a AND b) OR c`. Verified against real TaQL via
+`tableCommand`.
