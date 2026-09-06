@@ -10,7 +10,7 @@
 # a no-op here since TaQL-lite has no array indexing).
 #
 # The expression is evaluated with the Phase 22-25 TaQL-lite engine
-# (`_taqllite_parse` / `_tqleval` in query.jl).  An expression using a
+# (`_taqllite_parse` / `_tqleval` in taql/parse.jl / taql/ast.jl).  An expression using a
 # TaQL feature TaQL-lite does not support (array indexing, units,
 # date/time or measures functions) raises a clear error when the column
 # is *read* -- the rest of the table opens fine.  Read-only: casacore

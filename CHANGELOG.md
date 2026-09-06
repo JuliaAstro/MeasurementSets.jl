@@ -1007,3 +1007,17 @@ at least one `L.<col>` and one `R.<col>` (aggregates rejected); a
 bare-identifier `on` string is still the Phase-28 index-lookup join.
 The tokenizer now lexes one optional `.suffix` on an identifier.
 TaQL has no cartesian non-equi join, so no cross-check.
+
+### Phase 64 — TaQL engine restructured into `src/taql/`
+
+Pure refactor, no behaviour change. The ~2300-line `src/query.jl` and
+`src/write_commands.jl` are replaced by a `src/taql/` directory:
+`ast.jl` (nodes + visitors + `_bcast` + masked arrays + indexing),
+`parse.jl` (tokenizer + parser + operator tables + pattern→regex),
+`functions.jl` (function / aggregate registries + `_make_func`),
+`query.jl` (ORDER BY + `select` + `query(::AbstractTable)`),
+`groupby.jl` (`GroupSlice` / `GroupedTable` / `groupby` + `_geval`),
+`join.jl`, and `commands.jl` (`update!` / `delete!` / `insert!` /
+`taql`). `taql/engine.jl` includes the first six; `commands.jl` stays
+included last (it builds on `edit` / `create` / `resync`). Test files
+renamed to `taql_query_tests.jl` / `taql_command_tests.jl`.

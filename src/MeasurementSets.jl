@@ -47,13 +47,13 @@ include("datamanagers/forwardcol.jl")
 include("datamanagers/virtualtaql.jl")
 include("datamanagers/dysco.jl")
 include("column.jl")
-include("query.jl")
+include("taql/engine.jl")
 include("schema.jl")
 include("tables_interface.jl")
 include("create.jl")
 include("edit.jl")
 include("resync.jl")
-include("write_commands.jl")
+include("taql/commands.jl")
 
 export AbstractTable, Table, RefTable, ConcatTable
 export readtable, columnnames, columndesc, keywords, subtables, nrow
@@ -69,8 +69,8 @@ export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolu
 export resync, is_stale, is_multiused
 export query, groupby, GroupedTable
 export update!, taql
-# `join` extends `Base.join` (N:1 lookup join, see query.jl);
+# `join` extends `Base.join` (N:1 lookup join, see taql/join.jl);
 # `delete!` extends `Base.delete!` and `insert!` extends `Base.insert!`
-# (DELETE FROM / INSERT INTO, see write_commands.jl) -- none is exported.
+# (DELETE FROM / INSERT INTO, see taql/commands.jl) -- none is exported.
 
 end

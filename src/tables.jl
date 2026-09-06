@@ -545,7 +545,7 @@ end
 
 # `select` ("output_name => parent_name" pairs, in output order) ->
 # `(namemap, order)` for building a RefTable -- shared by `write_reftable`
-# and `query` (query.jl) so both use identical validation/error text.
+# and `query` (taql/query.jl) so both use identical validation/error text.
 function _select_spec(parent::AbstractTable, select::AbstractVector{<:Pair})
     order = String[String(first(p)) for p in select]
     allunique(order) || throw(ArgumentError("duplicate output column name"))
