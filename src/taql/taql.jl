@@ -1,7 +1,8 @@
-# TaQL-lite query engine.
+# TaQL-lite query engine -- entry point.  This file only `include`s the
+# pieces below in dependency order; `MeasurementSets.jl` includes it.
 #
 # A small, self-contained query facility -- a deliberate subset of
-# casacore's Table Query Language.  Split into cohesive pieces:
+# casacore's Table Query Language.  The pieces:
 #
 #   ast.jl        AST node types + the `_tqleval` / `_tqlrefs!` /
 #                 `_has_aggr` / `_sg` visitors, `_bcast`, masked arrays

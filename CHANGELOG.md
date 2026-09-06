@@ -1018,7 +1018,7 @@ Pure refactor, no behaviour change. The ~2300-line `src/query.jl` and
 `query.jl` (ORDER BY + `select` + `query(::AbstractTable)`),
 `groupby.jl` (`GroupSlice` / `GroupedTable` / `groupby` + `_geval`),
 `join.jl`, and `commands.jl` (`update!` / `delete!` / `insert!` /
-`taql`). `taql/engine.jl` includes the first six; `commands.jl` stays
+`taql`). `taql/taql.jl` includes the first six; `commands.jl` stays
 included last (it builds on `edit` / `create` / `resync`). Test files
 renamed to `taql_query_tests.jl` / `taql_command_tests.jl`. The
 `_select_spec` helper also moved from `tables.jl` to `taql/query.jl`,
