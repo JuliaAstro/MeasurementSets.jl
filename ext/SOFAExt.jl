@@ -1,0 +1,305 @@
+# Reference-frame conversions for the `Measure` types, on top of the
+# pure-Julia `SOFA.jl` (IAU SOFA) port.  Loaded when the caller does
+# `import SOFA`; `import EarthOrientation` as well activates
+# `EarthOrientationExt`, which feeds real IERS ΔUT1 / polar-motion into
+# `_eop` here (otherwise ΔUT1 = 0, no polar motion, ~1 arcsecond, a
+# one-time warning).
+#
+# Hubs: epoch -> TAI, direction -> ICRS (J2000 treated as ICRS, a ~0.02"
+# frame-bias simplification -- documented), frequency -> BARY.
+# Velocity-frame constants are copied verbatim from casacore
+# `measures/Measures/MeasTable.cc:3616-3690` (index 0 = J2000).
+
+module SOFAExt
+
+import SOFA
+import MeasurementSets as MS
+using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity,
+    RefFrame, MeasFrame, reftype,
+    UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
+    HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
+    OtherRef, _dir_xyz, _xyz_dir
+
+const C_LIGHT = SOFA.LIGHTSPEED          # m/s
+const AU_M    = SOFA.ASTRUNIT            # m
+const MJD0    = SOFA.MJD0                # 2400000.5
+const DAYSEC  = SOFA.SECPERDAY           # 86400.0
+
+# casacore MeasTable velocity vectors (J2000, m/s)
+const _VEL_LSRK    = 20_000.0        .* (0.0145021, -0.865863, 0.500071)
+const _VEL_LSRD    = sqrt(274.0)*1e3 .* (-0.0385568, -0.881138, 0.471285)
+const _VEL_LSRGAL  = 220_000.0       .* (0.494109, -0.44483, 0.746982)
+
+_dot(a, b) = a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
+
+# ======================================================================
+# Earth orientation
+# ======================================================================
+
+const _EOP_WARNED = Ref(false)
+
+function _eop(mjd_utc::Float64)
+    ext = Base.get_extension(MS, :EarthOrientationExt)
+    if ext === nothing
+        if !_EOP_WARNED[]
+            @warn "MeasurementSets: no Earth-orientation data — `import EarthOrientation` " *
+                  "for ΔUT1 / polar motion. Assuming ΔUT1 = 0, no polar motion (~1 arcsec)."
+            _EOP_WARNED[] = true
+        end
+        return (dut1=0.0, xp=0.0, yp=0.0)
+    end
+    return ext._eop_lookup(mjd_utc)
+end
+
+# ΔAT (TAI-UTC, seconds) at a UTC MJD
+function _delta_at(mjd_utc::Float64)
+    y, m, d, _ = SOFA.jd2cal(MJD0, mjd_utc)
+    SOFA.dat(y, m, d, 0.0)
+end
+
+# ======================================================================
+# epoch  (hub = TAI MJD)
+# ======================================================================
+
+_total(nt) = nt.day + nt.fraction - MJD0     # (day, fraction) -> MJD
+
+# location args for dtdb, from a frame position (ITRF xyz, metres)
+function _dtdb_loc(frame::MeasFrame)
+    p = frame.position
+    p === nothing && return (0.5, 0.0, 0.0, 0.0)
+    (0.5, atan(p.y, p.x), hypot(p.x, p.y)/1e3, p.z/1e3)
+end
+
+function _to_tai(m::MEpoch{A}, frame::MeasFrame) where {A}
+    A === TAI && return m.mjd
+    if A === UTC
+        return _total(SOFA.utctai(MJD0, m.mjd))
+    elseif A === TT
+        return _total(SOFA.tttai(MJD0, m.mjd))
+    elseif A === TDB
+        ut, el, u, v = _dtdb_loc(frame)
+        dtr = SOFA.dtdb(MJD0, m.mjd, ut, el, u, v)          # TDB-TT, seconds
+        tt = SOFA.tdbtt(MJD0, m.mjd, dtr)
+        return _total(SOFA.tttai(tt.day, tt.fraction))
+    elseif A === UT1
+        dat = _delta_at(m.mjd)
+        du = _eop(m.mjd).dut1
+        return _total(SOFA.ut1tai(MJD0, m.mjd, du - dat))    # dta = UT1-TAI
+    end
+    error("MeasurementSets: epoch scale $(nameof(A)) is not supported")
+end
+
+function _from_tai(tai::Float64, ::Type{B}, frame::MeasFrame) where {B}
+    B === TAI && return tai
+    if B === UTC
+        return _total(SOFA.taiutc(MJD0, tai))
+    elseif B === TT
+        return _total(SOFA.taitt(MJD0, tai))
+    elseif B === TDB
+        tt = SOFA.taitt(MJD0, tai)
+        ut, el, u, v = _dtdb_loc(frame)
+        ttmjd = tt.day + tt.fraction - MJD0
+        dtr = SOFA.dtdb(MJD0, ttmjd, ut, el, u, v)
+        return _total(SOFA.tttdb(tt.day, tt.fraction, dtr))
+    elseif B === UT1
+        utc = _total(SOFA.taiutc(MJD0, tai))
+        du = _eop(utc).dut1
+        return _total(SOFA.utcut1(MJD0, utc, du))
+    end
+    error("MeasurementSets: epoch scale $(nameof(B)) is not supported")
+end
+
+MS._mconv(m::MEpoch, ::Type{B}, frame::MeasFrame) where {B<:RefFrame} =
+    MEpoch{B}(_from_tai(_to_tai(m, frame), B, frame))
+
+# --- frame time helpers (two-part JD) --------------------------------
+function _frame_scale_mjd(frame::MeasFrame, ::Type{S}) where {S}
+    e = frame.epoch
+    e === nothing && error("MeasurementSets: this conversion needs `frame.epoch`")
+    _from_tai(_to_tai(e, frame), S, frame)
+end
+_frame_tt(frame)  = (t = _frame_scale_mjd(frame, TT);  (MJD0, t))
+_frame_utc(frame) = (u = _frame_scale_mjd(frame, UTC); (MJD0, u))
+_frame_ut1(frame) = (u = _frame_scale_mjd(frame, UT1); (MJD0, u))
+
+# `geodetic = true` -> ellipsoid-normal vertical (casacore AZELGEO);
+# `false` -> geocentric vertical, i.e. the local vertical points straight
+# away from the geocentre (casacore AZEL).
+function _frame_site(frame::MeasFrame; geodetic::Bool=true)
+    p = frame.position
+    p === nothing && error("MeasurementSets: this conversion needs `frame.position`")
+    if geodetic
+        g = SOFA.gc2gd(:WGS84, [p.x, p.y, p.z])           # (ϵ=elong, ϕ=lat, r=height)
+        return (g.ϵ, g.ϕ, g.r)
+    end
+    r = hypot(p.x, p.y, p.z)
+    (atan(p.y, p.x), asin(clamp(p.z / r, -1.0, 1.0)), r - 6_378_137.0)
+end
+
+_frame_eop(frame) = _eop(_frame_scale_mjd(frame, UTC))
+
+# ======================================================================
+# direction  (hub = ICRS; J2000 ≈ ICRS)
+# ======================================================================
+
+_is_icrsish(::Type{T}) where {T} = T === ICRS || T === J2000
+
+function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
+    _is_icrsish(A) && return (m.lon, m.lat)
+    if A === B1950
+        r = SOFA.fk425(m.lon, m.lat, 0.0, 0.0, 0.0, 0.0)
+        return (r.ra, r.dec)
+    elseif A === GALACTIC
+        r = SOFA.g2icrs(m.lon, m.lat);        return (r.ra, r.dec)
+    elseif A === ECLIPTIC
+        r = SOFA.eceq06(SOFA.JD2000, 0.0, m.lon, m.lat);  return (r.ra, r.dec)
+    elseif A === APP
+        tt1, tt2 = _frame_tt(frame)
+        eo = SOFA.atci13(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, tt1, tt2).eo
+        ri = m.lon + eo
+        r = SOFA.atic13(ri, m.lat, tt1, tt2)
+        return (r.ra, r.dec)
+    elseif A === AZEL || A === AZELGEO || A === HADEC
+        utc1, utc2 = _frame_utc(frame)
+        el, phi, hm = _frame_site(frame; geodetic = A !== AZEL)
+        eop = _frame_eop(frame)
+        typ = A === HADEC ? 'H' : 'A'
+        a = m.lon                                          # ha  /  az
+        b = A === HADEC ? m.lat : (pi/2 - m.lat)           # dec /  zen
+        ci = SOFA.atoi13(typ, a, b, utc1, utc2, eop.dut1,
+                         el, phi, hm, eop.xp, eop.yp, 0.0, 273.15, 0.0, 0.5)
+        tt1, tt2 = _frame_tt(frame)
+        r = SOFA.atic13(ci.ra, ci.dec, tt1, tt2)
+        return (r.ra, r.dec)
+    elseif A === ITRF
+        uta, utb = _frame_ut1(frame)
+        tta, ttb = _frame_tt(frame)
+        eop = _frame_eop(frame)
+        rc2t = SOFA.c2t06a(tta, ttb, uta, utb, eop.xp, eop.yp)   # GCRS->ITRS
+        v = _dir_xyz(m)
+        g = (rc2t[1,1]*v[1] + rc2t[2,1]*v[2] + rc2t[3,1]*v[3],
+             rc2t[1,2]*v[1] + rc2t[2,2]*v[2] + rc2t[3,2]*v[3],
+             rc2t[1,3]*v[1] + rc2t[2,3]*v[2] + rc2t[3,3]*v[3])
+        d = _xyz_dir(ICRS, g...)
+        return (d.lon, d.lat)
+    end
+    error("MeasurementSets: direction frame $(nameof(A)) is not supported")
+end
+
+function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) where {B}
+    _is_icrsish(B) && return MDirection{B}(lon, lat)
+    if B === B1950
+        r = SOFA.fk524(lon, lat, 0.0, 0.0, 0.0, 0.0)
+        return MDirection{B}(r.ra, r.dec)
+    elseif B === GALACTIC
+        r = SOFA.icrs2g(lon, lat);       return MDirection{B}(r.lon, r.lat)
+    elseif B === ECLIPTIC
+        r = SOFA.eqec06(SOFA.JD2000, 0.0, lon, lat);  return MDirection{B}(r.lon, r.lat)
+    elseif B === APP
+        tt1, tt2 = _frame_tt(frame)
+        r = SOFA.atci13(lon, lat, 0.0, 0.0, 0.0, 0.0, tt1, tt2)
+        return MDirection{B}(r.ra - r.eo, r.dec)
+    elseif B === AZEL || B === AZELGEO || B === HADEC
+        utc1, utc2 = _frame_utc(frame)
+        el, phi, hm = _frame_site(frame; geodetic = B !== AZEL)
+        eop = _frame_eop(frame)
+        r = SOFA.atco13(lon, lat, 0.0, 0.0, 0.0, 0.0, utc1, utc2, eop.dut1,
+                        el, phi, hm, eop.xp, eop.yp, 0.0, 273.15, 0.0, 0.5)
+        return B === HADEC ? MDirection{B}(r.ha, r.dec) : MDirection{B}(r.azi, pi/2 - r.zen)
+    elseif B === ITRF
+        uta, utb = _frame_ut1(frame)
+        tta, ttb = _frame_tt(frame)
+        eop = _frame_eop(frame)
+        rc2t = SOFA.c2t06a(tta, ttb, uta, utb, eop.xp, eop.yp)
+        v = (cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat))
+        g = (rc2t[1,1]*v[1] + rc2t[1,2]*v[2] + rc2t[1,3]*v[3],
+             rc2t[2,1]*v[1] + rc2t[2,2]*v[2] + rc2t[2,3]*v[3],
+             rc2t[3,1]*v[1] + rc2t[3,2]*v[2] + rc2t[3,3]*v[3])
+        return _xyz_dir(B, g...)
+    end
+    error("MeasurementSets: direction frame $(nameof(B)) is not supported")
+end
+
+MS._mconv(m::MDirection, ::Type{B}, frame::MeasFrame) where {B<:RefFrame} =
+    _icrs_to_dir(_dir_to_icrs(m, frame)..., B, frame)
+
+# ======================================================================
+# frequency  (hub = BARY);  radio/relativistic Doppler, casacore MCFrequency
+# ======================================================================
+
+# Earth's barycentric velocity (m/s, J2000) at the frame epoch.
+function _v_earth_bary(frame::MeasFrame)
+    tdb = _frame_scale_mjd(frame, TDB)
+    e = SOFA.epv00(MJD0, tdb)
+    v = e.bary[2]                         # AU/day
+    (v[1], v[2], v[3]) .* (AU_M / DAYSEC)
+end
+
+# Observatory velocity w.r.t. the geocentre (m/s, GCRS≈J2000).
+function _v_obs_geo(frame::MeasFrame)
+    el, phi, hm = _frame_site(frame)
+    uta, utb = _frame_ut1(frame)
+    tta, ttb = _frame_tt(frame)
+    era = SOFA.era00(uta, utb)
+    sp  = SOFA.sp00(tta, ttb)
+    eop = _frame_eop(frame)
+    pv = SOFA.pvtob(el, phi, hm, eop.xp, eop.yp, sp, era)
+    v = pv[2]
+    (v[1], v[2], v[3])
+end
+
+_dopp(f, beta, sign) = sign > 0 ? f * sqrt((1 + beta) / (1 - beta)) :
+                                  f * sqrt((1 - beta) / (1 + beta))
+
+function _n_hat(frame::MeasFrame)
+    d = frame.direction
+    d === nothing && error("MeasurementSets: a frequency conversion needs `frame.direction`")
+    _dir_xyz(MS.measconvert(d, J2000; frame))
+end
+
+function _freq_to_bary(f::MFrequency{A}, n, frame::MeasFrame) where {A}
+    A === BARY && return f.hz
+    if A === LSRK
+        return _dopp(f.hz, _dot(_VEL_LSRK, n) / C_LIGHT, +1)
+    elseif A === LSRD
+        return _dopp(f.hz, _dot(_VEL_LSRD, n) / C_LIGHT, +1)
+    elseif A === GALACTO
+        flsrd = _dopp(f.hz, _dot(_VEL_LSRGAL, n) / C_LIGHT, +1)   # GALACTO->LSRD
+        return _dopp(flsrd, _dot(_VEL_LSRD, n) / C_LIGHT, +1)     # LSRD->BARY
+    elseif A === GEO
+        return _dopp(f.hz, _dot(_v_earth_bary(frame), n) / C_LIGHT, -1)
+    elseif A === TOPO
+        fgeo = _dopp(f.hz, _dot(_v_obs_geo(frame), n) / C_LIGHT, -1)   # TOPO->GEO
+        return _dopp(fgeo, _dot(_v_earth_bary(frame), n) / C_LIGHT, -1)
+    end
+    error("MeasurementSets: frequency frame $(nameof(A)) is not supported")
+end
+
+function _bary_to_freq(hz::Float64, ::Type{B}, n, frame::MeasFrame) where {B}
+    B === BARY && return MFrequency{B}(hz)
+    if B === LSRK
+        return MFrequency{B}(_dopp(hz, _dot(_VEL_LSRK, n) / C_LIGHT, -1))
+    elseif B === LSRD
+        return MFrequency{B}(_dopp(hz, _dot(_VEL_LSRD, n) / C_LIGHT, -1))
+    elseif B === GALACTO
+        flsrd = _dopp(hz, _dot(_VEL_LSRD, n) / C_LIGHT, -1)
+        return MFrequency{B}(_dopp(flsrd, _dot(_VEL_LSRGAL, n) / C_LIGHT, -1))
+    elseif B === GEO
+        return MFrequency{B}(_dopp(hz, _dot(_v_earth_bary(frame), n) / C_LIGHT, +1))
+    elseif B === TOPO
+        fgeo = _dopp(hz, _dot(_v_earth_bary(frame), n) / C_LIGHT, +1)
+        return MFrequency{B}(_dopp(fgeo, _dot(_v_obs_geo(frame), n) / C_LIGHT, +1))
+    end
+    error("MeasurementSets: frequency frame $(nameof(B)) is not supported")
+end
+
+function MS._mconv(f::MFrequency, ::Type{B}, frame::MeasFrame) where {B<:RefFrame}
+    n = _n_hat(frame)
+    _bary_to_freq(_freq_to_bary(f, n, frame), B, n, frame)
+end
+
+MS._mconv(::MRadialVelocity, ::Type{<:RefFrame}, ::MeasFrame) = error(
+    "MeasurementSets: radial-velocity frame conversion is not implemented — " *
+    "convert the equivalent `MFrequency` instead")
+
+end # module

@@ -57,6 +57,52 @@ qcolumn
 UNITS_NO_JULIA_COUNTERPART
 ```
 
+### Reference frames (measures)
+
+`import SOFA` (and optionally `EarthOrientation`) activates
+[`measconvert`](@ref); see [Concepts](concepts.md#Reference-frames-(measures)).
+
+```@docs
+measinfo
+MeasInfo
+measure
+measconvert
+MeasFrame
+MEpoch
+MDirection
+MPosition
+MFrequency
+MRadialVelocity
+reftype
+RefFrame
+```
+
+```@docs
+UTC
+TAI
+TT
+TDB
+UT1
+J2000
+ICRS
+B1950
+APP
+GALACTIC
+ECLIPTIC
+HADEC
+AZEL
+AZELGEO
+ITRF
+WGS84
+TOPO
+REST
+LSRK
+LSRD
+BARY
+GEO
+GALACTO
+```
+
 ## Schema and metadata
 
 ```@docs

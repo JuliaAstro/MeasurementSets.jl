@@ -636,7 +636,7 @@ the source at full precision; a `BFloat16` column writes back as
 `HDF5.jl` (a wrapper over the C `libhdf5`) was a hard dependency since
 Phase 20, only ever used for `MultiHDF5` (`table.mfh5`) container tables.
 It is now a **weak dependency**: the MultiHDF5 code lives in
-`ext/MeasurementSetsHDF5Ext.jl`, a package extension that loads only
+`ext/HDF5Ext.jl`, a package extension that loads only
 when you `import HDF5` yourself. A plain `using MeasurementSets` pulls
 in no C libraries. Reading or writing a `table.mfh5` without `HDF5`
 loaded raises a clear, actionable error (`... run `import HDF5` first`).
@@ -651,7 +651,7 @@ module — `using MeasurementSets; ms = MeasurementSet("/path")` — the
 idiomatic Julia split (`Dates`/`Date`). Pure rename: same UUID, no API
 or behaviour change, all tests green. The test-only environment variables
 are now `MEASUREMENTSETS_TEST_MS` / `MEASUREMENTSETS_CASA_PYTHON`, and
-the HDF5 extension is `MeasurementSetsHDF5Ext`.
+the HDF5 extension is `HDF5Ext`.
 
 ### Phase 40 — `BitFlagsEngine` + `ForwardColumnEngine`
 
@@ -1040,7 +1040,7 @@ keep only thin `GroupedTable` / `VirtualTaQLColumn` dispatch adapters.
 ### Phase 65 — physical units (Unitful weak-dependency extension)
 
 `import Unitful, UnitfulAngles, UnitfulAstro` loads
-`MeasurementSetsUnitfulExt`, which maps a column's `QuantumUnits`
+`UnitfulExt`, which maps a column's `QuantumUnits`
 keyword onto a `Unitful` unit:
 
 ```julia
@@ -1072,6 +1072,52 @@ and all angle↔angle / angle↔scalar conversions, but not casacore's
 treatment of angle as a base dimension. `DimensionfulAngles.jl` is the
 strict alternative.
 
-Read-side only for now. TaQL unit literals (`3km`, `10arcsec`), writing
-`QuantumUnits` from Unitful-typed columns, and the measures / reference-
-frame layer are follow-ups.
+Read-side only for now. TaQL unit literals (`3km`, `10arcsec`) and
+writing `QuantumUnits` from Unitful-typed columns are follow-ups.
+
+### Phase 66 — measures / reference frames (SOFA weak-dependency extension)
+
+A measure-valued column declares its physical quantity and reference
+frame in a `MEASINFO` keyword. `src/measures/` (always loaded) parses it
+and reads a cell as a typed value:
+
+```julia
+measinfo(t, "CHAN_FREQ")           # MeasInfo(:frequency, …, VarRefCol = "MEAS_FREQ_REF", …)
+measure(main, "TIME", 1)           # MEpoch{UTC}(60454.4… d)
+measure(subtable(ms, "FIELD"), "PHASE_DIR", 1)   # MDirection{J2000}(…, …)
+```
+
+`import SOFA` loads `MeasurementSetsSOFAExt` (pure-Julia
+[`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl) v2, IAU SOFA port),
+which converts between frames; `import EarthOrientation` additionally
+loads `MeasurementSetsEarthOrientationExt` for IERS ΔUT1 / polar motion:
+
+```julia
+fr = MeasFrame(epoch = measure(main, "TIME", 1),
+               position = measure(subtable(ms, "ANTENNA"), "POSITION", 1),
+               direction = measure(subtable(ms, "FIELD"), "PHASE_DIR", 1))
+
+measconvert(measure(main, "TIME", 1), TAI)                 # epoch:  UTC → TAI
+measconvert(MDirection{J2000}(2.0, 0.5), AZEL; frame = fr) # direction
+measconvert(MFrequency{TOPO}(100e9), LSRK; frame = fr)     # frequency (radio/relativistic Doppler)
+```
+
+- **Epoch** `UTC`/`TAI`/`TT`/`TDB`/`UT1`; **direction** `J2000`/`ICRS`/
+  `B1950`/`APP`/`GALACTIC`/`ECLIPTIC`/`AZEL`/`AZELGEO`/`HADEC`/`ITRF`;
+  **frequency** `TOPO`/`GEO`/`BARY`/`LSRK`/`LSRD`/`GALACTO`.
+- Velocity-frame constants copied verbatim from casacore
+  `MeasTable.cc`; every conversion cross-checked against
+  `casatools.measures()` (epoch < 1 µs, direction < 5″, frequency < 1 Hz
+  on 100 GHz).
+- Without `EarthOrientation.jl`: ΔUT1 = 0, no polar motion (~1″), a
+  one-time warning. `J2000` is treated as `ICRS` (~0.02″ frame bias).
+
+Write path: `write_table(dir, name, cols; measures = Dict("D" => (;
+kind = :direction, ref = "J2000")))` (or the per-row `(; kind,
+varrefcol, tabtypes, tabcodes)` form) stamps a `MEASINFO` keyword;
+`copyms` / `copytable` round-trip it verbatim.
+
+Non-goals: solar-system-body direction frames (`SUN`/`MOON`/planets),
+`MeasComet` / ephemeris tables, `MBaseline` / `MEarthMagnetic`,
+standalone `MDoppler`, `RefOff` application, pulsar-timing-grade
+precision, TaQL measures *functions*, in-place `MEASINFO` edit.

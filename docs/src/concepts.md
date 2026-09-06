@@ -97,3 +97,50 @@ use `DimensionfulAngles.jl` for strict casacore-style dimensional
 angles. `MeasurementSets.UNITS_NO_JULIA_COUNTERPART` lists every
 casacore unit without a third-party Julia implementation and how it is
 handled. TaQL unit *literals* (`3km`, `10arcsec`) are a follow-up.
+
+## Reference frames (measures)
+
+A measure-valued column declares its physical quantity and reference
+frame in a `MEASINFO` keyword — `TIME` is an epoch in `UTC`, `UVW` a
+baseline in `ITRF`, `ANTENNA.POSITION` a position in `ITRF`,
+`FIELD.PHASE_DIR` a direction whose frame is a per-row code
+(`VarRefCol`), `SPECTRAL_WINDOW.CHAN_FREQ` a frequency likewise.
+
+`measinfo(t, col)` parses that keyword; `measure(t, col[, row])` reads a
+cell as a typed value — [`MEpoch`](@ref) (MJD days), [`MDirection`](@ref)
+(radians), [`MPosition`](@ref) (metres), [`MFrequency`](@ref) (Hz) —
+carrying its frame as a type parameter (`MEpoch{UTC}`,
+`MDirection{J2000}`).
+
+`import SOFA` loads an extension that converts between frames:
+
+```julia
+import SOFA, EarthOrientation          # SOFA alone works; EO adds ΔUT1 / polar motion
+
+fr = MeasFrame(epoch    = measure(main, "TIME", 1),
+               position = measure(subtable(ms, "ANTENNA"), "POSITION", 1),
+               direction = measure(subtable(ms, "FIELD"), "PHASE_DIR", 1))
+
+measconvert(measure(main, "TIME", 1), TAI)            # UTC → TAI
+measconvert(MDirection{J2000}(2.0, 0.5), AZEL; frame = fr)
+measconvert(MFrequency{TOPO}(100e9), LSRK; frame = fr)
+```
+
+- **Epoch**: `UTC` / `TAI` / `TT` / `TDB` / `UT1`.
+- **Direction**: `J2000` / `ICRS` / `B1950` / `APP` / `GALACTIC` /
+  `ECLIPTIC` / `AZEL` / `AZELGEO` / `HADEC` / `ITRF`.
+- **Frequency**: `TOPO` / `GEO` / `BARY` / `LSRK` / `LSRD` / `GALACTO`.
+
+Backed by the pure-Julia [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl)
+(v2, IAU SOFA port). Without `EarthOrientation.jl` the conversions run at
+~1 arcsecond (ΔUT1 = 0, no polar motion) with a one-time warning. `J2000`
+is treated as `ICRS` (a ~0.02″ frame-bias simplification). Solar-system
+bodies as direction frames, `MeasComet` / ephemeris tables, and
+pulsar-timing-grade precision are out of scope. TaQL date/time and
+measures *functions* remain deferred.
+
+The write path takes a `measures =` keyword on
+[`write_table`](@ref) — `Dict("D" => (; kind = :direction, ref =
+"J2000"))` or the per-row `(; kind, varrefcol, tabtypes, tabcodes)`
+form — and `copyms` / `copytable` round-trip a column's `MEASINFO`
+verbatim.

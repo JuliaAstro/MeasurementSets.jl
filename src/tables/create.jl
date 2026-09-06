@@ -86,6 +86,47 @@ function _merge_kw(base::Record, extra::Record)
     return r
 end
 
+# replace-or-append a keyword `name` on a copy of `base`
+function _set_kw(base::Record, name::AbstractString, t::CasaType, v)
+    r = Record(copy(base.names), copy(base.types), copy(base.values),
+               copy(base.comments), base.rectype)
+    i = findfirst(==(name), r.names)
+    if i === nothing
+        push!(r.names, name); push!(r.types, t); push!(r.values, v); push!(r.comments, "")
+    else
+        r.types[i] = t; r.values[i] = v
+    end
+    return r
+end
+
+# `spec` is a `MeasInfo`, or a NamedTuple:
+#   (; kind, ref[, units])                              -- fixed frame
+#   (; kind, varrefcol, tabtypes, tabcodes[, units])    -- per-row frame
+function _stamp_measinfo(c::ColumnDesc, spec)
+    if spec isa MeasInfo
+        kind = spec.kind
+        rec = spec.varrefcol !== nothing ?
+              _measinfo_record(kind; varrefcol=spec.varrefcol,
+                               tabtypes=spec.tabtypes, tabcodes=spec.tabcodes) :
+              _measinfo_record(kind; ref=spec.fixedref)
+        units = spec.units
+    else
+        kind = spec.kind
+        rec = haskey(spec, :varrefcol) && spec.varrefcol !== nothing ?
+              _measinfo_record(kind; varrefcol=spec.varrefcol,
+                               tabtypes=get(spec, :tabtypes, String[]),
+                               tabcodes=get(spec, :tabcodes, Int[])) :
+              _measinfo_record(kind; ref=spec.ref)
+        units = collect(String, get(spec, :units, String[]))
+    end
+    kw = _set_kw(c.keywords, "MEASINFO", TpRecord, rec)
+    if !isempty(units)
+        kw = _set_kw(kw, "QuantumUnits", TpArrayString, collect(String, units))
+    end
+    ColumnDesc(c.name, c.comment, c.manager, c.group, c.type, c.classname,
+               c.shape, c.option, c.maxlength, kw, c.default, c.sequ)
+end
+
 _stored_casatype(::Type{UInt8}) = TpUChar
 _stored_casatype(::Type{Int16}) = TpShort
 _stored_casatype(::Type{Int32}) = TpInt
@@ -126,6 +167,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            virtualtaql::AbstractDict=Dict{String,String}(),  # vname -> CALC expression
                            dysco=Vector{String}[],
                            dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
+                           measures::AbstractDict=Dict{String,Any}(),
                            storage::Symbol=:sepfile,
                            blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                            tablename::AbstractString="",
@@ -133,6 +175,13 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            readme::AbstractString="")
     mkpath(dir)
     tsmg = _tsm_groups(tsm)
+
+    # --- measures: stamp a MEASINFO (+ QuantumUnits) keyword on the column
+    for (mcol, spec) in measures
+        mi = findfirst(c -> c.name == mcol, descs)
+        mi === nothing && error("measures: no column \"$mcol\"")
+        descs[mi] = _stamp_measinfo(descs[mi], spec)
+    end
 
     # --- virtual column engines: synthesise the stored / scale / offset
     #     columns, stamp the `_<Engine>_*` keywords on the virtual column
@@ -337,6 +386,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      engines::AbstractDict=Dict{String,NamedTuple}(),
                      virtualtaql::AbstractDict=Dict{String,String}(),
                      dysco=Vector{String}[], dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
+                     measures::AbstractDict=Dict{String,Any}(),
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
@@ -370,7 +420,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
 
     _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,
                       ism = Set(String.(ism)), engines, virtualtaql, dysco, dysco_spec,
-                      storage, blocksize,
+                      measures, storage, blocksize,
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
 

@@ -84,6 +84,29 @@ stdtable("SPECTRAL_WINDOW").columns
 stdcolumns("ANTENNA")
 ```
 
+## Reference frames
+
+`measure(t, col[, row])` reads a measure-valued column as a typed value
+with its reference frame; `import SOFA` (+ optionally `EarthOrientation`)
+converts between frames.
+
+```julia
+import SOFA, EarthOrientation
+
+e = measure(main, "TIME", 1)                       # MEpoch{UTC}
+measconvert(e, TT)                                 # → MEpoch{TT}
+
+fr = MeasFrame(epoch = e,
+               position = measure(subtable(ms, "ANTENNA"), "POSITION", 1),
+               direction = measure(subtable(ms, "FIELD"), "PHASE_DIR", 1))
+measconvert(MDirection{J2000}(2.0, 0.5), AZEL; frame = fr)
+measconvert(measure(subtable(ms, "SPECTRAL_WINDOW"), "CHAN_FREQ", 1)[1],
+            LSRK; frame = fr)
+```
+
+See [Concepts](concepts.md#Reference-frames-(measures)) for the full
+frame list, accuracy notes, and the `measures =` write keyword.
+
 ## Writing and copying
 
 ```julia

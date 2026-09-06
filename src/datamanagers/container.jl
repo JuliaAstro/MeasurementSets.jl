@@ -25,7 +25,7 @@
 
 import Mmap
 
-# MultiHDF5 (`table.mfh5`) support lives in `ext/MeasurementSetsHDF5Ext.jl`
+# MultiHDF5 (`table.mfh5`) support lives in `ext/HDF5Ext.jl`
 # and is active only when the caller has loaded `HDF5.jl` (a weak
 # dependency).  The struct + entry-point stubs below are overridden there.
 
@@ -452,7 +452,7 @@ end
 
 # ======================================================================
 # MultiHDF5 -- weak-dependency entry points (real impl in
-# ext/MeasurementSetsHDF5Ext.jl; loaded when the caller has `import`ed
+# ext/HDF5Ext.jl; loaded when the caller has `import`ed
 # HDF5.jl).  The struct stays in the core namespace so callers /
 # `test/container_tests.jl` can name it; `fid` holds an `HDF5.File`
 # handle (typed `Any` here because HDF5 is not loaded).

@@ -19,7 +19,7 @@ const U = Unitful
 end
 
 @testset "units — extension loaded" begin
-    @test Base.get_extension(MSv2, :MeasurementSetsUnitfulExt) !== nothing
+    @test Base.get_extension(MSv2, :UnitfulExt) !== nothing
 end
 
 @testset "units — columnunit on the sample MS" begin
@@ -49,7 +49,7 @@ end
 end
 
 @testset "units — casacore unit vocabulary" begin
-    ext = Base.get_extension(MSv2, :MeasurementSetsUnitfulExt)
+    ext = Base.get_extension(MSv2, :UnitfulExt)
     up = ext._ms_uparse
     # angles (UnitfulAngles) -- dimensionless here, unlike casacore
     @test U.dimension(up("rad")) == U.NoDims
@@ -75,7 +75,7 @@ end
     @test d["_"].kind === :nounits
     @test d["WU"].kind === :unsupported
     @test d["rad"].kind === :dimension
-    ext = Base.get_extension(MSv2, :MeasurementSetsUnitfulExt)
+    ext = Base.get_extension(MSv2, :UnitfulExt)
     # every :pseudo / :nounits entry must actually parse
     for (name, info) in d
         info.kind in (:pseudo, :nounits) || continue

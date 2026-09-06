@@ -5,3 +5,7 @@
 
 # regenerated on every test run
 test/data/**/table.lock
+
+# CASA writes a log to cwd when casatools is imported (measures_fixture.py)
+test/casa-*.log
+**/casa-*.log

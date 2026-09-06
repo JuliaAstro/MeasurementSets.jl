@@ -55,6 +55,9 @@ include("datamanagers/dysco.jl")
 # --- lazy columns, then the query engine, then the higher table verbs ---
 include("tables/column.jl")
 include("tables/units.jl")
+include("measures/types.jl")
+include("measures/measinfo.jl")
+include("measures/read.jl")
 include("taql/taql.jl")
 include("schema.jl")
 include("tables/interface.jl")
@@ -70,7 +73,11 @@ export Record, SubTable, ColumnDesc, TableDesc, CasaType
 export BFloat16                       # re-exported from BFloat16s (for `precision=BFloat16`)
 export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
-export columnunit, qcolumn, UNITS_NO_JULIA_COUNTERPART   # real methods via MeasurementSetsUnitfulExt
+export columnunit, qcolumn, UNITS_NO_JULIA_COUNTERPART   # real methods via UnitfulExt
+export measure, measinfo, measconvert, MeasFrame, MeasInfo   # conversions via SOFAExt
+export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, reftype
+export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
+    HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 export write_table, write_ms, copyms, create_ms
 export write_reftable, write_concattable, copytable, reference_copy

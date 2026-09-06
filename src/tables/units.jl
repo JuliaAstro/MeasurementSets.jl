@@ -2,7 +2,7 @@
 # column keyword).  The reader stores `QuantumUnits` as raw strings in
 # `columndesc(t, name).keywords`; this file adds the string-normalisation
 # layer plus stubs for `columnunit` / `qcolumn`, which get real methods
-# from `MeasurementSetsUnitfulExt` once the caller does
+# from `UnitfulExt` once the caller does
 #
 #     import Unitful, UnitfulAngles, UnitfulAstro
 #
@@ -44,7 +44,7 @@ function _normalize_unit(s::AbstractString)
 end
 
 # `columnunit` / `qcolumn` get their real (table, name) methods from
-# `MeasurementSetsUnitfulExt`.  The varargs fallbacks here just give a
+# `UnitfulExt`.  The varargs fallbacks here just give a
 # clear "load Unitful" message; the extension's methods are strictly
 # more specific, so they win with no method-overwrite clash.
 _unitful_load_hint() = error(

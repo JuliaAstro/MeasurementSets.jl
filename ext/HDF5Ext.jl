@@ -6,7 +6,7 @@
 # for the format notes and the standing "no real casacore oracle for
 # MultiHDF5 on this machine" caveat.
 
-module MeasurementSetsHDF5Ext
+module HDF5Ext
 
 import HDF5
 import MeasurementSets as MS

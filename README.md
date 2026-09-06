@@ -6,11 +6,13 @@ A pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for
 interferometric visibility data by ALMA, the VLA, LOFAR and others.
 
-No C-library dependencies. Two **optional weak dependencies**, each
-loaded via a package extension only when you `import` it:
-`HDF5.jl` (wraps C `libhdf5`) for `MultiHDF5` (`table.mfh5`) containers,
-and `Unitful.jl` + `UnitfulAngles.jl` + `UnitfulAstro.jl` for
-physical-unit column reads (`columnunit`, `qcolumn`).
+No C-library dependencies. Optional **weak dependencies**, each loaded
+via a package extension only when you `import` it:
+`HDF5.jl` (wraps C `libhdf5`) for `MultiHDF5` (`table.mfh5`) containers;
+`Unitful.jl` + `UnitfulAngles.jl` + `UnitfulAstro.jl` for physical-unit
+column reads (`columnunit`, `qcolumn`); `SOFA.jl` (pure-Julia IAU SOFA)
+for reference-frame conversions (`measconvert` — epoch / direction /
+frequency), with `EarthOrientation.jl` adding IERS ΔUT1 / polar motion.
 
 ## At a glance
 

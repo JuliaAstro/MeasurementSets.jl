@@ -7,7 +7,7 @@
 # that no third-party Julia package provides.  See `src/tables/units.jl`
 # and `MeasurementSets.UNITS_NO_JULIA_COUNTERPART`.
 
-module MeasurementSetsUnitfulExt
+module UnitfulExt
 
 import Unitful
 import UnitfulAngles

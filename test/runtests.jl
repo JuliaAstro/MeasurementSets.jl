@@ -42,4 +42,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
     include("taql_query_tests.jl")
     include("taql_command_tests.jl")
     include("units_tests.jl")
+    if isdir(SAMPLE_MS)
+        include("measures_tests.jl")
+    end
 end
