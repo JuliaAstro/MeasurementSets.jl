@@ -123,6 +123,55 @@ end
     @test_throws ArgumentError query(t, "A > 5"; select=["X" => "NOPE"])
 end
 
+@testset "TaQL-lite query — computed select columns" begin
+    dir = joinpath(mktempdir(), "csel.tab")
+    K = Int32[0, 1, 2, 3, 4, 5]
+    X = Float64[1, 4, 9, 16, 25, 36]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X]; nrow=6)
+    t = readtable(dir)
+
+    # any computed rhs -> GroupedTable; a bare column stays a projection
+    r = query(t, "K >= 1"; select=["K" => "K", "X2" => "X * 2.0", "R" => "sqrt(X)"])
+    @test r isa MSv2.GroupedTable
+    @test columnnames(r) == ["K", "X2", "R"]
+    @test collect(r.K) == Int32[1, 2, 3, 4, 5]
+    @test collect(r.X2) == 2 .* X[2:6]
+    @test collect(r.R) == sqrt.(X[2:6])
+
+    # all-projection select still returns a lazy RefTable
+    @test query(t, "K >= 1"; select=["KK" => "K"]) isa RefTable
+
+    # closure form + computed
+    rc = query(t; select=["S" => "K + X", "F" => "iif(K == 0, 1, 0)"]) do row
+        row.K <= 2
+    end
+    @test rc isa MSv2.GroupedTable
+    @test collect(rc.S) == Float64[1, 5, 11]
+    @test collect(rc.F) == [1, 0, 0]
+
+    # ORDER BY composes with computed columns
+    ro = query(t, "K >= 0 ORDER BY K DESC"; select=["K" => "K", "NEG" => "-X"])
+    @test collect(ro.K) == Int32[5, 4, 3, 2, 1, 0]
+    @test collect(ro.NEG) == -X[6:-1:1]
+
+    # aggregate in a computed column -> clear error
+    @test_throws ArgumentError query(t, "TRUE"; select=["A" => "gsum(X)"])
+
+    # persist the computed result
+    dst = joinpath(mktempdir(), "OUT")
+    write_table(dst, "OUT", r; nrow=nrow(r))
+    @test column(readtable(dst), "X2")[:] == 2 .* X[2:6]
+
+    # query on a GroupedTable with a computed select
+    g2 = query(r, "K >= 2"; select=["K" => "K", "X4" => "X2 * 2.0"])
+    @test collect(g2.X4) == 4 .* X[3:6]
+
+    # taql string form: computed column needs AS; bare column doesn't
+    tq = taql(t, "SELECT K, X * 3.0 AS X3 WHERE K >= 3")
+    @test collect(tq.X3) == 3 .* X[4:6]
+    @test_throws ArgumentError taql(t, "SELECT X + 1 WHERE K >= 0")
+end
+
 @testset "TaQL-lite query — closure form" begin
     dir = joinpath(mktempdir(), "t3.tab")
     A = collect(Int32, 1:20)

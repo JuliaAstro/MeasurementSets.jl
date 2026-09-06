@@ -48,7 +48,8 @@ session or a live `casa` / python-casacore process.  `is_stale` /
 **Query** — a small TaQL-like engine: `query` (WHERE with arithmetic,
 `LIKE` / regex, `BETWEEN`, bitwise `& | ^ ~`, `~=` (approx-equal), a function library, 1-based array indexing /
 slicing (`DATA[1,1]`, `UVW[3]`, `V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`),
-`ORDER BY`, column projection → a `RefTable`), `groupby` (GROUP BY +
+`ORDER BY`, column projection or computed `select` expressions → a
+`RefTable` / `GroupedTable`), `groupby` (GROUP BY +
 `g*` aggregates + HAVING + `ROLLUP` / `CUBE` / `GROUPING SETS`, string
 or closure form), `join`
 (N:1 lookup, M:N inner / outer, or a `(lrow, rrow) -> Bool` non-equi

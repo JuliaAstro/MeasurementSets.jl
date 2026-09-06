@@ -315,10 +315,17 @@ function taql(target, command::AbstractString)
         else
             select = Pair{String,String}[]
             for piece in _split_commas(collist)
-                cm = match(r"^(\w+)(?:\s+AS\s+(\w+))?$"i, piece)
+                cm = match(r"^(.+?)(?:\s+AS\s+(\w+))?$"is, piece)
                 cm === nothing && throw(ArgumentError("taql: malformed column \"$piece\""))
-                src = String(cm.captures[1])
-                push!(select, (cm.captures[2] === nothing ? src : String(cm.captures[2])) => src)
+                src = String(strip(cm.captures[1]))
+                alias = cm.captures[2]
+                if alias === nothing
+                    occursin(r"^\w+$", src) ||
+                        throw(ArgumentError("taql: computed SELECT column \"$src\" needs an AS alias"))
+                    push!(select, src => src)
+                else
+                    push!(select, String(alias) => src)
+                end
             end
         end
 

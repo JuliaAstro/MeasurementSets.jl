@@ -912,3 +912,15 @@ predicate rows. It composes with `where` / `orderby` /
 MeasurementSets extension — TaQL's own `JOIN … ON` is `==` / `IN` only,
 so there is no cross-check — and it is O(nrow(left) × nrow(right)):
 `query` / `select` each side down first for a large table.
+
+### Phase 57 — computed output columns in `query`'s `select`
+
+`query`'s `select` `"out" => rhs` pairs now accept a **computed
+expression** as the `rhs` (`"X * 2"`, `"sqrt(abs(V))"`, `"iif(K==0, 1,
+0)"` — the WHERE grammar, aggregates excepted). When every `rhs` is a
+bare column name the result is still a lazy `RefTable` (unchanged); when
+any is computed the result is an in-memory `GroupedTable` with those
+columns evaluated per matched row. Works for the closure form and on a
+`GroupedTable` input too. `taql`'s `SELECT` parses `expr AS alias`
+(a computed column needs the `AS`). An aggregate in a `query` `select`
+raises a clear error pointing at `groupby`.

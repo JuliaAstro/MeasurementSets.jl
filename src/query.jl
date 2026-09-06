@@ -1178,13 +1178,64 @@ function _flatten_query_parent(t::AbstractTable, rows::Vector{Int},
     return t, rows, namemap
 end
 
+# classify `select` pairs against `validnames` into 3-tuples
+# `(outname, :proj, srcname)` or `(outname, :expr, TQLExpr)`.
+# A `Symbol` RHS, or a `String` RHS naming a column, is a projection;
+# any other `String` is parsed as a computed expression (aggregates
+# rejected -- those need `groupby`).
+function _select_classify(select::AbstractVector{<:Pair}, validnames)
+    order = String[String(first(p)) for p in select]
+    allunique(order) || throw(ArgumentError("duplicate output column name"))
+    out = Tuple{String,Symbol,Any}[]
+    for p in select
+        nm = String(first(p)); rhs = last(p)
+        if rhs isa Symbol || String(rhs) in validnames
+            s = String(rhs)
+            s in validnames || throw(ArgumentError("select: no column \"$s\""))
+            push!(out, (nm, :proj, s))
+        else
+            ast = _taqllite_parse(String(rhs), validnames)
+            if ast isa TQLCol
+                push!(out, (nm, :proj, ast.name))
+            else
+                _has_aggr(ast) && throw(ArgumentError(
+                    "select: aggregate functions need `groupby`, not `query` (\"$(rhs)\")"))
+                push!(out, (nm, :expr, ast))
+            end
+        end
+    end
+    return out
+end
+
+_select_all_proj(cls) = all(c -> c[2] === :proj, cls)
+
+# materialise the `select` output: `getcol(name)` fetches a source
+# column, `rows` are the surviving 1-based indices into it (already
+# ORDER BY-sorted). Returns column vectors in `select` order.
+function _select_materialize(cls, getcol, rows::Vector{Int})
+    refs = Set{String}()
+    for (_, kind, v) in cls
+        kind === :expr && _tqlrefs!(refs, v)
+    end
+    cd = Dict{String,AbstractVector}(n => getcol(n) for n in refs)
+    cols = AbstractVector[]
+    for (_, kind, v) in cls
+        if kind === :proj
+            push!(cols, _mapcol(getcol(v), rows))
+        else
+            push!(cols, identity.(Any[_tqleval(v, cd, i) for i in rows]))
+        end
+    end
+    return cols
+end
+
 # ======================================================================
 # public API
 # ======================================================================
 
 """
     query(t::AbstractTable, wherestr::AbstractString;
-         select=[n=>n for n in columnnames(t)]) -> RefTable
+         select=[n=>n for n in columnnames(t)]) -> RefTable | GroupedTable
 
 Row-filter `t` with a small TaQL-like WHERE expression:
 
@@ -1212,9 +1263,13 @@ Row-filter `t` with a small TaQL-like WHERE expression:
 Column names are case-sensitive and must name a column of `t`; keywords
 and function names are case-insensitive. Only the columns actually
 referenced (by the WHERE expression or an ORDER BY key) are read.
-`select` projects/renames columns exactly like [`write_reftable`](@ref)'s
-own `select=`. Returns a `RefTable` (no data copied); persist it with
-`write_reftable(dst, result)`.
+
+`select` is `"out" => rhs` pairs. When every `rhs` is a bare column
+name (or `Symbol`) the result is a lazy `RefTable` (no data copied;
+persist it with `write_reftable(dst, result)`). When any `rhs` is a
+**computed expression** (`"X * 2"`, `"sqrt(abs(V))"`, `"iif(K==0, 1,
+0)"` — same grammar as WHERE, aggregates excepted) the result is an
+in-memory `GroupedTable` with those columns evaluated per matched row.
 
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
@@ -1239,9 +1294,15 @@ function query(t::AbstractTable, wherestr::AbstractString;
     matched = ast === nothing ? collect(1:nrow(t)) :
               [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
     matched = _apply_orderby(matched, orderby, cols)
-    namemap, order = _select_spec(t, select)
-    parent, rows, namemap = _flatten_query_parent(t, matched, namemap)
-    return RefTable("", parent, rows, namemap, order, parent.type, parent.subtype, parent.readme)
+    cls = _select_classify(select, validnames)
+    if _select_all_proj(cls)
+        namemap, order = _select_spec(t, select)
+        parent, rows, namemap = _flatten_query_parent(t, matched, namemap)
+        return RefTable("", parent, rows, namemap, order,
+                        parent.type, parent.subtype, parent.readme)
+    end
+    outcols = _select_materialize(cls, n -> column(t, n), matched)
+    return GroupedTable(Symbol[Symbol(c[1]) for c in cls], outcols)
 end
 
 _normalize_orderkey(t::AbstractTable, s::Union{AbstractString,Symbol}) = begin
@@ -1260,7 +1321,7 @@ end
 
 """
     query(f::Function, t::AbstractTable; cols=nothing, orderby=nothing,
-         select=[n=>n for n in columnnames(t)]) -> RefTable
+         select=[n=>n for n in columnnames(t)]) -> RefTable | GroupedTable
 
 Row-filter `t` with a Julia predicate `f(row) -> Bool` (do-block
 friendly: `query(t; cols=[...]) do row ... end`). `row` is a
@@ -1286,9 +1347,15 @@ function query(f::Function, t::AbstractTable;
     matched = [i for (i, row) in enumerate(rows) if f(row)]
     cols_by_name = Dict(n => c for (n, c) in zip(allnames, allcols))
     matched = _apply_orderby(matched, orderkeys, cols_by_name)
-    namemap, order = _select_spec(t, select)
-    parent, rows2, namemap = _flatten_query_parent(t, matched, namemap)
-    return RefTable("", parent, rows2, namemap, order, parent.type, parent.subtype, parent.readme)
+    cls = _select_classify(select, Set(columnnames(t)))
+    if _select_all_proj(cls)
+        namemap, order = _select_spec(t, select)
+        parent, rows2, namemap = _flatten_query_parent(t, matched, namemap)
+        return RefTable("", parent, rows2, namemap, order,
+                        parent.type, parent.subtype, parent.readme)
+    end
+    outcols = _select_materialize(cls, n -> column(t, n), matched)
+    return GroupedTable(Symbol[Symbol(c[1]) for c in cls], outcols)
 end
 
 # ======================================================================
@@ -1461,9 +1528,9 @@ function query(gt::GroupedTable, wherestr::AbstractString;
     nr = nrow(gt)
     keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tqleval(ast, cd, i)]
     keep = _apply_orderby(keep, orderby, cd)
-    namemap, order = _select_spec(gt, select)
-    return GroupedTable(Symbol.(order),
-        AbstractVector[cd[namemap[o]][keep] for o in order])
+    cls = _select_classify(select, Set(columnnames(gt)))
+    return GroupedTable(Symbol[Symbol(c[1]) for c in cls],
+        _select_materialize(cls, n -> column(gt, n), keep))
 end
 
 """
@@ -1483,10 +1550,9 @@ function query(f::Function, gt::GroupedTable;
     rws = CTDSRows(AbstractVector[cd[n] for n in allnames], Symbol.(allnames), nrow(gt))
     keep = [i for (i, row) in enumerate(rws) if f(row)]
     keep = _apply_orderby(keep, orderkeys, cd)
-    fullcd = Dict{String,AbstractVector}(n => column(gt, n) for n in columnnames(gt))
-    namemap, order = _select_spec(gt, select)
-    return GroupedTable(Symbol.(order),
-        AbstractVector[fullcd[namemap[o]][keep] for o in order])
+    cls = _select_classify(select, Set(columnnames(gt)))
+    return GroupedTable(Symbol[Symbol(c[1]) for c in cls],
+        _select_materialize(cls, n -> column(gt, n), keep))
 end
 
 _gb_names(c::Union{AbstractString,Symbol}) = String[String(c)]
