@@ -74,7 +74,8 @@ briefly: 1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
 `UVW[-1]`, `V[end-2:end,1]`), `BETWEEN` / `NOT BETWEEN`, bitwise
 `& | ^ ~` (`^` = xor), `~=` / `!~=` approximate equality, and
 `UPDATE … SET col[i,j] = …` array-slice / boolean-mask
-(`SET col[maskexpr] = …`) assignment, and computed `query` `select`
-columns (`"amp" => "sqrt(abs(V))"`) *are* supported, but no units or
-date/time / measures functions, and no `(col, maskcol) = …` paired
-update (needs masked-array expressions).
+(`SET col[maskexpr] = …`) / `(col, maskcol)` paired assignment, and
+computed `query` `select` columns (`"amp" => "sqrt(abs(V))"`) *are*
+supported, but no units or date/time / measures functions. The
+`(col, maskcol)` form supplies the data and mask expressions
+explicitly (TaQL-lite has no masked-array expressions).

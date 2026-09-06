@@ -936,3 +936,17 @@ input, 3-verb deep chains, `write_table` round-trip of the final result)
 and drops the stale "use `Tables.columntable`" non-goal. No code change.
 `edit` / `write_ms` / `copyms`-as-MAIN still need a plain on-disk
 `Table`.
+
+### Phase 59 — `UPDATE SET (col, maskcol) = expr`
+
+`update!`'s `set` key can be a `(datacol, maskcol)` tuple (TaQL's
+`SET (NAME, MASKNAME) = …`). `("D", "M") => "dexpr"` writes `dexpr` to
+`D` and a non-finite flag (`!isfinite`, element-wise) of the result to
+`M`; `("D", "M") => ("dexpr", "mexpr")` writes an explicit mask
+expression to `M` instead. Either name may be a slice / mask target.
+`taql`'s `UPDATE … SET` parses `(D, M) = dexpr` and
+`(D, M) = (dexpr, mexpr)`. Since TaQL-lite has no masked-array
+expressions the data and mask are given explicitly — a documented
+divergence from casacore, which writes `expr`'s own attached mask, so
+there is no cross-check. New `nonfinite(x)` / `isnonfinite(x)` function
+(element-wise `!isfinite`) is available in expressions generally.

@@ -352,15 +352,56 @@ end
     update!(p4; set=["V[MK][1:2,1:2]" => "7.0"])
     @test column(readtable(p4), "V")[1] == [1.0 7.0 3.0; 7.0 5.0 6.0]
 
-    # (col, maskcol) form -> clear error
-    p5 = mk("m5")
-    @test_throws ArgumentError update!(p5; set=["(V, MK)" => "0.0"])
-    @test_throws ArgumentError taql(p5, "UPDATE t SET (V, MK) = 0.0")
-
     # taql string form
     p6 = mk("m6")
     @test taql(p6, "UPDATE t SET V[MK] = 0.0") == 3
     @test all(column(readtable(p6), "V")[1][M0[1]] .== 0.0)
+end
+
+@testset "update! -- (col, maskcol) pair form" begin
+    dir = mktempdir()
+    V0 = [Float64[i i+1 i+2; i+3 i+4 i+5] for i in 1:3]
+    M0 = [falses(2, 3) for _ in 1:3]
+    mk(name) = (p = joinpath(dir, name);
+                write_table(p, name, Pair{String,Any}["V" => deepcopy(V0), "M" => deepcopy(M0)];
+                    nrow=3, tsm=[["V"], ["M"]]); p)
+
+    # default mask = where the data expr goes non-finite
+    p1 = mk("d1")
+    @test update!(p1; set=[("V", "M") => "1.0 / (V - 4.0)"]) == 3
+    v1 = column(readtable(p1), "V"); m1 = column(readtable(p1), "M")
+    for r in 1:3
+        want = 1.0 ./ (V0[r] .- 4.0)
+        @test isequal(v1[r], want)
+        @test m1[r] == .!isfinite.(want)
+    end
+
+    # explicit (dexpr, mexpr)
+    p2 = mk("d2")
+    update!(p2; set=[("V", "M") => ("V * 2.0", "V > 4.0")])
+    @test column(readtable(p2), "V")[1] == 2 .* V0[1]
+    @test column(readtable(p2), "M")[1] == (V0[1] .> 4.0)
+
+    # slice targets inside the pair
+    p3 = mk("d3")
+    update!(p3; set=[("V[1,1]", "M[1,1]") => ("0.0", "true")])
+    @test column(readtable(p3), "V")[1][1, 1] == 0.0
+    @test column(readtable(p3), "M")[1][1, 1] == true
+    @test column(readtable(p3), "M")[1][2, 2] == false
+
+    # taql string forms
+    p4 = mk("d4")
+    @test taql(p4, "UPDATE t SET (V, M) = V * 2.0") == 3
+    @test column(readtable(p4), "V")[1] == 2 .* V0[1]
+    p5 = mk("d5")
+    taql(p5, "UPDATE t SET (V, M) = (V * 2.0, V > 4.0), M = M")   # composes with a plain entry
+    @test column(readtable(p5), "V")[1] == 2 .* V0[1]
+
+    # errors
+    p6 = mk("d6")
+    @test_throws ArgumentError update!(p6; set=[("V", "M", "X") => "0.0"])
+    @test_throws ArgumentError update!(p6; set=[("V", "NOPE") => "0.0"])
+    @test_throws ArgumentError update!(p6; set=["V" => ("a", "b")])
 end
 
 if _HAVE_TAQL

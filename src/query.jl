@@ -983,6 +983,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "conj" => (_ew(conj), 1:1), "norm" => (_ew(abs2), 1:1),
     "isnan" => (_ew(isnan), 1:1), "isinf" => (_ew(isinf), 1:1),
     "isfinite" => (_ew(isfinite), 1:1),
+    "nonfinite" => (_ew(!isfinite), 1:1), "isnonfinite" => (_ew(!isfinite), 1:1),
     # --- binary elementwise ---
     "pow" => (_ew2(^), 2:2), "atan2" => (_ew2((y, x) -> atan(y, x)), 2:2),
     "fmod" => (_ew2(rem), 2:2),
@@ -1256,7 +1257,7 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `sum`, `product`, `median`, `variance`, `stddev`, `rms`, `min`/`max`,
   `any`, `all`, `ntrue`/`nfalse`, `nelements`/`count`, `ndim`), string
   ops (`strlength`/`len`, `upper`/`lower`, `trim`/`ltrim`/`rtrim`),
-  `isnan`/`isinf`/`isfinite`, `iif(cond, a, b)`, `rownumber()` (1-based),
+  `isnan`/`isinf`/`isfinite`/`nonfinite`, `iif(cond, a, b)`, `rownumber()` (1-based),
   `pi`, `e`;
 * an optional trailing `ORDER BY col [ASC|DESC], ...` (bare columns).
 

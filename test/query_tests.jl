@@ -532,6 +532,9 @@ end
     @test ew2([1, 2, 3], 2) == [1, 4, 9]
     @test MSv2._tql_nelem([1 2; 3 4]) == 4
     @test MSv2._tql_nelem(7) == 1
+    nf = MSv2._TQL_FUNCS["nonfinite"][1]
+    @test nf([1.0 NaN; Inf 4.0]) == [false true; true false]
+    @test nf(NaN) == true && nf(3.0) == false
 end
 
 @testset "TaQL-lite query — function string form" begin

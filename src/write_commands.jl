@@ -27,9 +27,18 @@ swaps). The `set` key may also be an array-slice or boolean-mask target,
 or a single Bool-array subscript acting as a write mask — which writes
 only the addressed elements, leaving the rest untouched; a scalar RHS
 fills the region. `col[slice][mask]` and `col[mask][slice]` both work.
-`where` is a
-TaQL-lite WHERE string, a `row -> Bool` closure, or `nothing` (every
-row). Returns the number of rows changed.
+
+A `set` key may also be a **`(datacol, maskcol)` tuple** (TaQL's
+`UPDATE … SET (NAME, MASKNAME) = …`). `("D", "M") => "dexpr"` writes
+`dexpr` to `D` and writes to `M` a Bool array flagging where `dexpr`'s
+result is non-finite (NaN / Inf). `("D", "M") => ("dexpr", "mexpr")`
+writes `mexpr` (any Bool expression) to `M` instead. Either name may be
+a slice / mask target. (TaQL-lite has no masked-array expressions, so
+the data + mask are given explicitly — a documented divergence from
+casacore, which writes `expr`'s own attached mask.)
+
+`where` is a TaQL-lite WHERE string, a `row -> Bool` closure, or
+`nothing` (every row). Returns the number of rows changed.
 """
 function update!(target; set::AbstractVector{<:Pair}, where=nothing)
     path = _cmd_path(target)
@@ -37,17 +46,18 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
     vn = Set(columnnames(rd))
     isempty(set) && throw(ArgumentError("update!: `set` must not be empty"))
 
+    # expand `(D, M) => …` pair targets into plain per-column entries;
+    # `_expand_set_pairs` may hand back an already-parsed TQLExpr as a
+    # value (the default non-finite mask).
+    flat = _expand_set_pairs(set, vn)
+
     # each entry: (colname, levels::Vector{Vector} | nothing, rhs_ast)
     specs = Tuple{String,Any,Any}[]
-    for p in set
-        lhskey = String(first(p))
-        occursin(r"^\(\s*\w+\s*,\s*\w+\s*\)", lhskey) && throw(ArgumentError(
-            "update!: the (col, maskcol) update form needs masked-array expressions, " *
-            "which TaQL-lite does not have — use \"col[maskexpr] = …\" instead"))
+    for (lhskey, rv) in flat
         lhs = _taqllite_parse(lhskey, vn)
-        rhs = _taqllite_parse(String(last(p)), vn)
+        rhs = rv isa TQLExpr ? rv : _taqllite_parse(String(rv), vn)
         !_has_aggr(rhs) ||
-            throw(ArgumentError("update!: SET expression \"$(last(p))\" must not aggregate"))
+            throw(ArgumentError("update!: SET expression \"$(rv)\" must not aggregate"))
         if lhs isa TQLCol
             push!(specs, (lhs.name, nothing, rhs))
         else
@@ -127,6 +137,48 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
         end
     end
     return length(rows)
+end
+
+# "(a, b)" (paren-aware) -> ("a", "b"), else nothing
+function _pair_split(s::AbstractString)
+    t = strip(s)
+    (startswith(t, "(") && endswith(t, ")")) || return nothing
+    parts = _split_commas(chop(t; head=1, tail=1))
+    length(parts) == 2 || throw(ArgumentError(
+        "update!: a (col, maskcol) / (dexpr, mexpr) pair takes exactly two entries, got $(length(parts))"))
+    return (String(strip(parts[1])), String(strip(parts[2])))
+end
+
+# expand `(D, M) => …` pair-LHS `set` entries into plain per-column
+# entries. `(D, M) => "dexpr"` -> `D => dexpr` + `M => <non-finite flag
+# of dexpr>` (a pre-parsed TQLFunc); `(D, M) => ("dexpr", "mexpr")` ->
+# `D => dexpr` + `M => mexpr`. Non-pair entries pass through unchanged.
+function _expand_set_pairs(set, vn)
+    out = Pair{String,Any}[]
+    for p in set
+        lk, rv = first(p), last(p)
+        names = lk isa Tuple ?
+            (length(lk) == 2 ? (String(lk[1]), String(lk[2])) :
+             throw(ArgumentError("update!: a (col, maskcol) target takes exactly two names"))) :
+            (lk isa AbstractString ? _pair_split(lk) : nothing)
+        if names === nothing
+            rv isa Tuple && throw(ArgumentError(
+                "update!: a (dexpr, mexpr) RHS needs a (col, maskcol) target"))
+            push!(out, String(lk) => rv)
+            continue
+        end
+        dn, mn = names
+        de, me = rv isa Tuple ?
+            (length(rv) == 2 ? (String(rv[1]), String(rv[2])) :
+             throw(ArgumentError("update!: a (dexpr, mexpr) RHS takes exactly two expressions"))) :
+            (rv isa AbstractString ?
+             (x = _pair_split(rv); x === nothing ? (String(rv), nothing) : x) :
+             throw(ArgumentError("update!: unsupported RHS for a (col, maskcol) target")))
+        push!(out, dn => de)
+        push!(out, mn => (me === nothing ?
+            TQLFunc(_TQL_FUNCS["nonfinite"][1], TQLExpr[_taqllite_parse(de, vn)]) : me))
+    end
+    return out
 end
 
 # collect column names referenced inside array-subscript axis expressions
