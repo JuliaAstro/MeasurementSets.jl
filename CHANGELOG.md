@@ -841,3 +841,16 @@ then right-match order, then the unmatched right rows.
 The default (`multi = false`) is unchanged — the Phase-28 N:1 lookup
 join, still the only form that takes an index-lookup `on` (a bare
 column name) or requires a unique right key.
+
+### Phase 52 — `gs*` per-element aggregates
+
+`groupby` `select` strings gained the `s`-suffixed aggregate variants
+(`gsums`, `gproducts`, `gmeans` / `gavgs`, `gvariances` /
+`gsamplevariances`, `gstddevs` / `gsamplestddevs`, `grmss`, `gmins`,
+`gmaxs`, `ganys`, `galls`, `gntrues`, `gnfalses`). Where `gmean(x)`
+reduces one scalar-per-row value over a group, `gmeans(x)` takes the
+group's array cells (all the same shape) and reduces them
+**elementwise**, giving one array — e.g. `"gmeans(V)"` is the per-cell
+mean spectrum over a group. Reuses the existing `TQLAggr` node; no
+parser or AST change. Cross-checked against real casacore for
+`gsums` / `gmeans` / `gmaxs` / `gstddevs`.

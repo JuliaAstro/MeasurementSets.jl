@@ -645,6 +645,43 @@ end
     @test collect(r.MS) == [maximum(sum(V[i]) for i in grp[k]) for k in 1:3]
 end
 
+@testset "groupby — per-element (gs*) aggregates" begin
+    dir = joinpath(mktempdir(), "gse.tab")
+    K = Int32[1, 1, 1, 2, 2]
+    V = [Float64[i i+1; i+2 i+3] for i in 1:5]
+    B = [Bool[isodd(i) iseven(i); true false] for i in 1:5]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "V" => V, "B" => B]; nrow=5,
+                tsm=[["V"], ["B"]])
+    t = readtable(dir)
+    grp = Dict(1 => [1, 2, 3], 2 => [4, 5])
+
+    g = groupby(t, "K"; orderby=["K"],
+        select = ["K" => :K,
+                  "SU" => "gsums(V)", "MN" => "gmeans(V)", "MI" => "gmins(V)",
+                  "MX" => "gmaxs(V)", "PR" => "gproducts(V)",
+                  "SD" => "gstddevs(V)", "RM" => "grmss(V)",
+                  "AN" => "ganys(B)", "AL" => "galls(B)", "NT" => "gntrues(B)",
+                  "NF" => "gnfalses(B)"])
+    for k in (1, 2)
+        vv = V[grp[k]]; bb = B[grp[k]]; i = k
+        @test g.SU[i] == sum(vv)
+        @test g.MN[i] ≈ Statistics.mean(vv)
+        @test g.MI[i] == reduce((a, b) -> min.(a, b), vv)
+        @test g.MX[i] == reduce((a, b) -> max.(a, b), vv)
+        @test g.PR[i] == reduce((a, b) -> a .* b, vv)
+        @test g.SD[i] ≈ sqrt.(Statistics.var(vv; corrected=false))
+        @test g.RM[i] ≈ sqrt.(sum(x -> x .^ 2, vv) ./ length(vv))
+        @test g.AN[i] == reduce((a, b) -> a .| b, bb)
+        @test g.AL[i] == reduce((a, b) -> a .& b, bb)
+        @test g.NT[i] == sum(bb)
+        @test g.NF[i] == length(bb) .- sum(bb)
+    end
+
+    # gavgs alias, gsamplevariances/gsamplestddevs
+    g2 = groupby(t, "K"; select=["K" => :K, "A" => "gavgs(V)", "SV" => "gsamplevariances(V)"])
+    @test isequal(collect(g2.A), collect(groupby(t, "K"; select=["K" => :K, "A" => "gmeans(V)"]).A))
+end
+
 @testset "groupby — GroupedTable is a Tables.jl source" begin
     dir = joinpath(mktempdir(), "gt.tab")
     K = Int32[1, 1, 2, 2, 2, 3, 3]
@@ -1577,6 +1614,28 @@ if _HAVE_TAQL
             @test collect(got.MX) ≈ ref.MX
             @test collect(got.XMN) ≈ ref.XMN
             @test collect(got.XMX) ≈ ref.XMX
+        end
+    end
+
+    @testset "groupby — per-element (gs*) real TaQL cross-check" begin
+        d = mktempdir(); pdir = joinpath(d, "T")
+        K = Int32[(i - 1) % 3 for i in 1:24]
+        V = [Float64[i, i + 1, i + 2, i + 3] for i in 1:24]      # (4,) cells
+        write_table(pdir, "T", Pair{String,Any}["K" => K, "V" => V]; nrow=24, tsm=[["V"]])
+        rdir = joinpath(mktempdir(), "g")
+        _taqlcmd("SELECT K, gsums(V) AS SU, gmeans(V) AS MN, gmaxs(V) AS MX, " *
+                 "gstddevs(V) AS SD FROM \$1 GROUP BY K GIVING '$rdir'", pdir)
+        g = readtable(rdir)
+        ks = column(g, "K")[:]; p = sortperm(ks)
+        t = readtable(pdir)
+        got = groupby(t, "K"; orderby=["K"],
+            select=["K" => "K", "SU" => "gsums(V)", "MN" => "gmeans(V)",
+                    "MX" => "gmaxs(V)", "SD" => "gstddevs(V)"])
+        for i in 1:3
+            @test collect(got.SU)[i] ≈ collect(column(g, "SU")[:][p][i])
+            @test collect(got.MN)[i] ≈ collect(column(g, "MN")[:][p][i])
+            @test collect(got.MX)[i] ≈ collect(column(g, "MX")[:][p][i])
+            @test collect(got.SD)[i] ≈ collect(column(g, "SD")[:][p][i])
         end
     end
 

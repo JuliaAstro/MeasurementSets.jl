@@ -962,6 +962,22 @@ const _TQL_AGGRS = Dict{String,Base.Callable}(
     "gany" => any, "gall" => all,
     "gntrue" => (v -> count(identity, v)), "gnfalse" => (v -> count(!, v)),
     "gfirst" => first, "glast" => last,
+    # per-element (`s`-suffixed) variants: the group's array cells (all
+    # the same shape) reduced elementwise -> one array. `sum`/`mean`/
+    # `var` add/scale arrays elementwise; `prod`/`min`/`max`/`any`/`all`
+    # need an explicit broadcast reduce (`prod` of matrices is matmul!).
+    "gsums" => sum, "gproducts" => (v -> reduce((a, b) -> a .* b, v)),
+    "gmeans" => Statistics.mean, "gavgs" => Statistics.mean,
+    "gvariances" => (v -> Statistics.var(v; corrected=false)),
+    "gsamplevariances" => Statistics.var,
+    "gstddevs" => (v -> sqrt.(Statistics.var(v; corrected=false))),
+    "gsamplestddevs" => (v -> sqrt.(Statistics.var(v))),
+    "grmss" => (v -> sqrt.(sum(x -> abs2.(x), v) ./ length(v))),
+    "gmins" => (v -> reduce((a, b) -> min.(a, b), v)),
+    "gmaxs" => (v -> reduce((a, b) -> max.(a, b), v)),
+    "ganys" => (v -> reduce((a, b) -> a .| b, v)),
+    "galls" => (v -> reduce((a, b) -> a .& b, v)),
+    "gntrues" => sum, "gnfalses" => (v -> length(v) .- sum(v)),
 )
 
 function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
@@ -1553,7 +1569,12 @@ compute one result row per group.
   `gany(x)`, `gall(x)`, `gntrue(x)`, `gnfalse(x)`, `gfirst(x)`,
   `glast(x)` — plus the group-key columns and scalar expressions of
   them. An aggregate's argument must reduce to a scalar per row (wrap
-  an array cell in `mean(...)` / `sum(...)`).
+  an array cell in `mean(...)` / `sum(...)`). The `s`-suffixed
+  per-element variants (`gsums`, `gproducts`, `gmeans` / `gavgs`,
+  `gvariances` / `gsamplevariances`, `gstddevs` / `gsamplestddevs`,
+  `grmss`, `gmins`, `gmaxs`, `ganys`, `galls`, `gntrues`, `gnfalses`)
+  instead take the group's array cells (all the same shape) and reduce
+  them elementwise, giving one array.
 * a **`Symbol`** — shorthand for a bare column name (`:K` ≡ `"K"`).
 * a **function** `g -> value` — called with a [`GroupSlice`](@ref) (see
   the do-block form below); use for aggregates the `g*` set can't
