@@ -1006,6 +1006,53 @@ end
     @test issorted(collect(o.AN))
 end
 
+# ---- Phase 49: M:N joins (multi=true) ----
+
+@testset "join — M:N (multi=true)" begin
+    d = mktempdir()
+    write_table(joinpath(d, "L"), "L",
+                Pair{String,Any}["OBS" => Int32[1, 2, 3, 4], "SRC" => ["a", "b", "a", "c"]]; nrow=4)
+    write_table(joinpath(d, "R"), "R",
+                Pair{String,Any}["NAME" => ["a", "a", "b", "d"], "F" => Float64[10, 11, 20, 40]]; nrow=4)
+    L = readtable(joinpath(d, "L")); R = readtable(joinpath(d, "R"))
+    on = "SRC" => "NAME"
+
+    # inner: a matches {10,11}, b matches {20}, c dropped
+    ji = join(L, R; on, rightcols=["F"], multi=true, unmatched=:drop)
+    @test collect(ji.OBS) == [1, 1, 2, 3, 3]
+    @test collect(ji.F) == [10.0, 11.0, 20.0, 10.0, 11.0]
+
+    # left outer: + OBS 4 with F missing
+    jl = join(L, R; on, rightcols=["F"], multi=true, unmatched=:missing)
+    @test collect(jl.OBS) == [1, 1, 2, 3, 3, 4]
+    @test isequal(collect(jl.F), [10.0, 11.0, 20.0, 10.0, 11.0, missing])
+    @test eltype(jl.F) == Union{Missing,Float64}
+
+    # right outer: matched pairs + the unmatched right row "d" (OBS missing)
+    jr = join(L, R; on, leftcols=["OBS"], rightcols=["NAME", "F"], multi=true, unmatched=:right)
+    @test isequal(collect(jr.OBS), [1, 1, 2, 3, 3, missing])
+    @test collect(jr.NAME) == ["a", "a", "b", "a", "a", "d"]
+
+    # full outer
+    jf = join(L, R; on, leftcols=["OBS"], rightcols=["NAME"], multi=true, unmatched=:full)
+    @test isequal(collect(jf.OBS), [1, 1, 2, 3, 3, 4, missing])
+    @test isequal(collect(jf.NAME), ["a", "a", "b", "a", "a", missing, "d"])
+
+    # :error throws when a left row has no match
+    @test_throws ArgumentError join(L, R; on, rightcols=["F"], multi=true, unmatched=:error)
+
+    # index-lookup `on` is rejected with multi=true
+    @test_throws ArgumentError join(L, R; on="OBS", rightcols=["F"], multi=true)
+
+    # composes with where / orderby
+    jw = join(L, R; on, rightcols=["F"], multi=true, unmatched=:drop,
+              where="F > 10.0", orderby=["F" => :desc])
+    @test collect(jw.F) == [20.0, 11.0, 11.0]
+
+    # multi=false still rejects a non-unique right key
+    @test_throws ArgumentError join(L, R; on, rightcols=["F"])
+end
+
 # ---- Phase 29: chainable query results ----
 
 @testset "GroupedTable is an AbstractTable" begin

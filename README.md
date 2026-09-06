@@ -50,7 +50,7 @@ session or a live `casa` / python-casacore process.  `is_stale` /
 slicing (`DATA[1,1]`, `UVW[3]`, `V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`),
 `ORDER BY`, column projection → a `RefTable`), `groupby` (GROUP BY +
 `g*` aggregates + HAVING + `ROLLUP`, string or closure form), `join`
-(an N:1 lookup join), and the row-level write
+(N:1 lookup or M:N inner / outer), and the row-level write
 commands `update!` / `delete!` / `insert!` / `SELECT … INTO`, plus a
 `taql("…")` string dispatcher.  Results chain — each is an
 `AbstractTable`.

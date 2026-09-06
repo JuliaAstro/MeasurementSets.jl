@@ -71,5 +71,4 @@ briefly: 1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
 `UVW[-1]`, `V[end-2:end,1]`), `BETWEEN` / `NOT BETWEEN`, bitwise
 `& | ^ ~` (`^` = xor), and `~=` / `!~=` approximate equality *are*
 supported, but no boolean-mask subscripts, no units or date/time /
-measures functions, no general M:N cross-product
-join, no `UPDATE` array-slice assignment.
+measures functions, no `UPDATE` array-slice assignment.

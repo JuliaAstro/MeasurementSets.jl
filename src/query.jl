@@ -1626,15 +1626,16 @@ function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
 end
 
 # ======================================================================
-# join -- an N:1 lookup join  (Phase 28)
+# join -- N:1 lookup join (Phase 28) + M:N equi-join (Phase 49)
 # ======================================================================
 #
-# Not a general SQL cross-product: each `left` row maps to at most one
-# `right` row (via a key), and selected `right` columns are pulled in
-# per left row -- exactly what TaQL's own `JOIN ... ON` does.  The result
-# is a `GroupedTable` whose columns are lazy `MappedColumn` views
-# (zero-copy even joining onto a large left table); `unmatched=:missing`
-# forces the affected right columns to materialise.
+# `multi=false` (default): each `left` row maps to at most one `right`
+# row (via a key), right columns pulled in per left row -- exactly what
+# TaQL's own `JOIN ... ON` does. `multi=true`: a general M:N equi-join
+# (inner / left / right / full via `unmatched`). The result is a
+# `GroupedTable` whose columns are lazy `MappedColumn` views (zero-copy)
+# except where an outer join's unmatched rows force a `missing`-filled
+# materialisation.
 
 _mapcol(c::AbstractVector, rows::Vector{Int}) =
     MappedColumn{eltype(c),typeof(c)}(c, rows)
@@ -1676,6 +1677,78 @@ function _join_matchrow(left::AbstractTable, right::AbstractTable, on)
     return Int[get(idx, ntuple(t -> lcols[t][i], length(lkeys)), 0) for i in 1:nrow(left)]
 end
 
+# equi-join key columns for `on` (a Pair or vector of pairs); errors on
+# a bare-column-name (index-lookup) `on`.
+function _join_keycols(left::AbstractTable, right::AbstractTable, on)
+    on isa Union{AbstractString,Symbol} && throw(ArgumentError(
+        "join: `multi=true` needs an equi-join key (a `\"LK\" => \"RK\"` pair " *
+        "or a vector of them), not an index-lookup column name"))
+    pairs = on isa Pair ? [on] : collect(on)
+    isempty(pairs) && throw(ArgumentError("join: `on` must not be empty"))
+    lkeys = String[String(first(p)) for p in pairs]
+    rkeys = String[String(last(p)) for p in pairs]
+    for k in lkeys
+        k in columnnames(left) || throw(ArgumentError("join: left table has no column \"$k\""))
+    end
+    for k in rkeys
+        k in columnnames(right) || throw(ArgumentError("join: right table has no column \"$k\""))
+    end
+    return [column(left, k) for k in lkeys], [column(right, k) for k in rkeys]
+end
+
+# The (left-row, right-row) index pairs of the join (`0` on a side means
+# "no match, fill that side's columns with missing"). `multi=false` ->
+# the N:1 lookup; `multi=true` -> an M:N equi-join whose type is set by
+# `unmatched`: :drop (inner) / :missing|:left (left outer) / :right /
+# :full / :error (every left row must match >= 1).
+function _join_pairs(left::AbstractTable, right::AbstractTable, on, multi::Bool,
+                     unmatched::Symbol)
+    if !multi
+        unmatched in (:error, :drop, :missing) || throw(ArgumentError(
+            "join: `unmatched` must be :error, :drop or :missing (or pass multi=true)"))
+        mr = _join_matchrow(left, right, on)
+        lr =
+            unmatched === :error ? (b = findfirst(iszero, mr);
+                b === nothing ? collect(1:nrow(left)) :
+                throw(ArgumentError("join: left row $b has no match on the right " *
+                                    "(pass unmatched=:drop or :missing to allow it)"))) :
+            unmatched === :drop ? [i for i in eachindex(mr) if mr[i] != 0] :
+            collect(1:nrow(left))
+        return lr, mr[lr]
+    end
+
+    unmatched in (:error, :drop, :missing, :left, :right, :full) || throw(ArgumentError(
+        "join: `unmatched` must be :error, :drop, :missing/:left, :right or :full"))
+    keepL = unmatched in (:missing, :left, :full)      # keep unmatched left rows
+    keepR = unmatched in (:right, :full)               # keep unmatched right rows
+    lcols, rcols = _join_keycols(left, right, on)
+    nk = length(lcols)
+    ridx = Dict{Any,Vector{Int}}()
+    for j in 1:nrow(right)
+        push!(get!(() -> Int[], ridx, ntuple(t -> rcols[t][j], nk)), j)
+    end
+    lrows = Int[]; rrows = Int[]
+    matched_r = falses(nrow(right))
+    for i in 1:nrow(left)
+        ms = get(ridx, ntuple(t -> lcols[t][i], nk), nothing)
+        if ms === nothing
+            unmatched === :error && throw(ArgumentError(
+                "join: left row $i has no match on the right (use unmatched=:drop / :missing / ...)"))
+            keepL && (push!(lrows, i); push!(rrows, 0))
+        else
+            for j in ms
+                push!(lrows, i); push!(rrows, j); matched_r[j] = true
+            end
+        end
+    end
+    if keepR
+        for j in 1:nrow(right)
+            matched_r[j] || (push!(lrows, 0); push!(rrows, j))
+        end
+    end
+    return lrows, rrows
+end
+
 # post-assembly WHERE over the RESULT column names (a renamed right
 # column is referenced by its output name).  String -> the TaQL-lite
 # expression engine; Function -> a `row -> Bool` predicate.
@@ -1696,50 +1769,45 @@ end
 
 """
     join(left, right; on, rightcols, leftcols=nothing, where=nothing,
-         unmatched=:error, orderby=nothing) -> GroupedTable
+         unmatched=:error, multi=false, orderby=nothing) -> GroupedTable
 
-N:1 lookup join (extends `Base.join`). Each `left` row is matched to at
-most one `right` row and the selected `right` columns are pulled in per
-left row — TaQL's `JOIN … ON` semantics, not a general cross product.
+Join `left` and `right` (extends `Base.join`). The default (`multi =
+false`) is an **N:1 lookup join** — each `left` row matches at most one
+`right` row, right columns pulled in per left row (TaQL's `JOIN … ON`
+semantics). `multi = true` is a general **M:N equi-join**.
 
 `on` is either
 
 * a **column name** (`String` / `Symbol`) — that `left` column holds a
   **0-based row index** into `right` (the MS subtable convention:
-  `ANTENNA1` → the `ANTENNA` subtable row);
+  `ANTENNA1` → the `ANTENNA` subtable row); N:1 only;
 * a **`Pair`** `"LKEY" => "RKEY"` — equi-join, matching `left.LKEY`
-  against `right.RKEY` (which must be unique);
+  against `right.RKEY` (must be unique when `multi = false`);
 * a **vector of pairs** — a composite key (all must match).
 
 `rightcols` lists the `right` columns to attach — `"NAME"` or
 `"NAME" => "ANT_NAME"` to rename. `leftcols` (default: every `left`
 column) likewise selects/renames left columns. Output names must be
 unique across both. `where` filters the assembled result (a string over
-the *output* column names, or a `row -> Bool` closure). `unmatched`:
-`:error` (default — throw on a dangling key), `:drop` (exclude that
-left row), or `:missing` (keep it; right columns get `missing`).
-`orderby` sorts the result by output column name (`"N"` / `"N" => :desc`).
+the *output* column names, or a `row -> Bool` closure).
 
-Returns a [`GroupedTable`](@ref) whose columns are lazy views unless
-`:missing` forces materialisation.
+`unmatched` — for `multi = false`: `:error` (default — throw on a
+dangling key), `:drop` (exclude that left row), `:missing` (keep it,
+right columns `missing`). For `multi = true` it sets the join type:
+`:drop` = inner, `:missing` / `:left` = left outer, `:right` = right
+outer, `:full` = full outer, `:error` = every left row must match ≥ 1.
+Unmatched rows on either side get `missing` in the other table's
+columns.
+
+`orderby` sorts the result by output column name (`"N"` / `"N" =>
+:desc`). Returns a [`GroupedTable`](@ref) whose columns are lazy views
+except where `missing`-fill forces materialisation.
 """
 function Base.join(left::AbstractTable, right::AbstractTable; on,
                    rightcols::AbstractVector, leftcols=nothing,
-                   where=nothing, unmatched::Symbol=:error,
+                   where=nothing, unmatched::Symbol=:error, multi::Bool=false,
                    orderby::Union{Nothing,AbstractVector}=nothing)
-    matchrow = _join_matchrow(left, right, on)
-
-    lrows =
-        unmatched === :error ? begin
-            b = findfirst(iszero, matchrow)
-            b === nothing ? collect(1:nrow(left)) :
-                throw(ArgumentError("join: left row $b has no match on the right " *
-                                    "(pass unmatched=:drop or :missing to allow it)"))
-        end :
-        unmatched === :drop ? [i for i in eachindex(matchrow) if matchrow[i] != 0] :
-        unmatched === :missing ? collect(1:nrow(left)) :
-        throw(ArgumentError("join: `unmatched` must be :error, :drop, or :missing"))
-    rrows = matchrow[lrows]
+    lrows, rrows = _join_pairs(left, right, on, multi, unmatched)
 
     lpairs = leftcols === nothing ? Pair{String,String}[n => n for n in columnnames(left)] :
              _norm_pairs(leftcols)
@@ -1754,14 +1822,18 @@ function Base.join(left::AbstractTable, right::AbstractTable; on,
     allunique(outnames) ||
         throw(ArgumentError("join: duplicate output column name (left and right collide?)"))
 
+    # a side with any `0` index (an outer join's unmatched rows) must
+    # materialise with `missing` (eltype narrowed via `identity.`);
+    # otherwise a lazy `MappedColumn` view.
+    _side(c, rows) = any(iszero, rows) ?
+        identity.(Any[r == 0 ? missing : c[r] for r in rows]) : _mapcol(c, rows)
+
     cols = AbstractVector[]
     for (_, s) in lpairs
-        push!(cols, _mapcol(column(left, s), lrows))
+        push!(cols, _side(column(left, s), lrows))
     end
-    anymiss = unmatched === :missing && any(iszero, rrows)
     for (_, s) in rpairs
-        rc = column(right, s)
-        push!(cols, anymiss ? [r == 0 ? missing : rc[r] for r in rrows] : _mapcol(rc, rrows))
+        push!(cols, _side(column(right, s), rrows))
     end
 
     gt = GroupedTable(Symbol.(outnames), cols)

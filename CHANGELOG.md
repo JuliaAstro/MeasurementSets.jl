@@ -550,8 +550,7 @@ be constant expressions).
 Still, across Phases 22–31 (array indexing landed in Phase 42,
 `BETWEEN` in Phase 43, bitwise in Phase 46, `~=` in Phase 47): no
 units, date/time or measures functions, the `gs*` per-element
-aggregates, a general M:N cross-product join, `INSERT LIMIT`, or
-`UPDATE` array-slice assignment.
+aggregates, `INSERT LIMIT`, or `UPDATE` array-slice assignment.
 
 ### Phase 32 — docs / consolidation pass
 
@@ -803,3 +802,18 @@ NamedTuple — `(; g.keys..., N = length(g))` — which already carries the
 
 casacore parses `GROUP BY ROLLUP` but throws "not supported yet", so
 this is plain SQL semantics with no real-TaQL cross-check.
+
+### Phase 49 — M:N joins
+
+`join(left, right; on = "LK" => "RK", ..., multi = true)` is a general
+M:N equi-join — one left row can match many right rows. `unmatched`
+sets the join type: `:drop` = inner, `:missing` / `:left` = left outer,
+`:right` = right outer, `:full` = full outer, `:error` = every left row
+must match ≥ 1. Unmatched rows on either side get `missing` in the
+other table's columns (those output columns materialise; matched
+columns stay lazy `MappedColumn` views). Row order is left-row order,
+then right-match order, then the unmatched right rows.
+
+The default (`multi = false`) is unchanged — the Phase-28 N:1 lookup
+join, still the only form that takes an index-lookup `on` (a bare
+column name) or requires a unique right key.
