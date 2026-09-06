@@ -212,8 +212,8 @@ casacore's own `GIVING ... AS PLAIN` (`dataManagerInfo()`).
 
 Not yet implemented: editing a persisted RefTable/ConcatTable in place;
 concatenating keyword subtables on write; hypercube coordinate / id
-columns; `TiledDataStMan`; `ForwardColumnEngine` / `VirtualTaQLColumn` /
-`BitFlagsEngine`; adding a column (or engine) to an existing table in an
+columns; `TiledDataStMan`; `VirtualTaQLColumn` (`ForwardColumnEngine` and
+`BitFlagsEngine` landed in Phase 40); adding a column (or engine) to an existing table in an
 edit session; in-place per-data-manager `resync`. (Free-list bucket
 reuse doesn't apply here — every edit fully regenerates any touched
 storage-manager file from resolved data, so nothing accumulates across
@@ -653,3 +653,29 @@ idiomatic Julia split (`Dates`/`Date`). Pure rename: same UUID, no API
 or behaviour change, all tests green. The test-only environment variables
 are now `MEASUREMENTSETS_TEST_MS` / `MEASUREMENTSETS_CASA_PYTHON`, and
 the HDF5 extension is `MeasurementSetsHDF5Ext`.
+
+### Phase 40 — `BitFlagsEngine` + `ForwardColumnEngine`
+
+The two remaining virtual engines Phase 12 left out.
+
+**`BitFlagsEngine<StoredType>`** — an `Array{Bool}` column (e.g. `FLAG`)
+mapped onto a stored integer column, one bit per flag category:
+`virtual[i] = (stored[i] & readMask) != 0`. Read + write. The mask is
+either the numeric `_BitFlagsEngine_ReadMask` keyword or, when
+`ReadMaskKeys` names entries in the stored column's `FLAGSETS` record,
+the OR of those. Write stores raw `0`/`1` (matching casacore's actual
+`putArray` — the write mask is not applied). Create one with
+`write_table(dir, "T", ["FLAG" => cubes]; engines = Dict("FLAG" =>
+(; kind = MeasurementSets.BitFlags(), stored_type = MeasurementSets.TpInt)))`;
+`copyms` / `copytable` preserve it.
+
+**`ForwardColumnEngine`** — a column that forwards every read to a
+same-named column in another table (no data of its own).
+`reference_copy(dst, src; writable = [...])` builds a table whose columns
+are all forwards to `src`, except those named in `writable` (real
+independent copies) — casacore's `MSTableImpl::referenceCopy`. `edit` of
+a forward table is refused (edit the source); `copyms` / `copytable`
+materialise the forwards into a plain independent table.
+
+`RetypedArrayEngine` and `ForwardColumnIndexedRowEngine` stay
+unsupported — a clear error names them; neither occurs in a standard MS.

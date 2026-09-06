@@ -41,6 +41,8 @@ picks a sensible one for you when you create a table:
 | `TiledShapeStMan` / `TiledColumnStMan` / `TiledCellStMan` | visibility cubes (`DATA`, `FLAG`, `WEIGHT_SPECTRUM`, `UVW`) |
 | `DyscoStMan` | lossy-compressed `DATA` / `WEIGHT_SPECTRUM` (the `aroffringa/dysco` format) |
 | virtual engines (`ScaledArrayEngine`, `CompressComplex`, …) | a column mapped onto a hidden column of scaled integers |
+| `BitFlagsEngine` | an `Array{Bool}` column (e.g. `FLAG`) mapped onto a stored integer, one bit per flag category |
+| `ForwardColumnEngine` | a column that forwards every read to a same-named column in another table (see [`reference_copy`](@ref)) |
 
 Column data is read lazily — [`column`](@ref) returns a [`Column`](@ref)
 (an `AbstractVector`); `col[i]` fetches one cell, `col[:]` takes the

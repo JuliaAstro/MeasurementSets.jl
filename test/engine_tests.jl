@@ -186,3 +186,105 @@ end
     @test abs(column(r3, "V")[5][1, 1] - 7) < 0.02            # old row 7 -> new row 5
     @test column(r3, "X")[:] == [2.0, 3.0, 5.0, 6.0, 0.0, 0.0]  # keep old [2,3,5,6,7,8]; 7,8 unset
 end
+
+# ---- Phase 40: BitFlagsEngine + ForwardColumnEngine ----------------------
+
+@testset "engine — BitFlagsEngine round-trip + cross-check" begin
+    dir = joinpath(mktempdir(), "bfe.tab")
+    F = [rand(Bool, 2, 3) for _ in 1:5]
+    write_table(dir, "T", ["FLAG" => F]; nrow=5,
+        engines = Dict("FLAG" => (; kind=MSv2E.BitFlags(), stored_type=MSv2E.TpInt)))
+    r = readtable(dir)
+    m = _engine_manager(r, "FLAG")
+    @test startswith(m.name, "BitFlagsEngine<")
+    @test !isfile(joinpath(dir, "table.f$(m.sequ)"))          # engine writes no file
+    fc = column(r, "FLAG")
+    @test eltype(fc) == Array{Bool}
+    @test [fc[i] for i in 1:5] == F
+    st = column(r, "FLAG_COMPRESSED")[1]
+    @test eltype(st) <: Integer
+    @test all(x -> x == 0 || x == 1, st)                      # raw 0/1, no write mask
+    @test (st .!= 0) == F[1]
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)                                   # BitFlagsEngine<Int> auto-registered
+        @test [Bool.(ct[:FLAG][i]) for i in 1:5] == F
+    end
+
+    dst = joinpath(mktempdir(), "bfe_copy.tab")
+    copytable(dst, r)                                         # copyms/copytable preserve the engine
+    rc = readtable(dst)
+    @test startswith(_engine_manager(rc, "FLAG").name, "BitFlagsEngine<")
+    @test [column(rc, "FLAG")[i] for i in 1:5] == F
+end
+
+@testset "engine — BitFlagsEngine readMask + FLAGSETS keys" begin
+    dir = joinpath(mktempdir(), "bfe2.tab")
+    F = [rand(Bool, 2, 2) for _ in 1:3]
+    write_table(dir, "T", ["FLAG" => F]; nrow=3,
+        engines = Dict("FLAG" => (; kind=MSv2E.BitFlags(), stored_type=MSv2E.TpInt,
+                                   readmask=0x00000001)))
+    @test [column(readtable(dir), "FLAG")[i] for i in 1:3] == F   # bit 0 == raw storage
+
+    # readMask that never matches the raw 0/1 -> all false
+    dir3 = joinpath(mktempdir(), "bfe3.tab")
+    write_table(dir3, "T", ["FLAG" => F]; nrow=3,
+        engines = Dict("FLAG" => (; kind=MSv2E.BitFlags(), stored_type=MSv2E.TpInt,
+                                   readmask=0x00000002)))
+    r3 = readtable(dir3)
+    @test all(all(iszero, column(r3, "FLAG")[i]) for i in 1:3)
+
+    # FLAGSETS + ReadMaskKeys: mask is recomputed as the OR of the named sets
+    fs = MSv2E.Record()
+    MSv2E._kwpush!(fs, "CAL", MSv2E.TpUInt, UInt32(2))
+    MSv2E._kwpush!(fs, "RFI", MSv2E.TpUInt, UInt32(4))
+    dir4 = joinpath(mktempdir(), "bfe4.tab")
+    write_table(dir4, "T", ["FLAG" => F]; nrow=3,
+        engines = Dict("FLAG" => (; kind=MSv2E.BitFlags(), stored_type=MSv2E.TpInt,
+                                   readmaskkeys=["CAL", "RFI"], flagsets=fs)))
+    r4 = readtable(dir4)
+    inst = MSv2E._dm_instance(r4, columndesc(r4, "FLAG").sequ)
+    @test inst.scale == UInt32(6)                              # 2 | 4, recomputed from FLAGSETS
+    @test columndesc(r4, "FLAG_COMPRESSED").keywords["FLAGSETS"] isa MSv2E.Record
+end
+
+@testset "engine — ForwardColumnEngine / reference_copy" begin
+    src = joinpath(mktempdir(), "src.tab")
+    A = collect(1.0:6.0)
+    V = [ComplexF32.(fill(k, 2, 3)) for k in 1:6]
+    B = collect(Int32, 10:15)
+    write_table(src, "S", ["A" => A, "V" => V, "B" => B]; nrow=6)
+
+    dst = joinpath(dirname(src), "ref.tab")
+    reference_copy(dst, readtable(src); writable=["B"])
+    r = readtable(dst)
+    @test _engine_manager(r, "A").name == "ForwardColumnEngine"
+    @test _engine_manager(r, "V").name == "ForwardColumnEngine"
+    @test _engine_manager(r, "B").name != "ForwardColumnEngine"
+    @test !isfile(joinpath(dst, "table.f$(_engine_manager(r, "A").sequ)"))
+    @test column(r, "A")[:] == A
+    @test [column(r, "V")[i] for i in 1:6] == V
+    @test column(r, "B")[:] == B
+
+    edit(src) do t; t[:B][1] = Int32(999); end               # writable B is independent
+    @test column(readtable(dst), "B")[1] == 10
+    edit(src) do t; t[:A][1] = -5.0; end                      # forwarded A tracks the source
+    @test column(readtable(dst), "A")[1] == -5.0
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dst)                                   # ForwardColumnEngine auto-registered
+        @test Float64.(ct[:A][:]) == column(readtable(dst), "A")[:]
+    end
+
+    plain = joinpath(dirname(src), "plain.tab")
+    copytable(plain, readtable(dst))                          # materialises through the forward
+    rp = readtable(plain)
+    @test _engine_manager(rp, "A").name != "ForwardColumnEngine"
+    @test column(rp, "A")[:] == column(readtable(dst), "A")[:]
+    @test [column(rp, "V")[i] for i in 1:6] == V
+end
+
+@testset "engine — unsupported (RetypedArray / ForwardColumnIndexedRow)" begin
+    @test MSv2E._dmtype("RetypedArrayEngine<Float>") === MSv2E._UnsupportedDM
+    @test MSv2E._dmtype("ForwardColumnIndexedRowEngine") === MSv2E._UnsupportedDM
+end

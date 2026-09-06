@@ -68,6 +68,13 @@ struct CompressFloat     <: CompressKind end
 struct CompressComplex   <: CompressKind end
 struct CompressComplexSD <: CompressKind end
 
+# BitFlagsEngine<StoredType>: an Array{Bool} column mapped onto a stored
+# integer column, `virtual[i] = (stored[i] & readMask) != 0`.  Stands
+# alone (no scale/offset); the `VirtualEngine.scale` / `.offset` slots
+# carry `readmask` / `writemask` (UInt32) instead.  (casacore
+# BitFlagsEngine.tcc / BaseMappedArrayEngine.tcc)
+struct BitFlags          <: EngineKind end
+
 const PREFIXENGINE = Dict{EngineKind,String}(
     ScaledArray()       => "_ScaledArrayEngine_",
     ScaledComplex()     => "_ScaledComplexData_",
@@ -116,6 +123,27 @@ function VirtualEngine(table::Table, kind::CompressKind, vdesc::ColumnDesc,
                          scale, offset, scalename, offsetname, nothing, nothing, nothing)
 end
 
+function VirtualEngine(table::Table, kind::BitFlags, vdesc::ColumnDesc,
+                       storedname::String, kw::Record)
+    readmask  = _bfe_mask(table, kw, storedname, "Read")
+    writemask = _bfe_mask(table, kw, storedname, "Write")
+    return VirtualEngine(table, kind, vdesc, storedname, false, true, true,
+                         readmask, writemask, "", "", nothing, nothing, nothing)
+end
+
+# `_BitFlagsEngine_<dir>Mask` (UInt), unless `<dir>MaskKeys` names bits in
+# the stored column's `FLAGSETS` record -- then the mask is `⋃ FLAGSETS[k]`.
+function _bfe_mask(table::Table, kw::Record, storedname::AbstractString, dir::AbstractString)
+    default = dir == "Read" ? typemax(UInt32) : UInt32(1)
+    mask = UInt32(get(kw, "_BitFlagsEngine_$(dir)Mask", default))
+    keys = get(kw, "_BitFlagsEngine_$(dir)MaskKeys", nothing)
+    ks = keys === nothing ? String[] : filter(!isempty, String.(vec(collect(keys))))
+    isempty(ks) && return mask
+    fs = get(columndesc(table, storedname).keywords, "FLAGSETS", nothing)
+    fs isa Record || return mask
+    return reduce(|, UInt32(fs[k]) for k in ks; init = UInt32(0))
+end
+
 function VirtualEngine(table::Table, kind::ScaledKind, vdesc::ColumnDesc,
                        storedname::String, kw::Record)
     fixed_scale  = Bool(get(kw, PREFIXENGINE[kind] * "FixedScale", true))
@@ -140,10 +168,11 @@ DATAMANAGERS["CompressComplexSD"] = VirtualEngine
 DATAMANAGER_PATTERNS[r"^ScaledArrayEngine<"]  = VirtualEngine
 DATAMANAGER_PATTERNS[r"^ScaledComplexData<"]  = VirtualEngine
 DATAMANAGER_PATTERNS[r"^MappedArrayEngine<"]  = VirtualEngine
+DATAMANAGER_PATTERNS[r"^BitFlagsEngine<"]     = VirtualEngine
 
 _is_engine_dm(name::AbstractString) =
     startswith(name, "ScaledArrayEngine") || startswith(name, "ScaledComplexData") ||
-    startswith(name, "MappedArrayEngine") ||
+    startswith(name, "MappedArrayEngine") || startswith(name, "BitFlagsEngine") ||
     name in ("CompressFloat", "CompressComplex", "CompressComplexSD")
 
 "The `EngineKind` for a bound engine's on-disk name (an exact string for
@@ -152,6 +181,7 @@ function _engine_kind(name::AbstractString, kw::Record)::EngineKind
     startswith(name, "ScaledArrayEngine") && return ScaledArray()
     startswith(name, "ScaledComplexData") && return ScaledComplex()
     startswith(name, "MappedArrayEngine") && return Mapped()
+    startswith(name, "BitFlagsEngine")    && return BitFlags()
     name == "CompressFloat" && return CompressFloat()
     get(kw, "_CompressComplex_Type", name) == "CompressComplexSD" ?
         CompressComplexSD() : CompressComplex()
@@ -167,6 +197,10 @@ _engine_typestr(::ScaledArray, vtype::CasaType, stored_type::CasaType) =
     "ScaledArrayEngine<$(_TYPEID[vtype]),$(_TYPEID[stored_type])>"
 _engine_typestr(::ScaledComplex, vtype::CasaType, stored_type::CasaType) =
     "ScaledComplexData<$(_TYPEID[vtype]),$(_TYPEID[stored_type])>"
+# casacore BitFlagsEngine::className() has NO closing '>' (unlike the
+# others); `_TYPEID` is already 8-char space-padded.
+_engine_typestr(::BitFlags, ::CasaType, stored_type::CasaType) =
+    "BitFlagsEngine<" * _TYPEID[stored_type]
 
 function Base.open(::Type{VirtualEngine}, t::Table, dm::DataManagerInfo)
     vi = findfirst(c -> c.sequ == dm.sequ, t.desc.columns)
@@ -203,6 +237,12 @@ _round_clamp(x, lo, hi) = Int(clamp(_rha(x), lo, hi))
 #     directly. ------------------------------------------------------
 
 _decode(::Mapped, st, scale, offset, J::Type) = convert(Array{J}, st)
+
+# BitFlagsEngine: the `scale`/`offset` args carry readmask/writemask.
+function _decode(::BitFlags, st::AbstractArray{<:Integer}, readmask, writemask, ::Type{Bool})
+    rm = readmask % UInt32
+    return reshape(Bool[(x % UInt32) & rm != 0 for x in st], size(st))
+end
 
 function _decode(::ScaledArray, st::AbstractArray, scale, offset, J::Type)
     out = Array{J}(undef, size(st))
@@ -330,6 +370,7 @@ _eng_stored_eltype(::CompressComplex, ::CasaType)   = Int32
 _eng_stored_eltype(::CompressComplexSD, ::CasaType) = Int32
 _eng_stored_eltype(::Mapped, ::CasaType)            = ComplexF64
 _eng_stored_eltype(::ScaledKind, stored_type::CasaType) = juliatype(stored_type)
+_eng_stored_eltype(::BitFlags, stored_type::CasaType)   = juliatype(stored_type)
 
 # --- encode (inverse of decode): one method per engine, same pattern --
 
@@ -401,6 +442,12 @@ function _encode(::CompressComplexSD, cell::AbstractArray, scale, offset, ::Type
     return out
 end
 
+# BitFlagsEngine: casacore's actual `putArray` writes raw 0/1 (the write
+# mask is not applied, no read-modify-write -- see BitFlagsEngine.tcc).
+function _encode(::BitFlags, cell::AbstractArray, readmask, writemask, T::Type)
+    return T.(cell .!= 0)
+end
+
 # --- keyword record ------------------------------------------
 
 _kwpush!(r::Record, name, t::CasaType, v) =
@@ -462,25 +509,47 @@ _scaled_scaletype(::ScaledArray,   vtype::CasaType) = vtype == TpDouble   ? TpDo
 """
     encode_engine(kind::EngineKind, vdata, vtype; scale, offset, autoscale, stored_type,
                   storedname, scalename, offsetname)
-        -> (storeddata, keywords, scaledata, offsetdata)
+        -> (storeddata, keywords, scaledata, offsetdata, stored_keywords)
 
 Pack the virtual column `vdata` (a vector of numeric arrays) into stored
 integers.  `scaledata` / `offsetdata` are `Vector{Float32}` (one per row)
 when `autoscale`, else `nothing`.  `keywords` is the `_<Engine>_*` record
-to merge onto the virtual `ColumnDesc`.
+to merge onto the virtual `ColumnDesc`; `stored_keywords` a record to
+stamp on the *stored* `ColumnDesc` (only `BitFlags` uses it -- `FLAGSETS`).
 """
 function encode_engine(kind::Mapped, vdata::AbstractVector, vtype::CasaType;
                        storedname::AbstractString="", kwargs...)
     n = length(vdata)
     stored = Any[convert(Array{ComplexF64}, Array(vdata[r])) for r in 1:n]
-    return stored, _engine_keywords(kind, vtype, storedname, 0, 0, "", "", false), nothing, nothing
+    return stored, _engine_keywords(kind, vtype, storedname, 0, 0, "", "", false),
+           nothing, nothing, Record()
+end
+
+function encode_engine(::BitFlags, vdata::AbstractVector, ::CasaType;
+                       stored_type::CasaType=TpInt, storedname::AbstractString="",
+                       readmask::Integer=typemax(UInt32), writemask::Integer=UInt32(1),
+                       readmaskkeys::AbstractVector=String[],
+                       writemaskkeys::AbstractVector=String[],
+                       flagsets::Union{Nothing,Record}=nothing, kwargs...)
+    T = juliatype(stored_type)
+    stored = Any[_encode(BitFlags(), Array(vdata[r]), readmask, writemask, T)
+                 for r in eachindex(vdata)]
+    kw = Record()
+    _kwpush!(kw, "_BaseMappedArrayEngine_Name", TpString, String(storedname))
+    _kwpush!(kw, "_BitFlagsEngine_ReadMask",      TpUInt,        UInt32(readmask))
+    _kwpush!(kw, "_BitFlagsEngine_ReadMaskKeys",  TpArrayString, String.(collect(readmaskkeys)))
+    _kwpush!(kw, "_BitFlagsEngine_WriteMask",     TpUInt,        UInt32(writemask))
+    _kwpush!(kw, "_BitFlagsEngine_WriteMaskKeys", TpArrayString, String.(collect(writemaskkeys)))
+    skw = Record()
+    flagsets === nothing || _kwpush!(skw, "FLAGSETS", TpRecord, flagsets)
+    return stored, kw, nothing, nothing, skw
 end
 
 function encode_engine(kind::EngineKind, vdata::AbstractVector, vtype::CasaType;
                        scale=nothing, offset=nothing, autoscale::Bool=false,
                        stored_type::CasaType=TpInt,
                        storedname::AbstractString="", scalename::AbstractString="",
-                       offsetname::AbstractString="")
+                       offsetname::AbstractString="", kwargs...)   # kwargs...: BitFlags-only opts
     n = length(vdata)
     T = _eng_stored_eltype(kind, stored_type)
 
@@ -499,12 +568,12 @@ function encode_engine(kind::EngineKind, vdata::AbstractVector, vtype::CasaType;
         end
         kw = _engine_keywords(kind, vtype, storedname, ENG_UNIT_SCALE, ENG_ZERO_OFFSET,
                               scalename, offsetname, true)
-        return stored, kw, sc, of
+        return stored, kw, sc, of, Record()
     end
 
     scale === nothing && error("encode_engine: fixed engine needs a `scale`")
     off = offset === nothing ? zero(scale) : offset
     stored = Any[_encode(kind, Array(vdata[r]), scale, off, T) for r in 1:n]
     kw = _engine_keywords(kind, vtype, storedname, scale, off, "", "", false)
-    return stored, kw, nothing, nothing
+    return stored, kw, nothing, nothing, Record()
 end

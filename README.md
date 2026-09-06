@@ -17,7 +17,8 @@ container.
 `StandardStMan`, `IncrementalStMan`, the three `Tiled*StMan` (single- and
 multi-column hypercubes), `DyscoStMan` (lossy compression), and the
 virtual scaling / compression engines (`ScaledArrayEngine`,
-`CompressComplex`, …).  `MultiFile` / `MultiHDF5` container tables, and
+`CompressComplex`, `BitFlagsEngine`, `ForwardColumnEngine`, …).
+`MultiFile` / `MultiHDF5` container tables, and
 `RefTable` / `ConcatTable` (TaQL selections, MultiMS MAIN), too.  Columns
 are lazy `AbstractVector`s; tables are `Tables.jl` sources
 (`DataFrame(subtable(ms, "ANTENNA"))`).  A MAIN table's `DATA` /
@@ -30,7 +31,9 @@ the working set halves); `readtable(ms; precision=:full)` for
 **Write** — `write_table` / `create_ms` / `copyms` / `copytable` create
 conformant tables, preserving each column's storage-manager / engine /
 compression kind (or choosing one via `tsm=` / `ism=` / `engines=` /
-`dysco=` / `storage=` kwargs).  Verified byte-for-byte against casacore.
+`dysco=` / `storage=` kwargs).  `reference_copy` makes a
+`ForwardColumnEngine` reference copy (casacore's `referenceCopy`).
+Verified byte-for-byte against casacore.
 
 **Edit in place** — `edit(path) do t … end`: overwrite cells / whole
 columns, `addrows!`, `removerows!`, `addcolumn!`, `removecolumn!`.  Tiled

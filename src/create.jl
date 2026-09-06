@@ -86,6 +86,7 @@ function _merge_kw(base::Record, extra::Record)
     return r
 end
 
+_stored_casatype(::Type{UInt8}) = TpUChar
 _stored_casatype(::Type{Int16}) = TpShort
 _stored_casatype(::Type{Int32}) = TpInt
 _stored_casatype(::Type{ComplexF64}) = TpDComplex
@@ -121,6 +122,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            tsm=Set{String}(), tcm=Set{String}(), tcell=Set{String}(),
                            ism::AbstractSet{<:AbstractString}=Set{String}(),
                            engines::AbstractDict=Dict{String,NamedTuple}(),
+                           forward::AbstractDict=Dict{String,String}(),   # vname -> abs ref-table path
                            dysco=Vector{String}[],
                            dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
                            storage::Symbol=:sepfile,
@@ -147,9 +149,14 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         scalename   = something(get(spec, :scalename, nothing), vname * "_SCALE")
         offsetname  = something(get(spec, :offsetname, nothing), vname * "_OFFSET")
 
-        storeddata, kw, sc, of = encode_engine(kind, vdata, vdesc.type;
+        storeddata, kw, sc, of, stored_kw = encode_engine(kind, vdata, vdesc.type;
             scale = get(spec, :scale, nothing), offset = get(spec, :offset, nothing),
-            autoscale, stored_type, storedname, scalename, offsetname)
+            autoscale, stored_type, storedname, scalename, offsetname,
+            readmask = get(spec, :readmask, typemax(UInt32)),
+            writemask = get(spec, :writemask, UInt32(1)),
+            readmaskkeys = get(spec, :readmaskkeys, String[]),
+            writemaskkeys = get(spec, :writemaskkeys, String[]),
+            flagsets = get(spec, :flagsets, nothing))
 
         typestr = _engine_typestr(kind, vdesc.type, stored_type)
         descs[vi] = ColumnDesc(vname, vdesc.comment, typestr, vname, vdesc.type,
@@ -158,7 +165,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         push!(engine_seq, (vi, typestr))
 
         st_ct = _stored_casatype(eltype(storeddata[1]))
-        push!(descs, _mkdesc(storedname, st_ct, VariableShape()))
+        push!(descs, _mkdesc(storedname, st_ct, VariableShape(); keywords=stored_kw))
         push!(data, storeddata)
         if get(spec, :stored, :tsm) === :tsm
             push!(tsmg, String[storedname])
@@ -167,6 +174,21 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
             push!(descs, _mkdesc(scalename,  TpFloat, ())); push!(data, collect(sc))
             push!(descs, _mkdesc(offsetname, TpFloat, ())); push!(data, collect(of))
         end
+    end
+
+    # --- ForwardColumnEngine: no stored column, no file -- just the
+    #     `_ForwardColumn_TableName` (relative) keyword + an empty DM block.
+    for (vname, refabs) in forward
+        vi = findfirst(c -> c.name == vname, descs)
+        vi === nothing && error("forward: no column \"$vname\"")
+        push!(engine_virtual, vname)
+        vd = descs[vi]
+        fkw = Record()
+        _kwpush!(fkw, "_ForwardColumn_TableName", TpString, _strip_directory(String(refabs), dir))
+        descs[vi] = ColumnDesc(vname, vd.comment, "ForwardColumnEngine", vname, vd.type,
+            vd.classname, vd.shape, vd.option, vd.maxlength,
+            _merge_kw(vd.keywords, fkw), vd.default, nothing)
+        push!(engine_seq, (vi, "ForwardColumnEngine"))
     end
 
     tiledgroups = [(:tsm, "TiledShapeStMan", write_tiledshapestman, tsmg),
@@ -522,6 +544,34 @@ function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
     return dst
 end
 
+"""
+    reference_copy(dst, src; writable=String[]) -> dst
+
+Create a new table at `dst` whose columns are `ForwardColumnEngine`
+references to `src` (a path or a plain `Table`) -- each read forwards to
+the same-named column in `src`, and no data is copied.  Columns named in
+`writable` are real independent copies instead.  Mirrors casacore's
+`MSTableImpl::referenceCopy`.
+"""
+function reference_copy(dst::AbstractString, src::Union{AbstractString,AbstractTable};
+                        writable=String[], storage::Symbol=:sepfile,
+                        blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+    dst = String(rstrip(dst, '/'))
+    ispath(dst) && error("$dst already exists")
+    s = src isa AbstractTable ? src : readtable(String(rstrip(src, '/')))
+    s isa Table || error("reference_copy: `src` must be a plain on-disk Table")
+    w = Set(String.(writable))
+    descs = ColumnDesc[c for c in s.desc.columns]
+    data  = Any[c.name in w ? _pcolumn(s, c.name, :full)[:] : _pcolumn(s, c.name, :full)
+                for c in s.desc.columns]        # writable -> materialised, forwarded -> lazy Column
+    fwd = Dict{String,String}(c.name => s.path for c in s.desc.columns if !(c.name in w))
+    _write_table_core(dst, descs, data; nrow=nrow(s), endian=:little,
+                      public=s.desc.public, private=s.desc.private,
+                      forward=fwd, tablename=s.desc.name,
+                      type=s.type, subtype=s.subtype, readme=s.readme, storage, blocksize)
+    return dst
+end
+
 # reconstruct the `engines=` spec for a source virtual column
 function _engine_spec_from_source(t::Table, c::ColumnDesc, dm::AbstractString)
     kw = c.keywords
@@ -531,6 +581,16 @@ function _engine_spec_from_source(t::Table, c::ColumnDesc, dm::AbstractString)
     stored_type = columndesc(t, storedname).type
     kind isa Mapped && return (; kind, stored = occursin("Tiled", sd) ? :tsm : :ssm,
                                 stored_type, storedname)
+    if kind isa BitFlags
+        rk = get(kw, "_BitFlagsEngine_ReadMaskKeys", String[])
+        wk = get(kw, "_BitFlagsEngine_WriteMaskKeys", String[])
+        return (; kind, stored = occursin("Tiled", sd) ? :tsm : :ssm, stored_type, storedname,
+                readmask  = UInt32(get(kw, "_BitFlagsEngine_ReadMask",  typemax(UInt32))),
+                writemask = UInt32(get(kw, "_BitFlagsEngine_WriteMask", UInt32(1))),
+                readmaskkeys  = String.(vec(collect(rk))),
+                writemaskkeys = String.(vec(collect(wk))),
+                flagsets = get(columndesc(t, storedname).keywords, "FLAGSETS", nothing))
+    end
     pfx = PREFIXENGINE[kind]
     autoscale = kind isa CompressKind && Bool(get(kw, pfx * "AutoScale", false))
     scale  = get(kw, pfx * "Scale", nothing)

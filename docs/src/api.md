@@ -81,6 +81,7 @@ write_ms
 copyms
 copytable
 create_ms
+reference_copy
 write_reftable
 write_concattable
 ```

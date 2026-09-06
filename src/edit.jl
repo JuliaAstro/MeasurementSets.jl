@@ -55,6 +55,9 @@ function edit(path::AbstractString)
     r.container === nothing ||
         error("edit: $path uses a MultiFile/MultiHDF5 container — in-place edit " *
              "is not supported (Phase 20 is read-only)")
+    any(m -> _is_forward_dm(m.name), r.managers) &&
+        error("edit: $path has ForwardColumnEngine columns that reference another " *
+              "table — edit that table instead")
     EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
               Dict{String,Dict{Int,Any}}(),
               Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false)

@@ -43,6 +43,7 @@ include("datamanagers/standard.jl")
 include("datamanagers/tiled.jl")
 include("datamanagers/incremental.jl")
 include("datamanagers/virtual.jl")
+include("datamanagers/forwardcol.jl")
 include("datamanagers/dysco.jl")
 include("column.jl")
 include("query.jl")
@@ -62,7 +63,7 @@ export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 export write_table, write_ms, copyms, create_ms
-export write_reftable, write_concattable, copytable
+export write_reftable, write_concattable, copytable, reference_copy
 export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!
 export resync, is_stale, is_multiused
 export query, groupby, GroupedTable
