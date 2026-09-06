@@ -30,12 +30,11 @@ fills the region. `col[slice][mask]` and `col[mask][slice]` both work.
 
 A `set` key may also be a **`(datacol, maskcol)` tuple** (TaQL's
 `UPDATE … SET (NAME, MASKNAME) = …`). `("D", "M") => "dexpr"` writes
-`dexpr` to `D` and writes to `M` a Bool array flagging where `dexpr`'s
-result is non-finite (NaN / Inf). `("D", "M") => ("dexpr", "mexpr")`
-writes `mexpr` (any Bool expression) to `M` instead. Either name may be
-a slice / mask target. (TaQL-lite has no masked-array expressions, so
-the data + mask are given explicitly — a documented divergence from
-casacore, which writes `expr`'s own attached mask.)
+`dexpr` to `D` and, to `M`, the *mask* of `dexpr` when it is a masked
+array (`SET (D, M) = V[goodcond]` → `M` gets `!goodcond`), else a Bool
+array flagging where `dexpr`'s result is non-finite.
+`("D", "M") => ("dexpr", "mexpr")` writes `mexpr` (any Bool expression)
+to `M` instead. Either name may be a slice / mask target.
 
 `where` is a TaQL-lite WHERE string, a `row -> Bool` closure, or
 `nothing` (every row). Returns the number of rows changed.
@@ -106,11 +105,11 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
             if length(ops) == 1 && ops[1][1] === nothing
                 a = ops[1][2]
                 if where === nothing
-                    t[c][:] = [_tqleval(a, cols, i) for i in 1:nr]
+                    t[c][:] = [_unwrap_marray(_tqleval(a, cols, i)) for i in 1:nr]
                 else
                     ec = t[c]
                     for i in rows
-                        ec[i] = _tqleval(a, cols, i)
+                        ec[i] = _unwrap_marray(_tqleval(a, cols, i))
                     end
                 end
             else
@@ -119,9 +118,9 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
                 for i in rows
                     cur = nothing
                     for (levels, a) in ops
-                        ev = x -> _tqleval(x, cols, i)
+                        ev = x -> _unwrap_marray(_tqleval(x, cols, i))
                         if levels === nothing
-                            cur = _tqleval(a, cols, i)
+                            cur = ev(a)
                         else
                             cur === nothing && (cur = copy(base[i]))
                             if length(levels) == 1 && _as_mask(levels[1], ev) === nothing
@@ -131,7 +130,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
                             end
                         end
                     end
-                    ec[i] = cur
+                    ec[i] = _unwrap_marray(cur)
                 end
             end
         end
@@ -150,9 +149,9 @@ function _pair_split(s::AbstractString)
 end
 
 # expand `(D, M) => …` pair-LHS `set` entries into plain per-column
-# entries. `(D, M) => "dexpr"` -> `D => dexpr` + `M => <non-finite flag
-# of dexpr>` (a pre-parsed TQLFunc); `(D, M) => ("dexpr", "mexpr")` ->
-# `D => dexpr` + `M => mexpr`. Non-pair entries pass through unchanged.
+# entries. `(D, M) => "dexpr"` -> `D => dexpr` + `M => TQLMaskOf(dexpr)`
+# (the array's own mask, or a non-finite flag); `(D, M) => ("dexpr",
+# "mexpr")` -> `D => dexpr` + `M => mexpr`. Non-pair entries pass through.
 function _expand_set_pairs(set, vn)
     out = Pair{String,Any}[]
     for p in set
@@ -175,8 +174,9 @@ function _expand_set_pairs(set, vn)
              (x = _pair_split(rv); x === nothing ? (String(rv), nothing) : x) :
              throw(ArgumentError("update!: unsupported RHS for a (col, maskcol) target")))
         push!(out, dn => de)
-        push!(out, mn => (me === nothing ?
-            TQLFunc(_TQL_FUNCS["nonfinite"][1], TQLExpr[_taqllite_parse(de, vn)]) : me))
+        # no explicit mask: use the data expr's own mask when it is a
+        # masked array, else flag its non-finite elements (Phase 59).
+        push!(out, mn => (me === nothing ? TQLMaskOf(_taqllite_parse(de, vn)) : me))
     end
     return out
 end

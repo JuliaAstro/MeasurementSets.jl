@@ -125,6 +125,9 @@ struct TQLEnd <: TQLExpr end         # `end` inside a subscript -> that axis's l
 struct TQLBitNot <: TQLExpr          # unary `~` (bitwise NOT)
     a::TQLExpr
 end
+struct TQLMaskOf <: TQLExpr          # the mask of a (possibly masked) array expr;
+    e::TQLExpr                       # `update!`'s `(D, M) = expr` mask side
+end
 
 # Arithmetic and comparison broadcast over an array-cell operand (TaQL
 # semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
@@ -133,6 +136,27 @@ end
 # there. `AND`/`OR`/`NOT` stay scalar (short-circuit).
 _bcast(f, x) = x isa AbstractArray ? f.(x) : f(x)
 _bcast(f, x, y) = (x isa AbstractArray || y isa AbstractArray) ? f.(x, y) : f(x, y)
+
+# --- masked arrays (TaQL `MArray`): data + a Bool mask, `true` = invalid.
+# Produced by `V[boolexpr]`, `marray(d, m)`, and a masked reduction's
+# argument; reductions skip masked elements, arithmetic unions the masks.
+struct TQLMArray{A<:AbstractArray,M<:AbstractArray{Bool}}
+    data::A
+    mask::M
+    function TQLMArray(d::AbstractArray, m::AbstractArray{Bool})
+        size(d) == size(m) || throw(ArgumentError(
+            "TaQL-lite: masked-array data $(size(d)) and mask $(size(m)) shapes differ"))
+        new{typeof(d),typeof(m)}(d, m)
+    end
+end
+_mvalid(m::TQLMArray) = m.data[.!m.mask]
+_unwrap_marray(v) = v isa TQLMArray ? v.data : v
+
+_bcast(f, x::TQLMArray) = TQLMArray(_bcast(f, x.data), copy(x.mask))
+_bcast(f, x::TQLMArray, y) = TQLMArray(_bcast(f, x.data, y), copy(x.mask))
+_bcast(f, x, y::TQLMArray) = TQLMArray(_bcast(f, x, y.data), copy(y.mask))
+_bcast(f, x::TQLMArray, y::TQLMArray) =
+    TQLMArray(_bcast(f, x.data, y.data), x.mask .| y.mask)
 
 _tqleval(e::TQLCol, cols, i) = cols[e.name][i]
 _tqleval(e::TQLLit, cols, i) = e.value
@@ -144,6 +168,8 @@ _tqleval(e::TQLIn, cols, i) = _tqleval(e.lhs, cols, i) in e.vals
 _tqleval(e::TQLArith, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLNeg, cols, i) = _bcast(-, _tqleval(e.a, cols, i))
 _tqleval(e::TQLBitNot, cols, i) = _bcast((~), _tqleval(e.a, cols, i))
+_tqleval(e::TQLMaskOf, cols, i) = (v = _tqleval(e.e, cols, i);
+    v isa TQLMArray ? v.mask : _bcast(!isfinite, _unwrap_marray(v)))
 _tqleval(e::TQLMatch, cols, i) =
     xor(occursin(e.regex, _tqleval(e.lhs, cols, i)::AbstractString), e.negate)
 _tqleval(e::TQLFunc, cols, i) =
@@ -180,7 +206,15 @@ function _tql_index_tuple(arr, axes, ev)
     return ntuple(k -> k <= length(axes) ? _tql_axis(axes[k], arr, k, ev) : Colon(), nd)
 end
 
-_tql_do_index(arr, axes, ev) = arr[_tql_index_tuple(arr, axes, ev)...]
+function _tql_do_index(arr, axes, ev)
+    # a single Bool-array subscript is a masked selection, not an index:
+    # `V[boolexpr]` -> the whole cell with `!boolexpr` masked out.
+    if length(axes) == 1
+        m = _as_mask(axes, ev)
+        m !== nothing && return TQLMArray(collect(arr), BitArray(.!m))
+    end
+    return arr[_tql_index_tuple(arr, axes, ev)...]
+end
 
 # write `rhs` into `arr` at the resolved index tuple (used by `update!`
 # for `SET col[subscripts] = expr`): a plain assign when every axis is a
@@ -214,7 +248,13 @@ _flatten_lhs(::TQLExpr) = nothing
 # a single subscript that evaluates to a Bool array is a mask, not an index
 function _as_mask(axes, ev)
     length(axes) == 1 && !(axes[1] isa NamedTuple) || return nothing
-    v = ev(axes[1])
+    # `ev` may throw for an `end`-relative or out-of-context subscript --
+    # that just means "not a mask", fall through to ordinary indexing.
+    v = try
+        ev(axes[1])
+    catch
+        return nothing
+    end
     (v isa AbstractArray && eltype(v) <: Bool) ? v : nothing
 end
 
@@ -305,6 +345,7 @@ _tqlrefs!(seen, e::TQLIn) = _tqlrefs!(seen, e.lhs)
 _tqlrefs!(seen, e::TQLArith) = (_tqlrefs!(seen, e.lhs); _tqlrefs!(seen, e.rhs))
 _tqlrefs!(seen, e::TQLNeg) = _tqlrefs!(seen, e.a)
 _tqlrefs!(seen, e::TQLBitNot) = _tqlrefs!(seen, e.a)
+_tqlrefs!(seen, e::TQLMaskOf) = _tqlrefs!(seen, e.e)
 _tqlrefs!(seen, e::TQLMatch) = _tqlrefs!(seen, e.lhs)
 _tqlrefs!(seen, e::TQLFunc) = foreach(a -> _tqlrefs!(seen, a), e.args)
 _tqlrefs!(seen, ::TQLRowNum) = nothing
@@ -340,6 +381,7 @@ _has_aggr(e::TQLOr) = _has_aggr(e.a) || _has_aggr(e.b)
 _has_aggr(e::TQLNot) = _has_aggr(e.a)
 _has_aggr(e::TQLNeg) = _has_aggr(e.a)
 _has_aggr(e::TQLBitNot) = _has_aggr(e.a)
+_has_aggr(e::TQLMaskOf) = _has_aggr(e.e)
 _has_aggr(e::TQLIn) = _has_aggr(e.lhs)
 _has_aggr(e::TQLMatch) = _has_aggr(e.lhs)
 _has_aggr(e::TQLFunc) = any(_has_aggr, e.args)
@@ -957,11 +999,15 @@ end
 _ew(f) = x -> _bcast(f, x)
 _ew2(f) = (x, y) -> _bcast(f, x, y)
 # reduction: a scalar arg is wrapped in a 1-tuple so `f` still applies
-_red(f) = x -> f(x isa AbstractArray ? x : (x,))
+_red(f) = x -> f(x isa TQLMArray ? _mvalid(x) : x isa AbstractArray ? x : (x,))
 
 _tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y))(x))
-_tql_nelem(x) = x isa AbstractArray ? length(x) : 1
-_tql_ndim(x) = x isa AbstractArray ? ndims(x) : 0
+_tql_nelem(x) = x isa TQLMArray ? count(!, x.mask) : x isa AbstractArray ? length(x) : 1
+_tql_ndim(x) = x isa TQLMArray ? ndims(x.data) : x isa AbstractArray ? ndims(x) : 0
+
+_tql_arraymask(x::TQLMArray) = x.mask
+_tql_arraymask(x::AbstractArray) = falses(size(x))
+_tql_arraymask(_) = false
 
 # name => (callable-over-arg-values, allowed arg count).  `min`/`max` are
 # arity-overloaded and handled in `_make_func`, not here.
@@ -999,6 +1045,11 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "nfalse" => (_red(x -> count(!, x)), 1:1),
     "nelements" => (_tql_nelem, 1:1), "count" => (_tql_nelem, 1:1),
     "ndim" => (_tql_ndim, 1:1),
+    # --- masked arrays ---
+    "marray" => ((d, m) -> TQLMArray(collect(d), m isa AbstractArray ?
+                     BitArray(m) : fill(Bool(m), size(d))), 2:2),
+    "arraydata" => (_unwrap_marray, 1:1),
+    "arraymask" => (_tql_arraymask, 1:1),
     # --- string ---
     "strlength" => (length, 1:1), "len" => (length, 1:1),
     "upcase" => (uppercase, 1:1), "upper" => (uppercase, 1:1), "toupper" => (uppercase, 1:1),
@@ -1224,7 +1275,7 @@ function _select_materialize(cls, getcol, rows::Vector{Int})
         if kind === :proj
             push!(cols, _mapcol(getcol(v), rows))
         else
-            push!(cols, identity.(Any[_tqleval(v, cd, i) for i in rows]))
+            push!(cols, identity.(Any[_unwrap_marray(_tqleval(v, cd, i)) for i in rows]))
         end
     end
     return cols
@@ -1257,7 +1308,10 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `sum`, `product`, `median`, `variance`, `stddev`, `rms`, `min`/`max`,
   `any`, `all`, `ntrue`/`nfalse`, `nelements`/`count`, `ndim`), string
   ops (`strlength`/`len`, `upper`/`lower`, `trim`/`ltrim`/`rtrim`),
-  `isnan`/`isinf`/`isfinite`/`nonfinite`, `iif(cond, a, b)`, `rownumber()` (1-based),
+  `isnan`/`isinf`/`isfinite`/`nonfinite`, masked arrays
+  (`marray(d, m)`, `arraydata`, `arraymask`; `V[boolexpr]` yields a
+  masked array whose reductions skip the excluded elements),
+  `iif(cond, a, b)`, `rownumber()` (1-based),
   `pi`, `e`;
 * an optional trailing `ORDER BY col [ASC|DESC], ...` (bare columns).
 
@@ -1271,6 +1325,8 @@ persist it with `write_reftable(dst, result)`). When any `rhs` is a
 **computed expression** (`"X * 2"`, `"sqrt(abs(V))"`, `"iif(K==0, 1,
 0)"` — same grammar as WHERE, aggregates excepted) the result is an
 in-memory `GroupedTable` with those columns evaluated per matched row.
+A computed column that is a masked array (`"V[FLAG]"`) persists as its
+plain data — use `"arraymask(V[FLAG])"` for a separate mask column.
 
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
@@ -1379,6 +1435,8 @@ _geval(e::TQLCmp, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, 
 _geval(e::TQLArith, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
 _geval(e::TQLNeg, cols, g) = _bcast(-, _geval(e.a, cols, g))
 _geval(e::TQLBitNot, cols, g) = _bcast((~), _geval(e.a, cols, g))
+_geval(e::TQLMaskOf, cols, g) = (v = _geval(e.e, cols, g);
+    v isa TQLMArray ? v.mask : _bcast(!isfinite, _unwrap_marray(v)))
 _geval(e::TQLAnd, cols, g) = _geval(e.a, cols, g) && _geval(e.b, cols, g)
 _geval(e::TQLOr, cols, g) = _geval(e.a, cols, g) || _geval(e.b, cols, g)
 _geval(e::TQLNot, cols, g) = !_geval(e.a, cols, g)

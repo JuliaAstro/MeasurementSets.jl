@@ -402,6 +402,15 @@ end
     @test_throws ArgumentError update!(p6; set=[("V", "M", "X") => "0.0"])
     @test_throws ArgumentError update!(p6; set=[("V", "NOPE") => "0.0"])
     @test_throws ArgumentError update!(p6; set=["V" => ("a", "b")])
+
+    # faithful MArray form: (D, M) = V[boolexpr] writes the array's mask
+    p7 = mk("d7")
+    update!(p7; set=[("V", "M") => "V[V > 5.0]"])
+    v7 = column(readtable(p7), "V"); m7 = column(readtable(p7), "M")
+    for r in 1:3
+        @test v7[r] == V0[r]                       # data unchanged (V[cond] keeps the cell)
+        @test m7[r] == .!(V0[r] .> 5.0)            # mask = where the selector is false
+    end
 end
 
 if _HAVE_TAQL

@@ -537,6 +537,79 @@ end
     @test nf(NaN) == true && nf(3.0) == false
 end
 
+@testset "TaQL-lite — masked arrays (TQLMArray) unit" begin
+    d = Float64[1 2; 3 4]
+    m = Bool[false true; true false]          # elements 2,3 masked out
+    ma = MSv2.TQLMArray(d, m)
+    @test MSv2._mvalid(ma) == [1.0, 4.0]
+    @test MSv2._unwrap_marray(ma) === d
+    # arithmetic keeps / unions the mask
+    b1 = MSv2._bcast(+, ma, 10)
+    @test b1 isa MSv2.TQLMArray && b1.data == d .+ 10 && b1.mask == m
+    ma2 = MSv2.TQLMArray(Float64[10 20; 30 40], Bool[true false; false false])
+    b2 = MSv2._bcast(*, ma, ma2)
+    @test b2.mask == (m .| ma2.mask)          # [true true; true false]
+    # reductions skip masked, nelements counts unmasked
+    @test MSv2._red(sum)(ma) == 5.0
+    @test MSv2._red(Statistics.mean)(ma) == 2.5
+    @test MSv2._tql_nelem(ma) == 2
+    @test MSv2._tql_ndim(ma) == 2
+    # shape mismatch errors
+    @test_throws ArgumentError MSv2.TQLMArray(d, Bool[true, false])
+end
+
+@testset "TaQL-lite query — masked-array expressions" begin
+    dir = joinpath(mktempdir(), "marr.tab")
+    K = Int32[0, 1, 2, 3]
+    V = [Float64[i i+1 i+2; i+3 i+4 i+5] for i in 1:4]
+    F = [Bool[isodd(i + j) for i in 1:2, j in 1:3] for _ in 1:4]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "V" => V, "F" => F];
+        nrow=4, tsm=[["V"], ["F"]])
+    t = readtable(dir)
+
+    # V[F] is a masked selection: reductions use only the F-true elements
+    r = query(t; select=["K" => "K", "mv" => "mean(V[F])", "sv" => "sum(V[F])",
+                         "n" => "nelements(V[F])"]) do row
+        true
+    end
+    for i in 1:4
+        @test collect(r.mv)[i] ≈ Statistics.mean(V[i][F[i]])
+        @test collect(r.sv)[i] == sum(V[i][F[i]])
+        @test collect(r.n)[i] == count(F[i])
+    end
+
+    # arraydata / arraymask
+    r2 = query(t; select=["d" => "arraydata(V[F])", "m" => "arraymask(V[F])"]) do row
+        true
+    end
+    @test collect(r2.d)[1] == V[1]
+    @test collect(r2.m)[1] == .!F[1]
+
+    # marray(data, mask): mask is taken as-is (true = masked out)
+    r3 = query(t; select=["x" => "sum(marray(V, F))"]) do row
+        true
+    end
+    @test collect(r3.x)[1] == sum(V[1][.!F[1]])
+
+    # inline mask expression
+    r4 = query(t; select=["s" => "sum(V[V > 4.0])"]) do row
+        true
+    end
+    @test collect(r4.s)[1] == sum(V[1][V[1].>4.0])
+
+    # groupby: masked reduction inside a g* aggregate
+    g = groupby(t, "K"; select=["K" => :K, "mm" => "gmax(mean(V[F]))"], orderby=["K"])
+    @test collect(g.mm) == [Statistics.mean(V[i][F[i]]) for i in 1:4]
+
+    # a computed select column of masked arrays persists as plain data
+    dst = joinpath(mktempdir(), "MO")
+    rd = query(t; select=["dd" => "V[F] * 2.0"]) do row
+        true
+    end
+    write_table(dst, "MO", rd; nrow=nrow(rd))
+    @test column(readtable(dst), "dd")[1] == 2 .* V[1]
+end
+
 @testset "TaQL-lite query — function string form" begin
     dir = joinpath(mktempdir(), "fn1.tab")
     A = collect(Int32, 1:12)

@@ -950,3 +950,19 @@ expressions the data and mask are given explicitly — a documented
 divergence from casacore, which writes `expr`'s own attached mask, so
 there is no cross-check. New `nonfinite(x)` / `isnonfinite(x)` function
 (element-wise `!isfinite`) is available in expressions generally.
+
+### Phase 60 — masked arrays in the expression engine
+
+A `TQLMArray` value type (data + a `true`-means-masked-out Bool mask,
+casacore's `MArray`). `V[boolexpr]` in an expression now yields the
+whole cell with `!boolexpr` masked out (not a flat selection);
+`marray(d, m)` / `arraydata(m)` / `arraymask(m)` build and unpack one.
+Reductions (`sum` / `mean` / `min` / `max` / `median` / `variance` /
+`stddev` / `rms` / `any` / `all` / `ntrue` / `nfalse`) skip masked
+elements, `nelements` counts the unmasked ones, and arithmetic
+propagates the mask (union). So `mean(V[!FLAG])`,
+`gmax(mean(V[FLAG]))` (a masked reduction inside a `g*` aggregate), and
+`SET (D, M) = V[goodcond]` (writes `V`'s data and the `!goodcond` mask
+to the companion column — the faithful form Phase 59 approximated) all
+work. A computed `select` column of masked arrays persists as plain
+data (`arraymask(expr)` for a separate mask column).
