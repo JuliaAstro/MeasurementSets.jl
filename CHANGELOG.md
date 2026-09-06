@@ -854,3 +854,16 @@ group's array cells (all the same shape) and reduces them
 mean spectrum over a group. Reuses the existing `TQLAggr` node; no
 parser or AST change. Cross-checked against real casacore for
 `gsums` / `gmeans` / `gmaxs` / `gstddevs`.
+
+### Phase 53 — `INSERT … LIMIT`
+
+`insert!(target; values, limit = nothing)` gained a `limit` kwarg (TaQL's
+`INSERT … LIMIT n`). `nothing` / `0` keeps the old behaviour (one row per
+`values` row); a positive `limit` appends exactly that many rows, cycling
+through the `values` rows; a negative `limit` appends `nrow(target) +
+limit` rows (also cycling), clamped at zero — matching casacore's own
+`nrow = table.nrow() + limit_p`. The `taql` string form parses both
+`INSERT INTO t … VALUES (…) LIMIT n` (trailing) and `INSERT LIMIT n INTO
+t …` (prefix); the lite-only `INSERT … SET` form accepts `LIMIT` in
+either position too. Cross-checked against real TaQL for the VALUES
+forms (positive, cycling, prefix, and negative limits).

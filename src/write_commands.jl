@@ -91,7 +91,7 @@ function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing
 end
 
 """
-    insert!(target; values) -> Int
+    insert!(target; values, limit = nothing) -> Int
 
 Append rows to the CTDS table at `target` (a path or an open `Table`).
 `values` is one row (`["A" => 1, "B" => 2.5]` or `(; A = 1, B = 2.5)`),
@@ -100,21 +100,32 @@ a vector of those, or any `Tables.jl` source (another table, a
 not supplied get their default (`0` / `""` / a same-shape zero array).
 Scalar values are coerced to the target column's element type. Returns
 the number of rows inserted. Extends `Base.insert!`.
+
+`limit` controls how many rows are appended (TaQL's `INSERT … LIMIT`):
+`nothing` or `0` (default) inserts one row per `values` row; a positive
+`limit` inserts exactly that many, cycling through the `values` rows; a
+negative `limit` inserts `nrow(target) + limit` rows (also cycling),
+clamped at zero.
 """
-function Base.insert!(target::Union{AbstractString,AbstractTable}; values)
+function Base.insert!(target::Union{AbstractString,AbstractTable}; values,
+                      limit::Union{Nothing,Integer}=nothing)
     path = _cmd_path(target)
     rd = readtable(path)
     vn = Set(columnnames(rd))
-    rows = _norm_ins_rows(values)
-    isempty(rows) && return 0
-    for r in rows, c in Base.keys(r)
+    baserows = _norm_ins_rows(values)
+    isempty(baserows) && return 0
+    for r in baserows, c in Base.keys(r)
         c in vn || throw(ArgumentError("insert!: no column \"$c\""))
     end
+    m = length(baserows)
+    k = (limit === nothing || limit == 0) ? m :
+        limit > 0 ? Int(limit) : max(0, nrow(rd) + Int(limit))
+    k == 0 && return 0
+    rows = k == m ? baserows : [baserows[(i - 1) % m + 1] for i in 1:k]
     J = Dict(n => juliatype(columndesc(rd, n).type) for n in vn)
     sc = Dict(n => (columndesc(rd, n).shape isa Dims && isempty(columndesc(rd, n).shape))
               for n in vn)
     old = nrow(rd)
-    k = length(rows)
     edit(path) do t
         addrows!(t, k)
         for (ri, r) in enumerate(rows), (c, v) in r
@@ -185,8 +196,8 @@ open `Table`):
 * `DELETE [FROM t] [WHERE cond]`                  → [`delete!`](@ref), returns `Int`
 * `SELECT [*|col [AS a], …] [WHERE cond] (INTO|GIVING) 'path'`  → [`copytable`](@ref), returns the path
 * `SELECT …` with no `INTO`/`GIVING`              → [`query`](@ref), returns the result
-* `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…)`  → [`insert!`](@ref), returns `Int`
-* `INSERT INTO t SET c1 = v1, c2 = v2`             → [`insert!`](@ref), returns `Int`
+* `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…) [LIMIT n]`  → [`insert!`](@ref), returns `Int`
+* `INSERT [LIMIT n] INTO t SET c1 = v1, c2 = v2`   → [`insert!`](@ref), returns `Int`
 
 `INSERT` values must be constant expressions (no column references).
 Clause keywords (`SET` / `WHERE` / `INTO` / `GIVING` / `FROM`) are found
@@ -279,6 +290,19 @@ function _taql_const(exprstr::AbstractString)
 end
 
 function _taql_insert(target, cmd::AbstractString)
+    limit = nothing
+    pm = match(r"^INSERT\s+LIMIT\s+(.+?)\s+INTO\s+(.*)$"is, cmd)
+    if pm !== nothing
+        limit = Int(_taql_const(pm.captures[1]))
+        cmd = "INSERT INTO " * pm.captures[2]
+    end
+    tm = match(r"^(.*\S)\s+LIMIT\s+(.+?)\s*$"is, cmd)
+    if tm !== nothing
+        limit === nothing ||
+            throw(ArgumentError("taql: INSERT has more than one LIMIT clause"))
+        limit = Int(_taql_const(tm.captures[2]))
+        cmd = String(tm.captures[1])
+    end
     mv = match(r"^INSERT\s+INTO\s+\S+\s*(?:[([]([^)\]]*)[)\]]\s*)?VALUES\s+(.+)$"is, cmd)
     if mv !== nothing
         cols = mv.captures[1] === nothing ?
@@ -294,7 +318,7 @@ function _taql_insert(target, cmd::AbstractString)
                 "taql: INSERT value count ($(length(vals))) != column count ($(length(cols)))"))
             push!(rows, Pair{String,Any}[cols[i] => _taql_const(vals[i]) for i in eachindex(cols)])
         end
-        return insert!(target; values=rows)
+        return insert!(target; values=rows, limit)
     end
     ms = match(r"^INSERT\s+INTO\s+\S+\s+SET\s+(.+)$"is, cmd)
     if ms !== nothing
@@ -305,7 +329,7 @@ function _taql_insert(target, cmd::AbstractString)
                 throw(ArgumentError("taql: malformed SET assignment \"$piece\""))
             push!(row, String(am.captures[1]) => _taql_const(am.captures[2]))
         end
-        return insert!(target; values=row)
+        return insert!(target; values=row, limit)
     end
     throw(ArgumentError("taql: malformed INSERT command"))
 end

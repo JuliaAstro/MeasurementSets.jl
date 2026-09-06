@@ -257,6 +257,46 @@ end
     @test_throws ArgumentError taql(p5, "INSERT INTO t FROBNICATE")
 end
 
+@testset "insert! -- LIMIT" begin
+    dir = mktempdir()
+    mk(name) = (p = joinpath(dir, name);
+                write_table(p, name, Pair{String,Any}["A" => Int32[1, 2], "B" => [1.0, 2.0]];
+                    nrow=2); p)
+
+    # positive limit -> exactly that many rows, one value row repeated
+    p1 = mk("l1")
+    @test insert!(p1; values=["A" => 9, "B" => 9.5], limit=4) == 4
+    @test column(readtable(p1), "A")[:] == Int32[1, 2, 9, 9, 9, 9]
+
+    # positive limit cycles through multiple value rows
+    p2 = mk("l2")
+    @test insert!(p2; values=[["A" => 3], (; A=4, B=4.0)], limit=5) == 5
+    @test column(readtable(p2), "A")[:] == Int32[1, 2, 3, 4, 3, 4, 3]
+
+    # negative limit -> nrow(target) + limit rows
+    p3 = mk("l3")                                  # 2 rows
+    @test insert!(p3; values=["A" => 7], limit=-1) == 1     # 2 + (-1)
+    @test nrow(readtable(p3)) == 3
+    p3b = mk("l3b")
+    @test insert!(p3b; values=["A" => 7], limit=-5) == 0    # clamped at 0
+    @test nrow(readtable(p3b)) == 2
+
+    # limit == 0 / nothing -> one row per value row
+    p4 = mk("l4")
+    @test insert!(p4; values=[["A" => 1], ["A" => 2]], limit=0) == 2
+
+    # taql: trailing LIMIT (VALUES) and prefix LIMIT (SET, lite-only)
+    p5 = mk("l5")
+    @test taql(p5, "INSERT INTO t (A, B) VALUES (1, 1.0), (2, 2.0) LIMIT 5") == 5
+    @test column(readtable(p5), "A")[:] == Int32[1, 2, 1, 2, 1, 2, 1]
+    p6 = mk("l6")
+    @test taql(p6, "INSERT LIMIT 3 INTO t SET A = 8, B = 8.0") == 3
+    @test column(readtable(p6), "A")[:] == Int32[1, 2, 8, 8, 8]
+    p7 = mk("l7")
+    @test taql(p7, "INSERT INTO t SET A = 8 LIMIT 1 + 1") == 2
+    @test_throws ArgumentError taql(p7, "INSERT LIMIT 2 INTO t (A) VALUES (1) LIMIT 3")
+end
+
 if _HAVE_TAQL
     @testset "write commands -- real TaQL cross-check" begin
         _run(path, cmd) = _taqlcmd(cmd, path)
@@ -306,6 +346,25 @@ if _HAVE_TAQL
             for nm in ("ours", "ref")
                 write_table(joinpath(d, nm), nm,
                             Pair{String,Any}["A" => copy(A), "B" => copy(B)]; nrow=6)
+            end
+            taql(joinpath(d, "ours"), replace(taql_cmd, "\$1" => "t"))
+            _run(joinpath(d, "ref"), taql_cmd)
+            ours = readtable(joinpath(d, "ours"))
+            ref = readtable(joinpath(d, "ref"))
+            @test nrow(ours) == nrow(ref)
+            @test column(ours, "A")[:] ≈ column(ref, "A")[:]
+            @test column(ours, "B")[:] ≈ column(ref, "B")[:]
+        end
+
+        for taql_cmd in ("INSERT INTO \$1 (A, B) VALUES (7.0, 0.5) LIMIT 4",
+                         "INSERT INTO \$1 (A, B) VALUES (1.0, 1.0), (2.0, 2.0) LIMIT 5",
+                         "INSERT LIMIT 3 INTO \$1 (A, B) VALUES (9.0, 9.0)",
+                         "INSERT INTO \$1 (A, B) VALUES (3.0, 3.0) LIMIT -2")
+            d = mktempdir()
+            for nm in ("ours", "ref")
+                write_table(joinpath(d, nm), nm,
+                            Pair{String,Any}["A" => collect(Float64, 1:6),
+                                             "B" => collect(Float64, 6:-1:1)]; nrow=6)
             end
             taql(joinpath(d, "ours"), replace(taql_cmd, "\$1" => "t"))
             _run(joinpath(d, "ref"), taql_cmd)
