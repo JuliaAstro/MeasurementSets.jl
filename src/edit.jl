@@ -58,6 +58,9 @@ function edit(path::AbstractString)
     any(m -> _is_forward_dm(m.name), r.managers) &&
         error("edit: $path has ForwardColumnEngine columns that reference another " *
               "table — edit that table instead")
+    any(m -> _is_virtualtaql_dm(m.name), r.managers) &&
+        error("edit: $path has VirtualTaQLColumn columns computed from a stored " *
+              "TaQL expression — edit the source columns instead")
     EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
               Dict{String,Dict{Int,Any}}(),
               Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false)

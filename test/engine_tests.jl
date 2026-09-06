@@ -288,3 +288,53 @@ end
     @test MSv2E._dmtype("RetypedArrayEngine<Float>") === MSv2E._UnsupportedDM
     @test MSv2E._dmtype("ForwardColumnIndexedRowEngine") === MSv2E._UnsupportedDM
 end
+
+# ---- Phase 41: VirtualTaQLColumn -----------------------------------------
+
+@testset "engine — VirtualTaQLColumn round-trip + cross-check" begin
+    dir = joinpath(mktempdir(), "vtq.tab")
+    A = collect(1.0:6.0)
+    write_table(dir, "T", ["A" => A, "CONST" => zeros(6), "CALC" => zeros(6),
+                           "FLAGY" => falses(6)]; nrow=6,
+        virtualtaql = Dict("CONST" => "3.5",
+                           "CALC"  => "A * 2.0 + 1.0",
+                           "FLAGY" => "A > 3.0"))
+    r = readtable(dir)
+    m = _engine_manager(r, "CONST")
+    @test m.name == "VirtualTaQLColumn"
+    @test !isfile(joinpath(dir, "table.f$(m.sequ)"))          # no data file
+    @test column(r, "CONST")[:] == fill(3.5, 6)               # constant expr
+    @test column(r, "CALC")[:] == A .* 2 .+ 1                  # column-referencing, fast path
+    @test [column(r, "CALC")[i] for i in 1:6] == A .* 2 .+ 1  # per-cell
+    @test column(r, "FLAGY")[:] == (A .> 3)
+    @test eltype(column(r, "FLAGY")) == Bool
+    @test String(columndesc(r, "CALC").keywords["_VirtualTaQLEngine_CalcExpr"]) == "A * 2.0 + 1.0"
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)                                   # VirtualTaQLColumn auto-registered
+        @test ct[:CONST][:] == fill(3.5, 6)
+        @test ct[:CALC][:] == A .* 2 .+ 1
+    end
+end
+
+@testset "engine — VirtualTaQLColumn: unsupported expr + copy + edit guard" begin
+    dir = joinpath(mktempdir(), "vtq2.tab")
+    A = collect(1.0:5.0)
+    write_table(dir, "T", ["A" => A, "BAD" => zeros(5), "OK" => zeros(5)]; nrow=5,
+        virtualtaql = Dict("BAD" => "A[0,0] + 1", "OK" => "A + 10.0"))
+    r = readtable(dir)
+    @test column(r, "A")[:] == A                              # rest of the table is fine
+    @test column(r, "OK")[:] == A .+ 10
+    err = try column(r, "BAD")[1]; nothing catch e; e end
+    @test err isa ArgumentError
+    @test occursin("BAD", err.msg) && occursin("A[0,0] + 1", err.msg)
+
+    dst = joinpath(mktempdir(), "vtq_copy.tab")
+    copytable(dst, readtable(dir))            # BAD is dropped (unreadable); OK is preserved
+    rc = readtable(dst)
+    @test _engine_manager(rc, "OK").name == "VirtualTaQLColumn"        # preserved, not materialised
+    @test column(rc, "OK")[:] == A .+ 10
+    @test !isfile(joinpath(dst, "table.f$(_engine_manager(rc, "OK").sequ)"))
+
+    @test_throws ErrorException edit(dir) do t end               # computed column -> refuse edit
+end

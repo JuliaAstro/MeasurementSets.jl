@@ -43,6 +43,7 @@ picks a sensible one for you when you create a table:
 | virtual engines (`ScaledArrayEngine`, `CompressComplex`, …) | a column mapped onto a hidden column of scaled integers |
 | `BitFlagsEngine` | an `Array{Bool}` column (e.g. `FLAG`) mapped onto a stored integer, one bit per flag category |
 | `ForwardColumnEngine` | a column that forwards every read to a same-named column in another table (see [`reference_copy`](@ref)) |
+| `VirtualTaQLColumn` | a column whose per-row value is a stored TaQL-lite CALC expression over the table's own columns (`write_table(...; virtualtaql=Dict("CV" => "TIME - 4.6e9"))`) |
 
 Column data is read lazily — [`column`](@ref) returns a [`Column`](@ref)
 (an `AbstractVector`); `col[i]` fetches one cell, `col[:]` takes the

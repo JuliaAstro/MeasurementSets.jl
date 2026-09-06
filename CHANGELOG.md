@@ -212,8 +212,8 @@ casacore's own `GIVING ... AS PLAIN` (`dataManagerInfo()`).
 
 Not yet implemented: editing a persisted RefTable/ConcatTable in place;
 concatenating keyword subtables on write; hypercube coordinate / id
-columns; `TiledDataStMan`; `VirtualTaQLColumn` (`ForwardColumnEngine` and
-`BitFlagsEngine` landed in Phase 40); adding a column (or engine) to an existing table in an
+columns; `TiledDataStMan` (`ForwardColumnEngine` and `BitFlagsEngine`
+landed in Phase 40, `VirtualTaQLColumn` in Phase 41); adding a column (or engine) to an existing table in an
 edit session; in-place per-data-manager `resync`. (Free-list bucket
 reuse doesn't apply here — every edit fully regenerates any touched
 storage-manager file from resolved data, so nothing accumulates across
@@ -679,3 +679,25 @@ materialise the forwards into a plain independent table.
 
 `RetypedArrayEngine` and `ForwardColumnIndexedRowEngine` stay
 unsupported — a clear error names them; neither occurs in a standard MS.
+
+### Phase 41 — `VirtualTaQLColumn`
+
+casacore's "CALC column": a column whose per-row value is a stored TaQL
+expression evaluated against the table's own columns (a constant-valued
+MS column, or on-the-fly derived data). Read + write.
+
+Read evaluates the stored `_VirtualTaQLEngine_CalcExpr` keyword with the
+Phase 22-25 TaQL-lite engine — a constant expression is computed once,
+a column-referencing one per row. An expression using a TaQL feature
+TaQL-lite doesn't support (array indexing `DATA[0,0]`, units, date/time
+or measures functions) raises a clear `ArgumentError` naming the column
+and expression **when that column is read** — the rest of the table
+opens fine.
+
+Write: `write_table(dir, "T", [..., "CV" => zeros(n)]; nrow = n,
+virtualtaql = Dict("CV" => "TIME - 4.6e9"))` declares the column and
+stores the expression (the passed values are ignored). `copyms` /
+`copytable` preserve a `VirtualTaQLColumn` by re-emitting the
+expression. `edit` of such a table is refused (edit the source
+columns). `CCT.Table` reads a `VirtualTaQLColumn` our writer produces —
+genuine round-trip interop, since casacore auto-registers the engine.

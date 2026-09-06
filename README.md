@@ -17,8 +17,8 @@ container.
 `StandardStMan`, `IncrementalStMan`, the three `Tiled*StMan` (single- and
 multi-column hypercubes), `DyscoStMan` (lossy compression), and the
 virtual scaling / compression engines (`ScaledArrayEngine`,
-`CompressComplex`, `BitFlagsEngine`, `ForwardColumnEngine`, …).
-`MultiFile` / `MultiHDF5` container tables, and
+`CompressComplex`, `BitFlagsEngine`, `ForwardColumnEngine`,
+`VirtualTaQLColumn`, …).  `MultiFile` / `MultiHDF5` container tables, and
 `RefTable` / `ConcatTable` (TaQL selections, MultiMS MAIN), too.  Columns
 are lazy `AbstractVector`s; tables are `Tables.jl` sources
 (`DataFrame(subtable(ms, "ANTENNA"))`).  A MAIN table's `DATA` /

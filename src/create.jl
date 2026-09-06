@@ -123,6 +123,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            ism::AbstractSet{<:AbstractString}=Set{String}(),
                            engines::AbstractDict=Dict{String,NamedTuple}(),
                            forward::AbstractDict=Dict{String,String}(),   # vname -> abs ref-table path
+                           virtualtaql::AbstractDict=Dict{String,String}(),  # vname -> CALC expression
                            dysco=Vector{String}[],
                            dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
                            storage::Symbol=:sepfile,
@@ -189,6 +190,23 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
             vd.classname, vd.shape, vd.option, vd.maxlength,
             _merge_kw(vd.keywords, fkw), vd.default, nothing)
         push!(engine_seq, (vi, "ForwardColumnEngine"))
+    end
+
+    # --- VirtualTaQLColumn: no data file -- store the CALC expression as
+    #     two String keywords + an empty DM block.  The expression is
+    #     evaluated (TaQL-lite) on read, never on write.
+    for (vname, expr) in virtualtaql
+        vi = findfirst(c -> c.name == vname, descs)
+        vi === nothing && error("virtualtaql: no column \"$vname\"")
+        push!(engine_virtual, vname)
+        vd = descs[vi]
+        tkw = Record()
+        _kwpush!(tkw, "_VirtualTaQLEngine_CalcExpr", TpString, String(expr))
+        _kwpush!(tkw, "_VirtualTaQLEngine_Style", TpString, "")
+        descs[vi] = ColumnDesc(vname, vd.comment, "VirtualTaQLColumn", vname, vd.type,
+            vd.classname, vd.shape, vd.option, vd.maxlength,
+            _merge_kw(vd.keywords, tkw), vd.default, nothing)
+        push!(engine_seq, (vi, "VirtualTaQLColumn"))
     end
 
     tiledgroups = [(:tsm, "TiledShapeStMan", write_tiledshapestman, tsmg),
@@ -299,7 +317,7 @@ end
 
 """
     write_table(dir, name, columns; nrow, endian=:little,
-               tsm, tcm, tcell, ism, engines, dysco, dysco_spec,
+               tsm, tcm, tcell, ism, engines, virtualtaql, dysco, dysco_spec,
                storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE,
                type="", subtype="", readme="")
 
@@ -307,14 +325,17 @@ Write a CTDS table at `dir`.  `columns` is an iterable of `name => vector`
 pairs (or a `Tables` columns source).  Column metadata (units, comments,
 exact class names) is taken from `SCHEMAVER2[name]` when available.
 `dysco`/`dysco_spec` compress one or more columns with `DyscoStMan` --
-see `_write_table_core` for the exact shape.  `storage`/
-`blocksize` pack every StandardStMan/IncrementalStMan/TiledStMan private
-file into one `table.mf`/`table.mfh5` -- see `_write_table_core`.
+see `_write_table_core` for the exact shape.  `virtualtaql` maps a column
+name to a TaQL-lite CALC expression (a `VirtualTaQLColumn` -- the passed
+values for that column are ignored, only the expression is stored).
+`storage`/`blocksize` pack every StandardStMan/IncrementalStMan/TiledStMan
+private file into one `table.mf`/`table.mfh5` -- see `_write_table_core`.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
                      tsm=String[], tcm=String[], tcell=String[], ism=String[],
                      engines::AbstractDict=Dict{String,NamedTuple}(),
+                     virtualtaql::AbstractDict=Dict{String,String}(),
                      dysco=Vector{String}[], dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
@@ -348,7 +369,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
     end
 
     _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,
-                      ism = Set(String.(ism)), engines, dysco, dysco_spec,
+                      ism = Set(String.(ism)), engines, virtualtaql, dysco, dysco_spec,
                       storage, blocksize,
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
@@ -377,6 +398,7 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
 
     # --- virtual column engines: re-encode; skip the implied companions ---
     engines = Dict{String,NamedTuple}()
+    virtualtaql = Dict{String,String}()      # preserved VirtualTaQLColumn expressions
     implied = Set{String}()
     for c in dmsrc.desc.columns
         _is_engine_dm(_source_dm(dmsrc, c)) || continue
@@ -407,6 +429,17 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
         end
         oc = outname == srcname ? sc : _rename_columndesc(sc, outname)
         dm = _source_dm(dmsrc, sc)
+        # --- VirtualTaQLColumn: preserve the CALC expression rather than
+        #     materialise it (it re-evaluates on read).  `vals` above is
+        #     only used for shape/ndim inference and is never written.
+        if _is_virtualtaql_dm(dm)
+            expr = String(get(sc.keywords, "_VirtualTaQLEngine_CalcExpr", ""))
+            if !isempty(expr)
+                virtualtaql[outname] = expr
+                push!(descs, oc); push!(data, vals)
+                continue
+            end
+        end
         if _is_engine_dm(dm)
             engines[outname] = _engine_spec_from_source(dmsrc, sc, dm)
             push!(descs, oc); push!(data, vals)
@@ -451,7 +484,7 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
     _write_table_core(dir, descs, data; nrow=length(rows), endian=:little,
                       public, private=Record(), tsm=tsmg, tcm=tcmg, tcell=tcellg, ism,
-                      engines, dysco=dyscog, dysco_spec, storage, blocksize,
+                      engines, virtualtaql, dysco=dyscog, dysco_spec, storage, blocksize,
                       tablename, type, subtype, readme)
     return descs
 end
