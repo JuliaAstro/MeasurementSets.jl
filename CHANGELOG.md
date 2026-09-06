@@ -1087,10 +1087,10 @@ measure(main, "TIME", 1)           # MEpoch{UTC}(60454.4… d)
 measure(subtable(ms, "FIELD"), "PHASE_DIR", 1)   # MDirection{J2000}(…, …)
 ```
 
-`import SOFA` loads `MeasurementSetsSOFAExt` (pure-Julia
+`import SOFA` loads `SOFAExt` (pure-Julia
 [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl) v2, IAU SOFA port),
 which converts between frames; `import EarthOrientation` additionally
-loads `MeasurementSetsEarthOrientationExt` for IERS ΔUT1 / polar motion:
+loads `EarthOrientationExt` for IERS ΔUT1 / polar motion:
 
 ```julia
 fr = MeasFrame(epoch = measure(main, "TIME", 1),
@@ -1121,3 +1121,28 @@ Non-goals: solar-system-body direction frames (`SUN`/`MOON`/planets),
 `MeasComet` / ephemeris tables, `MBaseline` / `MEarthMagnetic`,
 standalone `MDoppler`, `RefOff` application, pulsar-timing-grade
 precision, TaQL measures *functions*, in-place `MEASINFO` edit.
+
+### Phase 67 — GitHub / CI wiring for the JuliaAstro repository
+
+The package moved to
+[`github.com/JuliaAstro/MeasurementSets.jl`](https://github.com/JuliaAstro/MeasurementSets.jl).
+The stale `Paul Barrett` owner in the README CI badge and the `docs/make.jl`
+`repo` / edit links were fixed, and the git remote re-pointed.
+
+- **`.github/workflows/CI.yml`** gains a `docs` job
+  (`julia-actions/julia-docdeploy`) — builds the Documenter site and
+  deploys it (stable + dev + PR previews) via the `DOCUMENTER_KEY`
+  secret that `TagBot.yml` already references — plus a coverage upload on
+  the `test` job (`julia-actions/julia-processcoverage` +
+  `codecov/codecov-action`).
+- **`.github/workflows/CompatHelper.yml`** added (the canonical Julia
+  `[compat]`-bumping bot, root + `docs/`).
+- **`.github/dependabot.yml`** trimmed to the `github-actions` ecosystem
+  only — CompatHelper now owns the Julia dependency updates.
+- **README** badge rows: `docs-stable` / `docs-dev` on the first,
+  CI / codecov / MIT-license on the second.
+- `docs/make.jl` `deploydocs` guarded on `CI`, with
+  `versions = ["stable" => "v^", "v#.#", "dev" => "dev"]`, matching the
+  JuliaAstro convention.
+
+No source or test changes; the suite is unchanged at 2591.

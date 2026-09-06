@@ -29,11 +29,15 @@ makedocs(
     checkdocs = :exported,
 )
 
-# Deployment: wired for JuliaAstro's shared docs host (needs a
-# DOCUMENTER_KEY secret + a docs job in .github/workflows/ — see
-# .github/workflows/TagBot.yml which already references DOCUMENTER_KEY).
-deploydocs(
-    repo = REPO,
-    devbranch = "main",
-    push_preview = true,
-)
+# Deployment (the `docs` job in .github/workflows/CI.yml, via
+# julia-actions/julia-docdeploy). `deploydocs` self-detects and no-ops
+# outside a CI deploy context, but guard it explicitly to match the
+# JuliaAstro convention.
+if get(ENV, "CI", "false") == "true"
+    deploydocs(
+        repo = REPO,
+        devbranch = "main",
+        versions = ["stable" => "v^", "v#.#", "dev" => "dev"],
+        push_preview = true,
+    )
+end

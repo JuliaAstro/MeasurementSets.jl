@@ -1,24 +1,9 @@
 # https://docs.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
+# GitHub Actions only -- Julia `[compat]` entries are handled by
+# .github/workflows/CompatHelper.yml.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    # To group all GitHub Actions updates into a single PR, uncomment the following:
-    # groups:
-    #   github-actions:
-    #     patterns:
-    #       - "*"
-  - package-ecosystem: "julia"
-    directories:
-      - "/"
-      - "/docs"
-      - "/test"
-    schedule:
-      interval: "weekly"
-    # To group all Julia dependency updates into a single PR, uncomment the following:
-    # groups:
-    #   julia-dependencies:
-    #     patterns:
-    #       - "*"

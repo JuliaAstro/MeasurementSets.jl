@@ -1,6 +1,11 @@
 # MeasurementSets
 
+[![Docs: stable](https://img.shields.io/badge/docs-stable-blue.svg)](https://juliaastro.org/MeasurementSets/stable/)
+[![Docs: dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliaastro.github.io/MeasurementSets.jl/dev/)
+
 [![Build Status](https://github.com/JuliaAstro/MeasurementSets.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/JuliaAstro/MeasurementSets.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![Coverage](https://codecov.io/gh/JuliaAstro/MeasurementSets.jl/graph/badge.svg)](https://codecov.io/gh/JuliaAstro/MeasurementSets.jl)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for
