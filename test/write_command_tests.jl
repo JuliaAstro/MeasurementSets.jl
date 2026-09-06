@@ -318,7 +318,73 @@ end
     @test all(column(t9, "K")[:] .== 5)
 end
 
+@testset "update! -- boolean-mask assignment" begin
+    dir = mktempdir()
+    V0 = [Float64[i i+1 i+2; i+3 i+4 i+5] for i in 1:3]
+    M0 = [Bool[isodd(i + j) for i in 1:2, j in 1:3] for _ in 1:3]
+    mk(name) = (p = joinpath(dir, name);
+                write_table(p, name, Pair{String,Any}["V" => deepcopy(V0), "MK" => deepcopy(M0)];
+                    nrow=3, tsm=[["V"], ["MK"]]); p)
+
+    # mask from a Bool column
+    p1 = mk("m1")
+    @test update!(p1; set=["V[MK]" => "0.0"]) == 3
+    v1 = column(readtable(p1), "V")
+    for r in 1:3
+        @test all(v1[r][M0[r]] .== 0.0)
+        @test v1[r][.!M0[r]] == V0[r][.!M0[r]]
+    end
+
+    # inline mask expression
+    p2 = mk("m2")
+    update!(p2; set=["V[V > 5.0]" => "-1.0"])
+    v2 = column(readtable(p2), "V")[1]
+    @test v2 == [1.0 2.0 3.0; 4.0 5.0 -1.0]
+
+    # slice then mask (mask conforms to the section)
+    p3 = mk("m3")
+    update!(p3; set=["V[1:2,1:2][MK[1:2,1:2]]" => "9.0"])
+    v3 = column(readtable(p3), "V")[1]
+    @test v3 == [1.0 9.0 3.0; 9.0 5.0 6.0]
+
+    # mask then slice (mask conforms to the cell, then sliced)
+    p4 = mk("m4")
+    update!(p4; set=["V[MK][1:2,1:2]" => "7.0"])
+    @test column(readtable(p4), "V")[1] == [1.0 7.0 3.0; 7.0 5.0 6.0]
+
+    # (col, maskcol) form -> clear error
+    p5 = mk("m5")
+    @test_throws ArgumentError update!(p5; set=["(V, MK)" => "0.0"])
+    @test_throws ArgumentError taql(p5, "UPDATE t SET (V, MK) = 0.0")
+
+    # taql string form
+    p6 = mk("m6")
+    @test taql(p6, "UPDATE t SET V[MK] = 0.0") == 3
+    @test all(column(readtable(p6), "V")[1][M0[1]] .== 0.0)
+end
+
 if _HAVE_TAQL
+    @testset "update! -- boolean-mask real TaQL cross-check" begin
+        for slice_cmd in ("V[MK] = 0.0",
+                          "V[V > 5.0] = -1.0",
+                          "V[1:2,1:2][MK[1:2,1:2]] = 9.0")
+            d = mktempdir()
+            V0 = [Float64[i i+1 i+2; i+3 i+4 i+5] for i in 1:5]
+            M0 = [Bool[isodd(i + j) for i in 1:2, j in 1:3] for _ in 1:5]
+            for nm in ("ours", "ref")
+                write_table(joinpath(d, nm), nm,
+                    Pair{String,Any}["V" => deepcopy(V0), "MK" => deepcopy(M0)];
+                    nrow=5, tsm=[["V"], ["MK"]])
+            end
+            lhs, rhs = split(slice_cmd, " = "; limit=2)
+            update!(joinpath(d, "ours"); set=[String(lhs) => String(strip(rhs))])
+            _taqlcmd("UPDATE \$1 SET $slice_cmd", joinpath(d, "ref"))
+            vo = column(readtable(joinpath(d, "ours")), "V")
+            vr = column(readtable(joinpath(d, "ref")), "V")
+            @test all(vo[i] ≈ vr[i] for i in 1:5)
+        end
+    end
+
     @testset "update! -- array-slice real TaQL cross-check" begin
         for slice_cmd in ("V[1,1] = 0.0",
                           "V[1:2,3] = 9.0",

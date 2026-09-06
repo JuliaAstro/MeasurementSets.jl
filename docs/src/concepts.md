@@ -70,6 +70,7 @@ It is *not* a full TaQL implementation. The [Changelog](changelog.md)
 briefly: 1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
 `UVW[-1]`, `V[end-2:end,1]`), `BETWEEN` / `NOT BETWEEN`, bitwise
 `& | ^ ~` (`^` = xor), `~=` / `!~=` approximate equality, and
-`UPDATE … SET col[i,j] = …` array-slice assignment *are* supported, but
-no boolean-mask subscripts and no units or date/time / measures
-functions.
+`UPDATE … SET col[i,j] = …` array-slice / boolean-mask
+(`SET col[maskexpr] = …`) assignment *are* supported, but no units or
+date/time / measures functions, and no `(col, maskcol) = …` paired
+update (needs masked-array expressions).

@@ -21,11 +21,13 @@ Change column values in the CTDS table at `target` (a path or an open
 `Table` / `subtable(ms, …)`). `set` is `"COL" => "expr"` pairs — each
 `expr` a TaQL-lite expression over the row's columns, **evaluated
 against the pre-update values** (so `set = ["A" => "B", "B" => "A"]`
-swaps). The `set` key may also be an array-slice target,
-`"COL[subscripts]" => "expr"` (TaQL's `UPDATE … SET NAME[i,j] = …`) —
-1-based, `end`-relative and range subscripts allowed (as in
-[`query`](@ref)) — which writes only that sub-region of the cell,
-leaving the rest untouched; a scalar RHS fills the slice. `where` is a
+swaps). The `set` key may also be an array-slice or boolean-mask target,
+`"COL[subscripts]" => "expr"` (TaQL's `UPDATE … SET NAME[i,j] = …` /
+`NAME[maskexpr] = …`) — 1-based, `end`-relative and range subscripts,
+or a single Bool-array subscript acting as a write mask — which writes
+only the addressed elements, leaving the rest untouched; a scalar RHS
+fills the region. `col[slice][mask]` and `col[mask][slice]` both work.
+`where` is a
 TaQL-lite WHERE string, a `row -> Bool` closure, or `nothing` (every
 row). Returns the number of rows changed.
 """
@@ -35,27 +37,31 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
     vn = Set(columnnames(rd))
     isempty(set) && throw(ArgumentError("update!: `set` must not be empty"))
 
-    # each entry: (colname, axes | nothing, rhs_ast)
+    # each entry: (colname, levels::Vector{Vector} | nothing, rhs_ast)
     specs = Tuple{String,Any,Any}[]
     for p in set
-        lhs = _taqllite_parse(String(first(p)), vn)
+        lhskey = String(first(p))
+        occursin(r"^\(\s*\w+\s*,\s*\w+\s*\)", lhskey) && throw(ArgumentError(
+            "update!: the (col, maskcol) update form needs masked-array expressions, " *
+            "which TaQL-lite does not have — use \"col[maskexpr] = …\" instead"))
+        lhs = _taqllite_parse(lhskey, vn)
         rhs = _taqllite_parse(String(last(p)), vn)
         !_has_aggr(rhs) ||
             throw(ArgumentError("update!: SET expression \"$(last(p))\" must not aggregate"))
         if lhs isa TQLCol
             push!(specs, (lhs.name, nothing, rhs))
-        elseif lhs isa TQLIndex && lhs.base isa TQLCol
-            push!(specs, (lhs.base.name, lhs.axes, rhs))
         else
-            throw(ArgumentError(
-                "update!: SET target \"$(first(p))\" must be a column or COL[subscripts]"))
+            fl = _flatten_lhs(lhs)
+            fl === nothing && throw(ArgumentError(
+                "update!: SET target \"$lhskey\" must be a column or COL[subscripts]"))
+            push!(specs, (fl[1], fl[2], rhs))
         end
     end
 
     needed = Set{String}(s[1] for s in specs)
-    for (_, axes, a) in specs
+    for (_, levels, a) in specs
         _tqlrefs!(needed, a)
-        axes === nothing || _axes_refs!(needed, axes)
+        levels === nothing || foreach(ax -> _axes_refs!(needed, ax), levels)
     end
     if where isa AbstractString
         union!(needed, _tql_where_refs(where, rd))
@@ -102,13 +108,17 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
                 base = get(fullcols, c, nothing)
                 for i in rows
                     cur = nothing
-                    for (axes, a) in ops
+                    for (levels, a) in ops
                         ev = x -> _tqleval(x, cols, i)
-                        if axes === nothing
+                        if levels === nothing
                             cur = _tqleval(a, cols, i)
                         else
                             cur === nothing && (cur = copy(base[i]))
-                            _slice_assign!(cur, _tql_index_tuple(cur, axes, ev), ev(a))
+                            if length(levels) == 1 && _as_mask(levels[1], ev) === nothing
+                                _slice_assign!(cur, _tql_index_tuple(cur, levels[1], ev), ev(a))
+                            else
+                                _apply_index_chain!(cur, levels, ev, ev(a))
+                            end
                         end
                     end
                     ec[i] = cur
@@ -281,7 +291,7 @@ function taql(target, command::AbstractString)
         m === nothing && throw(ArgumentError("taql: malformed UPDATE command"))
         set = Pair{String,String}[]
         for piece in _split_commas(m.captures[1])
-            am = match(r"^(\w+(?:\[.*\])?)\s*=\s*(.+)$"s, piece)
+            am = match(r"^(.+?)\s*=\s*(.+)$"s, piece)
             am === nothing && throw(ArgumentError("taql: malformed SET assignment \"$piece\""))
             push!(set, String(strip(am.captures[1])) => String(strip(am.captures[2])))
         end

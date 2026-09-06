@@ -16,8 +16,10 @@
 # arithmetic `+ - * / % // **`, bitwise `& | ^` + unary `~`,
 # `LIKE`/`ILIKE`, the `~`/`!~` glob/regex operator, and a trailing
 # `ORDER BY`, all case-insensitive keyword forms). Not supported (see
-# the Phase 22/24 plan non-goals): boolean-mask array subscripts, units,
-# date/time or measures functions, computed output columns.
+# the Phase 22/24 plan non-goals): units, date/time or measures
+# functions, computed output columns. (A boolean-mask array subscript
+# `V[V > 5]` is valid as an `update!` SET target -- Phase 55 -- but a
+# read of `V[boolmask]` in a WHERE/SELECT expression is not.)
 # (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
 # 1-based, with negative-from-end and `end` -- landed in Phase 42/44;
 # `BETWEEN` / `NOT BETWEEN` in Phase 43; bitwise ops -- `^` is xor, use
@@ -191,6 +193,52 @@ function _slice_assign!(arr, idx::Tuple, rhs)
         arr[idx...] .= rhs
     end
     return arr
+end
+
+# unwrap a chain of `TQLIndex` down to a `TQLCol` base, collecting each
+# bracket's axes in column-outward order (`V[a][b]` -> `("V", [[a],[b]])`).
+# Returns `nothing` if the base is not a plain column.
+_flatten_lhs(e::TQLCol) = (e.name, Vector{Any}[])
+function _flatten_lhs(e::TQLIndex)
+    if e.base isa TQLCol
+        return (e.base.name, Vector{Any}[collect(Any, e.axes)])
+    elseif e.base isa TQLIndex
+        r = _flatten_lhs(e.base)
+        r === nothing && return nothing
+        return (r[1], push!(r[2], collect(Any, e.axes)))
+    end
+    return nothing
+end
+_flatten_lhs(::TQLExpr) = nothing
+
+# a single subscript that evaluates to a Bool array is a mask, not an index
+function _as_mask(axes, ev)
+    length(axes) == 1 && !(axes[1] isa NamedTuple) || return nothing
+    v = ev(axes[1])
+    (v isa AbstractArray && eltype(v) <: Bool) ? v : nothing
+end
+
+# apply an `update!` LHS subscript chain to `cur`, assigning `rhs`; each
+# level is either an integer/range slice or a boolean mask (at most one
+# mask in the chain). Mask-before-slice conforms the mask to the whole
+# cell then slices it; mask-after-slice conforms it to the section.
+function _apply_index_chain!(cur, levels, ev, rhs)
+    target = cur
+    pending = nothing
+    for axes in levels
+        m = _as_mask(axes, ev)
+        if m !== nothing
+            pending === nothing ||
+                throw(ArgumentError("update!: two masks in one subscript chain"))
+            pending = m
+        else
+            idx = _tql_index_tuple(target, axes, ev)
+            target = view(target, idx...)
+            pending === nothing || (pending = pending[idx...])
+        end
+    end
+    pending === nothing ? (target .= rhs) : (target[pending] .= rhs)
+    return cur
 end
 
 function _tql_axis(ax, arr, k::Int, ev)
@@ -763,8 +811,10 @@ function _parse_axis!(p::TQLParser)
     t = _peek(p)
     (t.kind === :comma || t.kind === :rbracket) &&
         return (; lo=nothing, hi=nothing, step=nothing)
-    lo = t.kind === :colon ? nothing : _parse_bitor!(p)
-    _peek(p).kind === :colon || return lo                     # scalar index
+    # full expression so a single subscript can be a boolean mask
+    # (`V[V > 5]`, `FLAG[chan]`); range bounds stay arithmetic
+    lo = t.kind === :colon ? nothing : _parse_or!(p)
+    _peek(p).kind === :colon || return lo                     # scalar index / mask
     _advance!(p)                                              # first ':'
     hi = _peek(p).kind in (:colon, :comma, :rbracket) ? nothing : _parse_bitor!(p)
     step = nothing

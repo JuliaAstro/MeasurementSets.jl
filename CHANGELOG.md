@@ -883,3 +883,18 @@ assignment may precede slice assignments to the same column. `taql`'s
 for scalar, range, negative-index, and cross-referencing slice RHS.
 Boolean-mask subscripts and the `(col, maskcol) = …` paired form remain
 non-goals.
+
+### Phase 55 — `UPDATE` boolean-mask assignment
+
+`update!` / `taql`'s `UPDATE … SET` now also accept a boolean-mask
+subscript, `SET col[maskexpr] = expr` — assign only where the mask
+(a Bool array conforming to the cell, a column or an inline expression
+like `V > 5.0`) is true. The slice + mask two-bracket form works in
+either order: `col[slice][mask]` (mask conforms to the section) and
+`col[mask][slice]` (mask conforms to the cell, then sliced) — matching
+casacore's `maskFirst` semantics. Single array subscripts in the query
+grammar are now full expressions (so `V[V > 5]` parses), not just
+arithmetic. The `(col, maskcol) = expr` paired form raises a clear
+error — it needs masked-array-producing expressions, which TaQL-lite
+does not have. Cross-checked against real TaQL for the mask, inline-mask
+and slice+mask forms.
