@@ -77,5 +77,7 @@ briefly: 1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
 (`SET col[maskexpr] = …`) / `(col, maskcol)` paired assignment, and
 computed `query` `select` columns (`"amp" => "sqrt(abs(V))"`), and
 masked arrays (`V[boolexpr]`, `marray` / `arraydata` / `arraymask`,
-`SELECT expr AS (val, mask)`; reductions skip masked elements) *are*
-supported, but no units or date/time / measures functions.
+`SELECT expr AS (val, mask)`, masked `g*` / `gs*` aggregates;
+reductions skip masked elements) *are* supported. Units, date/time,
+and measures functions are deferred (they need Unitful.jl / JuliaAstro
+integration, not string parsing).

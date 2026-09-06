@@ -104,8 +104,9 @@ struct TQLFunc <: TQLExpr           # NAME(args...) -- resolved Julia callable +
 end
 struct TQLRowNum <: TQLExpr end     # rownumber() / rownr() -- the 1-based row index
 struct TQLAggr <: TQLExpr           # g*(arg) -- reduces over a group's rows (groupby only)
-    fn::Base.Callable               # Vector-of-per-row-values -> scalar
+    fn::Base.Callable               # a scalar reducer (Vector -> scalar)
     arg::Union{Nothing,TQLExpr}     # nothing only for gcount()
+    mode::Symbol                    # :scalar (g*) or :perelem (gs*)
 end
 struct TQLGrouping <: TQLExpr       # GROUPING(k) -- true if key `k` is rolled up in this group
     name::String
@@ -133,7 +134,8 @@ end
 # semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
 # WHERE that produces an array (e.g. `DATA > 0`) then errors on the
 # `if` -- correct, exactly as real TaQL requires `any(...)`/`all(...)`
-# there. `AND`/`OR`/`NOT` stay scalar (short-circuit).
+# there. `AND`/`OR` stay scalar (short-circuit); `NOT` broadcasts so
+# `NOT FLAG` / `V[!FLAG]` negate an array-cell mask elementwise.
 _bcast(f, x) = x isa AbstractArray ? f.(x) : f(x)
 _bcast(f, x, y) = (x isa AbstractArray || y isa AbstractArray) ? f.(x, y) : f(x, y)
 
@@ -163,7 +165,7 @@ _tqleval(e::TQLLit, cols, i) = e.value
 _tqleval(e::TQLCmp, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLAnd, cols, i) = _tqleval(e.a, cols, i) && _tqleval(e.b, cols, i)
 _tqleval(e::TQLOr, cols, i) = _tqleval(e.a, cols, i) || _tqleval(e.b, cols, i)
-_tqleval(e::TQLNot, cols, i) = !_tqleval(e.a, cols, i)
+_tqleval(e::TQLNot, cols, i) = _bcast(!, _tqleval(e.a, cols, i))
 _tqleval(e::TQLIn, cols, i) = _tqleval(e.lhs, cols, i) in e.vals
 _tqleval(e::TQLArith, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLNeg, cols, i) = _bcast(-, _tqleval(e.a, cols, i))
@@ -319,7 +321,7 @@ _sg(e::TQLBetween, r) = TQLBetween(_sg(e.lhs, r), _sg(e.lo, r), _sg(e.hi, r), e.
 _sg(e::TQLIn, r) = TQLIn(_sg(e.lhs, r), e.vals)
 _sg(e::TQLMatch, r) = TQLMatch(_sg(e.lhs, r), e.regex, e.negate)
 _sg(e::TQLFunc, r) = TQLFunc(e.fn, TQLExpr[_sg(a, r) for a in e.args])
-_sg(e::TQLAggr, r) = e.arg === nothing ? e : TQLAggr(e.fn, _sg(e.arg, r))
+_sg(e::TQLAggr, r) = e.arg === nothing ? e : TQLAggr(e.fn, _sg(e.arg, r), e.mode)
 _sg(e::TQLIndex, r) = TQLIndex(_sg(e.base, r),
     Any[ax isa NamedTuple ?
         (; lo = ax.lo === nothing ? nothing : _sg(ax.lo, r),
@@ -1059,41 +1061,38 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "iif" => (ifelse, 3:3),
 )
 
-# g-prefixed aggregate functions -- each reduces a Vector of per-row
-# values (collected over a group's rows) to a scalar.  Used only by
-# `groupby` (via `_geval`); `_tqleval(::TQLAggr, ...)` errors.
-# `gvariance`/`gstddev` are population (÷N); `gsample*` are ÷(N-1),
-# matching casacore's own `gvariance0`/`gvariance1` split.
-const _TQL_AGGRS = Dict{String,Base.Callable}(
-    "gcount" => length,
-    "gsum" => sum, "gproduct" => prod,
-    "gmean" => Statistics.mean, "gavg" => Statistics.mean,
-    "gmedian" => Statistics.median,
-    "gmin" => minimum, "gmax" => maximum,
-    "gvariance" => (v -> Statistics.var(v; corrected=false)),
-    "gsamplevariance" => Statistics.var,
-    "gstddev" => (v -> Statistics.std(v; corrected=false)),
-    "gsamplestddev" => Statistics.std,
-    "grms" => (v -> sqrt(sum(abs2, v) / length(v))),
-    "gany" => any, "gall" => all,
-    "gntrue" => (v -> count(identity, v)), "gnfalse" => (v -> count(!, v)),
-    "gfirst" => first, "glast" => last,
-    # per-element (`s`-suffixed) variants: the group's array cells (all
-    # the same shape) reduced elementwise -> one array. `sum`/`mean`/
-    # `var` add/scale arrays elementwise; `prod`/`min`/`max`/`any`/`all`
-    # need an explicit broadcast reduce (`prod` of matrices is matmul!).
-    "gsums" => sum, "gproducts" => (v -> reduce((a, b) -> a .* b, v)),
-    "gmeans" => Statistics.mean, "gavgs" => Statistics.mean,
-    "gvariances" => (v -> Statistics.var(v; corrected=false)),
-    "gsamplevariances" => Statistics.var,
-    "gstddevs" => (v -> sqrt.(Statistics.var(v; corrected=false))),
-    "gsamplestddevs" => (v -> sqrt.(Statistics.var(v))),
-    "grmss" => (v -> sqrt.(sum(x -> abs2.(x), v) ./ length(v))),
-    "gmins" => (v -> reduce((a, b) -> min.(a, b), v)),
-    "gmaxs" => (v -> reduce((a, b) -> max.(a, b), v)),
-    "ganys" => (v -> reduce((a, b) -> a .| b, v)),
-    "galls" => (v -> reduce((a, b) -> a .& b, v)),
-    "gntrues" => sum, "gnfalses" => (v -> length(v) .- sum(v)),
+# g-prefixed aggregate functions.  `_geval(::TQLAggr)` collects the
+# group's per-row argument values and applies the scalar reducer here:
+# `:scalar` -> over the pooled values (unmasked elements, if the arg is a
+# masked array) -> one scalar; `:perelem` (the `s`-suffixed variants) ->
+# per array-cell position, over the rows where that cell is unmasked ->
+# one array.  `gvariance`/`gstddev` are population (÷N); `gsample*` are
+# ÷(N-1), matching casacore's `gvariance0`/`gvariance1` split.
+const _pop_var = v -> Statistics.var(v; corrected=false)
+const _pop_std = v -> Statistics.std(v; corrected=false)
+const _ntrue = v -> count(identity, v)
+const _nfalse = v -> count(!, v)
+const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
+    "gcount" => (length, :scalar),
+    "gsum" => (sum, :scalar), "gproduct" => (prod, :scalar),
+    "gmean" => (Statistics.mean, :scalar), "gavg" => (Statistics.mean, :scalar),
+    "gmedian" => (Statistics.median, :scalar),
+    "gmin" => (minimum, :scalar), "gmax" => (maximum, :scalar),
+    "gvariance" => (_pop_var, :scalar), "gsamplevariance" => (Statistics.var, :scalar),
+    "gstddev" => (_pop_std, :scalar), "gsamplestddev" => (Statistics.std, :scalar),
+    "grms" => (v -> sqrt(sum(abs2, v) / length(v)), :scalar),
+    "gany" => (any, :scalar), "gall" => (all, :scalar),
+    "gntrue" => (_ntrue, :scalar), "gnfalse" => (_nfalse, :scalar),
+    "gfirst" => (first, :scalar), "glast" => (last, :scalar),
+    # per-element variants -- same scalar reducer, applied per cell position
+    "gsums" => (sum, :perelem), "gproducts" => (prod, :perelem),
+    "gmeans" => (Statistics.mean, :perelem), "gavgs" => (Statistics.mean, :perelem),
+    "gvariances" => (_pop_var, :perelem), "gsamplevariances" => (Statistics.var, :perelem),
+    "gstddevs" => (_pop_std, :perelem), "gsamplestddevs" => (Statistics.std, :perelem),
+    "grmss" => (v -> sqrt(sum(abs2, v) / length(v)), :perelem),
+    "gmins" => (minimum, :perelem), "gmaxs" => (maximum, :perelem),
+    "ganys" => (any, :perelem), "galls" => (all, :perelem),
+    "gntrues" => (_ntrue, :perelem), "gnfalses" => (_nfalse, :perelem),
 )
 
 function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
@@ -1101,10 +1100,11 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     if haskey(_TQL_AGGRS, name)
         if name == "gcount"
             n in 0:1 || throw(ArgumentError("TaQL-lite: gcount() takes 0 or 1 arguments in \"$src\""))
-            return TQLAggr(length, n == 0 ? nothing : args[1])
+            return TQLAggr(length, n == 0 ? nothing : args[1], :scalar)
         end
         n == 1 || throw(ArgumentError("TaQL-lite: $name() takes 1 argument, got $n, in \"$src\""))
-        return TQLAggr(_TQL_AGGRS[name], args[1])
+        fn, mode = _TQL_AGGRS[name]
+        return TQLAggr(fn, args[1], mode)
     end
     if name == "grouping"
         (n == 1 && args[1] isa TQLCol) || throw(ArgumentError(
@@ -1463,8 +1463,46 @@ end
 
 _geval(::TQLGrouping, cols, g) = throw(ArgumentError(
     "TaQL-lite: GROUPING() must be resolved per grouping set (internal error)"))
-_geval(e::TQLAggr, cols, g) =
-    e.fn(e.arg === nothing ? g : [_tqleval(e.arg, cols, i) for i in g])
+function _geval(e::TQLAggr, cols, g)
+    e.arg === nothing && return e.fn(g)                    # gcount()
+    vals = Any[_tqleval(e.arg, cols, i) for i in g]
+    e.mode === :perelem && return _perelem_reduce(e.fn, vals)
+    any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
+    return e.fn(vals)
+end
+
+# flatten a group's per-row aggregate values into one vector, dropping
+# masked elements of any `TQLMArray`.
+_pool_masked(vals) = reduce(vcat, (x isa TQLMArray ? _mvalid(x) :
+    x isa AbstractArray ? vec(x) : [x] for x in vals))
+
+# per array-cell position, reduce (`f`) the values from the group's rows
+# where that cell is not masked. Replaces the `gs*` closures; also
+# reduces an unmasked `Vector` of same-shape arrays elementwise.
+function _perelem_reduce(f, vals)
+    isempty(vals) && throw(ArgumentError("groupby: empty group in a per-element aggregate"))
+    d1 = vals[1] isa TQLMArray ? vals[1].data : vals[1]
+    d1 isa AbstractArray || throw(ArgumentError(
+        "groupby: a per-element (gs*) aggregate needs array-cell values"))
+    sz = size(d1); T = eltype(d1)
+    accs = [T[] for _ in CartesianIndices(sz)]
+    for x in vals, p in CartesianIndices(sz)
+        x isa TQLMArray ? (x.mask[p] || push!(accs[p], x.data[p])) : push!(accs[p], x[p])
+    end
+    nonempty = findfirst(!isempty, accs)
+    nonempty === nothing && throw(ArgumentError(
+        "groupby: every cell is masked in a per-element aggregate"))
+    R = typeof(f(accs[nonempty]))
+    out = Array{R}(undef, sz)
+    for p in CartesianIndices(sz)
+        out[p] = isempty(accs[p]) ? _pe_empty(R) : R(f(accs[p]))
+    end
+    return out
+end
+_pe_empty(::Type{T}) where {T<:AbstractFloat} = T(NaN)
+_pe_empty(::Type{T}) where {T<:Complex} = T(NaN, NaN)
+_pe_empty(::Type{Bool}) = false
+_pe_empty(::Type{T}) where {T} = zero(T)
 _geval(e::TQLCol, cols, g) = cols[e.name][g[1]]
 _geval(e::TQLLit, cols, g) = e.value
 _geval(e::TQLCmp, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
@@ -1475,7 +1513,7 @@ _geval(e::TQLMaskOf, cols, g) = (v = _geval(e.e, cols, g);
     v isa TQLMArray ? v.mask : _bcast(!isfinite, _unwrap_marray(v)))
 _geval(e::TQLAnd, cols, g) = _geval(e.a, cols, g) && _geval(e.b, cols, g)
 _geval(e::TQLOr, cols, g) = _geval(e.a, cols, g) || _geval(e.b, cols, g)
-_geval(e::TQLNot, cols, g) = !_geval(e.a, cols, g)
+_geval(e::TQLNot, cols, g) = _bcast(!, _geval(e.a, cols, g))
 _geval(e::TQLIn, cols, g) = _geval(e.lhs, cols, g) in e.vals
 _geval(e::TQLMatch, cols, g) =
     xor(occursin(e.regex, _geval(e.lhs, cols, g)::AbstractString), e.negate)
@@ -1795,13 +1833,15 @@ so the verbs chain.
   `gsamplevariance(x)`, `gstddev(x)` / `gsamplestddev(x)`, `grms(x)`,
   `gany(x)`, `gall(x)`, `gntrue(x)`, `gnfalse(x)`, `gfirst(x)`,
   `glast(x)` — plus the group-key columns and scalar expressions of
-  them. An aggregate's argument must reduce to a scalar per row (wrap
-  an array cell in `mean(...)` / `sum(...)`). The `s`-suffixed
-  per-element variants (`gsums`, `gproducts`, `gmeans` / `gavgs`,
-  `gvariances` / `gsamplevariances`, `gstddevs` / `gsamplestddevs`,
-  `grmss`, `gmins`, `gmaxs`, `ganys`, `galls`, `gntrues`, `gnfalses`)
-  instead take the group's array cells (all the same shape) and reduce
-  them elementwise, giving one array.
+  them. An aggregate's argument is normally a scalar per row (wrap an
+  array cell in `mean(...)` / `sum(...)`), OR a masked array
+  (`gmean(V[!FLAG])` pools every row's unmasked elements). The
+  `s`-suffixed per-element variants (`gsums`, `gproducts`, `gmeans` /
+  `gavgs`, `gvariances` / `gsamplevariances`, `gstddevs` /
+  `gsamplestddevs`, `grmss`, `gmins`, `gmaxs`, `ganys`, `galls`,
+  `gntrues`, `gnfalses`) reduce the group's array cells per position —
+  over the rows where that cell is unmasked (all cells if unmasked),
+  giving one array.
 * a **`Symbol`** — shorthand for a bare column name (`:K` ≡ `"K"`).
 * a **function** `g -> value` — called with a [`GroupSlice`](@ref) (see
   the do-block form below); use for aggregates the `g*` set can't

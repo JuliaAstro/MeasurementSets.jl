@@ -978,3 +978,20 @@ column together with its mask column, and `taql(t, "SELECT V[V > 0] AS
 gives a non-finite flag for the mask column (consistent with Phase 59).
 casacore has no on-disk column↔mask association — the mask is always
 named, so `marray(col, maskcol)` *is* "read a masked column".
+
+### Phase 62 — masked `g*` aggregates (first-class)
+
+A `g*` aggregate with a masked-array argument now reduces over the
+group's **unmasked** elements: scalar `g*` (`gmean` / `gsum` / `gmin` /
+`gmax` / `gmedian` / `gstddev` / `grms` / `gany` / `gall` / `gproduct`)
+pools every row's unmasked elements into one flat reduction —
+`gmean(V[!FLAG])` is the mean of every unflagged visibility in the
+group — and per-element `gs*` reduces per cell position over the rows
+where that cell is unmasked (`gmeans(V[!FLAG])` = the per-cell mean
+spectrum, flagged cells ignored; an all-masked cell → NaN/0/false).
+The 14 Phase-52 `gs*` closures collapse to one generic
+`_perelem_reduce` sharing the non-`s` scalar reducer (so `gproducts` is
+a genuine per-cell product, no matmul). `NOT` now broadcasts, so
+`V[!FLAG]` and `NOT FLAG` negate an array-cell mask elementwise.
+casacore's own masked-`g*` semantics are murky (no reliable
+cross-check) — the pooled-unmasked interpretation is the clean one.

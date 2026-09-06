@@ -834,6 +834,52 @@ end
     @test isequal(collect(g2.A), collect(groupby(t, "K"; select=["K" => :K, "A" => "gmeans(V)"]).A))
 end
 
+@testset "groupby — masked g* aggregates" begin
+    dir = joinpath(mktempdir(), "mga.tab")
+    K = Int32[0, 0, 0, 1, 1]
+    V = [Float64[i i+1; i+2 i+3] for i in 1:5]
+    F = [Bool[isodd(i) false; true iseven(i)] for i in 1:5]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "V" => V, "F" => F];
+        nrow=5, tsm=[["V"], ["F"]])
+    t = readtable(dir)
+    grp = Dict(Int32(0) => [1, 2, 3], Int32(1) => [4, 5])
+
+    g = groupby(t, "K"; orderby=["K"],
+        select=["K" => :K,
+                "gm" => "gmean(V[!F])", "gs" => "gsum(V[!F])",
+                "gmx" => "gmax(V[!F])", "gmn" => "gmin(V[!F])",
+                "gsd" => "gstddev(V[!F])",
+                "gsm" => "gmeans(V[!F])",
+                "gnt" => "gsum(ntrue(F))"])
+    for (row, k) in enumerate(Int32[0, 1])
+        pooled = Float64[]
+        for i in grp[k]
+            append!(pooled, V[i][.!F[i]])
+        end
+        @test collect(g.gm)[row] ≈ Statistics.mean(pooled)
+        @test collect(g.gs)[row] == sum(pooled)
+        @test collect(g.gmx)[row] == maximum(pooled)
+        @test collect(g.gmn)[row] == minimum(pooled)
+        @test collect(g.gsd)[row] ≈ Statistics.std(pooled; corrected=false)
+        @test collect(g.gnt)[row] == sum(count(F[i]) for i in grp[k])
+
+        want = Matrix{Float64}(undef, 2, 2)
+        for p in CartesianIndices((2, 2))
+            vs = [V[i][p] for i in grp[k] if !F[i][p]]
+            want[p] = isempty(vs) ? NaN : Statistics.mean(vs)
+        end
+        @test isequal(collect(g.gsm)[row], want)
+    end
+
+    # gs* on unmasked data still reduces elementwise (Phase 52 behaviour)
+    gu = groupby(t, "K"; select=["K" => :K, "s" => "gsums(V)", "p" => "gproducts(V)"],
+        orderby=["K"])
+    for (row, k) in enumerate(Int32[0, 1])
+        @test collect(gu.s)[row] == sum(V[i] for i in grp[k])
+        @test collect(gu.p)[row] == reduce((a, b) -> a .* b, V[grp[k]])
+    end
+end
+
 @testset "groupby — GroupedTable is a Tables.jl source" begin
     dir = joinpath(mktempdir(), "gt.tab")
     K = Int32[1, 1, 2, 2, 2, 3, 3]
