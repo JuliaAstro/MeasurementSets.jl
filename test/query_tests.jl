@@ -693,10 +693,12 @@ end
     @test gs.A == [20, 40]
     @test gs.B == ["q", "s"]
     @test length(gs) == 2
-    @test Set(propertynames(gs)) == Set([:A, :B, :keys, :level])
+    @test Set(propertynames(gs)) == Set([:A, :B, :keys, :level, :grouping])
     @test gs.level == 0 && gs.keys == NamedTuple()
-    gs2 = MSv2.GroupSlice(getfield(gs, :cols), [1, 2], ["A"], 1)
-    @test gs2.keys == (A = 10,) && gs2.level == 1
+    gs2 = MSv2.GroupSlice(getfield(gs, :cols), [1, 2], ["A"], [1])
+    @test gs2.keys == (A = 10,) && gs2.level == 1 && gs2.grouping == (A = false,)
+    gs3 = MSv2.GroupSlice(getfield(gs, :cols), [1, 2], ["A", "B"], Int[])
+    @test isequal(gs3.keys, (A = missing, B = missing)) && gs3.grouping == (A = true, B = true)
     @test_throws ArgumentError gs.NOPE
 end
 
@@ -744,6 +746,56 @@ end
         select = ["K1" => :K1, "K2" => :K2, "N" => "gcount()"],
         having = "gcount() >= 2", rollup = true)
     @test all(gh.N .>= 2)
+end
+
+# ---- Phase 50: CUBE / GROUPING SETS ------------------------------
+
+@testset "groupby — CUBE / GROUPING SETS" begin
+    dir = joinpath(mktempdir(), "cb.tab")
+    K1 = Int32[1, 1, 1, 2, 2, 2]
+    K2 = Int32[10, 10, 20, 10, 20, 20]
+    X  = Float64[1, 2, 3, 4, 5, 6]
+    write_table(dir, "T", Pair{String,Any}["K1" => K1, "K2" => K2, "X" => X]; nrow=6)
+    t = readtable(dir)
+    sel = ["K1" => :K1, "K2" => :K2, "N" => "gcount()", "S" => "gsum(X)"]
+
+    _rows(g) = sort([(g.K1[i], g.K2[i], g.N[i], g.S[i]) for i in 1:nrow(g)]; by = string)
+
+    # CUBE(K1,K2) -> (K1,K2)×4, (K1)×2, (K2)×2, ()×1 = 9 rows
+    gcu = groupby(t, ["K1", "K2"]; select = sel, cube = true)
+    @test nrow(gcu) == 9
+    want_cube = [(1, 10, 2, 3.0), (1, 20, 1, 3.0), (2, 10, 1, 4.0), (2, 20, 2, 11.0),
+                 (1, missing, 3, 6.0), (2, missing, 3, 15.0),
+                 (missing, 10, 3, 7.0), (missing, 20, 3, 14.0),
+                 (missing, missing, 6, 21.0)]
+    @test isequal(_rows(gcu), sort(want_cube; by = string))
+
+    # GROUPING SETS: exactly the listed sets
+    ggs = groupby(t, ["K1", "K2"]; select = sel,
+                  grouping_sets = [("K1",), ("K2",), ()])
+    @test nrow(ggs) == 5
+    @test isequal(_rows(ggs), sort([(1, missing, 3, 6.0), (2, missing, 3, 15.0),
+                                    (missing, 10, 3, 7.0), (missing, 20, 3, 14.0),
+                                    (missing, missing, 6, 21.0)]; by = string))
+
+    # a single-name grouping set entry is a 1-key set
+    @test isequal(_rows(groupby(t, ["K1", "K2"]; select = sel, grouping_sets = ["K1", ()])),
+                  _rows(groupby(t, ["K1", "K2"]; select = sel, grouping_sets = [("K1",), ()])))
+
+    # closure form + g.grouping
+    gc = groupby(t, [:K1, :K2]; cube = true) do g
+        (; g.keys..., N = length(g), gK2 = g.grouping.K2)
+    end
+    @test count(gc.gK2) == 3          # the 3 rows where K2 is rolled up ((K1) sets + grand total)
+
+    # rollup is a subset of cube (both give the () and (K1) levels)
+    gru = groupby(t, ["K1", "K2"]; select = sel, rollup = true)
+    @test issubset(Set(_rows(gru)), Set(_rows(gcu)))
+
+    # errors
+    @test_throws ArgumentError groupby(t, ["K1"]; select = sel, cube = true, rollup = true)
+    @test_throws ArgumentError groupby(t, ["K1", "K2"]; select = sel,
+                                      grouping_sets = [("K1", "NOPE")])
 end
 
 @testset "groupby — do-block form" begin

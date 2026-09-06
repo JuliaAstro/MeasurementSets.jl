@@ -803,6 +803,18 @@ NamedTuple — `(; g.keys..., N = length(g))` — which already carries the
 casacore parses `GROUP BY ROLLUP` but throws "not supported yet", so
 this is plain SQL semantics with no real-TaQL cross-check.
 
+### Phase 50 — `groupby` CUBE / GROUPING SETS
+
+Generalises Phase 48's `rollup`: `groupby(t, cols; select, cube = true)`
+computes **every** key subset (not just prefixes); `grouping_sets =
+[("K1","K2"), ("K1",), ()]` computes exactly the sets you name (`()` =
+grand total). At most one of `rollup` / `cube` / `grouping_sets`.
+Aggregated-away keys are `missing` as before. `GroupSlice` now carries
+the active-key *set* (not a prefix count): `g.keys` / `g.level` still
+work, and a new `g.grouping` NamedTuple gives SQL `GROUPING()` — `true`
+for a key rolled up in that row. casacore parses these but doesn't
+implement them; plain SQL semantics, no cross-check.
+
 ### Phase 49 — M:N joins
 
 `join(left, right; on = "LK" => "RK", ..., multi = true)` is a general

@@ -1232,21 +1232,26 @@ struct GroupSlice
     cols::Dict{String,AbstractVector}
     rows::Vector{Int}
     keynames::Vector{String}
-    level::Int
+    active::Vector{Int}          # 1-based indices of the keys active for this group
 end
-GroupSlice(cols, rows) = GroupSlice(cols, rows, String[], 0)
+GroupSlice(cols, rows) = GroupSlice(cols, rows, String[], Int[])
+GroupSlice(cols, rows, kn::Vector{String}) =
+    GroupSlice(cols, rows, kn, collect(1:length(kn)))
 Base.length(g::GroupSlice) = length(getfield(g, :rows))
 Base.propertynames(g::GroupSlice) =
-    (Symbol.(keys(getfield(g, :cols)))..., :keys, :level)
+    (Symbol.(keys(getfield(g, :cols)))..., :keys, :level, :grouping)
 function Base.getproperty(g::GroupSlice, s::Symbol)
     (s === :cols || s === :rows) && return getfield(g, s)
-    s === :level && return getfield(g, :level)
+    s === :level && return length(getfield(g, :active))
+    kn = getfield(g, :keynames); act = getfield(g, :active)
     if s === :keys
-        kn = getfield(g, :keynames); lvl = getfield(g, :level)
         r1 = getfield(g, :rows)[1]
         return NamedTuple{Tuple(Symbol.(kn))}(
-            ntuple(j -> j <= lvl ? getfield(g, :cols)[kn[j]][r1] : missing, length(kn)))
+            ntuple(j -> j in act ? getfield(g, :cols)[kn[j]][r1] : missing, length(kn)))
     end
+    # SQL GROUPING(): `true` for a key aggregated away in this group
+    s === :grouping && return NamedTuple{Tuple(Symbol.(kn))}(
+        ntuple(j -> !(j in act), length(kn)))
     c = get(getfield(g, :cols), String(s), nothing)
     c === nothing && throw(ArgumentError(
         "GroupSlice has no column $s -- pass it in `cols=` (a closure's column use can't be inferred)"))
@@ -1454,17 +1459,40 @@ function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
         [i for i in 1:nrow(t) if _tqleval(whereast, loaded, i)]
 
     havingfn =
-        havingarg === nothing ? ((g, kn, lvl) -> true) :
-        havingarg isa Function ? ((g, kn, lvl) -> havingarg(GroupSlice(loaded, g, kn, lvl))) :
-        ((g, kn, lvl) -> _geval(havingast, loaded, g))
+        havingarg === nothing ? ((g, kn, act) -> true) :
+        havingarg isa Function ? ((g, kn, act) -> havingarg(GroupSlice(loaded, g, kn, act))) :
+        ((g, kn, act) -> _geval(havingast, loaded, g))
     return loaded, rows, havingfn, keys
 end
 
-# active-key-prefix lengths to group by: just the full set normally, or
-# n, n-1, ..., 0 for GROUP BY ROLLUP (detailed groups first, then each
-# subtotal level, then the grand total).
-_gb_levels(keys::Vector{String}, rollup::Bool) =
-    rollup ? (length(keys):-1:0) : (length(keys):length(keys))
+# The grouping sets to compute: each a sorted `Vector{Int}` of active
+# key indices. Plain groupby -> one set (all keys); ROLLUP -> key
+# prefixes n, n-1, ..., 0; CUBE -> every subset; `grouping_sets` -> the
+# explicit list. At most one of rollup/cube/grouping_sets may be given.
+function _gb_one_set(gs, kidx::AbstractDict)
+    names = gs isa Union{AbstractString,Symbol} ? String[String(gs)] :
+            String[String(x) for x in gs]
+    for nm in names
+        haskey(kidx, nm) || throw(ArgumentError(
+            "groupby: grouping set names a non-grouping column \"$nm\""))
+    end
+    return sort!(unique(Int[kidx[nm] for nm in names]))
+end
+
+function _gb_sets(keys::Vector{String}, rollup::Bool, cube::Bool, gsets)
+    n = length(keys)
+    count(!=(false), (rollup, cube, gsets !== nothing)) <= 1 || throw(ArgumentError(
+        "groupby: give at most one of `rollup`, `cube`, `grouping_sets`"))
+    if gsets !== nothing
+        kidx = Dict(k => j for (j, k) in enumerate(keys))
+        return Vector{Int}[_gb_one_set(gs, kidx) for gs in gsets]
+    end
+    rollup && return [collect(1:p) for p in n:-1:0]
+    cube && return sort!(
+        [Int[j for j in 1:n if (m >> (j - 1)) & 1 == 1] for m in 0:(2^n - 1)];
+        by = s -> (-length(s), s))
+    return [collect(1:n)]
+end
 
 """
     groupby(t, groupcols; select, cols=nothing, where=nothing, having=nothing, orderby=nothing) -> GroupedTable
@@ -1496,20 +1524,25 @@ compute one result row per group.
 closure (default: every column of `t`). `orderby` sorts the result rows
 by output column name(s): `"N"` (ascending) or `"N" => :desc`.
 
-`rollup = true` adds SQL `GROUP BY ROLLUP` subtotal rows: the detailed
-groups (by all keys), then a level per key prefix dropped
-(`keys[1:end-1]`, …, `keys[1:0]`), ending with the grand total. In a
-subtotal row the aggregated-away key columns are `missing` — a bare
-`:K` / `"K"` select entry for such a key emits `missing`; a closure
-should build its key fields from `g.keys` (`(; g.keys..., N =
-length(g))`). (casacore parses `GROUP BY ROLLUP` but does not implement
-it, so this is plain SQL semantics with no real-TaQL cross-check.)
+`rollup = true` / `cube = true` / `grouping_sets = [...]` compute
+multiple SQL grouping sets and stack the result rows. `rollup` groups by
+each key prefix (`keys`, `keys[1:end-1]`, …, `()`); `cube` by every
+subset; `grouping_sets` by exactly the sets you list — each an iterable
+of key names, `()` for the grand total (`grouping_sets = [("K1","K2"),
+("K1",), ()]`). At most one of the three. In a row where a key is
+aggregated away, that key column is `missing` — a bare `:K` / `"K"`
+select entry emits `missing`; a closure should build its key fields
+from `g.keys` (`(; g.keys..., N = length(g))`), and can test
+`g.grouping.K` (SQL `GROUPING()` — `true` when `K` is rolled up).
+(casacore parses these but does not implement them, so this is plain
+SQL semantics with no real-TaQL cross-check.)
 
 Returns a [`GroupedTable`](@ref).
 """
 function groupby(t::AbstractTable, groupcols;
                  select::AbstractVector{<:Pair}, cols=nothing,
-                 where=nothing, having=nothing, rollup::Bool=false,
+                 where=nothing, having=nothing,
+                 rollup::Bool=false, cube::Bool=false, grouping_sets=nothing,
                  orderby::Union{Nothing,AbstractVector}=nothing)
     isempty(select) && throw(ArgumentError("groupby: `select` must not be empty"))
     outnames = String[String(first(p)) for p in select]
@@ -1526,18 +1559,19 @@ function groupby(t::AbstractTable, groupcols;
 
     loaded, rows, havingfn, keys =
         _gb_prepare(t, groupcols, where, having, strasts, cols, anyclosure)
+    kidx = Dict(k => j for (j, k) in enumerate(keys))
 
     acc = [Any[] for _ in outnames]
-    for level in _gb_levels(keys, rollup)
-        rolled = Set(@view keys[level+1:end])
-        groups, seen = _group_rows(keys[1:level], loaded, rows)
+    for active in _gb_sets(keys, rollup, cube, grouping_sets)
+        aset = Set(active)
+        groups, seen = _group_rows(keys[active], loaded, rows)
         for key in seen
             g = groups[key]
-            havingfn(g, keys, level) || continue
+            havingfn(g, keys, active) || continue
             for (j, (k, v)) in enumerate(kinds)
                 push!(acc[j],
-                    k === :fn ? v(GroupSlice(loaded, g, keys, level)) :
-                    (v isa TQLCol && v.name in rolled) ? missing :
+                    k === :fn ? v(GroupSlice(loaded, g, keys, active)) :
+                    (v isa TQLCol && haskey(kidx, v.name) && !(kidx[v.name] in aset)) ? missing :
                     _geval(v, loaded, g))
             end
         end
@@ -1564,23 +1598,25 @@ end
 `cols` restricts which columns are loaded onto `g` (default: every
 column of `t` — `f` is opaque). `where` / `having` — a string or a
 predicate closure (`row -> Bool` / `g -> Bool`). `orderby` — see the
-string form. `rollup = true` — see the string form; a rollup closure
-should use `g.keys` for its key fields (`(; g.keys..., N = length(g))`)
-so the aggregated-away keys come back as `missing`.
+string form. `rollup` / `cube` / `grouping_sets` — see the string form;
+a multi-set closure should use `g.keys` for its key fields (`(; g.keys...,
+N = length(g))`) so aggregated-away keys come back as `missing`, and
+may test `g.grouping.K`.
 """
 function groupby(f::Function, t::AbstractTable, groupcols; cols=nothing,
-                 where=nothing, having=nothing, rollup::Bool=false,
+                 where=nothing, having=nothing,
+                 rollup::Bool=false, cube::Bool=false, grouping_sets=nothing,
                  orderby::Union{Nothing,AbstractVector}=nothing)
     loaded, rows, havingfn, keys =
         _gb_prepare(t, groupcols, where, having, TQLExpr[], cols, true)
 
     nts = NamedTuple[]
-    for level in _gb_levels(keys, rollup)
-        groups, seen = _group_rows(keys[1:level], loaded, rows)
+    for active in _gb_sets(keys, rollup, cube, grouping_sets)
+        groups, seen = _group_rows(keys[active], loaded, rows)
         for key in seen
             g = groups[key]
-            havingfn(g, keys, level) || continue
-            nt = f(GroupSlice(loaded, g, keys, level))
+            havingfn(g, keys, active) || continue
+            nt = f(GroupSlice(loaded, g, keys, active))
             nt isa NamedTuple ||
                 throw(ArgumentError("groupby(f, ...): the closure must return a NamedTuple"))
             isempty(nts) || Base.keys(nt) == Base.keys(nts[1]) ||
