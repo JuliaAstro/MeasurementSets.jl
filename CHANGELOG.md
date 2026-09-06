@@ -995,3 +995,15 @@ a genuine per-cell product, no matmul). `NOT` now broadcasts, so
 `V[!FLAG]` and `NOT FLAG` negate an array-cell mask elementwise.
 casacore's own masked-`g*` semantics are murky (no reliable
 cross-check) — the pooled-unmasked interpretation is the clean one.
+
+### Phase 63 — string `L.` / `R.`-qualified non-equi join condition
+
+`join`'s `on` can now be a **string** — a TaQL-lite expression with
+`L.` / `R.` table-qualified column references,
+`join(l, r; on = "L.TIME BETWEEN R.T0 AND R.T1")`. It is the
+declarative form of the Phase-56 predicate closure: same nested loop,
+same O(N×M) cost, same `unmatched` join-type semantics. Must reference
+at least one `L.<col>` and one `R.<col>` (aggregates rejected); a
+bare-identifier `on` string is still the Phase-28 index-lookup join.
+The tokenizer now lexes one optional `.suffix` on an identifier.
+TaQL has no cartesian non-equi join, so no cross-check.

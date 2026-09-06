@@ -471,6 +471,14 @@ function _taqllite_tokenize(s::AbstractString)
             while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_')
                 j += 1
             end
+            # one optional `.suffix` -> a table-qualified column (`L.TIME`),
+            # only when a letter/`_` immediately follows the dot
+            if j < n && cs[j] == '.' && (isletter(cs[j+1]) || cs[j+1] == '_')
+                j += 1
+                while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_')
+                    j += 1
+                end
+            end
             push!(toks, TQLToken(:ident, join(cs[i:j-1]), nothing))
             i = j
         elseif c in _TQL_OPCHARS
@@ -2164,6 +2172,53 @@ function _join_pairs_pred(left::AbstractTable, right::AbstractTable, pred::Funct
     return lrows, rrows
 end
 
+# nested-loop join on a TaQL-lite `on` STRING with `L.` / `R.`
+# table-qualified column references (`"L.T BETWEEN R.T0 AND R.T1"`).
+function _join_pairs_qexpr(left::AbstractTable, right::AbstractTable, onstr::AbstractString,
+                           unmatched::Symbol)
+    unmatched in (:error, :drop, :missing, :left, :right, :full) || throw(ArgumentError(
+        "join: `unmatched` must be :error, :drop, :missing/:left, :right or :full"))
+    keepL = unmatched in (:missing, :left, :full)
+    keepR = unmatched in (:right, :full)
+    validnames = Set{String}()
+    for c in columnnames(left);  push!(validnames, "L.$c"); end
+    for c in columnnames(right); push!(validnames, "R.$c"); end
+    ast = _taqllite_parse(String(onstr), validnames)
+    _has_aggr(ast) &&
+        throw(ArgumentError("join: `on` string must not contain aggregate functions"))
+    refs = Set{String}(); _tqlrefs!(refs, ast)
+    lref = String[r for r in refs if startswith(r, "L.")]
+    rref = String[r for r in refs if startswith(r, "R.")]
+    (isempty(lref) || isempty(rref)) && throw(ArgumentError(
+        "join: `on` string must reference at least one L.<col> and one R.<col>"))
+    lcols = Dict(r => column(left, r[3:end]) for r in lref)
+    rcols = Dict(r => column(right, r[3:end]) for r in rref)
+    qcd = Dict{String,Vector{Any}}(r => Vector{Any}(undef, 1) for r in refs)
+    lrows = Int[]; rrows = Int[]
+    matched_r = falses(nrow(right))
+    for i in 1:nrow(left)
+        for r in lref; qcd[r][1] = lcols[r][i]; end
+        hit = false
+        for j in 1:nrow(right)
+            for r in rref; qcd[r][1] = rcols[r][j]; end
+            if _tqleval(ast, qcd, 1)::Bool
+                push!(lrows, i); push!(rrows, j); matched_r[j] = true; hit = true
+            end
+        end
+        if !hit
+            unmatched === :error && throw(ArgumentError(
+                "join: left row $i has no match on the right (use unmatched=:drop / :missing / ...)"))
+            keepL && (push!(lrows, i); push!(rrows, 0))
+        end
+    end
+    if keepR
+        for j in 1:nrow(right)
+            matched_r[j] || (push!(lrows, 0); push!(rrows, j))
+        end
+    end
+    return lrows, rrows
+end
+
 # post-assembly WHERE over the RESULT column names (a renamed right
 # column is referenced by its output name).  String -> the TaQL-lite
 # expression engine; Function -> a `row -> Bool` predicate.
@@ -2208,7 +2263,13 @@ semantics). `multi = true` is a general **M:N equi-join**.
   / `select` each side down first for a large table. `oncols =
   (leftnames, rightnames)` restricts which columns are loaded onto the
   predicate rows. `unmatched` sets the join type as for `multi = true`;
-  `multi` itself is ignored.
+  `multi` itself is ignored;
+* a **string condition** — a TaQL-lite expression with `L.` / `R.`
+  table-qualified column references
+  (`"L.TIME BETWEEN R.T0 AND R.T1"`). The declarative form of the
+  predicate above — same nested loop, same cost, same `unmatched`
+  semantics. Must reference at least one `L.<col>` and one `R.<col>`;
+  a bare column name is still the index-lookup join.
 
 `rightcols` lists the `right` columns to attach — `"NAME"` or
 `"NAME" => "ANT_NAME"` to rename. `leftcols` (default: every `left`
@@ -2232,8 +2293,12 @@ function Base.join(left::AbstractTable, right::AbstractTable; on,
                    rightcols::AbstractVector, leftcols=nothing,
                    where=nothing, unmatched::Symbol=:error, multi::Bool=false,
                    oncols=nothing, orderby::Union{Nothing,AbstractVector}=nothing)
-    lrows, rrows = on isa Function ?
-        _join_pairs_pred(left, right, on, unmatched, oncols) :
+    # a bare-identifier string is the index-lookup `on` (Phase 28); a
+    # string with operators / `L.`/`R.` qualifiers is a join condition
+    lrows, rrows =
+        on isa Function ? _join_pairs_pred(left, right, on, unmatched, oncols) :
+        (on isa AbstractString && !occursin(r"^\s*\w+\s*$", on)) ?
+            _join_pairs_qexpr(left, right, on, unmatched) :
         _join_pairs(left, right, on, multi, unmatched)
 
     lpairs = leftcols === nothing ? Pair{String,String}[n => n for n in columnnames(left)] :

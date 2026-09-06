@@ -65,8 +65,8 @@ joins, and almost every operator / function / clause it accepts is a
 genuine subset of TaQL's own (checked against TaQL's grammar, and
 against a live cross-check that runs the same string through both
 engines). A few conveniences go beyond TaQL — notably `join`'s
-`on = (lrow, rrow) -> Bool` predicate form for range / non-equi joins,
-which TaQL has no equivalent for.
+non-equi forms (`on = (lrow, rrow) -> Bool`, or a string
+`"L.T BETWEEN R.T0 AND R.T1"`), which TaQL has no equivalent for.
 
 It is *not* a full TaQL implementation. The [Changelog](changelog.md)
 (phases 22–31) spells out what each area does and does not support —

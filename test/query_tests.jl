@@ -1429,6 +1429,55 @@ end
                                    unmatched=:drop)
 end
 
+@testset "join — string L./R.-qualified condition" begin
+    d = mktempdir()
+    write_table(joinpath(d, "L"), "L",
+        Pair{String,Any}["T" => Float64[1, 5, 9, 15], "X" => Int32[10, 20, 30, 40]]; nrow=4)
+    write_table(joinpath(d, "R"), "R",
+        Pair{String,Any}["T0" => Float64[0, 4, 20], "T1" => Float64[6, 12, 30],
+                         "MINX" => Int32[0, 15, 100], "LAB" => ["a", "b", "c"]]; nrow=3)
+    L = readtable(joinpath(d, "L")); R = readtable(joinpath(d, "R"))
+
+    # range join, M:N
+    jd = join(L, R; on="L.T BETWEEN R.T0 AND R.T1", rightcols=["LAB"], unmatched=:drop)
+    @test collect(jd.T) == [1.0, 5.0, 5.0, 9.0]
+    @test collect(jd.LAB) == ["a", "a", "b", "b"]
+
+    jm = join(L, R; on="L.T BETWEEN R.T0 AND R.T1", rightcols=["LAB"], unmatched=:missing)
+    @test collect(jm.T) == [1.0, 5.0, 5.0, 9.0, 15.0]
+    @test isequal(collect(jm.LAB), ["a", "a", "b", "b", missing])
+
+    jf = join(L, R; on="L.T BETWEEN R.T0 AND R.T1", leftcols=["T"], rightcols=["LAB"],
+              unmatched=:full)
+    @test isequal(collect(jf.LAB), ["a", "a", "b", "b", missing, "c"])
+
+    # compound condition, both-sides expressions
+    jc = join(L, R; on="L.T >= R.T0 AND L.T <= R.T1 AND L.X > R.MINX", rightcols=["LAB"],
+              unmatched=:drop)
+    # T=1(X=10): a needs X>0 ok; T=5(X=20): a ok, b needs X>15 ok; T=9(X=30): b ok
+    @test collect(jc.T) == [1.0, 5.0, 5.0, 9.0]
+    @test collect(jc.LAB) == ["a", "a", "b", "b"]
+
+    # :error throws on the dangling left row T=15
+    @test_throws ArgumentError join(L, R; on="L.T BETWEEN R.T0 AND R.T1", rightcols=["LAB"])
+
+    # a bare-identifier string is still the index-lookup join
+    write_table(joinpath(d, "M"), "M", Pair{String,Any}["A1" => Int32[0, 1, 2, 0]]; nrow=4)
+    write_table(joinpath(d, "A"), "A", Pair{String,Any}["NAME" => ["x", "y", "z"]]; nrow=3)
+    gi = join(readtable(joinpath(d, "M")), readtable(joinpath(d, "A")); on="A1", rightcols=["NAME"])
+    @test collect(gi.NAME) == ["x", "y", "z", "x"]
+
+    # errors
+    @test_throws ArgumentError join(L, R; on="L.NOPE > R.T0", rightcols=["LAB"])
+    @test_throws ArgumentError join(L, R; on="L.T > 5.0", rightcols=["LAB"])           # no R. ref
+    @test_throws ArgumentError join(L, R; on="gmax(L.T) > R.T0", rightcols=["LAB"])
+
+    # composes with where / orderby
+    jw = join(L, R; on="L.T BETWEEN R.T0 AND R.T1", rightcols=["LAB"], unmatched=:drop,
+              where="LAB == 'b'", orderby=["T" => :desc])
+    @test collect(jw.T) == [9.0, 5.0]
+end
+
 # ---- Phase 29: chainable query results ----
 
 @testset "GroupedTable is an AbstractTable" begin
