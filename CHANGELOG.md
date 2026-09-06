@@ -924,3 +924,15 @@ columns evaluated per matched row. Works for the closure form and on a
 `GroupedTable` input too. `taql`'s `SELECT` parses `expr AS alias`
 (a computed column needs the `AS`). An aggregate in a `query` `select`
 raises a clear error pointing at `groupby`.
+
+### Phase 58 — `GroupedTable` as a `groupby` / `join` input
+
+Since `GroupedTable <: AbstractTable` (Phase 29) and the query verbs are
+generic, a `groupby` / `join` / `query` result already feeds straight
+back into `groupby` or `join` — this phase adds a dedicated test set
+(both sides `GroupedTable`, index-lookup / equi / `multi` / predicate
+`on`, closure `groupby` with `cols=`, a computed-`select` result as
+input, 3-verb deep chains, `write_table` round-trip of the final result)
+and drops the stale "use `Tables.columntable`" non-goal. No code change.
+`edit` / `write_ms` / `copyms`-as-MAIN still need a plain on-disk
+`Table`.

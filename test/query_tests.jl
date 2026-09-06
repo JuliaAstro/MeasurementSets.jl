@@ -1404,6 +1404,67 @@ end
     @test Set(collect(deep.AN)) == Set(["a", "b", "c"])
 end
 
+@testset "chain — GroupedTable as groupby/join input" begin
+    dir = joinpath(mktempdir(), "gtchain")
+    K = Int32[0, 0, 1, 1, 1, 2]
+    G = Int32[0, 1, 0, 1, 0, 1]
+    X = Float64[1, 2, 3, 4, 5, 6]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "G" => G, "X" => X]; nrow=6)
+    t = readtable(dir)
+
+    # a per-(K,G) grouped table, then re-grouped by K
+    g = groupby(t, ["K", "G"]; select=["K" => :K, "G" => :G, "N" => "gcount()", "S" => "gsum(X)"])
+    @test g isa GroupedTable && nrow(g) == 5
+
+    gg = groupby(g, "K"; select=["K" => :K, "TN" => "gsum(N)", "TS" => "gsum(S)"], orderby=["K"])
+    @test collect(gg.K) == Int32[0, 1, 2]
+    @test collect(gg.TN) == [2, 3, 1]
+    @test collect(gg.TS) == [sum(X[K.==0]), sum(X[K.==1]), sum(X[K.==2])]
+
+    # closure groupby of a GroupedTable, with cols=
+    gc = groupby(g, "K"; cols=["K", "N"]) do gs
+        (; K=first(gs.K), MX=maximum(gs.N))
+    end
+    @test Set(collect(gc.K)) == Set(Int32[0, 1, 2])
+
+    # groupby of a computed-select query result
+    qcomp = query(t; select=["K" => "K", "X10" => "X * 10.0"]) do row
+        true
+    end
+    @test qcomp isa GroupedTable
+    gq = groupby(qcomp, "K"; select=["K" => :K, "SX" => "gsum(X10)"], orderby=["K"])
+    @test collect(gq.SX) == [10 * sum(X[K.==0]), 10 * sum(X[K.==1]), 10 * sum(X[K.==2])]
+
+    # join: GroupedTable on the left, plain Table on the right
+    write_table(joinpath(dir, "R"), "R",
+        Pair{String,Any}["KK" => Int32[0, 1, 2], "LAB" => ["a", "b", "c"]]; nrow=3)
+    r = readtable(joinpath(dir, "R"))
+    gsum = groupby(t, "K"; select=["K" => :K, "S" => "gsum(X)"], orderby=["K"])
+    jl = join(gsum, r; on="K" => "KK", rightcols=["LAB"])
+    @test collect(jl.LAB) == ["a", "b", "c"]
+    @test collect(jl.S) == [sum(X[K.==0]), sum(X[K.==1]), sum(X[K.==2])]
+
+    # join: plain Table on the left, GroupedTable on the right
+    write_table(joinpath(dir, "L"), "L", Pair{String,Any}["KK" => Int32[2, 0, 1]]; nrow=3)
+    l = readtable(joinpath(dir, "L"))
+    jr = join(l, gsum; on="KK" => "K", rightcols=["S"])
+    @test collect(jr.S) == [sum(X[K.==2]), sum(X[K.==0]), sum(X[K.==1])]
+
+    # join: both sides GroupedTable, M:N
+    g2 = groupby(t, "K"; select=["K" => :K, "MX" => "gmax(X)"], orderby=["K"])
+    jgg = join(gsum, g2; on="K" => "K", rightcols=["MX"], multi=true, unmatched=:full)
+    @test collect(jgg.K) == Int32[0, 1, 2]
+
+    # predicate join with a GroupedTable side
+    jp = join(gsum, r; on=(a, b) -> a.K == b.KK, rightcols=["LAB"], unmatched=:missing)
+    @test collect(jp.LAB) == ["a", "b", "c"]
+
+    # persist a doubly-chained result
+    dst = joinpath(mktempdir(), "GTCH")
+    write_table(dst, "GTCH", jl; nrow=nrow(jl))
+    @test column(readtable(dst), "LAB")[:] == ["a", "b", "c"]
+end
+
 # ---- Phase 42: array indexing + slices ---------------------------------
 
 @testset "TaQL-lite parser — array indexing unit" begin

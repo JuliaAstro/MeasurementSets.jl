@@ -1687,7 +1687,9 @@ end
 
 Group the rows of `t` by `groupcols` (a column name / `Symbol`, or a
 vector of them; an empty vector = one group over the whole table) and
-compute one result row per group.
+compute one result row per group. `t` is any `AbstractTable` — a
+`Table`, a `RefTable`, or another `groupby` / `join` / `query` result,
+so the verbs chain.
 
 `select` is `outname => rhs` pairs, where `rhs` is one of:
 
@@ -2049,7 +2051,9 @@ end
     join(left, right; on, rightcols, leftcols=nothing, where=nothing,
          unmatched=:error, multi=false, oncols=nothing, orderby=nothing) -> GroupedTable
 
-Join `left` and `right` (extends `Base.join`). The default (`multi =
+Join `left` and `right` (extends `Base.join`). Either side is any
+`AbstractTable` — a `Table`, a `RefTable`, or another `groupby` /
+`join` / `query` result, so the verbs chain. The default (`multi =
 false`) is an **N:1 lookup join** — each `left` row matches at most one
 `right` row, right columns pulled in per left row (TaQL's `JOIN … ON`
 semantics). `multi = true` is a general **M:N equi-join**.
