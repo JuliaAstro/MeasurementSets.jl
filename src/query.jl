@@ -11,17 +11,17 @@
 # This is a deliberate SUBSET of real TaQL's WHERE grammar, not a
 # look-alike: every operator/keyword spelling accepted here is also
 # accepted by real TaQL (verified against `tables/TaQL/TableGram.{ll,yy}`'s
-# lexer + grammar -- `==`/`=`/`!=`/`<>`/`<`/`<=`/`>`/`>=`, `AND`/`&&`,
-# `OR`/`||`, `NOT`/`!`, `IN [...]`, arithmetic `+ - * / % // **`,
-# bitwise `& | ^` + unary `~`, `LIKE`/`ILIKE`, the `~`/`!~` glob/regex
-# operator, and a trailing `ORDER BY`, all case-insensitive keyword
-# forms). Not supported (see the Phase 22/24 plan non-goals): `~=`
-# approximate equality, boolean-mask array subscripts, units, date/time
-# or measures functions, computed output columns.
+# lexer + grammar -- `==`/`=`/`!=`/`<>`/`<`/`<=`/`>`/`>=`, `~=`/`!~=`
+# (approximate equality), `AND`/`&&`, `OR`/`||`, `NOT`/`!`, `IN [...]`,
+# arithmetic `+ - * / % // **`, bitwise `& | ^` + unary `~`,
+# `LIKE`/`ILIKE`, the `~`/`!~` glob/regex operator, and a trailing
+# `ORDER BY`, all case-insensitive keyword forms). Not supported (see
+# the Phase 22/24 plan non-goals): boolean-mask array subscripts, units,
+# date/time or measures functions, computed output columns.
 # (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
 # 1-based, with negative-from-end and `end` -- landed in Phase 42/44;
 # `BETWEEN` / `NOT BETWEEN` in Phase 43; bitwise ops -- `^` is xor, use
-# `**` for power -- in Phase 46.)
+# `**` for power -- in Phase 46; `~=` in Phase 47.)
 #
 # Phase 23 adds ORDER BY (bare column references only, optional per-key
 # ASC/DESC -- verified against the `sortlist`/`sortexpr` grammar; no
@@ -476,9 +476,40 @@ function _parse_not!(p::TQLParser)
     return _parse_comparison!(p)
 end
 
+# casacore `near(a, b, tol)` (casa/BasicMath/Math.cc, casa/BasicSL/
+# Complex.cc) -- TaQL's `~=` / `!~=` desugar to `NEAR(lhs, rhs, 1e-5)`
+# and `NOT NEAR(...)`. Relative tolerance, with the same zero / opposite-
+# sign special cases casacore uses.
+const _TQL_NEAR_TOL = 1.0e-5
+
+# NB: integer operands use this same relative-tolerance form -- casacore's
+# own `near(Int,Int)` compares `|a|-|b|` (not `|a-b|`), which makes e.g.
+# `3 ~= 4` true; TaQL-lite deliberately does not reproduce that.
+function _tql_near(a::Real, b::Real, tol::Real = _TQL_NEAR_TOL)
+    tol <= 0 && return a == b
+    a == b && return true
+    a == 0 && return abs(b) <= (1 + tol) * floatmin(Float64)
+    b == 0 && return abs(a) <= (1 + tol) * floatmin(Float64)
+    (a > 0) != (b > 0) && return false
+    return abs(a - b) <= tol * max(abs(a), abs(b))
+end
+function _tql_near(a::Complex, b::Complex, tol::Real = _TQL_NEAR_TOL)
+    tol <= 0 && return a == b
+    a == b && return true
+    (_tql_near(real(a), real(b), tol) && _tql_near(imag(a), imag(b), tol)) && return true
+    aa, ab = abs(a), abs(b)
+    aa == 0 && return ab <= (1 + tol) * floatmin(Float64)
+    ab == 0 && return aa <= (1 + tol) * floatmin(Float64)
+    return abs(a - b) <= tol * max(aa, ab)
+end
+_tql_near(a::Complex, b::Real, tol::Real = _TQL_NEAR_TOL) = _tql_near(a, complex(b), tol)
+_tql_near(a::Real, b::Complex, tol::Real = _TQL_NEAR_TOL) = _tql_near(complex(a), b, tol)
+_tql_nnear(a, b, tol::Real = _TQL_NEAR_TOL) = !_tql_near(a, b, tol)
+
 const _TQL_CMPOPS = Dict{String,Function}(
     "==" => (==), "=" => (==), "!=" => (!=), "<>" => (!=),
-    "<" => (<), "<=" => (<=), ">" => (>), ">=" => (>=))
+    "<" => (<), "<=" => (<=), ">" => (>), ">=" => (>=),
+    "~=" => _tql_near, "!~=" => _tql_nnear)
 
 # `/` is Julia's `/` (always Float); `%` -> `rem`; `//` -> `div`
 # (truncating, matching TaQL DIVIDETRUNC); `**` -> `^`.
@@ -486,9 +517,7 @@ const _TQL_ARITHOPS = Dict{String,Function}(
     "+" => (+), "-" => (-), "*" => (*), "/" => (/), "%" => rem, "//" => div)
 
 # operator tokens this subset deliberately rejects, with a clear message
-const _TQL_REJECTED_OPS = Dict{String,String}(
-    "~=" => "approximate equality (`~=`) is not supported",
-    "!~=" => "approximate inequality (`!~=`) is not supported")
+const _TQL_REJECTED_OPS = Dict{String,String}()
 
 function _parse_comparison!(p::TQLParser)
     lhs = _parse_bitor!(p)
@@ -1070,11 +1099,12 @@ own `select=`. Returns a `RefTable` (no data copied); persist it with
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
-`~=` approximate equality, boolean-mask array subscripts, units, or
-date/time / measures functions.  Supported: 1-based array element/slice
-indexing (`DATA[1,1]`, `V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`),
-`BETWEEN` / `NOT BETWEEN` (inclusive), and bitwise `& | ^ ~` (`^` is
-xor -- use `**` for exponentiation).
+boolean-mask array subscripts, units, or date/time / measures
+functions.  Supported: 1-based array element/slice indexing
+(`DATA[1,1]`, `V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`), `BETWEEN` /
+`NOT BETWEEN` (inclusive), bitwise `& | ^ ~` (`^` is xor -- use `**`
+for exponentiation), and `~=` / `!~=` approximate equality (casacore's
+`near`, relative tolerance `1e-5`).
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])

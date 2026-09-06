@@ -334,9 +334,10 @@ end
     mf = parse("N ~ f/CAS/").regex           # full (anchored)
     @test occursin(mf, "CAS") && !occursin(mf, "XCASY")
 
-    # rejected operators give clear errors
-    @test_throws ArgumentError parse("A ~= 5")
-    @test_throws ArgumentError parse("A !~= 5")
+    # ~= / !~= (approximate equality) build a TQLCmp with the near op
+    @test parse("A ~= 5").op === MSv2._tql_near
+    @test parse("A !~= 5").op === MSv2._tql_nnear
+    @test parse("A ~= 5") isa MSv2.TQLCmp
 end
 
 @testset "TaQL-lite parser — bitwise unit" begin
@@ -1234,6 +1235,34 @@ end
     @test query(t, "A & 1 == 1 AND A > 8").rows == [i for i in 1:15 if isodd(A[i]) && A[i] > 8]
 end
 
+# ---- Phase 47: approximate equality (~= / !~=) ---------------------
+
+@testset "TaQL-lite — _tql_near unit" begin
+    n = MSv2._tql_near
+    @test n(1.0, 1.0) && n(1.0, 1.0 + 1e-7) && !n(1.0, 1.001)
+    @test n(0.0, 0.0) && !n(0.0, 1e-30)                 # ~0 test: relative, 0 stays 0
+    @test !n(1.0, -1.0) && n(-2.0, -2.0 + 1e-7)         # opposite sign -> not near
+    @test n(3, 3) && !n(3, 4)                           # integers use the same relative form
+                                                        # (not casacore's `|a|-|b|` Int near)
+    @test n(1.0 + 0im, 1.0 + 1e-7im) && !n(1.0 + 0im, 1.0 + 0.1im)
+    @test MSv2._tql_nnear(1.0, 2.0) && !MSv2._tql_nnear(1.0, 1.0)
+end
+
+@testset "TaQL-lite query — approximate equality" begin
+    dir = joinpath(mktempdir(), "ae.tab")
+    X = [1.0, 1.0 + 3e-6, 1.01, 2.0, 2.0 - 1e-6, -1.0, 0.0]
+    write_table(dir, "T", Pair{String,Any}["X" => X]; nrow=7)
+    t = readtable(dir)
+    @test query(t, "X ~= 1.0").rows == [i for i in 1:7 if MSv2._tql_near(X[i], 1.0)]
+    @test query(t, "X !~= 1.0").rows == [i for i in 1:7 if !MSv2._tql_near(X[i], 1.0)]
+    @test query(t, "X ~= 2.0").rows == [i for i in 1:7 if MSv2._tql_near(X[i], 2.0)]
+    @test query(t, "X ~= 0.0").rows == [7]
+    # composes with arithmetic / AND
+    @test query(t, "X * 2.0 ~= 2.0").rows == [i for i in 1:7 if MSv2._tql_near(X[i] * 2, 2.0)]
+    @test query(t, "X ~= 1.0 OR X ~= 2.0").rows ==
+          [i for i in 1:7 if MSv2._tql_near(X[i], 1.0) || MSv2._tql_near(X[i], 2.0)]
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
@@ -1267,7 +1296,10 @@ if _HAVE_TAQL
                          # (bitwise above comparison, | < ^ < & < + -) and
                          # ^ == xor / ~ == bitnot against real TaQL
                          "A & 1 == 0", "A | 8 > 12", "A ^ 3 == 0",
-                         "~A > -6", "A & 3 | 4 == 5", "A + 1 & 6 == 6")
+                         "~A > -6", "A & 3 | 4 == 5", "A + 1 & 6 == 6",
+                         # Phase 47: approximate equality (B is Double)
+                         "B ~= 5.0", "B !~= 5.0", "B / 2.0 ~= 5.0",
+                         "B ~= 5.0 OR B ~= 12.0")
             @test query(t, wherestr).rows == _taql_rows(wherestr)
         end
 
