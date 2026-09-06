@@ -82,12 +82,29 @@ function _vtq_cast(v::VirtualTaQLColumn, raw, J::Type)
     return convert(Array{J}, collect(raw))           # array column
 end
 
-getcell(v::VirtualTaQLColumn, ::Integer, ::ColumnDesc, row::Integer, ::Integer) =
-    (_vtq_prepare!(v); _vtq_cast(v, _vtq_raw(v, row), juliatype(v.vdesc.type)))
+function _vtq_err(v::VirtualTaQLColumn, err)
+    err isa ArgumentError && occursin(v.vdesc.name, err.msg) && rethrow(err)
+    throw(ArgumentError(
+        "VirtualTaQLColumn column \"$(v.vdesc.name)\": evaluating CALC expression " *
+        "\"$(v.exprstr)\" — $(sprint(showerror, err))"))
+end
+
+function getcell(v::VirtualTaQLColumn, ::Integer, ::ColumnDesc, row::Integer, ::Integer)
+    _vtq_prepare!(v)
+    try
+        return _vtq_cast(v, _vtq_raw(v, row), juliatype(v.vdesc.type))
+    catch err
+        _vtq_err(v, err)
+    end
+end
 
 function getcolumn(v::VirtualTaQLColumn, ::Integer, ::ColumnDesc, nrow::Integer, ::Integer;
                    astype::Union{Nothing,Type}=nothing)
     _vtq_prepare!(v)
     J = astype === nothing ? juliatype(v.vdesc.type) : astype
-    return [_vtq_cast(v, _vtq_raw(v, r), J) for r in 1:nrow]
+    try
+        return [_vtq_cast(v, _vtq_raw(v, r), J) for r in 1:nrow]
+    catch err
+        _vtq_err(v, err)
+    end
 end

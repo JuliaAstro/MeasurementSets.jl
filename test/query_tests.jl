@@ -1054,6 +1054,81 @@ end
     @test Set(collect(deep.AN)) == Set(["a", "b", "c"])
 end
 
+# ---- Phase 42: array indexing + slices ---------------------------------
+
+@testset "TaQL-lite parser — array indexing unit" begin
+    validnames = Set(["A", "UVW", "V"])
+    parse(s) = MSv2._taqllite_parse(s, validnames)
+
+    e = parse("UVW[3] > 0").lhs
+    @test e isa MSv2.TQLIndex && length(e.axes) == 1 && e.axes[1] isa MSv2.TQLExpr
+
+    e2 = parse("V[1,2] > 0").lhs
+    @test e2 isa MSv2.TQLIndex && length(e2.axes) == 2
+
+    e3 = parse("V[1:4,1] > 0").lhs                      # range + scalar
+    @test e3.axes[1] isa NamedTuple && e3.axes[2] isa MSv2.TQLExpr
+    @test e3.axes[1].lo isa MSv2.TQLLit && e3.axes[1].hi isa MSv2.TQLLit
+    @test e3.axes[1].step === nothing
+
+    e4 = parse("V[:,1] > 0").lhs                        # full axis
+    @test e4.axes[1] == (; lo=nothing, hi=nothing, step=nothing)
+
+    e5 = parse("V[2:,1] > 0").lhs                       # open end
+    @test e5.axes[1].lo isa MSv2.TQLLit && e5.axes[1].hi === nothing
+
+    e6 = parse("V[1:8:2,1] > 0").lhs                    # start:end:step (casacore order)
+    @test e6.axes[1].hi isa MSv2.TQLLit && e6.axes[1].step isa MSv2.TQLLit
+
+    e7 = parse("A[1][2] > 0").lhs                       # chained
+    @test e7 isa MSv2.TQLIndex && e7.base isa MSv2.TQLIndex
+
+    e8 = parse("V[rownumber(),1] > 0").lhs              # expression subscript
+    @test e8.axes[1] isa MSv2.TQLRowNum
+
+    @test_throws ArgumentError parse("V[] > 0")
+end
+
+@testset "TaQL-lite query — array indexing" begin
+    dir = joinpath(mktempdir(), "ix.tab")
+    UVW = [Float64[i, i + 1, i + 2] for i in 1:6]
+    V = [reshape(Float64.(1:12) .+ 10k, 3, 4) for k in 0:5]   # (3,4) cells
+    write_table(dir, "T", Pair{String,Any}["K" => collect(1:6), "UVW" => UVW,
+                                           "V" => V]; nrow=6, tsm=[["V"]])
+    t = readtable(dir)
+
+    @test query(t, "UVW[3] > 6").rows == [i for i in 1:6 if i + 2 > 6]
+    @test query(t, "V[1,1] > 15").rows == [i for i in 1:6 if V[i][1, 1] > 15]
+    @test query(t, "V[1,1] * 2.0 > 30").rows == [i for i in 1:6 if V[i][1, 1] * 2 > 30]
+    # slice -> sub-array -> reduction
+    @test query(t, "mean(V[:,1]) > 20").rows ==
+          [i for i in 1:6 if sum(V[i][:, 1]) / 3 > 20]
+    @test query(t, "sum(V[1:2,1]) > 12").rows ==
+          [i for i in 1:6 if sum(V[i][1:2, 1]) > 12]
+    # closure equivalent reads the same
+    @test query(t) do row; row.UVW[3] > 6 end |> x -> x.rows == query(t, "UVW[3] > 6").rows
+
+    # only referenced columns read (K would be fine; V/UVW touched)
+    @test query(t, "UVW[1] > 100").rows == Int[]
+end
+
+@testset "TaQL-lite — array indexing in groupby / update!" begin
+    dir = joinpath(mktempdir(), "ixg.tab")
+    K = Int32[0, 1, 0, 1, 0, 1]
+    V = [reshape(Float64.(1:6) .+ 10k, 2, 3) for k in 0:5]
+    X = zeros(6)
+    write_table(dir, "T", Pair{String,Any}["K" => K, "V" => V, "X" => X]; nrow=6, tsm=[["V"]])
+
+    g = groupby(readtable(dir), "K"; select=["K" => :K, "M" => "gmean(V[1,1])"])
+    byk = Dict(collect(g.K) .=> collect(g.M))
+    @test byk[0] ≈ Statistics.mean(V[i][1, 1] for i in (1, 3, 5))
+    @test byk[1] ≈ Statistics.mean(V[i][1, 1] for i in (2, 4, 6))
+
+    update!(dir; set=["X" => "V[2,3] + 1.0"])
+    r = readtable(dir)
+    @test column(r, "X")[:] == [V[i][2, 3] + 1 for i in 1:6]
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
@@ -1109,6 +1184,26 @@ if _HAVE_TAQL
                          "iif(A > 10, A, 0) > 12", "min(A, 8) == 8",
                          "isfinite(B)")
             @test query(t, wherestr).rows == _taql_rows(wherestr)
+        end
+    end
+
+    @testset "TaQL-lite — array indexing real TaQL cross-check" begin
+        d = mktempdir(); pdir = joinpath(d, "T")
+        UVW = [Float64[i, 2i, 3i] for i in 1:20]
+        V = [reshape(Float64.(1:12) .+ i, 3, 4) for i in 1:20]
+        write_table(pdir, "T", Pair{String,Any}["UVW" => UVW, "V" => V]; nrow=20, tsm=[["V"]])
+        t = readtable(pdir)
+        function _rows(w)
+            rdir = joinpath(mktempdir(), "sel")
+            _taqlcmd("SELECT FROM \$1 WHERE $w GIVING '$rdir'", pdir)
+            return readtable(rdir).rows
+        end
+        # 1-based scalar index, arithmetic on an indexed value, a slice
+        # sum (exercises inclusive range), and a start:end:step range
+        # (casacore order -> must match our a:b:s -> Julia a:s:b mapping).
+        for w in ("UVW[3] > 30", "V[1,1] > 8", "V[2,3] - V[1,1] > 1",
+                  "sum(V[1:2,1]) > 12", "sum(V[1:3:2,1]) > 8")
+            @test query(t, w).rows == _rows(w)
         end
     end
 

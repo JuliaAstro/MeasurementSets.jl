@@ -317,17 +317,36 @@ end
     end
 end
 
+@testset "engine — VirtualTaQLColumn with array indexing (Phase 42)" begin
+    dir = joinpath(mktempdir(), "vtqix.tab")
+    UVW = [Float64[i, 2i, 3i] for i in 1:5]
+    V = [reshape(Float64.(1:6) .+ 10k, 2, 3) for k in 0:4]
+    write_table(dir, "T", Pair{String,Any}["UVW" => UVW, "V" => V,
+                                           "W" => zeros(5), "V11" => zeros(5)]; nrow=5,
+        tsm = [["V"]],
+        virtualtaql = Dict("W" => "UVW[3]", "V11" => "V[1,1] * 2.0"))
+    r = readtable(dir)
+    @test _engine_manager(r, "W").name == "VirtualTaQLColumn"
+    @test column(r, "W")[:] == [3i for i in 1:5]
+    @test column(r, "V11")[:] == [V[i][1, 1] * 2 for i in 1:5]
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)                                   # 1-based UVW[3] must agree
+        @test ct[:W][:] == [3.0i for i in 1:5]
+        @test ct[:V11][:] == [V[i][1, 1] * 2 for i in 1:5]
+    end
+end
+
 @testset "engine — VirtualTaQLColumn: unsupported expr + copy + edit guard" begin
     dir = joinpath(mktempdir(), "vtq2.tab")
     A = collect(1.0:5.0)
     write_table(dir, "T", ["A" => A, "BAD" => zeros(5), "OK" => zeros(5)]; nrow=5,
-        virtualtaql = Dict("BAD" => "A[0,0] + 1", "OK" => "A + 10.0"))
+        virtualtaql = Dict("BAD" => "mjd(A) + 1", "OK" => "A + 10.0"))   # mjd: unsupported fn
     r = readtable(dir)
     @test column(r, "A")[:] == A                              # rest of the table is fine
     @test column(r, "OK")[:] == A .+ 10
     err = try column(r, "BAD")[1]; nothing catch e; e end
     @test err isa ArgumentError
-    @test occursin("BAD", err.msg) && occursin("A[0,0] + 1", err.msg)
+    @test occursin("BAD", err.msg) && occursin("mjd(A) + 1", err.msg)
 
     dst = joinpath(mktempdir(), "vtq_copy.tab")
     copytable(dst, readtable(dir))            # BAD is dropped (unreadable); OK is preserved

@@ -16,8 +16,10 @@
 # `LIKE`/`ILIKE`, the `~`/`!~` glob/regex operator, and a trailing
 # `ORDER BY`, all case-insensitive keyword forms). Not supported (see
 # the Phase 22/24 plan non-goals): bitwise operators (`& | ^ ~`),
-# `BETWEEN`, `~=` approximate equality, array indexing, units,
-# functions, GROUP BY, joins, computed output columns.
+# `BETWEEN`, `~=` approximate equality, boolean-mask array subscripts,
+# units, date/time or measures functions, computed output columns.
+# (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
+# 1-based -- landed in Phase 42.)
 #
 # Phase 23 adds ORDER BY (bare column references only, optional per-key
 # ASC/DESC -- verified against the `sortlist`/`sortexpr` grammar; no
@@ -100,6 +102,11 @@ struct TQLAggr <: TQLExpr           # g*(arg) -- reduces over a group's rows (gr
     fn::Base.Callable               # Vector-of-per-row-values -> scalar
     arg::Union{Nothing,TQLExpr}     # nothing only for gcount()
 end
+struct TQLIndex <: TQLExpr          # base[i], base[i,j], base[a:b:step, k] -- 1-based
+    base::TQLExpr
+    axes::Vector{Any}               # each: a TQLExpr (scalar index, drops the axis) OR
+                                    # (; lo, hi, step) of Union{Nothing,TQLExpr} (a range/colon)
+end
 
 # Arithmetic and comparison broadcast over an array-cell operand (TaQL
 # semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
@@ -125,6 +132,30 @@ _tqleval(e::TQLFunc, cols, i) =
 _tqleval(::TQLRowNum, cols, i) = i
 _tqleval(::TQLAggr, cols, i) = throw(ArgumentError(
     "TaQL-lite: aggregate functions (g*) are only valid in groupby(...), not query(...)"))
+_tqleval(e::TQLIndex, cols, i) = _tql_do_index(_tqleval(e.base, cols, i), e.axes,
+                                               (x -> _tqleval(x, cols, i)))
+
+# 1-based array-cell indexing: a scalar axis drops that dimension, a
+# range axis `lo:hi:step` (casacore's start:end:step) maps to Julia's
+# `lo:step:hi`; a missing lo/hi/step defaults to 1 / size(arr,k) / 1;
+# fewer subscripts than ndims => trailing axes taken whole.
+function _tql_do_index(arr, axes, ev)
+    arr isa AbstractArray || throw(ArgumentError(
+        "TaQL-lite: cannot index a scalar value with `[...]`"))
+    nd = ndims(arr)
+    length(axes) <= nd || throw(ArgumentError(
+        "TaQL-lite: $(length(axes)) subscripts for a $(nd)-D array cell"))
+    idx = Any[k <= length(axes) ? _tql_axis(axes[k], arr, k, ev) : Colon() for k in 1:nd]
+    return arr[idx...]
+end
+
+function _tql_axis(ax, arr, k::Int, ev)
+    ax isa NamedTuple || return Int(ev(ax))                       # scalar index
+    lo = ax.lo === nothing ? 1           : Int(ev(ax.lo))
+    hi = ax.hi === nothing ? size(arr, k) : Int(ev(ax.hi))
+    st = ax.step === nothing ? 1          : Int(ev(ax.step))
+    return lo:st:hi
+end
 
 # Collect every column name an expression actually references, so `query`
 # reads only those columns (not the whole table) -- the real point of the
@@ -142,6 +173,18 @@ _tqlrefs!(seen, e::TQLMatch) = _tqlrefs!(seen, e.lhs)
 _tqlrefs!(seen, e::TQLFunc) = foreach(a -> _tqlrefs!(seen, a), e.args)
 _tqlrefs!(seen, ::TQLRowNum) = nothing
 _tqlrefs!(seen, e::TQLAggr) = e.arg === nothing ? nothing : _tqlrefs!(seen, e.arg)
+function _tqlrefs!(seen, e::TQLIndex)
+    _tqlrefs!(seen, e.base)
+    for ax in e.axes
+        if ax isa NamedTuple
+            for v in (ax.lo, ax.hi, ax.step)
+                v === nothing || _tqlrefs!(seen, v)
+            end
+        else
+            _tqlrefs!(seen, ax)
+        end
+    end
+end
 
 # true if any TQLAggr node appears anywhere in the expression tree
 _has_aggr(e::TQLAggr) = true
@@ -157,6 +200,10 @@ _has_aggr(e::TQLNeg) = _has_aggr(e.a)
 _has_aggr(e::TQLIn) = _has_aggr(e.lhs)
 _has_aggr(e::TQLMatch) = _has_aggr(e.lhs)
 _has_aggr(e::TQLFunc) = any(_has_aggr, e.args)
+_has_aggr(e::TQLIndex) = _has_aggr(e.base) || any(e.axes) do ax
+    ax isa NamedTuple ? any(v -> v !== nothing && _has_aggr(v), (ax.lo, ax.hi, ax.step)) :
+    _has_aggr(ax)
+end
 
 # ======================================================================
 # tokenizer
@@ -164,7 +211,7 @@ _has_aggr(e::TQLFunc) = any(_has_aggr, e.args)
 
 struct TQLToken
     kind::Symbol     # :ident | :num | :str | :op | :arithop | :patlit |
-                      # :lparen | :rparen | :lbracket | :rbracket | :comma | :eof
+                      # :lparen | :rparen | :lbracket | :rbracket | :comma | :colon | :eof
     text::String
     value::Any        # :num/:str -> the literal value; :patlit ->
                       # (; flavor::Symbol, pattern::String, icase::Bool); else nothing
@@ -197,6 +244,8 @@ function _taqllite_tokenize(s::AbstractString)
             push!(toks, TQLToken(:rbracket, "]", nothing)); i += 1
         elseif c == ','
             push!(toks, TQLToken(:comma, ",", nothing)); i += 1
+        elseif c == ':'
+            push!(toks, TQLToken(:colon, ":", nothing)); i += 1
         elseif c == '+' || c == '-' || c == '%' || c == '^'
             push!(toks, TQLToken(:arithop, string(c), nothing)); i += 1
         elseif c == '*'
@@ -501,7 +550,50 @@ function _parse_literal_value!(p::TQLParser)
     return neg ? -e.value : e.value
 end
 
+# atom, then any postfix `[...]` array subscripts (`a[1]`, `a[1,2]`,
+# `a[1:4,1]`, chained `a[1][2]`).  Indexing binds tighter than
+# arithmetic, matching casacore's `inxexpr LBRACKET subscripts RBRACKET`.
 function _parse_atom!(p::TQLParser)
+    e = _parse_atom_base!(p)
+    while _peek(p).kind === :lbracket
+        e = _parse_index!(p, e)
+    end
+    return e
+end
+
+function _parse_index!(p::TQLParser, base::TQLExpr)
+    _advance!(p)                                   # consume '['
+    _peek(p).kind === :rbracket && throw(ArgumentError(
+        "TaQL-lite: empty `[]` subscript in \"$(p.src)\""))
+    axes = Any[_parse_axis!(p)]
+    while _peek(p).kind === :comma
+        _advance!(p)
+        push!(axes, _peek(p).kind === :rbracket ?
+              (; lo=nothing, hi=nothing, step=nothing) : _parse_axis!(p))
+    end
+    _expect_kind!(p, :rbracket, "']'")
+    return TQLIndex(base, axes)
+end
+
+# one axis subscript: a bare axis (full), a scalar index, or a
+# `lo:hi:step` range with every part optional (casacore start:end:step).
+function _parse_axis!(p::TQLParser)
+    t = _peek(p)
+    (t.kind === :comma || t.kind === :rbracket) &&
+        return (; lo=nothing, hi=nothing, step=nothing)
+    lo = t.kind === :colon ? nothing : _parse_addsub!(p)
+    _peek(p).kind === :colon || return lo                     # scalar index
+    _advance!(p)                                              # first ':'
+    hi = _peek(p).kind in (:colon, :comma, :rbracket) ? nothing : _parse_addsub!(p)
+    step = nothing
+    if _peek(p).kind === :colon
+        _advance!(p)
+        step = _peek(p).kind in (:comma, :rbracket) ? nothing : _parse_addsub!(p)
+    end
+    return (; lo, hi, step)
+end
+
+function _parse_atom_base!(p::TQLParser)
     if _peek(p).kind === :lparen
         _advance!(p)
         e = _parse_or!(p)
@@ -871,8 +963,9 @@ own `select=`. Returns a `RefTable` (no data copied); persist it with
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
-bitwise operators, `BETWEEN`, `~=` approximate equality, array indexing,
-units, date/time or measures functions, `GROUP BY`, or joins.
+bitwise operators, `BETWEEN`, `~=` approximate equality, boolean-mask
+array subscripts, units, or date/time / measures functions.  1-based
+array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`) is supported.
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
@@ -966,6 +1059,8 @@ _geval(e::TQLFunc, cols, g) =
     e.fn(ntuple(k -> _geval(e.args[k], cols, g), length(e.args))...)
 _geval(::TQLRowNum, cols, g) =
     throw(ArgumentError("TaQL-lite: rownumber() is not valid in groupby(...)"))
+_geval(e::TQLIndex, cols, g) = _tql_do_index(_geval(e.base, cols, g), e.axes,
+                                             (x -> _geval(x, cols, g)))
 
 """
     GroupSlice

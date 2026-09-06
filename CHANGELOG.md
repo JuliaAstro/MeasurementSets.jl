@@ -547,11 +547,11 @@ A `taql(target, "…")` string-command dispatcher wraps all four:
 `taql(t, "INSERT INTO t (A, B) VALUES (1, 2.5), (3, 4.5)")` (VALUES must
 be constant expressions).
 
-Still, across Phases 22–31: no bitwise operators (`& | ^ ~`),
-`BETWEEN`, `~=`, array indexing, units, date/time or measures
-functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates, a
-general M:N cross-product join, `INSERT LIMIT`, or `UPDATE` array-slice
-assignment.
+Still, across Phases 22–31 (array indexing landed in Phase 42): no
+bitwise operators (`& | ^ ~`), `BETWEEN`, `~=`, units, date/time or
+measures functions, `GROUP BY ROLLUP`, the `gs*` per-element aggregates,
+a general M:N cross-product join, `INSERT LIMIT`, or `UPDATE`
+array-slice assignment.
 
 ### Phase 32 — docs / consolidation pass
 
@@ -689,10 +689,9 @@ MS column, or on-the-fly derived data). Read + write.
 Read evaluates the stored `_VirtualTaQLEngine_CalcExpr` keyword with the
 Phase 22-25 TaQL-lite engine — a constant expression is computed once,
 a column-referencing one per row. An expression using a TaQL feature
-TaQL-lite doesn't support (array indexing `DATA[0,0]`, units, date/time
-or measures functions) raises a clear `ArgumentError` naming the column
-and expression **when that column is read** — the rest of the table
-opens fine.
+TaQL-lite doesn't support (units, date/time or measures functions)
+raises a clear `ArgumentError` naming the column and expression **when
+that column is read** — the rest of the table opens fine.
 
 Write: `write_table(dir, "T", [..., "CV" => zeros(n)]; nrow = n,
 virtualtaql = Dict("CV" => "TIME - 4.6e9"))` declares the column and
@@ -701,3 +700,25 @@ stores the expression (the passed values are ignored). `copyms` /
 expression. `edit` of such a table is refused (edit the source
 columns). `CCT.Table` reads a `VirtualTaQLColumn` our writer produces —
 genuine round-trip interop, since casacore auto-registers the engine.
+
+### Phase 42 — TaQL-lite array indexing + slices
+
+Array-cell element and slice indexing in every TaQL-lite expression:
+`UVW[3]`, `FLAG[1,1]`, `DATA[1:4,1]`, `V[:,1]`, `V[1:8:2,1]`,
+`X[1][2]` (chained), `V[rownumber(),1]` (expression subscripts).
+**1-based** — matching casacore's default TaQL style (the `tableCommand`
+cross-checks), Julia, and TaQL-lite's 1-based `rownumber()`. A colon
+range is casacore's `start:end:step` (end before step), inclusive both
+ends; a bare axis / trailing comma / missing trailing axes = whole
+axis; a scalar subscript drops that dimension.
+
+This lands in `query` / `groupby` / `join` WHERE and SELECT, the
+`update!` SET RHS, and — for free — `VirtualTaQLColumn` CALC
+expressions (Phase 41). Verified against real TaQL via `tableCommand`
+(1-based, inclusive-range and end-before-step all agree) and, for the
+engine path, against `CCT.Table` decoding `virtualtaql=Dict("W" =>
+"UVW[3]")`.
+
+Not supported: boolean-mask subscripts (`DATA[FLAG]`), negative /
+`end`-relative indices (omit the range end to mean "to the end"), and
+assigning *into* an indexed cell.

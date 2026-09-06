@@ -67,6 +67,8 @@ cross-check that runs the same string through both engines).
 
 It is *not* a full TaQL implementation. The [Changelog](changelog.md)
 (phases 22–31) spells out what each area does and does not support —
-briefly: no bitwise operators, no `BETWEEN`, no array indexing, no units
-or date/time / measures functions, no `GROUP BY ROLLUP`, no general M:N
-cross-product join, no `UPDATE` array-slice assignment.
+briefly: 1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`)
+*is* supported, but no bitwise operators, no `BETWEEN`, no boolean-mask
+subscripts, no units or date/time / measures functions, no `GROUP BY
+ROLLUP`, no general M:N cross-product join, no `UPDATE` array-slice
+assignment.
