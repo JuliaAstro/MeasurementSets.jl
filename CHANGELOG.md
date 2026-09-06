@@ -549,9 +549,9 @@ be constant expressions).
 
 Still, across Phases 22–31 (array indexing landed in Phase 42,
 `BETWEEN` in Phase 43, bitwise in Phase 46, `~=` in Phase 47): no
-units, date/time or measures functions, `GROUP BY ROLLUP`, the `gs*`
-per-element aggregates, a general M:N cross-product join, `INSERT
-LIMIT`, or `UPDATE` array-slice assignment.
+units, date/time or measures functions, the `gs*` per-element
+aggregates, a general M:N cross-product join, `INSERT LIMIT`, or
+`UPDATE` array-slice assignment.
 
 ### Phase 32 — docs / consolidation pass
 
@@ -789,3 +789,17 @@ operands. Verified against real TaQL via `tableCommand`. One deliberate
 divergence: casacore's `near(Int, Int)` compares `|a|-|b|` rather than
 `|a-b|` (making `3 ~= 4` true) — TaQL-lite uses the same relative form
 for integers as for floats.
+
+### Phase 48 — `groupby` ROLLUP
+
+`groupby(t, cols; select, rollup = true)` (and the closure form) adds
+SQL `GROUP BY ROLLUP` subtotal rows: the detailed groups, then one
+level per trailing key dropped, ending with the grand total. In a
+subtotal row the aggregated-away key columns are `missing` (so those
+result columns become `Union{T, Missing}`). A bare key select entry
+emits `missing`; a closure builds its key fields from the new `g.keys`
+NamedTuple — `(; g.keys..., N = length(g))` — which already carries the
+`missing`s. `GroupSlice` also gained `g.level` (active-key count).
+
+casacore parses `GROUP BY ROLLUP` but throws "not supported yet", so
+this is plain SQL semantics with no real-TaQL cross-check.

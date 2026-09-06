@@ -693,8 +693,57 @@ end
     @test gs.A == [20, 40]
     @test gs.B == ["q", "s"]
     @test length(gs) == 2
-    @test Set(propertynames(gs)) == Set([:A, :B])
+    @test Set(propertynames(gs)) == Set([:A, :B, :keys, :level])
+    @test gs.level == 0 && gs.keys == NamedTuple()
+    gs2 = MSv2.GroupSlice(getfield(gs, :cols), [1, 2], ["A"], 1)
+    @test gs2.keys == (A = 10,) && gs2.level == 1
     @test_throws ArgumentError gs.NOPE
+end
+
+# ---- Phase 48: GROUP BY ROLLUP ------------------------------------
+
+@testset "groupby — rollup (string + closure forms)" begin
+    dir = joinpath(mktempdir(), "ru.tab")
+    K1 = Int32[1, 1, 1, 1, 2, 2, 2]
+    K2 = Int32[10, 10, 20, 20, 10, 30, 30]
+    X  = Float64[1, 2, 3, 4, 5, 6, 7]
+    write_table(dir, "T", Pair{String,Any}["K1" => K1, "K2" => K2, "X" => X]; nrow=7)
+    t = readtable(dir)
+
+    # hand-computed expectation: detailed groups, then subtotal-by-K1,
+    # then grand total; rolled-up keys are `missing`
+    want = [(1, 10, 2, 3.0), (1, 20, 2, 7.0), (2, 10, 1, 5.0), (2, 30, 2, 13.0),
+            (1, missing, 4, 10.0), (2, missing, 3, 18.0),
+            (missing, missing, 7, 28.0)]
+
+    g = groupby(t, ["K1", "K2"];
+        select = ["K1" => :K1, "K2" => :K2, "N" => "gcount()", "S" => "gsum(X)"],
+        rollup = true)
+    @test nrow(g) == 7
+    got = [(g.K1[i], g.K2[i], g.N[i], g.S[i]) for i in 1:7]
+    @test all(isequal.(got, want))
+    @test eltype(g.K2) == Union{Missing,Int32}
+
+    # closure form: same result via g.keys
+    gc = groupby(t, [:K1, :K2]; rollup = true) do gs
+        (; gs.keys..., N = length(gs), S = sum(gs.X))
+    end
+    @test all(isequal.([(gc.K1[i], gc.K2[i], gc.N[i], gc.S[i]) for i in 1:7], want))
+
+    # rollup=false is unchanged (3 detailed groups only)
+    g0 = groupby(t, ["K1", "K2"]; select = ["K1" => :K1, "N" => "gcount()"])
+    @test nrow(g0) == 4
+
+    # single-key rollup: detailed + grand total
+    g1 = groupby(t, ["K1"]; select = ["K1" => :K1, "N" => "gcount()"], rollup = true)
+    @test all(isequal.([(g1.K1[i], g1.N[i]) for i in 1:nrow(g1)],
+                       [(1, 4), (2, 3), (missing, 7)]))
+
+    # HAVING still filters (applied per level)
+    gh = groupby(t, ["K1", "K2"];
+        select = ["K1" => :K1, "K2" => :K2, "N" => "gcount()"],
+        having = "gcount() >= 2", rollup = true)
+    @test all(gh.N .>= 2)
 end
 
 @testset "groupby — do-block form" begin
