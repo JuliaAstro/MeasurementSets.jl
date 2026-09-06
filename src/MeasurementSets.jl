@@ -29,14 +29,19 @@ See the README and `CHANGELOG.md` for the full picture.
 """
 module MeasurementSets
 
-include("aipsio.jl")
+# --- wire-format codecs + the CTDS type system ---
+include("io/aips.jl")
+include("tables/typeenum.jl")
+include("tables/record.jl")
+include("io/lock.jl")
+
+# --- table model + I/O ---
 include("datamanagers/container.jl")
-include("lock.jl")
-include("typeenum.jl")
-include("record.jl")
-include("tables.jl")
+include("tables/table.jl")
 include("measurementset.jl")
-include("writer.jl")
+include("tables/writer.jl")
+
+# --- storage managers + column engines ---
 include("datamanagers/datamanager.jl")
 include("datamanagers/arrayfile.jl")
 include("datamanagers/standard.jl")
@@ -46,13 +51,15 @@ include("datamanagers/virtual.jl")
 include("datamanagers/forwardcol.jl")
 include("datamanagers/virtualtaql.jl")
 include("datamanagers/dysco.jl")
-include("column.jl")
+
+# --- lazy columns, then the query engine, then the higher table verbs ---
+include("tables/column.jl")
 include("taql/taql.jl")
 include("schema.jl")
-include("tables_interface.jl")
-include("create.jl")
-include("edit.jl")
-include("resync.jl")
+include("tables/interface.jl")
+include("tables/create.jl")
+include("tables/edit.jl")
+include("tables/resync.jl")
 include("taql/commands.jl")
 
 export AbstractTable, Table, RefTable, ConcatTable

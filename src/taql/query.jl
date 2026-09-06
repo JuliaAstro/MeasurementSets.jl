@@ -96,7 +96,7 @@ end
 
 # `select` ("output_name => parent_name" pairs, in output order) ->
 # `(namemap, order)` for building a RefTable -- shared by
-# `write_reftable` (tables.jl) and the all-projection `query` path.
+# `write_reftable` (tables/table.jl) and the all-projection `query` path.
 function _select_spec(parent::AbstractTable, select::AbstractVector{<:Pair})
     order = String[String(first(p)) for p in select]
     allunique(order) || throw(ArgumentError("duplicate output column name"))

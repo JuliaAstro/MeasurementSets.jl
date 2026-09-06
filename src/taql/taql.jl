@@ -19,8 +19,8 @@
 #                 `L.`-`R.`-qualified string condition
 #
 # The row-level write commands (`update!` / `delete!` / `insert!` /
-# `taql`) live in `taql/commands.jl`, included later (after `edit.jl` /
-# `create.jl` / `resync.jl`, which they build on).
+# `taql`) live in `taql/commands.jl`, included later (after `tables/edit.jl` /
+# `tables/create.jl` / `tables/resync.jl`, which they build on).
 
 include("ast.jl")
 include("parse.jl")

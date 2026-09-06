@@ -173,7 +173,7 @@ function columndesc(gt::GroupedTable, name::AbstractString)
 end
 
 # `.OUTNAME` sugar + display -- not part of the Tables.jl interface
-# (the generic `::AbstractTable` methods in tables_interface.jl cover
+# (the generic `::AbstractTable` methods in tables/interface.jl cover
 # `istable`/`columns`/`columnnames`/`getcolumn`/`schema`/`rows`).
 Base.getproperty(x::GroupedTable, s::Symbol) =
     s === :names || s === :cols ? getfield(x, s) : column(x, String(s))

@@ -329,7 +329,7 @@ end
 # A virtual engine binds exactly one (virtual) column per instance, so
 # the DM-local `index`/`cols` that every other data manager's `getcell`/
 # `getcolumn` method takes (for dispatch-signature uniformity -- see
-# `column.jl`) are always `(1, 1)` here and unused.
+# `tables/column.jl`) are always `(1, 1)` here and unused.
 
 _engine_decode(e::VirtualEngine, row::Integer, T::Type) =
     _decode(e.kind, Array(_eng_stored(e)[row]), _row_scale(e, row), _row_offset(e, row), T)

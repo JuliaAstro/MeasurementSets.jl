@@ -245,7 +245,7 @@ end
 `ssmcol` and `row` are 1-based.  `cols` (the column count bound to this DM
 instance) is unused here -- SSM columns are addressed by `ssmcol` alone --
 and present only so every data-manager's `getcell` method shares one
-signature for dispatch (see `column.jl`).
+signature for dispatch (see `tables/column.jl`).
 """
 function getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Integer, ::Integer)
     kind = _ssmkind(c)

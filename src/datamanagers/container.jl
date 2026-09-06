@@ -38,7 +38,7 @@ abstract type Container end
 # Every per-DM writer this package has (`write_standardstman`,
 # `write_incrementalstman`, the three tiled writers) already writes its
 # own `table.f<seq>...` file at the very end of its own function body via
-# `_atomic_write` (`writer.jl`).  Rather than threading a "where do I
+# `_atomic_write` (`tables/writer.jl`).  Rather than threading a "where do I
 # write this file" parameter through every one of those signatures (and
 # every caller of them), the three container-eligible families route
 # through `_dmfile_write!` instead of `_atomic_write` directly; whether
@@ -208,7 +208,7 @@ end
 read_element(a::AipsIO, ::Type{MultiFileRawInfo}) =
     MultiFileRawInfo(read_string(a), Int(read_scalar(a, Int64)), read_scalar(a, Bool))
 
-# Write-side mirror, used by `wr_block` (aipsio.jl) exactly like
+# Write-side mirror, used by `wr_block` (io/aips.jl) exactly like
 # `read_block`/`read_element` are used to parse a `Vector<MultiFileInfo>`.
 wr_element(w::AipsWriter, x::MultiFileRawInfo) =
     (wr_string(w, x.name); wr_scalar(w, Int64(x.fsize)); wr_scalar(w, x.nested))

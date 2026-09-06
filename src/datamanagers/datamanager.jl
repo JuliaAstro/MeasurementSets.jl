@@ -4,7 +4,7 @@
 # on directly -- these tables are the one unavoidable name -> type lookup,
 # isolated here so the actual "open" logic (in each of this directory's
 # other files) can be ordinary multiple dispatch: `_dm_instance`
-# (`column.jl`) maps the name to a type via `_dmtype`, then calls
+# (`tables/column.jl`) maps the name to a type via `_dmtype`, then calls
 # `open(T, t, dm)`, which resolves to the right
 # `Base.open(::Type{T}, t::Table, dm::DataManagerInfo)` method.
 #

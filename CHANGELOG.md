@@ -1008,10 +1008,21 @@ bare-identifier `on` string is still the Phase-28 index-lookup join.
 The tokenizer now lexes one optional `.suffix` on an identifier.
 TaQL has no cartesian non-equi join, so no cross-check.
 
-### Phase 64 — TaQL engine restructured into `src/taql/`
+### Phase 64 — `src/` restructured into subdirectories
 
-Pure refactor, no behaviour change. The ~2300-line `src/query.jl` and
-`src/write_commands.jl` are replaced by a `src/taql/` directory:
+Pure refactor, no behaviour change. `src/` is now organised into
+`io/` (the `aips.jl` / `lock.jl` wire-format codecs), `tables/` (the
+CTDS type system + table model + I/O: `typeenum.jl`, `record.jl`,
+`table.jl`, `column.jl`, `interface.jl`, `writer.jl`, `create.jl`,
+`edit.jl`, `resync.jl`), `datamanagers/` (unchanged), and `taql/`
+(below); only the module file and the two MS-domain files
+`measurementset.jl` / `schema.jl` stay at the top.
+`MeasurementSets.jl`'s include list keeps its existing order
+(dependencies force table files to interleave with the `datamanagers/`
+and `taql/` includes), just gaining directory prefixes.
+
+The ~2300-line `src/query.jl` and `src/write_commands.jl` become the
+`src/taql/` directory:
 `ast.jl` (nodes + visitors + `_bcast` + masked arrays + indexing),
 `parse.jl` (tokenizer + parser + operator tables + pattern→regex),
 `functions.jl` (function / aggregate registries + `_make_func`),
@@ -1021,7 +1032,7 @@ Pure refactor, no behaviour change. The ~2300-line `src/query.jl` and
 `taql`). `taql/taql.jl` includes the first six; `commands.jl` stays
 included last (it builds on `edit` / `create` / `resync`). Test files
 renamed to `taql_query_tests.jl` / `taql_command_tests.jl`. The
-`_select_spec` helper also moved from `tables.jl` to `taql/query.jl`,
+`_select_spec` helper also moved from `table.jl` to `taql/query.jl`,
 so the whole query engine — parser, evaluators, verbs, write commands —
 now lives under `src/taql/`; `create.jl` / `resync.jl` / `edit.jl`
 keep only thin `GroupedTable` / `VirtualTaQLColumn` dispatch adapters.

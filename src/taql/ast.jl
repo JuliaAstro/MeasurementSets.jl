@@ -1,12 +1,12 @@
 # TaQL-lite: a small, self-contained query facility -- row filtering
 # (WHERE) and column projection/rename (SELECT), producing a `RefTable`
 # (the same lazy, no-copy view type real TaQL's own `SELECT ... GIVING`
-# produces -- see tables.jl's RefTable/`write_reftable`).
+# produces -- see tables/table.jl's RefTable/`write_reftable`).
 #
 # Two entry points share one AST/evaluator: a small hand-written parser
 # for a TaQL-like WHERE string, and a plain Julia predicate closure over
 # a `Tables.AbstractRow` (reusing `CTDSRow`/`CTDSRows` from
-# tables_interface.jl -- no new row-wrapper type needed).
+# tables/interface.jl -- no new row-wrapper type needed).
 #
 # This is a deliberate SUBSET of real TaQL's WHERE grammar, not a
 # look-alike: every operator/keyword spelling accepted here is also
