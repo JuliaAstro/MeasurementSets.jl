@@ -6,10 +6,11 @@ A pure-Julia reader and writer for the **Measurement Set version 2** data
 format — the casacore Table Data System (CTDS) tables used for
 interferometric visibility data by ALMA, the VLA, LOFAR and others.
 
-No C-library dependencies. `HDF5.jl` (a wrapper over the C `libhdf5`) is
-an **optional weak dependency** — loaded via a package extension only
-when you `import HDF5` to read or write a `MultiHDF5` (`table.mfh5`)
-container.
+No C-library dependencies. Two **optional weak dependencies**, each
+loaded via a package extension only when you `import` it:
+`HDF5.jl` (wraps C `libhdf5`) for `MultiHDF5` (`table.mfh5`) containers,
+and `Unitful.jl` + `UnitfulAngles.jl` + `UnitfulAstro.jl` for
+physical-unit column reads (`columnunit`, `qcolumn`).
 
 ## At a glance
 

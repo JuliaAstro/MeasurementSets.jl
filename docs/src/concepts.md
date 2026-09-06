@@ -78,6 +78,22 @@ briefly: 1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
 computed `query` `select` columns (`"amp" => "sqrt(abs(V))"`), and
 masked arrays (`V[boolexpr]`, `marray` / `arraydata` / `arraymask`,
 `SELECT expr AS (val, mask)`, masked `g*` / `gs*` aggregates;
-reductions skip masked elements) *are* supported. Units, date/time,
-and measures functions are deferred (they need Unitful.jl / JuliaAstro
-integration, not string parsing).
+reductions skip masked elements) *are* supported. Date/time and measures
+(reference-frame) functions in TaQL expressions are deferred.
+
+## Physical units
+
+`import Unitful, UnitfulAngles, UnitfulAstro` loads an extension that
+maps a column's `QuantumUnits` keyword onto a `Unitful` unit:
+`columnunit(t, "CHAN_FREQ")` → `u"Hz"`, `qcolumn(t, "UVW")` → the whole
+column as `… m` quantities. `UnitfulAngles` supplies the angle
+vocabulary (`arcsec`, `mas`, `°`) and `UnitfulAstro` the astronomy units
+(`Jy`, `pc`, `AU`); the extension also registers the dimensionless
+"pseudo-units" casacore uses that no Julia package provides (`beam`,
+`pixel`, `lambda`, …). Note that angles are **SI-dimensionless** here
+(`dimension(u"rad") == NoDims`), unlike casacore where `rad`/`sr` are
+base dimensions — angle↔angle and angle↔scalar conversions still work;
+use `DimensionfulAngles.jl` for strict casacore-style dimensional
+angles. `MeasurementSets.UNITS_NO_JULIA_COUNTERPART` lists every
+casacore unit without a third-party Julia implementation and how it is
+handled. TaQL unit *literals* (`3km`, `10arcsec`) are a follow-up.

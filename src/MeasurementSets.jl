@@ -54,6 +54,7 @@ include("datamanagers/dysco.jl")
 
 # --- lazy columns, then the query engine, then the higher table verbs ---
 include("tables/column.jl")
+include("tables/units.jl")
 include("taql/taql.jl")
 include("schema.jl")
 include("tables/interface.jl")
@@ -69,6 +70,7 @@ export Record, SubTable, ColumnDesc, TableDesc, CasaType
 export BFloat16                       # re-exported from BFloat16s (for `precision=BFloat16`)
 export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
+export columnunit, qcolumn, UNITS_NO_JULIA_COUNTERPART   # real methods via MeasurementSetsUnitfulExt
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 export write_table, write_ms, copyms, create_ms
 export write_reftable, write_concattable, copytable, reference_copy

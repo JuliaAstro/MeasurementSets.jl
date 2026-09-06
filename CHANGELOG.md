@@ -1036,3 +1036,42 @@ renamed to `taql_query_tests.jl` / `taql_command_tests.jl`. The
 so the whole query engine — parser, evaluators, verbs, write commands —
 now lives under `src/taql/`; `create.jl` / `resync.jl` / `edit.jl`
 keep only thin `GroupedTable` / `VirtualTaQLColumn` dispatch adapters.
+
+### Phase 65 — physical units (Unitful weak-dependency extension)
+
+`import Unitful, UnitfulAngles, UnitfulAstro` loads
+`MeasurementSetsUnitfulExt`, which maps a column's `QuantumUnits`
+keyword onto a `Unitful` unit:
+
+```julia
+columnunit(t, "CHAN_FREQ")   # u"Hz"
+qcolumn(t, "UVW")            # the whole column as `… m` quantities (materialised)
+```
+
+`UnitfulAngles` supplies casacore's angle vocabulary (`arcsec`, `mas`,
+`°`), `UnitfulAstro` the astronomy units (`Jy`, `pc`, `AU`), and the
+extension registers the dimensionless "pseudo-units" casacore uses that
+no Julia package provides — `beam`, `pixel`, `channel`, `count`, `adu`,
+`lambda`, `klambda` (so `Jy/beam` parses to `Jy beam⁻¹`). The
+string-normalisation layer (`_normalize_unit`, always loaded) handles
+casacore's `.`-as-multiply, `%`/`%%`, and the FITS/long-form aliases.
+
+`MeasurementSets.UNITS_NO_JULIA_COUNTERPART` documents every casacore
+unit without a third-party Julia implementation and how it is handled:
+
+| kind | units | handling |
+|---|---|---|
+| `:pseudo` | `beam` `pixel` `channel` `count` `adu` `lambda` `klambda` | registered dimensionless by the extension |
+| `:nounits` | `_`, `""` | `Unitful.NoUnits` |
+| `:unsupported` | `WU` `FU` `fu` `cy` `deg_2` `sq_deg` | clear error + suggested replacement |
+| `:dimension` | `rad` `sr` | dimensionless here; base dimensions in casacore |
+
+**Divergence from casacore:** angles are SI-dimensionless
+(`dimension(u"rad") == NoDims`) — `UnitfulAngles` gives the unit names
+and all angle↔angle / angle↔scalar conversions, but not casacore's
+treatment of angle as a base dimension. `DimensionfulAngles.jl` is the
+strict alternative.
+
+Read-side only for now. TaQL unit literals (`3km`, `10arcsec`), writing
+`QuantumUnits` from Unitful-typed columns, and the measures / reference-
+frame layer are follow-ups.

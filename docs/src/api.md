@@ -46,6 +46,17 @@ nrow
 columnnames
 ```
 
+### Physical units
+
+`import Unitful, UnitfulAngles, UnitfulAstro` gives these real methods
+(see [Concepts](concepts.md#Physical-units)).
+
+```@docs
+columnunit
+qcolumn
+UNITS_NO_JULIA_COUNTERPART
+```
+
 ## Schema and metadata
 
 ```@docs
