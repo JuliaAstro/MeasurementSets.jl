@@ -660,6 +660,7 @@ container for the whole MS tree).
 """
 function write_ms(dir::AbstractString, ms::MeasurementSet;
                   rows=Colon(), subtables=Colon(),
+                  subtable_rows::AbstractDict=Dict{String,Any}(),
                   storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
@@ -679,7 +680,9 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
             @warn "skipping subtable $kw" err=e; continue
         end
         try
-            _copy_table(joinpath(dir, kw), sub, 1:nrow(sub); storage, blocksize)
+            srows = get(subtable_rows, kw, 1:nrow(sub))
+            srows === Colon() && (srows = 1:nrow(sub))
+            _copy_table(joinpath(dir, kw), sub, srows; storage, blocksize)
             push!(written, kw)
         catch e
             @warn "skipping subtable $kw (unsupported source)" typeof(sub) err=e
@@ -695,7 +698,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
         if v isa SubTable
             nm in written || continue
             push!(pub.names, nm); push!(pub.types, TpTable)
-            push!(pub.values, SubTable("./" * nm)); push!(pub.comments, src.comments[i])
+            push!(pub.values, SubTable("././" * nm)); push!(pub.comments, src.comments[i])
         else
             push!(pub.names, nm); push!(pub.types, src.types[i])
             push!(pub.values, v); push!(pub.comments, src.comments[i])
@@ -715,8 +718,9 @@ optionally sliced; `subtables` optionally restricted to a set of names).
 `storage`/`blocksize` -- see [`write_ms`](@ref).
 """
 copyms(src::AbstractString, dst::AbstractString; rows=Colon(), subtables=Colon(),
+      subtable_rows::AbstractDict=Dict{String,Any}(),
       storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE) =
-    write_ms(dst, MeasurementSet(src); rows, subtables, storage, blocksize)
+    write_ms(dst, MeasurementSet(src); rows, subtables, subtable_rows, storage, blocksize)
 
 # --- synthesise a minimal standard MS -----------------------------
 
@@ -825,7 +829,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
     push!(pub.values, MS_VERSION); push!(pub.comments, "")
     for (tbl, _) in subrows
         push!(pub.names, tbl); push!(pub.types, TpTable)
-        push!(pub.values, SubTable("./" * tbl)); push!(pub.comments, "")
+        push!(pub.values, SubTable("././" * tbl)); push!(pub.comments, "")
     end
     # MAIN's scalar per-integration metadata goes through IncrementalStMan,
     # as in a real MS

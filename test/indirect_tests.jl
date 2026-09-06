@@ -22,16 +22,19 @@ using MeasurementSets: ArrayFileWriter, af_put!, arrayfile_bytes, open_arrayfile
 end
 
 if isdir(SAMPLE_MS)
-    @testset "indirect-array header (SPECTRAL_WINDOW/table.f0i)" begin
-        b = read(joinpath(SAMPLE_MS, "SPECTRAL_WINDOW", "table.f0i"))
-        ver  = ltoh(reinterpret(UInt32, b[1:4])[1])       # sample MS is little-endian
+    @testset "indirect-array header (SPECTRAL_WINDOW StManArrayFile)" begin
+        spwdir = joinpath(SAMPLE_MS, "SPECTRAL_WINDOW")
+        spw = readtable(spwdir)
+        seq = columndesc(spw, "CHAN_FREQ").sequ           # CHAN_FREQ's SSM instance
+        b = read(joinpath(spwdir, "table.f$(seq)i"))
+        ver  = ltoh(reinterpret(UInt32, b[1:4])[1])       # little-endian
         leng = ltoh(reinterpret(Int64,  b[5:12])[1])
         @test ver == 0
         @test leng == length(b)
         ndim = ltoh(reinterpret(UInt32, b[17:20])[1])     # first record at byte 16
         dim0 = ltoh(reinterpret(Int32,  b[21:24])[1])
         @test ndim == 1
-        @test dim0 == 64
+        @test dim0 == 64                                  # CHAN_FREQ: 64 channels
     end
 
     if _HAVE_CASACORE
@@ -43,7 +46,7 @@ if isdir(SAMPLE_MS)
                                      "POLARIZATION_TYPE", "RECEPTOR_ANGLE"], Colon()),
                 ("FIELD",           ["PHASE_DIR", "DELAY_DIR"], Colon()),
                 ("OBSERVATION",     ["LOG", "SCHEDULE"], Colon()),
-                ("POINTING",        ["DIRECTION", "TARGET"], 1:2000),
+                ("POINTING",        ["DIRECTION", "TARGET"], 1:100),
             ]
             for (st, cols, rng) in cases
                 t = readtable(joinpath(SAMPLE_MS, st))

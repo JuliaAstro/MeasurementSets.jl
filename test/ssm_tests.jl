@@ -17,7 +17,7 @@ _flat(x) = x isa AbstractArray ? collect(vec(x)) : [x]
 
     t = readtable(SAMPLE_MS)
     a1 = getcolumn(t, "ANTENNA1")
-    @test length(a1) == nrow(t) == 9_817_600
+    @test length(a1) == nrow(t)
     @test eltype(a1) == Int32
     @test extrema(a1) == (0, 24)
     @test eltype(getcolumn(t, "FLAG_ROW")) == Bool

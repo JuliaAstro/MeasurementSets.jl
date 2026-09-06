@@ -20,7 +20,7 @@
     @test eltype(column(tf, "DATA")) == Matrix{ComplexF32}
 
     # values agree to ComplexF16 precision
-    for r in (1, 2, 37, 1000)
+    for r in (1, 2, 37, nrow(t))
         dh = column(t, "DATA")[r]
         df = column(tf, "DATA")[r]
         @test dh isa Matrix{ComplexF16}
@@ -54,7 +54,7 @@ end
     @test eltype(column(t, "FLAG"))   == Matrix{Bool}
     @test eltype(column(t, "TIME"))   == Float64               # never narrowed
 
-    for r in (1, 37, 1000)
+    for r in (1, 37, nrow(t))
         wb = column(t, "WEIGHT")[r]
         @test all(isfinite, Float32.(wb))
         @test isapprox(Float32.(wb), column(tf, "WEIGHT")[r]; rtol = 2.0f0^-7)

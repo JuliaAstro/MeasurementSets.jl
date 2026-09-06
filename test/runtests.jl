@@ -3,10 +3,13 @@ using Test
 
 const MSv2 = MeasurementSets
 
-# A real ALMA MS on the developer's machine.  All data-dependent tests are
-# skipped when it is not present (e.g. on CI).
+# The MeasurementSet the data-dependent tests run against.  By default a
+# small committed fixture (`test/data/sample.ms`, a 600-row `copyms` slice
+# of a real ALMA MS -- see `test/gen_sample_ms.jl`); set
+# `MEASUREMENTSETS_TEST_MS` to point at a full real MS instead (the tests
+# derive their row/dimension expectations from the MS, so both work).
 const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
-    "/Users/paul/Development/MSv2/data/24A-005.sb45337587.eb46111741.60454.422525601854.ms")
+    joinpath(@__DIR__, "data", "sample.ms"))
 
 @testset "MeasurementSets" begin
     include("aipsio_tests.jl")

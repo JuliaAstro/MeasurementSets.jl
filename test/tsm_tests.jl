@@ -15,8 +15,11 @@
     @test size(getcell(t, "WEIGHT", 1)) == (4,)
     @test size(getcell(t, "SIGMA", 1)) == (4,)
 
-    # WEIGHT_SPECTRUM / FLAG_CATEGORY are defined but never written
-    @test_throws ErrorException getcolumn(t, "WEIGHT_SPECTRUM")
+    # WEIGHT_SPECTRUM / FLAG_CATEGORY are defined-but-never-written in the
+    # full MS; the fixture drops them on copy. Either way: not usable data.
+    if "WEIGHT_SPECTRUM" in columnnames(t)
+        @test_throws Exception getcolumn(t, "WEIGHT_SPECTRUM")
+    end
 
     uvwcol = getcolumn(t, "UVW")
     @test length(uvwcol) == nrow(t)
@@ -33,7 +36,7 @@ if _HAVE_CASACORE
         ct = CCT.Table(SAMPLE_MS)
         cols = Dict(n => ct[Symbol(n)] for n in
                     ("UVW", "DATA", "FLAG", "WEIGHT", "SIGMA"))
-        probe = (1, 2, 37, 1000, 250_000, 5_000_000, nrow(t))
+        probe = Tuple(unique(clamp.((1, 2, 37, 1000, nrow(t) ÷ 2, nrow(t)), 1, nrow(t))))
         for (n, col) in cols
             @testset "$n" begin
                 for r in probe

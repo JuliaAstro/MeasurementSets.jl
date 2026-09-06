@@ -15,7 +15,7 @@ const _MAIN_ISM = ("TIME", "INTERVAL", "EXPOSURE", "FEED1", "FEED2",
     @test eltype(time) == Float64
     @test getcell(t, "TIME", 1) == time[1]
     @test getcell(t, "TIME", nrow(t)) == time[end]
-    @test getcell(t, "TIME", 4_000_000) == time[4_000_000]
+    @test getcell(t, "TIME", nrow(t) ÷ 2) == time[nrow(t) ÷ 2]
 
     @test unique(getcolumn(t, "INTERVAL")) == [3.0]     # constant in this MS
     @test eltype(getcolumn(t, "FIELD_ID")) == Int32
@@ -28,8 +28,9 @@ if _HAVE_CASACORE
         for name in _MAIN_ISM
             @test getcolumn(t, name) == collect(ct[Symbol(name)][:])
         end
-        # a few random cells too
-        for name in ("TIME", "SCAN_NUMBER"), r in (1, 12345, 5_000_000, nrow(t))
+        # a few scattered cells too
+        for name in ("TIME", "SCAN_NUMBER"),
+            r in (1, nrow(t) ÷ 3, 2 * nrow(t) ÷ 3, nrow(t))
             @test getcell(t, name, r) == ct[Symbol(name)][r]
         end
     end

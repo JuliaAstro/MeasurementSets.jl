@@ -746,3 +746,24 @@ non-positive slice step is rejected (casacore does too).
 Negative indices are cross-checked against real TaQL via `tableCommand`;
 `end` is exercised only against a hand-computed reference (no TaQL
 equivalent).
+
+### Phase 45 — committed small MS test fixture
+
+The data-dependent tests used to run only where a hard-coded 20 GB real
+ALMA MS lived. They now run everywhere against a small **committed
+fixture** — `test/data/sample.ms` (~4 MB), a 600-row `copyms` slice of a
+real MS (POINTING / SYSPOWER capped at 150 rows; every other subtable
+kept whole; the SM mix and `(4,64)` cell shape preserved). Regenerate it
+with `test/gen_sample_ms.jl`.
+
+`write_ms` / `copyms` gained a `subtable_rows` kwarg (subtable name → row
+range) for the slicing. **Bugfix along the way:** `write_ms` / `create_ms`
+wrote subtable-keyword paths as `./NAME` (a sibling) instead of casacore's
+`././NAME` (inside the table dir) — our own lenient reader coped, but
+`CCT.Table(ms).ANTENNA` (real casacore MS subtable access) failed. Now
+fixed. `SAMPLE_MS` defaults to the fixture;
+`MEASUREMENTSETS_TEST_MS` still points the tests at a full MS when set —
+the row/dimension assertions were made relative to `nrow(t)` so both
+work. (`FLAG_CATEGORY` / `WEIGHT_SPECTRUM` are defined-but-never-written
+in the source and don't survive a `copyms`; the fixture re-adds the
+schema-required `FLAG_CATEGORY` as an empty column.)

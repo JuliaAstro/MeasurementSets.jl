@@ -174,7 +174,11 @@ deployed anywhere yet.
 julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-The AipsIO unit tests always run. Metadata tests and a column-by-column
-cross-check against [`Casacore.jl`](https://github.com/JuliaAstro/Casacore.jl)
-run when a sample MS is available — set `MEASUREMENTSETS_TEST_MS` to point
-at one.
+The full suite runs against a small committed fixture MS
+(`test/data/sample.ms`, ~4 MB — a 600-row `copyms` slice of a real ALMA
+MS; regenerate with `test/gen_sample_ms.jl`). The `Casacore.jl`
+column-by-column cross-checks run when
+[`Casacore.jl`](https://github.com/JuliaAstro/Casacore.jl) is installed.
+Set `MEASUREMENTSETS_TEST_MS` to a full real MS to run against that
+instead — the tests derive their row/dimension expectations from the MS,
+so both work.
