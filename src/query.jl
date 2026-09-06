@@ -41,7 +41,8 @@
 # imag, arg/phase, conj, norm), array-cell reductions (mean/avg, sum,
 # median, stddev, variance, rms, min/max, any, all, ntrue, nelements),
 # string ops (strlength/len, upper, lower, trim), and specials
-# (rownumber(), pi, e, iif). Not supported: date/time, measures/cones,
+# (rownumber(), pi, e, iif, GROUPING(k) in a groupby select/having).
+# Not supported: date/time, measures/cones,
 # sliding-window (`running*`/`boxed*`) ops, rand, array reshaping,
 # rowid(), substr, type conversions, UDFs, aggregates over row groups.
 
@@ -104,6 +105,9 @@ struct TQLAggr <: TQLExpr           # g*(arg) -- reduces over a group's rows (gr
     fn::Base.Callable               # Vector-of-per-row-values -> scalar
     arg::Union{Nothing,TQLExpr}     # nothing only for gcount()
 end
+struct TQLGrouping <: TQLExpr       # GROUPING(k) -- true if key `k` is rolled up in this group
+    name::String
+end
 struct TQLIndex <: TQLExpr          # base[i], base[i,j], base[a:b:step, k] -- 1-based
     base::TQLExpr
     axes::Vector{Any}               # each: a TQLExpr (scalar index, drops the axis) OR
@@ -145,6 +149,8 @@ _tqleval(e::TQLFunc, cols, i) =
 _tqleval(::TQLRowNum, cols, i) = i
 _tqleval(::TQLEnd, cols, i) = throw(ArgumentError(
     "TaQL-lite: `end` is only valid inside an array subscript `[...]`"))
+_tqleval(::TQLGrouping, cols, i) = throw(ArgumentError(
+    "TaQL-lite: GROUPING() is only valid in a groupby select / having"))
 _tqleval(::TQLAggr, cols, i) = throw(ArgumentError(
     "TaQL-lite: aggregate functions (g*) are only valid in groupby(...), not query(...)"))
 _tqleval(e::TQLIndex, cols, i) = _tql_do_index(_tqleval(e.base, cols, i), e.axes,
@@ -197,6 +203,33 @@ _subst_end(e::TQLNeg, n) = TQLNeg(_subst_end(e.a, n))
 _subst_end(e::TQLFunc, n) = TQLFunc(e.fn, TQLExpr[_subst_end(a, n) for a in e.args])
 _subst_end(e::TQLExpr, n) = e
 
+# rewrite `GROUPING(k)` -> `TQLLit(k in rolled)` throughout a groupby
+# select / having expression -- it is a per-grouping-set constant.
+_sg(e::TQLGrouping, r) = TQLLit(e.name in r)
+_sg(e::TQLArith, r) = TQLArith(e.op, _sg(e.lhs, r), _sg(e.rhs, r))
+_sg(e::TQLCmp, r) = TQLCmp(e.op, _sg(e.lhs, r), _sg(e.rhs, r))
+_sg(e::TQLAnd, r) = TQLAnd(_sg(e.a, r), _sg(e.b, r))
+_sg(e::TQLOr, r) = TQLOr(_sg(e.a, r), _sg(e.b, r))
+_sg(e::TQLNot, r) = TQLNot(_sg(e.a, r))
+_sg(e::TQLNeg, r) = TQLNeg(_sg(e.a, r))
+_sg(e::TQLBitNot, r) = TQLBitNot(_sg(e.a, r))
+_sg(e::TQLBetween, r) = TQLBetween(_sg(e.lhs, r), _sg(e.lo, r), _sg(e.hi, r), e.negate)
+_sg(e::TQLIn, r) = TQLIn(_sg(e.lhs, r), e.vals)
+_sg(e::TQLMatch, r) = TQLMatch(_sg(e.lhs, r), e.regex, e.negate)
+_sg(e::TQLFunc, r) = TQLFunc(e.fn, TQLExpr[_sg(a, r) for a in e.args])
+_sg(e::TQLAggr, r) = e.arg === nothing ? e : TQLAggr(e.fn, _sg(e.arg, r))
+_sg(e::TQLIndex, r) = TQLIndex(_sg(e.base, r),
+    Any[ax isa NamedTuple ?
+        (; lo = ax.lo === nothing ? nothing : _sg(ax.lo, r),
+           hi = ax.hi === nothing ? nothing : _sg(ax.hi, r),
+           step = ax.step === nothing ? nothing : _sg(ax.step, r)) :
+        _sg(ax, r) for ax in e.axes])
+_sg(e::TQLExpr, r) = e     # TQLCol, TQLLit, TQLRowNum, TQLEnd
+
+# the set of grouping-key names rolled up (not in `active`) for a set
+_gb_rolled(keys::Vector{String}, active) =
+    Set(keys[j] for j in eachindex(keys) if !(j in active))
+
 # Collect every column name an expression actually references, so `query`
 # reads only those columns (not the whole table) -- the real point of the
 # string-based path over the closure one, which can't be introspected.
@@ -215,6 +248,7 @@ _tqlrefs!(seen, e::TQLFunc) = foreach(a -> _tqlrefs!(seen, a), e.args)
 _tqlrefs!(seen, ::TQLRowNum) = nothing
 _tqlrefs!(seen, ::TQLEnd) = nothing
 _tqlrefs!(seen, e::TQLAggr) = e.arg === nothing ? nothing : _tqlrefs!(seen, e.arg)
+_tqlrefs!(seen, e::TQLGrouping) = push!(seen, e.name)
 function _tqlrefs!(seen, e::TQLIndex)
     _tqlrefs!(seen, e.base)
     for ax in e.axes
@@ -232,6 +266,7 @@ _tqlrefs!(seen, e::TQLBetween) =
 
 # true if any TQLAggr node appears anywhere in the expression tree
 _has_aggr(e::TQLAggr) = true
+_has_aggr(e::TQLGrouping) = true   # group-context only (rejected in a plain WHERE)
 _has_aggr(e::TQLCol) = false
 _has_aggr(e::TQLLit) = false
 _has_aggr(::TQLRowNum) = false
@@ -939,6 +974,11 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         n == 1 || throw(ArgumentError("TaQL-lite: $name() takes 1 argument, got $n, in \"$src\""))
         return TQLAggr(_TQL_AGGRS[name], args[1])
     end
+    if name == "grouping"
+        (n == 1 && args[1] isa TQLCol) || throw(ArgumentError(
+            "TaQL-lite: grouping() takes one grouping-key column name in \"$src\""))
+        return TQLGrouping(args[1].name)
+    end
     if name in ("rownumber", "rownr")
         n == 0 || throw(ArgumentError("TaQL-lite: $name() takes no arguments in \"$src\""))
         return TQLRowNum()
@@ -1181,6 +1221,8 @@ end
 # row (a non-aggregate select expr is assumed constant across the group
 # because you grouped by it -- SQL-lenient, not strictly verified).
 
+_geval(::TQLGrouping, cols, g) = throw(ArgumentError(
+    "TaQL-lite: GROUPING() must be resolved per grouping set (internal error)"))
 _geval(e::TQLAggr, cols, g) =
     e.fn(e.arg === nothing ? g : [_tqleval(e.arg, cols, i) for i in g])
 _geval(e::TQLCol, cols, g) = cols[e.name][g[1]]
@@ -1461,7 +1503,7 @@ function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
     havingfn =
         havingarg === nothing ? ((g, kn, act) -> true) :
         havingarg isa Function ? ((g, kn, act) -> havingarg(GroupSlice(loaded, g, kn, act))) :
-        ((g, kn, act) -> _geval(havingast, loaded, g))
+        ((g, kn, act) -> _geval(_sg(havingast, _gb_rolled(kn, act)), loaded, g))
     return loaded, rows, havingfn, keys
 end
 
@@ -1532,10 +1574,16 @@ of key names, `()` for the grand total (`grouping_sets = [("K1","K2"),
 ("K1",), ()]`). At most one of the three. In a row where a key is
 aggregated away, that key column is `missing` — a bare `:K` / `"K"`
 select entry emits `missing`; a closure should build its key fields
-from `g.keys` (`(; g.keys..., N = length(g))`), and can test
-`g.grouping.K` (SQL `GROUPING()` — `true` when `K` is rolled up).
-(casacore parses these but does not implement them, so this is plain
-SQL semantics with no real-TaQL cross-check.)
+from `g.keys` (`(; g.keys..., N = length(g))`).
+
+`GROUPING(K)` — usable in a `select` or `having` **string**, and as
+`g.grouping.K` in a closure — is `true` when key `K` is rolled up in
+that row (SQL's `GROUPING()`), e.g.
+`select = ["label" => "iif(GROUPING(K2), 'ALL', K2)", …]` or
+`having = "GROUPING(K1) == 0"`.
+
+(casacore parses `ROLLUP`/`CUBE`/`GROUPING SETS` but does not implement
+them, so this is plain SQL semantics with no real-TaQL cross-check.)
 
 Returns a [`GroupedTable`](@ref).
 """
@@ -1564,11 +1612,14 @@ function groupby(t::AbstractTable, groupcols;
     acc = [Any[] for _ in outnames]
     for active in _gb_sets(keys, rollup, cube, grouping_sets)
         aset = Set(active)
+        rolled = _gb_rolled(keys, active)
+        # resolve GROUPING(k) in each string select expr for this set
+        lvl = Tuple{Symbol,Any}[k === :ast ? (:ast, _sg(v, rolled)) : (k, v) for (k, v) in kinds]
         groups, seen = _group_rows(keys[active], loaded, rows)
         for key in seen
             g = groups[key]
             havingfn(g, keys, active) || continue
-            for (j, (k, v)) in enumerate(kinds)
+            for (j, (k, v)) in enumerate(lvl)
                 push!(acc[j],
                     k === :fn ? v(GroupSlice(loaded, g, keys, active)) :
                     (v isa TQLCol && haskey(kidx, v.name) && !(kidx[v.name] in aset)) ? missing :

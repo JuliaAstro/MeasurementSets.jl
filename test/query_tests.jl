@@ -798,6 +798,44 @@ end
                                       grouping_sets = [("K1", "NOPE")])
 end
 
+# ---- Phase 51: GROUPING() in the string grammar ------------------
+
+@testset "groupby — GROUPING() function" begin
+    dir = joinpath(mktempdir(), "gr.tab")
+    K1 = Int32[1, 1, 2, 2]
+    K2 = Int32[10, 20, 10, 20]
+    X  = Float64[1, 2, 3, 4]
+    write_table(dir, "T", Pair{String,Any}["K1" => K1, "K2" => K2, "X" => X]; nrow=4)
+    t = readtable(dir)
+
+    parse(s) = MSv2._taqllite_parse(s, Set(["K1", "K2", "X"]))
+    @test parse("GROUPING(K1)") isa MSv2.TQLGrouping
+    @test parse("GROUPING(K1)").name == "K1"
+    @test_throws ArgumentError parse("GROUPING(K1, K2)")   # arity
+    @test_throws ArgumentError parse("GROUPING(X + 1)")    # needs a bare column
+
+    # in SELECT: 0/1 flag + the classic "label the subtotal" idiom
+    g = groupby(t, ["K1", "K2"];
+        select = ["K1" => :K1, "K2" => :K2,
+                  "gK2" => "GROUPING(K2)",
+                  "lbl" => "iif(GROUPING(K2), 999, K2)",
+                  "S" => "gsum(X)"],
+        rollup = true)
+    @test collect(g.gK2) == [false, false, false, false, true, true, true]
+    @test collect(g.lbl) == [10, 20, 10, 20, 999, 999, 999]
+
+    # in HAVING: drop rows where K1 is rolled up (CUBE's (K2) sets + grand total)
+    gh = groupby(t, ["K1", "K2"]; select = ["K1" => :K1, "K2" => :K2, "N" => "gcount()"],
+        cube = true, having = "GROUPING(K1) == 0")
+    @test all(!ismissing, gh.K1)
+    @test nrow(gh) == 6                                    # 4 detailed + 2 (K1) subtotals
+
+    # rejected outside a group context
+    @test_throws ArgumentError groupby(t, "K1"; select = ["N" => "gcount()"],
+        where = "GROUPING(K1) == 1")
+    @test_throws ArgumentError query(t, "GROUPING(K1) == 0")
+end
+
 @testset "groupby — do-block form" begin
     dir = joinpath(mktempdir(), "cb.tab")
     K = Int32[1, 1, 1, 2, 2, 3, 3, 3, 3, 1]

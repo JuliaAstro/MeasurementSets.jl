@@ -812,8 +812,20 @@ grand total). At most one of `rollup` / `cube` / `grouping_sets`.
 Aggregated-away keys are `missing` as before. `GroupSlice` now carries
 the active-key *set* (not a prefix count): `g.keys` / `g.level` still
 work, and a new `g.grouping` NamedTuple gives SQL `GROUPING()` — `true`
-for a key rolled up in that row. casacore parses these but doesn't
-implement them; plain SQL semantics, no cross-check.
+for a key rolled up in that row (also a string-grammar function since
+Phase 51). casacore parses these but doesn't implement them; plain SQL
+semantics, no cross-check.
+
+### Phase 51 — `GROUPING()` in the string grammar
+
+`GROUPING(K)` is now a function usable in a `groupby` `select` or
+`having` **string** (not just `g.grouping.K` in a closure) — `true`
+when key `K` is rolled up in that row. The classic uses:
+`select = ["label" => "iif(GROUPING(K2), 'ALL', K2)", …]` and
+`having = "GROUPING(K1) == 0"`. It takes exactly one bare grouping-key
+column name, is resolved to a constant per grouping set (an AST
+rewrite, like Phase 44's `end`), and is rejected outside a group
+context (in a plain `query` / a `where`).
 
 ### Phase 49 — M:N joins
 
