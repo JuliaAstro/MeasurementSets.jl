@@ -94,6 +94,20 @@ function _flatten_query_parent(t::AbstractTable, rows::Vector{Int},
     return t, rows, namemap
 end
 
+# `select` ("output_name => parent_name" pairs, in output order) ->
+# `(namemap, order)` for building a RefTable -- shared by
+# `write_reftable` (tables.jl) and the all-projection `query` path.
+function _select_spec(parent::AbstractTable, select::AbstractVector{<:Pair})
+    order = String[String(first(p)) for p in select]
+    allunique(order) || throw(ArgumentError("duplicate output column name"))
+    namemap = Dict{String,String}(String(first(p)) => String(last(p)) for p in select)
+    pcols = Set(columnnames(parent))
+    for s in values(namemap)
+        s in pcols || throw(ArgumentError("parent has no column \"$s\""))
+    end
+    return namemap, order
+end
+
 # classify `select` pairs against `validnames` into 3-tuples:
 # `(outname, :proj, srcname)`, `(outname, :expr, TQLExpr)`, or
 # `(valname, :mpair, (maskname, TQLExpr))` -- the last emits TWO output

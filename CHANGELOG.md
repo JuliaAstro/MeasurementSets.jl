@@ -1020,4 +1020,8 @@ Pure refactor, no behaviour change. The ~2300-line `src/query.jl` and
 `join.jl`, and `commands.jl` (`update!` / `delete!` / `insert!` /
 `taql`). `taql/engine.jl` includes the first six; `commands.jl` stays
 included last (it builds on `edit` / `create` / `resync`). Test files
-renamed to `taql_query_tests.jl` / `taql_command_tests.jl`.
+renamed to `taql_query_tests.jl` / `taql_command_tests.jl`. The
+`_select_spec` helper also moved from `tables.jl` to `taql/query.jl`,
+so the whole query engine — parser, evaluators, verbs, write commands —
+now lives under `src/taql/`; `create.jl` / `resync.jl` / `edit.jl`
+keep only thin `GroupedTable` / `VirtualTaQLColumn` dispatch adapters.

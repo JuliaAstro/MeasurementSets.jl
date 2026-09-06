@@ -543,19 +543,8 @@ end
 
 # --- writers -------------------------------------------------------
 
-# `select` ("output_name => parent_name" pairs, in output order) ->
-# `(namemap, order)` for building a RefTable -- shared by `write_reftable`
-# and `query` (taql/query.jl) so both use identical validation/error text.
-function _select_spec(parent::AbstractTable, select::AbstractVector{<:Pair})
-    order = String[String(first(p)) for p in select]
-    allunique(order) || throw(ArgumentError("duplicate output column name"))
-    namemap = Dict{String,String}(String(first(p)) => String(last(p)) for p in select)
-    pcols = Set(columnnames(parent))
-    for s in values(namemap)
-        s in pcols || throw(ArgumentError("parent has no column \"$s\""))
-    end
-    return namemap, order
-end
+# `_select_spec` (the `select` projection helper shared by
+# `write_reftable` below and `query`) lives in `taql/query.jl`.
 
 """
     write_reftable(dir, parent, rows; select) -> dir
