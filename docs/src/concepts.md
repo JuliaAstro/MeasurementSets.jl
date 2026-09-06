@@ -61,9 +61,12 @@ resolves through these transparently. `MultiHDF5` needs `HDF5.jl` — do
 [`query`](@ref) / [`groupby`](@ref) / `join` / [`update!`](@ref) /
 [`taql`](@ref) implement a **deliberate subset of TaQL** — casacore's
 Table Query Language. It is enough for real MS filtering, aggregation and
-joins, and every operator / function / clause it accepts is a genuine
-subset of TaQL's own (checked against TaQL's grammar, and against a live
-cross-check that runs the same string through both engines).
+joins, and almost every operator / function / clause it accepts is a
+genuine subset of TaQL's own (checked against TaQL's grammar, and
+against a live cross-check that runs the same string through both
+engines). A few conveniences go beyond TaQL — notably `join`'s
+`on = (lrow, rrow) -> Bool` predicate form for range / non-equi joins,
+which TaQL has no equivalent for.
 
 It is *not* a full TaQL implementation. The [Changelog](changelog.md)
 (phases 22–31) spells out what each area does and does not support —

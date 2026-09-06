@@ -1180,6 +1180,57 @@ end
     @test_throws ArgumentError join(L, R; on, rightcols=["F"])
 end
 
+@testset "join — non-equi predicate" begin
+    d = mktempdir()
+    write_table(joinpath(d, "L"), "L",
+        Pair{String,Any}["T" => Float64[1, 5, 9, 15], "X" => Int32[10, 20, 30, 40]]; nrow=4)
+    write_table(joinpath(d, "R"), "R",
+        Pair{String,Any}["T0" => Float64[0, 4, 20], "T1" => Float64[6, 12, 30],
+                         "LAB" => ["a", "b", "c"]]; nrow=3)
+    L = readtable(joinpath(d, "L")); R = readtable(joinpath(d, "R"))
+    pred = (a, b) -> b.T0 <= a.T <= b.T1
+
+    # T=1->a, T=5->a & b (M:N), T=9->b, T=15->none
+    jd = join(L, R; on=pred, rightcols=["LAB"], unmatched=:drop)
+    @test collect(jd.T) == [1.0, 5.0, 5.0, 9.0]
+    @test collect(jd.LAB) == ["a", "a", "b", "b"]
+
+    jm = join(L, R; on=pred, rightcols=["LAB"], unmatched=:missing)
+    @test collect(jm.T) == [1.0, 5.0, 5.0, 9.0, 15.0]
+    @test isequal(collect(jm.LAB), ["a", "a", "b", "b", missing])
+
+    jf = join(L, R; on=pred, leftcols=["T"], rightcols=["LAB"], unmatched=:full)
+    @test isequal(collect(jf.T), [1.0, 5.0, 5.0, 9.0, 15.0, missing])
+    @test isequal(collect(jf.LAB), ["a", "a", "b", "b", missing, "c"])
+
+    jrt = join(L, R; on=pred, leftcols=["T"], rightcols=["LAB"], unmatched=:right)
+    @test isequal(collect(jrt.LAB), ["a", "a", "b", "b", "c"])
+    @test isequal(collect(jrt.T), [1.0, 5.0, 5.0, 9.0, missing])
+
+    # :error throws on the dangling left row T=15
+    @test_throws ArgumentError join(L, R; on=pred, rightcols=["LAB"])
+
+    # oncols restricts what's loaded -- BOGUS would error if read
+    bogus = ColumnDesc("BOGUS", "", "NoSuchManager", "g", MSv2.TpInt,
+                       "ScalarColumnDesc<Int>", (), Int32(0), UInt32(0), Record(), nothing, 999)
+    td2 = TableDesc(L.desc.name, L.desc.version, L.desc.comment, L.desc.public,
+                    L.desc.private, [L.desc.columns; bogus])
+    Lb = Table(L.path, L.type, L.subtype, L.readme, L.version, L.rows, L.endian,
+               td2, L.managers, L.syncmod, L.lockpath, L.container, L.precision)
+    j2 = join(Lb, R; on=(a, b) -> b.T0 <= a.T <= b.T1, leftcols=["T"], rightcols=["LAB"],
+              unmatched=:missing, oncols=(["T"], ["T0", "T1", "LAB"]))
+    @test collect(j2.T) == [1.0, 5.0, 5.0, 9.0, 15.0]
+
+    # composes with where / orderby
+    jw = join(L, R; on=pred, rightcols=["LAB"], unmatched=:drop,
+              where="LAB == 'b'", orderby=["T" => :desc])
+    @test collect(jw.T) == [9.0, 5.0]
+
+    # duplicate output name still errors
+    @test_throws ArgumentError join(L, R; on=pred, leftcols=["T" => "LAB"], rightcols=["LAB"],
+                                   unmatched=:drop)
+end
+
 # ---- Phase 29: chainable query results ----
 
 @testset "GroupedTable is an AbstractTable" begin

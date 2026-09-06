@@ -898,3 +898,17 @@ arithmetic. The `(col, maskcol) = expr` paired form raises a clear
 error — it needs masked-array-producing expressions, which TaQL-lite
 does not have. Cross-checked against real TaQL for the mask, inline-mask
 and slice+mask forms.
+
+### Phase 56 — general non-equi join (predicate closure)
+
+`join`'s `on` may now be a **2-arg predicate** `(lrow, rrow) -> Bool` —
+a range / inequality / tolerance join, evaluated by a nested loop over
+every `(left, right)` row pair. `lrow` / `rrow` support `row.COLNAME`.
+`unmatched` sets the join type (`:drop` inner, `:missing` / `:left`,
+`:right`, `:full`, `:error`) exactly as `multi = true`; `oncols =
+(leftnames, rightnames)` restricts which columns are loaded onto the
+predicate rows. It composes with `where` / `orderby` /
+`leftcols` / `rightcols` like the other join forms. This is a
+MeasurementSets extension — TaQL's own `JOIN … ON` is `==` / `IN` only,
+so there is no cross-check — and it is O(nrow(left) × nrow(right)):
+`query` / `select` each side down first for a large table.

@@ -1798,13 +1798,15 @@ function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
 end
 
 # ======================================================================
-# join -- N:1 lookup join (Phase 28) + M:N equi-join (Phase 49)
+# join -- N:1 lookup (Phase 28) + M:N equi (Phase 49) + predicate (Phase 56)
 # ======================================================================
 #
 # `multi=false` (default): each `left` row maps to at most one `right`
 # row (via a key), right columns pulled in per left row -- exactly what
 # TaQL's own `JOIN ... ON` does. `multi=true`: a general M:N equi-join
-# (inner / left / right / full via `unmatched`). The result is a
+# (inner / left / right / full via `unmatched`). An `on::Function`
+# predicate `(lrow, rrow) -> Bool` is a nested-loop non-equi join (a
+# MeasurementSets extension). The result is a
 # `GroupedTable` whose columns are lazy `MappedColumn` views (zero-copy)
 # except where an outer join's unmatched rows force a `missing`-filled
 # materialisation.
@@ -1921,6 +1923,44 @@ function _join_pairs(left::AbstractTable, right::AbstractTable, on, multi::Bool,
     return lrows, rrows
 end
 
+# nested-loop join on a 2-arg predicate `pred(lrow, rrow) -> Bool`
+# (a MeasurementSets extension -- TaQL's own JOIN is == / IN only).
+# `oncols` = (leftnames, rightnames) or nothing (= every column).
+# Returns (lrows, rrows); `0` on a side means an unmatched outer row.
+function _join_pairs_pred(left::AbstractTable, right::AbstractTable, pred::Function,
+                          unmatched::Symbol, oncols)
+    unmatched in (:error, :drop, :missing, :left, :right, :full) || throw(ArgumentError(
+        "join: `unmatched` must be :error, :drop, :missing/:left, :right or :full"))
+    keepL = unmatched in (:missing, :left, :full)
+    keepR = unmatched in (:right, :full)
+    lnames = oncols === nothing ? columnnames(left) : String.(oncols[1])
+    rnames = oncols === nothing ? columnnames(right) : String.(oncols[2])
+    lrws = CTDSRows(AbstractVector[column(left, n) for n in lnames], Symbol.(lnames), nrow(left))
+    rrws = CTDSRows(AbstractVector[column(right, n) for n in rnames], Symbol.(rnames), nrow(right))
+    rrows_v = collect(rrws)
+    lrows = Int[]; rrows = Int[]
+    matched_r = falses(nrow(right))
+    for (i, lr) in enumerate(lrws)
+        hit = false
+        for (j, rr) in enumerate(rrows_v)
+            if pred(lr, rr)::Bool
+                push!(lrows, i); push!(rrows, j); matched_r[j] = true; hit = true
+            end
+        end
+        if !hit
+            unmatched === :error && throw(ArgumentError(
+                "join: left row $i has no match on the right (use unmatched=:drop / :missing / ...)"))
+            keepL && (push!(lrows, i); push!(rrows, 0))
+        end
+    end
+    if keepR
+        for j in 1:nrow(right)
+            matched_r[j] || (push!(lrows, 0); push!(rrows, j))
+        end
+    end
+    return lrows, rrows
+end
+
 # post-assembly WHERE over the RESULT column names (a renamed right
 # column is referenced by its output name).  String -> the TaQL-lite
 # expression engine; Function -> a `row -> Bool` predicate.
@@ -1941,7 +1981,7 @@ end
 
 """
     join(left, right; on, rightcols, leftcols=nothing, where=nothing,
-         unmatched=:error, multi=false, orderby=nothing) -> GroupedTable
+         unmatched=:error, multi=false, oncols=nothing, orderby=nothing) -> GroupedTable
 
 Join `left` and `right` (extends `Base.join`). The default (`multi =
 false`) is an **N:1 lookup join** — each `left` row matches at most one
@@ -1955,7 +1995,15 @@ semantics). `multi = true` is a general **M:N equi-join**.
   `ANTENNA1` → the `ANTENNA` subtable row); N:1 only;
 * a **`Pair`** `"LKEY" => "RKEY"` — equi-join, matching `left.LKEY`
   against `right.RKEY` (must be unique when `multi = false`);
-* a **vector of pairs** — a composite key (all must match).
+* a **vector of pairs** — a composite key (all must match);
+* a **2-arg predicate** `(lrow, rrow) -> Bool` — a general non-equi join
+  (a MeasurementSets extension; TaQL's own `JOIN` is `==` / `IN` only).
+  `lrow` / `rrow` support `row.COLNAME`. Evaluated by a nested loop over
+  every `(left, right)` pair — **O(nrow(left) × nrow(right))**; `query`
+  / `select` each side down first for a large table. `oncols =
+  (leftnames, rightnames)` restricts which columns are loaded onto the
+  predicate rows. `unmatched` sets the join type as for `multi = true`;
+  `multi` itself is ignored.
 
 `rightcols` lists the `right` columns to attach — `"NAME"` or
 `"NAME" => "ANT_NAME"` to rename. `leftcols` (default: every `left`
@@ -1978,8 +2026,10 @@ except where `missing`-fill forces materialisation.
 function Base.join(left::AbstractTable, right::AbstractTable; on,
                    rightcols::AbstractVector, leftcols=nothing,
                    where=nothing, unmatched::Symbol=:error, multi::Bool=false,
-                   orderby::Union{Nothing,AbstractVector}=nothing)
-    lrows, rrows = _join_pairs(left, right, on, multi, unmatched)
+                   oncols=nothing, orderby::Union{Nothing,AbstractVector}=nothing)
+    lrows, rrows = on isa Function ?
+        _join_pairs_pred(left, right, on, unmatched, oncols) :
+        _join_pairs(left, right, on, multi, unmatched)
 
     lpairs = leftcols === nothing ? Pair{String,String}[n => n for n in columnnames(left)] :
              _norm_pairs(leftcols)
