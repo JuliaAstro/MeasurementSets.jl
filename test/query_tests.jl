@@ -336,8 +336,34 @@ end
 
     # rejected operators give clear errors
     @test_throws ArgumentError parse("A ~= 5")
-    @test_throws ArgumentError parse("A & 1 == 0")
-    @test_throws ArgumentError parse("A ^ 2 > 3")
+    @test_throws ArgumentError parse("A !~= 5")
+end
+
+@testset "TaQL-lite parser — bitwise unit" begin
+    validnames = Set(["A", "B", "F"])
+    parse(s) = MSv2._taqllite_parse(s, validnames)
+
+    # binary & | ^ build TQLArith nodes
+    @test parse("A & 1 == 0").lhs.op === (&)
+    @test parse("A | 1 == 0").lhs.op === (|)
+    @test parse("A ^ 1 == 0").lhs.op === xor
+    # unary ~
+    @test parse("~A > 0").lhs isa MSv2.TQLBitNot
+    @test parse("~(A & B) > 0").lhs isa MSv2.TQLBitNot
+
+    # precedence: bitwise sits above comparison, below +/-, and | < ^ < &
+    @test parse("A & 1 == 0") isa MSv2.TQLCmp               # (A & 1) == 0
+    e = parse("A | B & 1 == 0").lhs                          # A | ((B & 1))  ... == handled outside
+    @test e.op === (|) && e.rhs.op === (&)
+    @test parse("A + 1 & 2 == 0").lhs.op === (&)             # + binds tighter than &
+    @test parse("A + 1 & 2 == 0").lhs.lhs isa MSv2.TQLArith  #   -> (A+1) & 2
+
+    # `**` is still exponentiation; `^` is no longer a "use **" error
+    @test parse("A ** 2 == 4").lhs.op === (^)
+    @test parse("A ^ 2 == 4").lhs.op === xor
+
+    # `~` before a p/m/f literal is still a pattern match, not bitnot
+    @test parse("F ~ p/x/") isa MSv2.TQLMatch
 end
 
 @testset "TaQL-lite pattern -> regex helpers" begin
@@ -1186,6 +1212,28 @@ end
     @test query(t, "(A BETWEEN 2 AND 4) OR A == 10 ORDER BY A DESC").rows == [10, 4, 3, 2]
 end
 
+# ---- Phase 46: bitwise operators ------------------------------------
+
+@testset "TaQL-lite query — bitwise" begin
+    dir = joinpath(mktempdir(), "bw.tab")
+    A = Int32.(1:15)
+    B = Int32.(fill(6, 15))
+    F = [isodd(i) for i in 1:15]
+    write_table(dir, "T", Pair{String,Any}["A" => A, "B" => B, "F" => F]; nrow=15)
+    t = readtable(dir)
+
+    @test query(t, "A & 1 == 0").rows == [i for i in 1:15 if iseven(A[i])]
+    @test query(t, "A | 8 > 12").rows == [i for i in 1:15 if (A[i] | 8) > 12]
+    @test query(t, "A ^ B == 0").rows == [i for i in 1:15 if xor(A[i], 6) == 0]  # A == 6
+    @test query(t, "~A > -6").rows == [i for i in 1:15 if (~A[i]) > -6]          # A in 1..4
+    @test query(t, "~F").rows == [i for i in 1:15 if !F[i]]
+    # precedence: (A & 3) | 4, then == ; and + binds tighter than &
+    @test query(t, "A & 3 | 4 == 5").rows == [i for i in 1:15 if ((A[i] & 3) | 4) == 5]
+    @test query(t, "A + 1 & 6 == 6").rows == [i for i in 1:15 if ((A[i] + 1) & 6) == 6]
+    # composes with AND / arithmetic
+    @test query(t, "A & 1 == 1 AND A > 8").rows == [i for i in 1:15 if isodd(A[i]) && A[i] > 8]
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite query — real TaQL cross-check" begin
         d = mktempdir(); pdir = joinpath(d, "T")
@@ -1214,7 +1262,12 @@ if _HAVE_TAQL
                          "C == 'x'", "NOT (A > 10)", "A IN [1,5,10,20]",
                          "A BETWEEN 5 AND 12", "A NOT BETWEEN 5 AND 12",
                          "A BETWEEN 5 AND 12 OR A == 18",
-                         "B BETWEEN A - 1 AND A")
+                         "B BETWEEN A - 1 AND A",
+                         # Phase 46: bitwise (A is Int32) -- pins precedence
+                         # (bitwise above comparison, | < ^ < & < + -) and
+                         # ^ == xor / ~ == bitnot against real TaQL
+                         "A & 1 == 0", "A | 8 > 12", "A ^ 3 == 0",
+                         "~A > -6", "A & 3 | 4 == 5", "A + 1 & 6 == 6")
             @test query(t, wherestr).rows == _taql_rows(wherestr)
         end
 

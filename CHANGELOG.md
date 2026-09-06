@@ -548,10 +548,10 @@ A `taql(target, "…")` string-command dispatcher wraps all four:
 be constant expressions).
 
 Still, across Phases 22–31 (array indexing landed in Phase 42,
-`BETWEEN` in Phase 43): no bitwise operators (`& | ^ ~`), `~=`, units,
-date/time or measures functions, `GROUP BY ROLLUP`, the `gs*`
-per-element aggregates, a general M:N cross-product join, `INSERT
-LIMIT`, or `UPDATE` array-slice assignment.
+`BETWEEN` in Phase 43, bitwise in Phase 46): no `~=`, units, date/time
+or measures functions, `GROUP BY ROLLUP`, the `gs*` per-element
+aggregates, a general M:N cross-product join, `INSERT LIMIT`, or
+`UPDATE` array-slice assignment.
 
 ### Phase 32 — docs / consolidation pass
 
@@ -767,3 +767,15 @@ the row/dimension assertions were made relative to `nrow(t)` so both
 work. (`FLAG_CATEGORY` / `WEIGHT_SPECTRUM` are defined-but-never-written
 in the source and don't survive a `copyms`; the fixture re-adds the
 schema-required `FLAG_CATEGORY` as an empty column.)
+
+### Phase 46 — TaQL-lite bitwise operators
+
+Binary `&` `|` `^` and unary `~`, in every TaQL-lite expression surface.
+Integer bitwise semantics; elementwise over an array cell. Precedence
+matches casacore: above comparisons, below `+`/`-`, with `|` < `^` < `&`.
+`^` is **xor** (not exponentiation) — `**` stays for power; the old
+"`^` is not supported, use `**`" error is gone. A bare `~` before a
+`p/…/` `m/…/` `f/…/` literal is still the glob/regex match operator (the
+tokenizer only treats `~` as bitnot when no pattern literal follows).
+Verified against real TaQL via `tableCommand` (precedence, `^`=xor,
+`~`=bitnot all agree).

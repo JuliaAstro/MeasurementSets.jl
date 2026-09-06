@@ -13,14 +13,15 @@
 # accepted by real TaQL (verified against `tables/TaQL/TableGram.{ll,yy}`'s
 # lexer + grammar -- `==`/`=`/`!=`/`<>`/`<`/`<=`/`>`/`>=`, `AND`/`&&`,
 # `OR`/`||`, `NOT`/`!`, `IN [...]`, arithmetic `+ - * / % // **`,
-# `LIKE`/`ILIKE`, the `~`/`!~` glob/regex operator, and a trailing
-# `ORDER BY`, all case-insensitive keyword forms). Not supported (see
-# the Phase 22/24 plan non-goals): bitwise operators (`& | ^ ~`),
-# `~=` approximate equality, boolean-mask array subscripts, units,
-# date/time or measures functions, computed output columns.
+# bitwise `& | ^` + unary `~`, `LIKE`/`ILIKE`, the `~`/`!~` glob/regex
+# operator, and a trailing `ORDER BY`, all case-insensitive keyword
+# forms). Not supported (see the Phase 22/24 plan non-goals): `~=`
+# approximate equality, boolean-mask array subscripts, units, date/time
+# or measures functions, computed output columns.
 # (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
 # 1-based, with negative-from-end and `end` -- landed in Phase 42/44;
-# `BETWEEN` / `NOT BETWEEN` in Phase 43.)
+# `BETWEEN` / `NOT BETWEEN` in Phase 43; bitwise ops -- `^` is xor, use
+# `**` for power -- in Phase 46.)
 #
 # Phase 23 adds ORDER BY (bare column references only, optional per-key
 # ASC/DESC -- verified against the `sortlist`/`sortexpr` grammar; no
@@ -115,6 +116,9 @@ struct TQLBetween <: TQLExpr        # x BETWEEN lo AND hi (inclusive both ends);
     negate::Bool
 end
 struct TQLEnd <: TQLExpr end         # `end` inside a subscript -> that axis's length
+struct TQLBitNot <: TQLExpr          # unary `~` (bitwise NOT)
+    a::TQLExpr
+end
 
 # Arithmetic and comparison broadcast over an array-cell operand (TaQL
 # semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
@@ -133,6 +137,7 @@ _tqleval(e::TQLNot, cols, i) = !_tqleval(e.a, cols, i)
 _tqleval(e::TQLIn, cols, i) = _tqleval(e.lhs, cols, i) in e.vals
 _tqleval(e::TQLArith, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLNeg, cols, i) = _bcast(-, _tqleval(e.a, cols, i))
+_tqleval(e::TQLBitNot, cols, i) = _bcast((~), _tqleval(e.a, cols, i))
 _tqleval(e::TQLMatch, cols, i) =
     xor(occursin(e.regex, _tqleval(e.lhs, cols, i)::AbstractString), e.negate)
 _tqleval(e::TQLFunc, cols, i) =
@@ -204,6 +209,7 @@ _tqlrefs!(seen, e::TQLNot) = _tqlrefs!(seen, e.a)
 _tqlrefs!(seen, e::TQLIn) = _tqlrefs!(seen, e.lhs)
 _tqlrefs!(seen, e::TQLArith) = (_tqlrefs!(seen, e.lhs); _tqlrefs!(seen, e.rhs))
 _tqlrefs!(seen, e::TQLNeg) = _tqlrefs!(seen, e.a)
+_tqlrefs!(seen, e::TQLBitNot) = _tqlrefs!(seen, e.a)
 _tqlrefs!(seen, e::TQLMatch) = _tqlrefs!(seen, e.lhs)
 _tqlrefs!(seen, e::TQLFunc) = foreach(a -> _tqlrefs!(seen, a), e.args)
 _tqlrefs!(seen, ::TQLRowNum) = nothing
@@ -236,6 +242,7 @@ _has_aggr(e::TQLAnd) = _has_aggr(e.a) || _has_aggr(e.b)
 _has_aggr(e::TQLOr) = _has_aggr(e.a) || _has_aggr(e.b)
 _has_aggr(e::TQLNot) = _has_aggr(e.a)
 _has_aggr(e::TQLNeg) = _has_aggr(e.a)
+_has_aggr(e::TQLBitNot) = _has_aggr(e.a)
 _has_aggr(e::TQLIn) = _has_aggr(e.lhs)
 _has_aggr(e::TQLMatch) = _has_aggr(e.lhs)
 _has_aggr(e::TQLFunc) = any(_has_aggr, e.args)
@@ -257,9 +264,10 @@ struct TQLToken
                       # (; flavor::Symbol, pattern::String, icase::Bool); else nothing
 end
 
-# comparison/logical/match operator chars -- grouped into one token
-# (`==`, `!=`, `<>`, `<=`, `>=`, `&&`, `||`, `~`, `!~`, ...).  `~` is
-# here (not a bitwise op in this subset) so `!~` lexes as one token.
+# comparison / logical / match / bitwise operator chars -- grouped into
+# one token (`==`, `!=`, `<>`, `<=`, `>=`, `&&`, `||`, `&`, `|`, `~`,
+# `!~`, ...). Bare `&`/`|` are bitwise; `~` is bitwise-not or (before a
+# `p/m/f` pattern literal) the glob/regex match operator.
 const _TQL_OPCHARS = "=!<>&|~"
 # `~ <flavor><delim>pattern<delim>[i]` literal delimiters / flavors.
 const _TQL_PAT_DELIMS = "/%@"
@@ -332,7 +340,11 @@ function _taqllite_tokenize(s::AbstractString)
             optext = join(cs[i:j-1])
             push!(toks, TQLToken(:op, optext, nothing))
             i = j
-            if optext == "~" || optext == "!~"
+            # `!~` is always a pattern match. Bare `~` is a pattern match
+            # only when a `p/…/` `m/…/` `f/…/` literal follows; otherwise it
+            # stays a bare `:op` token (unary bitwise NOT, or -- infix with
+            # no pattern -- a parse error).
+            if optext == "!~" || (optext == "~" && _patlit_ahead(cs, i, n))
                 i = _read_patlit!(toks, cs, i, n, s)
             end
         else
@@ -344,6 +356,13 @@ function _taqllite_tokenize(s::AbstractString)
 end
 
 _isdigit_at(cs, j, n) = j <= n && isdigit(cs[j])
+
+# does a `p/…/` `m/…/` `f/…/` pattern literal start at `cs[i]` (after
+# optional whitespace)? -- distinguishes `A ~ p/x/` from unary `~A`.
+function _patlit_ahead(cs, i, n)
+    while i <= n && isspace(cs[i]); i += 1; end
+    i + 1 <= n && haskey(_TQL_PAT_FLAVORS, cs[i]) && cs[i+1] in _TQL_PAT_DELIMS
+end
 
 # Consume a `~`/`!~` pattern literal: optional space, a flavor char
 # (`p` glob / `m` partial regex / `f` full regex), a delimiter (`/ % @`),
@@ -469,16 +488,14 @@ const _TQL_ARITHOPS = Dict{String,Function}(
 # operator tokens this subset deliberately rejects, with a clear message
 const _TQL_REJECTED_OPS = Dict{String,String}(
     "~=" => "approximate equality (`~=`) is not supported",
-    "!~=" => "approximate inequality (`!~=`) is not supported",
-    "&" => "bitwise operators (`& | ^ ~`) are not supported",
-    "|" => "bitwise operators (`& | ^ ~`) are not supported")
+    "!~=" => "approximate inequality (`!~=`) is not supported")
 
 function _parse_comparison!(p::TQLParser)
-    lhs = _parse_addsub!(p)
+    lhs = _parse_bitor!(p)
     t = _peek(p)
     if t.kind === :op && haskey(_TQL_CMPOPS, t.text)
         _advance!(p)
-        return TQLCmp(_TQL_CMPOPS[t.text], lhs, _parse_addsub!(p))
+        return TQLCmp(_TQL_CMPOPS[t.text], lhs, _parse_bitor!(p))
     elseif t.kind === :op && haskey(_TQL_REJECTED_OPS, t.text)
         throw(ArgumentError("TaQL-lite: $(_TQL_REJECTED_OPS[t.text]) in \"$(p.src)\""))
     elseif _iskw(t, "IN")
@@ -530,22 +547,52 @@ end
 # before control returns to `_parse_and!`. `lo`/`hi` are arithexpr-level
 # (casacore `arithexpr BETWEEN arithexpr AND arithexpr`).
 function _parse_between!(p::TQLParser, lhs::TQLExpr, negate::Bool)
-    lo = _parse_addsub!(p)
+    lo = _parse_bitor!(p)
     _iskw(_peek(p), "AND") || throw(ArgumentError(
         "TaQL-lite: expected `AND` after `BETWEEN <lo>` in \"$(p.src)\""))
     _advance!(p)
-    hi = _parse_addsub!(p)
+    hi = _parse_bitor!(p)
     return TQLBetween(lhs, lo, hi, negate)
 end
 
 function _parse_like!(p::TQLParser, lhs::TQLExpr, icase::Bool, negate::Bool)
-    rhs = _parse_addsub!(p)
+    rhs = _parse_bitor!(p)
     rhs isa TQLLit && rhs.value isa AbstractString || throw(ArgumentError(
         "TaQL-lite: LIKE/ILIKE needs a string-literal pattern in \"$(p.src)\""))
     return TQLMatch(lhs, _sqlpattern_regex(rhs.value, icase), negate)
 end
 
-# ---- arithmetic precedence layers (addsub < muldiv < unary < power) ----
+# ---- "arithexpr" precedence layers, low to high (casacore order):
+#      bitor < bitxor < bitand < addsub < muldiv < unary < power.
+#      `_parse_bitor!` is the arithexpr entry point (comparisons, BETWEEN,
+#      LIKE, IN, array subscripts all bottom out here).
+
+function _parse_bitor!(p::TQLParser)
+    a = _parse_bitxor!(p)
+    while (t = _peek(p); t.kind === :op && t.text == "|")   # not "||"
+        _advance!(p)
+        a = TQLArith((|), a, _parse_bitxor!(p))
+    end
+    return a
+end
+
+function _parse_bitxor!(p::TQLParser)
+    a = _parse_bitand!(p)
+    while (t = _peek(p); t.kind === :arithop && t.text == "^")
+        _advance!(p)
+        a = TQLArith(xor, a, _parse_bitand!(p))
+    end
+    return a
+end
+
+function _parse_bitand!(p::TQLParser)
+    a = _parse_addsub!(p)
+    while (t = _peek(p); t.kind === :op && t.text == "&")   # not "&&"
+        _advance!(p)
+        a = TQLArith((&), a, _parse_addsub!(p))
+    end
+    return a
+end
 
 function _parse_addsub!(p::TQLParser)
     a = _parse_muldiv!(p)
@@ -577,6 +624,9 @@ function _parse_unary!(p::TQLParser)
     elseif t.kind === :arithop && t.text == "+"
         _advance!(p)
         return _parse_unary!(p)
+    elseif t.kind === :op && t.text == "~"          # unary bitwise NOT
+        _advance!(p)
+        return TQLBitNot(_parse_unary!(p))
     end
     return _parse_power!(p)
 end
@@ -587,11 +637,8 @@ function _parse_power!(p::TQLParser)
     if t.kind === :arithop && t.text == "**"
         _advance!(p)
         return TQLArith(^, base, _parse_unary!(p))   # right-assoc
-    elseif t.kind === :arithop && t.text == "^"
-        throw(ArgumentError("TaQL-lite: `^` (bitwise xor) is not supported; " *
-                            "use `**` for exponentiation in \"$(p.src)\""))
     end
-    return base
+    return base                                       # `^` handled at _parse_bitxor!
 end
 
 # accepts an optional leading unary minus so `IN [-1, 2]` works
@@ -638,14 +685,14 @@ function _parse_axis!(p::TQLParser)
     t = _peek(p)
     (t.kind === :comma || t.kind === :rbracket) &&
         return (; lo=nothing, hi=nothing, step=nothing)
-    lo = t.kind === :colon ? nothing : _parse_addsub!(p)
+    lo = t.kind === :colon ? nothing : _parse_bitor!(p)
     _peek(p).kind === :colon || return lo                     # scalar index
     _advance!(p)                                              # first ':'
-    hi = _peek(p).kind in (:colon, :comma, :rbracket) ? nothing : _parse_addsub!(p)
+    hi = _peek(p).kind in (:colon, :comma, :rbracket) ? nothing : _parse_bitor!(p)
     step = nothing
     if _peek(p).kind === :colon
         _advance!(p)
-        step = _peek(p).kind in (:comma, :rbracket) ? nothing : _parse_addsub!(p)
+        step = _peek(p).kind in (:comma, :rbracket) ? nothing : _parse_bitor!(p)
     end
     return (; lo, hi, step)
 end
@@ -1023,10 +1070,11 @@ own `select=`. Returns a `RefTable` (no data copied); persist it with
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
-bitwise operators, `~=` approximate equality, boolean-mask array
-subscripts, units, or date/time / measures functions.  Supported:
-1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
-`UVW[-1]`, `V[end-2:end,1]`) and `BETWEEN` / `NOT BETWEEN` (inclusive).
+`~=` approximate equality, boolean-mask array subscripts, units, or
+date/time / measures functions.  Supported: 1-based array element/slice
+indexing (`DATA[1,1]`, `V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`),
+`BETWEEN` / `NOT BETWEEN` (inclusive), and bitwise `& | ^ ~` (`^` is
+xor -- use `**` for exponentiation).
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
@@ -1110,6 +1158,7 @@ _geval(e::TQLLit, cols, g) = e.value
 _geval(e::TQLCmp, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
 _geval(e::TQLArith, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
 _geval(e::TQLNeg, cols, g) = _bcast(-, _geval(e.a, cols, g))
+_geval(e::TQLBitNot, cols, g) = _bcast((~), _geval(e.a, cols, g))
 _geval(e::TQLAnd, cols, g) = _geval(e.a, cols, g) && _geval(e.b, cols, g)
 _geval(e::TQLOr, cols, g) = _geval(e.a, cols, g) || _geval(e.b, cols, g)
 _geval(e::TQLNot, cols, g) = !_geval(e.a, cols, g)
