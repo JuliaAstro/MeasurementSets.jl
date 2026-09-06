@@ -169,14 +169,28 @@ end
 # range axis `lo:hi:step` (casacore's start:end:step) maps to Julia's
 # `lo:step:hi`; a missing lo/hi/step defaults to 1 / size(arr,k) / 1;
 # fewer subscripts than ndims => trailing axes taken whole.
-function _tql_do_index(arr, axes, ev)
+function _tql_index_tuple(arr, axes, ev)
     arr isa AbstractArray || throw(ArgumentError(
         "TaQL-lite: cannot index a scalar value with `[...]`"))
     nd = ndims(arr)
     length(axes) <= nd || throw(ArgumentError(
         "TaQL-lite: $(length(axes)) subscripts for a $(nd)-D array cell"))
-    idx = Any[k <= length(axes) ? _tql_axis(axes[k], arr, k, ev) : Colon() for k in 1:nd]
-    return arr[idx...]
+    return ntuple(k -> k <= length(axes) ? _tql_axis(axes[k], arr, k, ev) : Colon(), nd)
+end
+
+_tql_do_index(arr, axes, ev) = arr[_tql_index_tuple(arr, axes, ev)...]
+
+# write `rhs` into `arr` at the resolved index tuple (used by `update!`
+# for `SET col[subscripts] = expr`): a plain assign when every axis is a
+# scalar index, otherwise a broadcast (a scalar RHS fills the slice, a
+# conforming array RHS is assigned elementwise).
+function _slice_assign!(arr, idx::Tuple, rhs)
+    if all(i -> i isa Integer, idx)
+        arr[idx...] = rhs
+    else
+        arr[idx...] .= rhs
+    end
+    return arr
 end
 
 function _tql_axis(ax, arr, k::Int, ev)

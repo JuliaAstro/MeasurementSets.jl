@@ -21,25 +21,41 @@ Change column values in the CTDS table at `target` (a path or an open
 `Table` / `subtable(ms, …)`). `set` is `"COL" => "expr"` pairs — each
 `expr` a TaQL-lite expression over the row's columns, **evaluated
 against the pre-update values** (so `set = ["A" => "B", "B" => "A"]`
-swaps). `where` is a TaQL-lite WHERE string, a `row -> Bool` closure, or
-`nothing` (every row). Returns the number of rows changed.
+swaps). The `set` key may also be an array-slice target,
+`"COL[subscripts]" => "expr"` (TaQL's `UPDATE … SET NAME[i,j] = …`) —
+1-based, `end`-relative and range subscripts allowed (as in
+[`query`](@ref)) — which writes only that sub-region of the cell,
+leaving the rest untouched; a scalar RHS fills the slice. `where` is a
+TaQL-lite WHERE string, a `row -> Bool` closure, or `nothing` (every
+row). Returns the number of rows changed.
 """
 function update!(target; set::AbstractVector{<:Pair}, where=nothing)
     path = _cmd_path(target)
     rd = readtable(path)
     vn = Set(columnnames(rd))
-    pairs = Tuple{String,Any}[(String(first(p)), _taqllite_parse(String(last(p)), vn))
-                              for p in set]
-    isempty(pairs) && throw(ArgumentError("update!: `set` must not be empty"))
-    for (c, a) in pairs
-        c in vn || throw(ArgumentError("update!: no column \"$c\""))
-        !_has_aggr(a) ||
-            throw(ArgumentError("update!: SET expression for \"$c\" must not aggregate"))
+    isempty(set) && throw(ArgumentError("update!: `set` must not be empty"))
+
+    # each entry: (colname, axes | nothing, rhs_ast)
+    specs = Tuple{String,Any,Any}[]
+    for p in set
+        lhs = _taqllite_parse(String(first(p)), vn)
+        rhs = _taqllite_parse(String(last(p)), vn)
+        !_has_aggr(rhs) ||
+            throw(ArgumentError("update!: SET expression \"$(last(p))\" must not aggregate"))
+        if lhs isa TQLCol
+            push!(specs, (lhs.name, nothing, rhs))
+        elseif lhs isa TQLIndex && lhs.base isa TQLCol
+            push!(specs, (lhs.base.name, lhs.axes, rhs))
+        else
+            throw(ArgumentError(
+                "update!: SET target \"$(first(p))\" must be a column or COL[subscripts]"))
+        end
     end
 
-    needed = Set{String}(first.(pairs))
-    for (_, a) in pairs
+    needed = Set{String}(s[1] for s in specs)
+    for (_, axes, a) in specs
         _tqlrefs!(needed, a)
+        axes === nothing || _axes_refs!(needed, axes)
     end
     if where isa AbstractString
         union!(needed, _tql_where_refs(where, rd))
@@ -51,19 +67,70 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
     rows = _where_rows(rd, where, cols)
     isempty(rows) && return 0
     nr = nrow(rd)
+
+    sliced = Set(s[1] for s in specs if s[2] !== nothing)
+    fullcols = Dict{String,AbstractVector}()
+    if !isempty(sliced)
+        rdf = readtable(path; precision=:full)
+        for c in sliced
+            fullcols[c] = column(rdf, c)
+        end
+    end
+
+    # group specs by target column, preserving order
+    bycol = Pair{String,Vector{Tuple{Any,Any}}}[]
+    for (c, axes, a) in specs
+        i = findfirst(kv -> first(kv) == c, bycol)
+        i === nothing ? push!(bycol, c => Tuple{Any,Any}[(axes, a)]) :
+                        push!(last(bycol[i]), (axes, a))
+    end
+
     edit(path) do t
-        for (c, a) in pairs
-            if where === nothing
-                t[c][:] = [_tqleval(a, cols, i) for i in 1:nr]
+        for (c, ops) in bycol
+            if length(ops) == 1 && ops[1][1] === nothing
+                a = ops[1][2]
+                if where === nothing
+                    t[c][:] = [_tqleval(a, cols, i) for i in 1:nr]
+                else
+                    ec = t[c]
+                    for i in rows
+                        ec[i] = _tqleval(a, cols, i)
+                    end
+                end
             else
                 ec = t[c]
+                base = get(fullcols, c, nothing)
                 for i in rows
-                    ec[i] = _tqleval(a, cols, i)
+                    cur = nothing
+                    for (axes, a) in ops
+                        ev = x -> _tqleval(x, cols, i)
+                        if axes === nothing
+                            cur = _tqleval(a, cols, i)
+                        else
+                            cur === nothing && (cur = copy(base[i]))
+                            _slice_assign!(cur, _tql_index_tuple(cur, axes, ev), ev(a))
+                        end
+                    end
+                    ec[i] = cur
                 end
             end
         end
     end
     return length(rows)
+end
+
+# collect column names referenced inside array-subscript axis expressions
+function _axes_refs!(seen, axes)
+    for ax in axes
+        if ax isa NamedTuple
+            for x in (ax.lo, ax.hi, ax.step)
+                x === nothing || _tqlrefs!(seen, x)
+            end
+        else
+            _tqlrefs!(seen, ax)
+        end
+    end
+    return seen
 end
 
 """
@@ -214,9 +281,9 @@ function taql(target, command::AbstractString)
         m === nothing && throw(ArgumentError("taql: malformed UPDATE command"))
         set = Pair{String,String}[]
         for piece in _split_commas(m.captures[1])
-            am = match(r"^(\w+)\s*=\s*(.+)$"s, piece)
+            am = match(r"^(\w+(?:\[.*\])?)\s*=\s*(.+)$"s, piece)
             am === nothing && throw(ArgumentError("taql: malformed SET assignment \"$piece\""))
-            push!(set, String(am.captures[1]) => String(strip(am.captures[2])))
+            push!(set, String(strip(am.captures[1])) => String(strip(am.captures[2])))
         end
         return update!(target; set, where=m.captures[2] === nothing ? nothing : String(strip(m.captures[2])))
     elseif kw == "DELETE"

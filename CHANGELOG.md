@@ -867,3 +867,19 @@ limit` rows (also cycling), clamped at zero — matching casacore's own
 t …` (prefix); the lite-only `INSERT … SET` form accepts `LIMIT` in
 either position too. Cross-checked against real TaQL for the VALUES
 forms (positive, cycling, prefix, and negative limits).
+
+### Phase 54 — `UPDATE` array-slice assignment
+
+`update!`'s `set` key can now be an array-slice target,
+`"COL[subscripts]" => "expr"` (TaQL's `UPDATE … SET NAME[i,j] = …`) —
+1-based, with `end`-relative and range subscripts as in [`query`](@ref).
+It reads the target cell at full precision, writes only the addressed
+sub-region, and leaves the rest of the cell (and unmatched rows)
+untouched; a scalar RHS fills the slice. Multiple slice assignments to
+one column in a single `update!` are applied in order to the same cell
+(a later one doesn't clobber an earlier one), and a whole-column
+assignment may precede slice assignments to the same column. `taql`'s
+`UPDATE … SET` parses the bracketed LHS. Cross-checked against real TaQL
+for scalar, range, negative-index, and cross-referencing slice RHS.
+Boolean-mask subscripts and the `(col, maskcol) = …` paired form remain
+non-goals.

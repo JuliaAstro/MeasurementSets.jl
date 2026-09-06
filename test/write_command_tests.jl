@@ -257,6 +257,89 @@ end
     @test_throws ArgumentError taql(p5, "INSERT INTO t FROBNICATE")
 end
 
+@testset "update! -- array-slice assignment" begin
+    dir = mktempdir()
+    K = Int32[0, 1, 0, 1]
+    V = [Float64[i i+1 i+2 i+3; i+4 i+5 i+6 i+7; i+8 i+9 i+10 i+11] for i in 1:4]
+    mk(name) = (p = joinpath(dir, name);
+                write_table(p, name, Pair{String,Any}["K" => copy(K), "V" => deepcopy(V)];
+                    nrow=4, tsm=[["V"]]); p)
+
+    # scalar element, WHERE-filtered
+    p1 = mk("s1")
+    @test update!(p1; set=["V[1,1]" => "0.0"], where="K == 1") == 2
+    v1 = column(readtable(p1), "V")
+    @test v1[2][1, 1] == 0.0 && v1[4][1, 1] == 0.0
+    @test v1[1][1, 1] == 1.0 && v1[3][1, 1] == 3.0     # unmatched rows untouched
+    @test v1[2][1, 2] == V[2][1, 2]                    # rest of the cell untouched
+
+    # range subscript, scalar RHS broadcast; all rows
+    p2 = mk("s2")
+    @test update!(p2; set=["V[1:2,3]" => "9.0"]) == 4
+    v2 = column(readtable(p2), "V")
+    @test v2[1][:, 3] == [9.0, 9.0, V[1][3, 3]]
+
+    # end-relative
+    p3 = mk("s3")
+    update!(p3; set=["V[end,1]" => "-1.0"])
+    @test column(readtable(p3), "V")[1][3, 1] == -1.0
+
+    # RHS references another slice of the same column (pre-update value)
+    p4 = mk("s4")
+    update!(p4; set=["V[1,1]" => "V[2,2] + 1.0"])
+    v4 = column(readtable(p4), "V")
+    @test v4[1][1, 1] == V[1][2, 2] + 1.0
+
+    # sequential SET on one cell: the second does not clobber the first
+    p5 = mk("s5")
+    update!(p5; set=["V[1,1]" => "1.0", "V[2,2]" => "2.0"])
+    v5 = column(readtable(p5), "V")[1]
+    @test v5[1, 1] == 1.0 && v5[2, 2] == 2.0 && v5[2, 1] == V[1][2, 1]
+
+    # whole-column then slice on the same column
+    p6 = mk("s6")
+    update!(p6; set=["V" => "V * 0.0", "V[1,1]" => "5.0"])
+    v6 = column(readtable(p6), "V")[2]
+    @test v6[1, 1] == 5.0 && all(v6[2:end, :] .== 0.0)
+
+    # errors
+    p7 = mk("s7")
+    @test_throws ArgumentError update!(p7; set=["V[1,1,1]" => "0.0"])
+    @test_throws ArgumentError update!(p7; set=["5" => "0.0"])
+
+    # taql string form
+    p8 = mk("s8")
+    @test taql(p8, "UPDATE t SET V[1,1] = 0.0 WHERE K == 1") == 2
+    @test column(readtable(p8), "V")[2][1, 1] == 0.0
+    p9 = mk("s9")
+    @test taql(p9, "UPDATE t SET V[1:2,3] = 9.0, K = 5") == 4
+    t9 = readtable(p9)
+    @test column(t9, "V")[1][:, 3] == [9.0, 9.0, V[1][3, 3]]
+    @test all(column(t9, "K")[:] .== 5)
+end
+
+if _HAVE_TAQL
+    @testset "update! -- array-slice real TaQL cross-check" begin
+        for slice_cmd in ("V[1,1] = 0.0",
+                          "V[1:2,3] = 9.0",
+                          "V[2,2] = V[1,1] + 1.0",
+                          "V[-1,1] = -5.0")
+            d = mktempdir()
+            V = [Float64[i i+1 i+2 i+3; i+4 i+5 i+6 i+7; i+8 i+9 i+10 i+11] for i in 1:5]
+            for nm in ("ours", "ref")
+                write_table(joinpath(d, nm), nm, Pair{String,Any}["V" => deepcopy(V)];
+                    nrow=5, tsm=[["V"]])
+            end
+            lhs, rhs = split(slice_cmd, " = "; limit=2)
+            update!(joinpath(d, "ours"); set=[String(lhs) => String(strip(rhs))])
+            _taqlcmd("UPDATE \$1 SET $slice_cmd", joinpath(d, "ref"))
+            vo = column(readtable(joinpath(d, "ours")), "V")
+            vr = column(readtable(joinpath(d, "ref")), "V")
+            @test all(vo[i] ≈ vr[i] for i in 1:5)
+        end
+    end
+end
+
 @testset "insert! -- LIMIT" begin
     dir = mktempdir()
     mk(name) = (p = joinpath(dir, name);
