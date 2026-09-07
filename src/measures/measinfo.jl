@@ -96,21 +96,25 @@ The reference-frame name for one row: the fixed `Ref`, or the
 `VarRefCol` companion column's code for that row mapped through
 `TabRefCodes` -> `TabRefTypes` (or the fixed enum order).
 """
+# a per-row `VarRefCol` code -> its reference-frame name
+function _ref_from_code(mi::MeasInfo, code::Integer)
+    c = Int(code)
+    if !isempty(mi.tabcodes)
+        i = findfirst(==(c), mi.tabcodes)
+        i === nothing && throw(ArgumentError("MEASINFO ref code $c not in TabRefCodes"))
+        return mi.tabtypes[i]
+    end
+    enum = get(_MEAS_ENUM, mi.kind, String[])
+    0 <= c < length(enum) || throw(ArgumentError(
+        "MEASINFO ref code $c out of range for $(mi.kind)"))
+    return enum[c + 1]
+end
+
 function _ref_string(mi::MeasInfo, t::AbstractTable, col::AbstractString, row::Integer)
     mi.fixedref !== nothing && return mi.fixedref
     mi.varrefcol === nothing && throw(ArgumentError(
         "column \"$col\": MEASINFO has neither Ref nor VarRefCol"))
-    code = Int(getcell(t, mi.varrefcol, row))
-    if !isempty(mi.tabcodes)
-        i = findfirst(==(code), mi.tabcodes)
-        i === nothing && throw(ArgumentError(
-            "column \"$col\": ref code $code not in TabRefCodes"))
-        return mi.tabtypes[i]
-    end
-    enum = get(_MEAS_ENUM, mi.kind, String[])
-    0 <= code < length(enum) || throw(ArgumentError(
-        "column \"$col\": ref code $code out of range for $(mi.kind)"))
-    return enum[code + 1]
+    _ref_from_code(mi, getcell(t, mi.varrefcol, row))
 end
 
 _frame_type(kind::Symbol, s::AbstractString) =

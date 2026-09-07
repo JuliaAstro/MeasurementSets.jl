@@ -77,7 +77,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
     elseif where isa Function
         union!(needed, columnnames(rd))
     end
-    cols = Dict{String,AbstractVector}(n => column(rd, n) for n in needed)
+    cols = Dict{String,AbstractVector}(n => _load_col(column(rd, n)) for n in needed)
 
     rows = _where_rows(rd, where, cols)
     isempty(rows) && return 0
@@ -210,7 +210,7 @@ function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing
         where isa Function ? columnnames(rd) :
         where isa AbstractString ? collect(_tql_where_refs(where, rd)) :
         String[]
-    cols = Dict{String,AbstractVector}(n => column(rd, n) for n in names)
+    cols = Dict{String,AbstractVector}(n => _load_col(column(rd, n)) for n in names)
     rows = _where_rows(rd, where, cols)
     isempty(rows) && return 0
     edit(path) do t

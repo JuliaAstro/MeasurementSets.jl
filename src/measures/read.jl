@@ -22,8 +22,21 @@ function measure(t::AbstractTable, col::AbstractString, row::Integer)
     _wrap_measure(mi.kind, R, getcell(t, col, row), mi)
 end
 
-measure(t::AbstractTable, col::AbstractString) =
-    [measure(t, col, r) for r in 1:nrow(t)]
+# whole-column: parse MEASINFO once and bulk-read the value column (and,
+# for a per-row `VarRefCol`, the code column) instead of going cell by
+# cell / re-parsing the keyword per row.
+function measure(t::AbstractTable, col::AbstractString)
+    mi = measinfo(t, col)
+    mi === nothing && throw(ArgumentError("column \"$col\" has no MEASINFO keyword"))
+    vals = column(t, col)[:]
+    if mi.fixedref !== nothing
+        R = _frame_type(mi.kind, mi.fixedref)
+        return [_wrap_measure(mi.kind, R, v, mi) for v in vals]
+    end
+    codes = column(t, mi.varrefcol)[:]
+    return [_wrap_measure(mi.kind, _frame_type(mi.kind, _ref_from_code(mi, codes[i])),
+                          vals[i], mi) for i in eachindex(vals)]
+end
 
 # seconds -> MJD days for an epoch value (casacore stores epoch as an
 # MJD in the QuantumUnits, almost always "s").

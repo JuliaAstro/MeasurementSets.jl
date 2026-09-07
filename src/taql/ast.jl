@@ -139,6 +139,15 @@ end
 _bcast(f, x) = x isa AbstractArray ? f.(x) : f(x)
 _bcast(f, x, y) = (x isa AbstractArray || y isa AbstractArray) ? f.(x, y) : f(x, y)
 
+# Materialise a (lazy) *scalar* column once, so a WHERE / group /
+# aggregate loop indexes a dense `Vector` per row rather than re-decoding
+# a storage-manager cell by cell.  A `GroupedTable` column is already a
+# `Vector` (no needless copy); an array-valued column stays lazy so a
+# predicate over a huge cube column (`mean(abs(DATA)) > x`) still streams
+# rather than trying to hold the whole column in memory.
+_load_col(c::Vector) = c
+_load_col(c::AbstractVector) = eltype(c) <: AbstractArray ? c : c[:]
+
 # --- masked arrays (TaQL `MArray`): data + a Bool mask, `true` = invalid.
 # Produced by `V[boolexpr]`, `marray(d, m)`, and a masked reduction's
 # argument; reductions skip masked elements, arithmetic unions the masks.

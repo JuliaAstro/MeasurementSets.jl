@@ -261,7 +261,7 @@ function query(t::AbstractTable, wherestr::AbstractString;
     for k in orderby
         push!(needed, k.name)
     end
-    cols = Dict(n => column(t, n) for n in needed)
+    cols = Dict(n => _load_col(column(t, n)) for n in needed)
     matched = ast === nothing ? collect(1:nrow(t)) :
               [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
     matched = _apply_orderby(matched, orderby, cols)
@@ -313,7 +313,7 @@ function query(f::Function, t::AbstractTable;
     orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(t, o) for o in orderby]
     extra = [k.name for k in orderkeys if !(k.name in names)]
     allnames = vcat(collect(names), extra)
-    allcols = AbstractVector[column(t, n) for n in allnames]
+    allcols = AbstractVector[_load_col(column(t, n)) for n in allnames]
     rows = CTDSRows(allcols, Symbol.(allnames), nrow(t))
     matched = [i for (i, row) in enumerate(rows) if f(row)]
     cols_by_name = Dict(n => c for (n, c) in zip(allnames, allcols))

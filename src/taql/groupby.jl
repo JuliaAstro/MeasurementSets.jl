@@ -315,7 +315,7 @@ function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
     elseif anyclosure
         union!(needed, columnnames(t))
     end
-    loaded = Dict{String,AbstractVector}(n => column(t, n) for n in needed)
+    loaded = Dict{String,AbstractVector}(n => _load_col(column(t, n)) for n in needed)
 
     rows =
         wherearg === nothing ? collect(1:nrow(t)) :

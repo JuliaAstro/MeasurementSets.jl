@@ -1146,3 +1146,24 @@ The stale `Paul Barrett` owner in the README CI badge and the `docs/make.jl`
   JuliaAstro convention.
 
 No source or test changes; the suite is unchanged at 2591.
+
+### Performance — bulk column reads in the query engine and `measure`
+
+Two hot paths were re-decoding storage-manager cells one at a time inside
+a per-row loop:
+
+- **`measure(t, col)`** (whole-column) re-parsed the `MEASINFO` keyword
+  and re-resolved the frame *every row*, and read the value cell by cell.
+  Now it parses once and bulk-reads the value column (and the `VarRefCol`
+  code column) via the column's own whole-column fast path.
+- **`query` / `groupby` / `update!` / `delete!`** loaded the columns a
+  `WHERE` / `GROUP BY` / `SET`-RHS touches as lazy `Column`s and indexed
+  `col[i]` per row — for an `IncrementalStMan` column (most MAIN
+  metadata: `TIME`, `FIELD_ID`, `SCAN_NUMBER`, …) that re-walks the
+  bucket index on every access. A new `_load_col` materialises each
+  referenced **scalar** column once before the loop (array-valued
+  columns stay lazy, so a predicate over a big cube column still
+  streams). Orders-of-magnitude faster on a real-sized table; bounded
+  extra memory (a `WHERE` usually references 1–3 scalar columns).
+
+No API or behaviour change.
