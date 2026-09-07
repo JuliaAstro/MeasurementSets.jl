@@ -277,8 +277,8 @@ MAIN table with `ANTENNA` / `FIELD` subtables): `mscal.ha1()` /
 `mscal.azel1()` (`[az, el]`), `mscal.az1()` / `el1()` (scalar),
 `mscal.pa1()` (parallactic angle), `mscal.last1()` (local apparent
 sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
-ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000;
-O(nrow)), `mscal.delay()` (geometric delay, s). The `1` / `2` suffix
+ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000),
+`mscal.delay()` (geometric delay, s). The `1` / `2` suffix
 picks `ANTENNA1` / `ANTENNA2`; no suffix uses antenna 0 (array-centre
 fallback).
 
