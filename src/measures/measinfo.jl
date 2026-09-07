@@ -25,7 +25,19 @@ const _DIRECTION_FRAMES = Dict{String,DataType}(
     "HADEC" => HADEC,
     "AZEL" => AZEL, "AZELNE" => AZEL,
     "AZELGEO" => AZELGEO, "AZELNEGEO" => AZELGEO,
-    "ITRF" => ITRF, "TOPO" => TOPO)
+    "ITRF" => ITRF, "TOPO" => TOPO,
+    # solar-system bodies (casacore MDirection::Types codes >= 32)
+    "MERCURY" => MERCURY, "VENUS" => VENUS, "MARS" => MARS,
+    "JUPITER" => JUPITER, "SATURN" => SATURN, "URANUS" => URANUS,
+    "NEPTUNE" => NEPTUNE, "SUN" => SUN, "MOON" => MOON)
+
+# casacore MDirection body codes: MERCURY = 32 .. SUN = 40, MOON = 41,
+# COMET = 42 (a per-row `VarRefCol` code >= 32 decodes through this, not
+# the 0-based `_DIRECTION_ENUM`).  PLUTO (39) and COMET have no type.
+const _BODY_ENUM = Dict{Int,String}(
+    32 => "MERCURY", 33 => "VENUS", 34 => "MARS", 35 => "JUPITER",
+    36 => "SATURN", 37 => "URANUS", 38 => "NEPTUNE", 39 => "PLUTO",
+    40 => "SUN", 41 => "MOON", 42 => "COMET")
 
 const _MEAS_FRAMES = Dict{Symbol,Dict{String,DataType}}(
     :epoch => Dict(
@@ -120,6 +132,10 @@ function _ref_from_code(mi::MeasInfo, code::Integer)
         i === nothing && throw(ArgumentError("MEASINFO ref code $c not in TabRefCodes"))
         return mi.tabtypes[i]
     end
+    # solar-system-body direction codes live at 32+ (a gap above N_Types)
+    if c >= 32 && mi.kind in (:direction, :uvw, :baseline) && haskey(_BODY_ENUM, c)
+        return _BODY_ENUM[c]
+    end
     enum = get(_MEAS_ENUM, mi.kind, String[])
     0 <= c < length(enum) || throw(ArgumentError(
         "MEASINFO ref code $c out of range for $(mi.kind)"))
@@ -152,6 +168,10 @@ const _FRAME_STRING = Dict{DataType,String}(
     AZEL => "AZEL", AZELGEO => "AZELGEO", ITRF => "ITRF", WGS84 => "WGS84",
     TOPO => "TOPO", REST => "REST", LSRK => "LSRK", LSRD => "LSRD",
     BARY => "BARY", GEO => "GEO", GALACTO => "GALACTO",
+    # solar-system-body direction frames
+    MERCURY => "MERCURY", VENUS => "VENUS", MARS => "MARS",
+    JUPITER => "JUPITER", SATURN => "SATURN", URANUS => "URANUS",
+    NEPTUNE => "NEPTUNE", SUN => "SUN", MOON => "MOON",
     # Doppler conventions -- casacore `showType` spells BETA as "TRUE"
     RADIO => "RADIO", OPTICAL => "OPTICAL", RATIO => "RATIO",
     BETA => "TRUE", GAMMA => "GAMMA")

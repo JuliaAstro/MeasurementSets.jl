@@ -157,13 +157,24 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
 - **Baseline** ([`MBaseline`](@ref)) and **uvw** ([`MuvW`](@ref), the
   `UVW` column): rotated between any direction frame; a `uvw` conversion
   also needs `frame.direction` (the phase centre) for the pole rotation.
+- **Solar-system body** (`SUN` / `MOON` / `MERCURY` / `VENUS` / `MARS`
+  / `JUPITER` / `SATURN` / `URANUS` / `NEPTUNE`): a `FIELD.PHASE_DIR`
+  column can name a body as its frame (a moving target). `measure()`
+  reads it as `MDirection{SUN}` (the stored `(lon, lat)` is a
+  placeholder); `measconvert(MDirection{SUN}(0,0), AZEL; frame)`
+  resolves the body's geocentric apparent place via `SOFA.plan94` /
+  `moon98` — accuracy ~arcsec (Sun / Moon / Venus / Mercury) to ~arcmin
+  (Jupiter / Saturn). The Moon's topocentric parallax is applied when
+  `frame.position` is set. Body frames are source-only (you cannot
+  convert a direction *to* one). `PLUTO`, `COMET` and `MeasComet`
+  ephemeris tables are out of scope.
 
 Backed by the pure-Julia [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl)
 (v2, IAU SOFA port). Without `EarthOrientation.jl` the conversions run at
 ~1 arcsecond (ΔUT1 = 0, no polar motion) with a one-time warning. `J2000`
-is treated as `ICRS` (a ~0.02″ frame-bias simplification). Solar-system
-bodies as direction frames, `MeasComet` / ephemeris tables, and
-pulsar-timing-grade precision are out of scope. TaQL date/time and
+is treated as `ICRS` (a ~0.02″ frame-bias simplification). `MeasComet` /
+ephemeris tables and pulsar-timing-grade precision are out of scope.
+TaQL date/time and
 angle functions landed in the query engine (see above); measures
 *frame-conversion* functions (`mscal.azel()`) remain deferred.
 

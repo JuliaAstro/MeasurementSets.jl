@@ -73,6 +73,18 @@ for frame in ("B1950", "GALACTIC", "APP", "AZEL", "AZELGEO", "HADEC"):
     dparts.append(f"{frame} = ({m['m0']['value']!r}, {m['m1']['value']!r})")
 L.append(f"  direction = ({', '.join(dparts)}),")
 
+# solar-system body directions: <BODY> -> {J2000, AZEL}
+pparts = []
+for body in ("SUN", "MOON", "MERCURY", "VENUS", "MARS", "JUPITER"):
+    b = me.direction(body)
+    me.doframe(e0)
+    me.doframe(pos)
+    j = me.measure(b, "J2000")
+    a = me.measure(b, "AZEL")
+    pparts.append(f"{body} = (j2000 = ({j['m0']['value']!r}, {j['m1']['value']!r}), "
+                  f"azel = ({a['m0']['value']!r}, {a['m1']['value']!r}))")
+L.append(f"  planet = ({', '.join(pparts)}),")
+
 # frequency: TOPO -> {...}
 f = me.frequency("TOPO", qa.quantity(FREQ_HZ, "Hz"))
 me.doframe(e0)

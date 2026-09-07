@@ -65,6 +65,27 @@ for (T, doc) in [
     @eval @doc $doc $T
 end
 
+# solar-system-body *direction* frames (casacore `MDirection::Types`
+# codes ≥ 32).  Source-only: a body-frame column's stored `(lon, lat)`
+# is a placeholder and `measconvert(MDirection{SUN}(...), J2000; frame)`
+# resolves the body's geocentric apparent place at `frame.epoch` via
+# `SOFA.jl` (`plan94` / `moon98`).  `PLUTO` (no `plan94`) and `COMET`
+# (needs an ephemeris table) are deliberately absent.
+for (T, doc) in [
+        (:MERCURY, "The planet Mercury as a direction (geocentric apparent place)."),
+        (:VENUS,   "The planet Venus as a direction (geocentric apparent place)."),
+        (:MARS,    "The planet Mars as a direction (geocentric apparent place)."),
+        (:JUPITER, "The planet Jupiter as a direction (geocentric apparent place)."),
+        (:SATURN,  "The planet Saturn as a direction (geocentric apparent place)."),
+        (:URANUS,  "The planet Uranus as a direction (geocentric apparent place)."),
+        (:NEPTUNE, "The planet Neptune as a direction (geocentric apparent place)."),
+        (:SUN,     "The Sun as a direction (geocentric apparent place)."),
+        (:MOON,    "The Moon as a direction (geocentric apparent place; topocentric when `frame.position` is set)."),
+    ]
+    @eval struct $T <: RefFrame end
+    @eval @doc $doc $T
+end
+
 "A reference-frame name string casacore uses that this package parses but does not convert."
 struct OtherRef{S} <: RefFrame end
 

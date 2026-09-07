@@ -20,6 +20,7 @@ using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocit
     RefFrame, MeasFrame, reftype,
     UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
+    MERCURY, VENUS, MARS, JUPITER, SATURN, URANUS, NEPTUNE, SUN, MOON,
     OtherRef, _dir_xyz, _xyz_dir
 
 # All shared -- see `src/constants.jl` (each equals its `SOFA.jl` value).
@@ -145,8 +146,73 @@ _frame_eop(frame) = _eop(_frame_scale_mjd(frame, UTC))
 
 _is_icrsish(::Type{T}) where {T} = T === ICRS || T === J2000
 
+# ---- solar-system-body directions (SOFA plan94 / moon98) -------------
+
+const _PLAN94_NP = Dict{DataType,Int}(
+    MERCURY => 1, VENUS => 2, MARS => 4, JUPITER => 5,
+    SATURN => 6, URANUS => 7, NEPTUNE => 8)
+_is_body(::Type{T}) where {T} = T === SUN || T === MOON || haskey(_PLAN94_NP, T)
+
+const _C_AUDAY = C_LIGHT * DAYSEC / AU_M      # speed of light, AU/day
+
+_earth_helio(t) = SOFA.epv00(MJD0, t).helio[1]                 # AU, J2000 eq
+_planet_helio(np, t) = SOFA.plan94(MJD0, t, np)[1]             # AU, J2000 eq
+
+# geocentric vector (AU) of the body at the frame epoch
+function _body_geovec(::Type{SUN}, tdb, ::Any)
+    g = .-_earth_helio(tdb)
+    for _ in 1:2
+        g = .-_earth_helio(tdb - hypot(g...) / _C_AUDAY)
+    end
+    g
+end
+function _body_geovec(::Type{MOON}, ::Any, tt)
+    Tuple(SOFA.moon98(MJD0, tt)[1])            # geocentric GCRS ≈ J2000, AU
+end
+function _body_geovec(::Type{P}, tdb, ::Any) where {P}
+    np = _PLAN94_NP[P]
+    eb = _earth_helio(tdb)
+    g  = _planet_helio(np, tdb) .- eb          # heliocentric planet − heliocentric Earth
+    for _ in 1:2
+        τ = hypot(g...) / _C_AUDAY
+        g = _planet_helio(np, tdb - τ) .- eb   # Earth fixed at tdb (casacore R_PLANET)
+    end
+    Tuple(g)
+end
+
+# observatory geocentric position (metres, GCRS) -- pv[1] of pvtob
+function _p_obs_geo(frame::MeasFrame)
+    el, phi, hm = _frame_site(frame)
+    uta, utb = _frame_ut1(frame)
+    tta, ttb = _frame_tt(frame)
+    era = SOFA.era00(uta, utb)
+    sp  = SOFA.sp00(tta, ttb)
+    eop = _frame_eop(frame)
+    Tuple(SOFA.pvtob(el, phi, hm, eop.xp, eop.yp, sp, era)[1])
+end
+
+# astrometric direction of a body, J2000 equatorial ≈ ICRS -> (ra, dec)
+# radians.  `topo` applies the geometric geocentric→topocentric parallax
+# shift (~1° for the Moon, ≲30″ planets) -- only wanted for an
+# observer-frame target (casacore does this in `applyAPPtoTOPO`); a
+# celestial-frame target and `_n_hat` want the geocentric direction, to
+# match casacore's `me.measure(body, "J2000")`.
+function _body_dir_icrs(::Type{P}, frame::MeasFrame, topo::Bool) where {P}
+    frame.epoch === nothing && error(
+        "MeasurementSets: a solar-system-body direction needs `frame.epoch`")
+    tdb = _frame_scale_mjd(frame, TDB)
+    tt  = _frame_scale_mjd(frame, TT)
+    g = _body_geovec(P, tdb, tt)                     # AU, geocentric
+    if topo && frame.position !== nothing
+        g = g .- _p_obs_geo(frame) ./ AU_M           # observer geocentric, AU
+    end
+    r = hypot(g...)
+    (atan(g[2], g[1]), asin(clamp(g[3] / r, -1.0, 1.0)))
+end
+
 function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
     _is_icrsish(A) && return (m.lon, m.lat)
+    _is_body(A) && return _body_dir_icrs(A, frame, false)
     if A === B1950
         r = SOFA.fk425(m.lon, m.lat, 0.0, 0.0, 0.0, 0.0)
         return (r.ra, r.dec)
@@ -186,6 +252,9 @@ end
 
 function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) where {B}
     _is_icrsish(B) && return MDirection{B}(lon, lat)
+    _is_body(B) && error(
+        "MeasurementSets: cannot convert a direction *to* the solar-system-body " *
+        "frame $(nameof(B)) (body frames are source-only)")
     if B === B1950
         r = SOFA.fk524(lon, lat, 0.0, 0.0, 0.0, 0.0)
         return MDirection{B}(r.ra, r.dec)
@@ -215,8 +284,16 @@ function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) w
     error("MeasurementSets: direction frame $(nameof(B)) is not supported")
 end
 
-MS._mconv(m::MDirection, ::Type{B}, frame::MeasFrame) where {B<:RefFrame} =
+const _OBS_FRAMES = (AZEL, AZELGEO, HADEC, APP, ITRF)
+
+function MS._mconv(m::MDirection, ::Type{B}, frame::MeasFrame) where {B<:RefFrame}
+    A = reftype(m)
+    if _is_body(A)
+        ra, dec = _body_dir_icrs(A, frame, B in _OBS_FRAMES)
+        return _icrs_to_dir(ra, dec, B, frame)
+    end
     _icrs_to_dir(_dir_to_icrs(m, frame)..., B, frame)
+end
 
 # ======================================================================
 # frequency  (hub = BARY);  radio/relativistic Doppler, casacore MCFrequency
