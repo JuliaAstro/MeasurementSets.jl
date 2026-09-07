@@ -301,8 +301,10 @@ antenna sets; `&` drops autocorrelations) and a whole-spec `!`.
 `YYYY/MM/DD[/HH:MM:SS]` datetimes or a bare MJD-days number);
 `mscal.uvdist('a~b[unit]')` selects a 2-D uv-distance range, `unit` ∈
 `m` (default) / `km` / `lambda` / `klambda` / `mlambda` (wavelength
-units scale per row by `SPECTRAL_WINDOW.REF_FREQUENCY`). No
-`mscal.corr` / `mscal.feed`.
+units scale per row by `SPECTRAL_WINDOW.REF_FREQUENCY`).
+`mscal.corr('RR,LL')` selects rows whose polarization setup contains
+any of the named correlations (Stokes names or integer codes);
+`mscal.feed('0 & 1')` is the `mscal.baseline` form on `FEED1` / `FEED2`.
 
 `mscal.spw('0:5~20')` — the spw selection takes an optional `:chanlist`
 (a `;`-list of `a~b`, `a~b^step` channel-index ranges, single indices,

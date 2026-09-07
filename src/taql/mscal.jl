@@ -441,7 +441,7 @@ _has_aggr(::TQLMSSel)          = false
 _has_qty(::TQLMSSel)           = false
 
 const _MSSEL_FUNCS = Set(["baseline", "field", "spw", "scan", "state", "array",
-                          "obs", "time", "uvdist", "chan"])
+                          "obs", "time", "uvdist", "chan", "corr", "feed"])
 
 function _mssel_str_arg(a::TQLExpr, src::AbstractString)
     (a isa TQLLit && a.value isa AbstractString) || throw(ArgumentError(
@@ -557,7 +557,24 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
     fn == "time" && return _mssel_time(t, spec, cn, n)
     fn == "uvdist" && return _mssel_uvdist(t, spec, cn, subs, n)
 
-    if fn == "baseline"
+    if fn == "corr"
+        _need("DATA_DESC_ID")
+        (haskey(subs, "DATA_DESCRIPTION") && haskey(subs, "POLARIZATION")) || error(
+            "mscal.corr: needs DATA_DESCRIPTION + POLARIZATION subtables")
+        ddid = Int.(column(t, "DATA_DESC_ID")[:])
+        dd2pol = Int.(column(readtable(subs["DATA_DESCRIPTION"]), "POLARIZATION_ID")[:])
+        polct = column(readtable(subs["POLARIZATION"]), "CORR_TYPE")[:]   # Vector per setup
+        want = _parse_corr_types(spec)
+        have = [Set(Int.(c)) for c in polct]
+        return Bool[!isempty(want ∩ have[dd2pol[d + 1] + 1]) for d in ddid]
+    elseif fn == "feed"
+        _need("FEED1")
+        f1 = Int.(column(t, "FEED1")[:])
+        f2 = "FEED2" in cn ? Int.(column(t, "FEED2")[:]) : f1
+        maxf = max(maximum(f1; init = -1), maximum(f2; init = -1))
+        pred = _mssel_baseline_pred(spec, Dict{String,Vector{Int}}(), 0:maxf)
+        return Bool[pred(f1[i], f2[i]) for i in 1:n]
+    elseif fn == "baseline"
         _need("ANTENNA1")
         haskey(subs, "ANTENNA") || error("mscal.baseline: no ANTENNA subtable")
         a1 = Int.(column(t, "ANTENNA1")[:])
@@ -814,4 +831,33 @@ function _chan_mask(elems, chanfreq::AbstractVector)
         end
     end
     return m
+end
+
+# ---------------------------------------------------------------------------
+# Phase 84: `mscal.corr('spec')` and `mscal.feed('spec')`.
+#
+# corr: a comma-list of correlation names (`RR` / `XX` / `I` / … via the
+#   Phase-78 `_STOKES_NAMES`) or integer Stokes codes. A per-row `Bool`:
+#   true if the row's polarization setup (`POLARIZATION.CORR_TYPE` via
+#   `DATA_DESCRIPTION.POLARIZATION_ID`) shares any code with the request.
+# feed: the antenna-grammar form on FEED1 / FEED2 -- `L & R` feed-pair
+#   selection, comma-lists of ids / `N~M` ranges, `!` negation -- exactly
+#   like `mscal.baseline` but with numeric feed ids only.
+
+function _parse_corr_types(spec::AbstractString)
+    out = Set{Int}()
+    for raw in _mssel_commas(spec)
+        term = strip(raw)
+        isempty(term) && continue
+        up = uppercase(term)
+        if haskey(_STOKES_NAMES, up)
+            push!(out, _STOKES_NAMES[up])
+        elseif occursin(r"^\d+$", term)
+            push!(out, parse(Int, term))
+        else
+            throw(ArgumentError("mscal.corr: unknown correlation \"$term\""))
+        end
+    end
+    isempty(out) && throw(ArgumentError("mscal.corr: empty correlation list"))
+    return out
 end

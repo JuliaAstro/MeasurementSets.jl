@@ -1583,7 +1583,30 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
-### Phase 83 — `mscal.spw` channel sub-selection + `mscal.chan`
+### Phase 84 — `mscal.corr()` / `mscal.feed()` selection
+
+The two remaining `derivedmscal` selection UDFs, completing the
+`mscal.*` selection set.
+
+```julia
+query(main, "mscal.corr('RR,LL')")           # rows whose pol setup has RR or LL
+query(main, "mscal.feed('0 & 1') AND mscal.baseline('DA*')")
+```
+
+- `mscal.corr('spec')` — a comma-list of correlation names (`RR` /
+  `XX` / `I` / … via the Phase-78 `_STOKES_NAMES`) or integer Stokes
+  codes. A per-row `Bool`: `true` if the row's polarization setup
+  (`POLARIZATION.CORR_TYPE` via `DATA_DESCRIPTION.POLARIZATION_ID`)
+  shares any code with the request.
+- `mscal.feed('spec')` — the `mscal.baseline` antenna-grammar form on
+  `FEED1` / `FEED2` (`L & R` feed-pair, `L && R`, `!`, comma-lists of
+  ids / `N~M` ranges), with numeric feed ids only.
+- Both in `src/taql/mscal.jl` — `_parse_corr_types`, `_mssel_one`
+  `corr` / `feed` branches (feed reuses `_mssel_baseline_pred`).
+- `mscal.corr` / `mscal.feed` are not `registerUDF`-registered in the
+  casacore build here (only advertised in the help text), so the
+  real-`derivedmscal` cross-check skips them cleanly.
+
 
 `mscal.spw('spec')` now takes the MSSelection `spwid:chanlist` form, and
 a companion `mscal.chan('spec')` returns the per-row channel mask.
