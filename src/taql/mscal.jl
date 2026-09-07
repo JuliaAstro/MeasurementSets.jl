@@ -441,7 +441,7 @@ _has_aggr(::TQLMSSel)          = false
 _has_qty(::TQLMSSel)           = false
 
 const _MSSEL_FUNCS = Set(["baseline", "field", "spw", "scan", "state", "array",
-                          "obs", "time", "uvdist"])
+                          "obs", "time", "uvdist", "chan"])
 
 function _mssel_str_arg(a::TQLExpr, src::AbstractString)
     (a isa TQLLit && a.value isa AbstractString) || throw(ArgumentError(
@@ -571,20 +571,37 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         nf = haskey(subs, "FIELD") ? nrow(readtable(subs["FIELD"])) : maximum(fid; init = -1) + 1
         S = _mssel_idset(spec, 0:(nf - 1), _sub("FIELD", "NAME"))
         return Bool[f in S for f in fid]
-    elseif fn == "spw"
+    elseif fn == "spw" || fn == "chan"
         _need("DATA_DESC_ID")
-        haskey(subs, "DATA_DESCRIPTION") || error("mscal.spw: no DATA_DESCRIPTION subtable")
+        haskey(subs, "DATA_DESCRIPTION") || error("mscal.$fn: no DATA_DESCRIPTION subtable")
         ddid = Int.(column(t, "DATA_DESC_ID")[:])
         dd2spw = Int.(column(readtable(subs["DATA_DESCRIPTION"]), "SPECTRAL_WINDOW_ID")[:])
         rowspw = Int[dd2spw[d + 1] for d in ddid]
-        nspw = haskey(subs, "SPECTRAL_WINDOW") ? nrow(readtable(subs["SPECTRAL_WINDOW"])) :
-               maximum(rowspw; init = -1) + 1
-        n2i = (haskey(subs, "SPECTRAL_WINDOW") &&
-               "NAME" in Set(columnnames(readtable(subs["SPECTRAL_WINDOW"])))) ?
-              _mssel_names_to_ids(column(readtable(subs["SPECTRAL_WINDOW"]), "NAME")[:]) :
-              Dict{String,Vector{Int}}()
-        S = _mssel_idset(spec, 0:(nspw - 1), n2i)
-        return Bool[s in S for s in rowspw]
+        spwtab = haskey(subs, "SPECTRAL_WINDOW") ? readtable(subs["SPECTRAL_WINDOW"]) : nothing
+        nspw = spwtab === nothing ? maximum(rowspw; init = -1) + 1 : nrow(spwtab)
+        n2i = (spwtab !== nothing && "NAME" in Set(columnnames(spwtab))) ?
+              _mssel_names_to_ids(column(spwtab, "NAME")[:]) : Dict{String,Vector{Int}}()
+
+        if fn == "spw" && !_spw_has_chan(spec)
+            S = _mssel_idset(spec, 0:(nspw - 1), n2i)
+            return Bool[s in S for s in rowspw]
+        end
+
+        spwtab === nothing && error("mscal.$fn: channel selection needs a SPECTRAL_WINDOW subtable")
+        chanfreq = column(spwtab, "CHAN_FREQ")[:]          # Vector, per spw
+        items = _parse_spw_spec(spec, nspw, n2i)
+        # per-spw combined channel mask (OR of matching items)
+        spwmask = Dict{Int,BitVector}()
+        _mask(s) = get!(spwmask, s) do
+            cf = chanfreq[s + 1]
+            m = falses(length(cf))
+            for it in items
+                s in it.spws && (m .|= _chan_mask(it.chans, cf))
+            end
+            m
+        end
+        return fn == "chan" ? [_mask(s) for s in rowspw] :
+               Bool[any(_mask(s)) for s in rowspw]
     else
         col = fn == "scan" ? "SCAN_NUMBER" : fn == "state" ? "STATE_ID" :
               fn == "array" ? "ARRAY_ID" : "OBSERVATION_ID"
@@ -706,4 +723,95 @@ function _mssel_uvdist(t::AbstractTable, spec::AbstractString, cn::AbstractSet,
     reff = Float64.(column(readtable(subs["SPECTRAL_WINDOW"]), "REF_FREQUENCY")[:])
     return Bool[_mssel_inany(d2d[i] * reff[dd2spw[ddid[i] + 1] + 1] / C_LIGHT, ranges)
                 for i in 1:n]
+end
+
+# ---------------------------------------------------------------------------
+# Phase 83: `mscal.spw('spec')` channel sub-selection + companion
+# `mscal.chan('spec')`.
+#
+# `spec` is a comma-list of `<spwterm>[:<chanlist>]` items.  `<spwterm>`
+# is a single MSSelection-lite term (`N`, `N~M`, `>N`, `<N`, a name /
+# glob / `/regex/` against `SPECTRAL_WINDOW.NAME`, `*`).  `<chanlist>`
+# is a `;`-list of channel selectors:
+#   a          a single 0-based channel index
+#   a~b        an inclusive channel-index range
+#   a~b^s      ... with a step
+#   f1~f2GHz   a CHAN_FREQ range (Hz / kHz / MHz / GHz)
+#   <f / >f    a CHAN_FREQ bound
+#
+# `mscal.spw` returns a per-row `Bool`: the row's spw matches an item
+# *and*, if that item has a channel list, at least one of the row's
+# channels is selected.  `mscal.chan` returns a per-row `BitVector`
+# (length = the spw's channel count) -- the OR of the matching items'
+# channel masks (a full mask for an item with no channel list).
+
+struct _SpwItem
+    spws::Set{Int}
+    chans::Union{Nothing,Vector{Any}}     # each: (:idx, lo, hi, step) | (:freq, flo, fhi)
+end
+
+_spw_has_chan(spec::AbstractString) = occursin(':', spec)
+
+const _CHAN_FREQ_UNIT = Dict("hz" => 1.0, "khz" => 1e3, "mhz" => 1e6, "ghz" => 1e9)
+
+function _parse_chan_elem(s::AbstractString)
+    s = strip(s)
+    um = match(r"[a-zA-Z]+\s*$", s)
+    if um !== nothing
+        u = lowercase(strip(um.match))
+        haskey(_CHAN_FREQ_UNIT, u) || throw(ArgumentError(
+            "mscal channel selection: unknown frequency unit \"$u\""))
+        sc = _CHAN_FREQ_UNIT[u]
+        body = strip(s[1:prevind(s, um.offset)])
+        num(x) = parse(Float64, strip(x)) * sc
+        startswith(body, ">") && return (:freq, num(body[2:end]), Inf)
+        startswith(body, "<") && return (:freq, -Inf, num(body[2:end]))
+        m = match(r"^(.+?)\s*~\s*(.+)$", body)
+        m === nothing && throw(ArgumentError("mscal channel freq \"$s\": give `f1~f2UNIT`"))
+        return (:freq, num(m[1]), num(m[2]))
+    end
+    m = match(r"^(\d+)\s*~\s*(\d+)(?:\s*\^\s*(\d+))?$", s)
+    m !== nothing && return (:idx, parse(Int, m[1]), parse(Int, m[2]),
+                             m[3] === nothing ? 1 : parse(Int, m[3]))
+    startswith(s, ">") && return (:idx, parse(Int, strip(s[2:end])) + 1, typemax(Int) ÷ 2, 1)
+    startswith(s, "<") && return (:idx, 0, parse(Int, strip(s[2:end])) - 1, 1)
+    occursin(r"^\d+$", s) && return (:idx, parse(Int, s), parse(Int, s), 1)
+    throw(ArgumentError("mscal channel selection: bad selector \"$s\""))
+end
+
+function _parse_spw_spec(spec::AbstractString, nspw::Integer, n2i::AbstractDict)
+    items = _SpwItem[]
+    for raw in _mssel_commas(spec)
+        term = strip(raw)
+        isempty(term) && continue
+        ci = findfirst(':', term)
+        spwpart = ci === nothing ? term : strip(term[1:prevind(term, ci)])
+        chanpart = ci === nothing ? nothing : strip(term[nextind(term, ci):end])
+        spws = _mssel_resolve(spwpart, 0:(nspw - 1), n2i)
+        chans = chanpart === nothing ? nothing :
+                Any[_parse_chan_elem(e) for e in split(chanpart, ';') if !isempty(strip(e))]
+        push!(items, _SpwItem(spws, chans))
+    end
+    return items
+end
+
+# channel mask for one spw given its CHAN_FREQ vector
+function _chan_mask(elems, chanfreq::AbstractVector)
+    nc = length(chanfreq)
+    m = falses(nc)
+    elems === nothing && return trues(nc)
+    for e in elems
+        if e[1] === :idx
+            lo, hi, st = e[2], min(e[3], nc - 1), e[4]
+            for c in lo:st:hi
+                0 <= c < nc && (m[c + 1] = true)
+            end
+        else
+            flo, fhi = e[2], e[3]
+            for c in 1:nc
+                flo <= chanfreq[c] <= fhi && (m[c] = true)
+            end
+        end
+    end
+    return m
 end

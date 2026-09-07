@@ -1583,6 +1583,37 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 83 — `mscal.spw` channel sub-selection + `mscal.chan`
+
+`mscal.spw('spec')` now takes the MSSelection `spwid:chanlist` form, and
+a companion `mscal.chan('spec')` returns the per-row channel mask.
+
+```julia
+query(main, "mscal.spw('0:5~20')")                    # spw 0, chans 5-20 non-empty
+query(main, "any(mscal.chan('0:100~200MHz'))")        # rows with a channel in the band
+query(main; select = ["m" => "mscal.chan('0:5~20;40~50')"])   # per-row BitVector
+```
+
+- `spec` is a comma-list of `<spwterm>[:<chanlist>]`. `<spwterm>` is a
+  single MSSelection-lite term (`N` / `N~M` / `>N` / `<N` / a name /
+  glob / `/regex/` against `SPECTRAL_WINDOW.NAME` / `*`). `<chanlist>`
+  is a `;`-list of `a` (single 0-based index), `a~b` (inclusive range),
+  `a~b^step`, `f1~f2GHz` (a `CHAN_FREQ` range, `Hz`/`kHz`/`MHz`/`GHz`),
+  or `<f` / `>f`.
+- `mscal.spw` stays a per-row `Bool` — a channelled spw matches only if
+  at least one of the row's channels is selected (so `0:100~200` on a
+  64-channel spw excludes the row). `mscal.chan` returns a per-row
+  `BitVector` of the spw's channel count (all-false for an unselected
+  spw), for `any(...)` / `count(...)` / a Phase-60 masked array.
+- All in `src/taql/mscal.jl` — `_parse_spw_spec` / `_parse_chan_elem` /
+  `_chan_mask`; `_mssel_one`'s `spw` branch gains the channelled path,
+  new `chan` branch. Threading unchanged.
+- `mscal.spw('0:5~20')` row count cross-checked against real
+  `derivedmscal`.
+- Non-goals: velocity units on a channel range (casacore disables them
+  too); `^step` on a frequency range; per-`DATA_DESC_ID` distinct
+  channel geometry within one spw.
+
 ### Phase 82 — solar-system ephemeris (`MeasComet`) tables
 
 A moving-target `FIELD` row — a non-negative `EPHEMERIS_ID` with a

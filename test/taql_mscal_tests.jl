@@ -198,6 +198,41 @@ end
     @test_throws ErrorException query(readtable(dir), "mscal.field('0')")
 end
 
+@testset "TaQL-lite — mscal.spw channel selection + mscal.chan" begin
+    main = readtable(SAMPLE_MS)
+    N = nrow(main)
+    cf = column(subtable(MeasurementSet(SAMPLE_MS), "SPECTRAL_WINDOW"), "CHAN_FREQ")[1]
+    nch = length(cf)                                   # 64
+
+    p(s) = MSv2._taqllite_parse(s, Set(["A"]))
+    @test p("mscal.chan('0:5~20') != 0").lhs.fn == "chan"
+    @test MSv2._parse_chan_elem("5~20") == (:idx, 5, 20, 1)
+    @test MSv2._parse_chan_elem("0~63^4") == (:idx, 0, 63, 4)
+    @test MSv2._parse_chan_elem("8.0~8.05GHz")[1] === :freq
+    @test_throws ArgumentError MSv2._parse_chan_elem("5~20foo")
+
+    # mscal.spw with a :chan part -- the sample has one spw (64 chan)
+    @test nrow(query(main, "mscal.spw('0:5~20')")) == N          # nonempty -> all rows
+    @test nrow(query(main, "mscal.spw('0:100~200')")) == 0       # out of range
+    @test nrow(query(main, "mscal.spw('1:0~10')")) == 0          # no such spw
+    @test nrow(query(main, "mscal.spw('0:8.0~8.05GHz')")) == N   # freq in band
+    @test nrow(query(main, "mscal.spw('0:20~30GHz')")) == 0      # freq above band
+
+    # mscal.chan -> a per-row BitVector
+    q = query(main, "any(mscal.chan('0:5~20'))"; select = ["m" => "mscal.chan('0:5~20')"])
+    @test nrow(q) == N
+    m = column(q, "m")[1]
+    @test length(m) == nch
+    @test count(m) == 16 && all(m[6:21]) && !m[5] && !m[22]      # 0-based 5..20
+    q2 = query(main, "rownumber() >= 1"; select = ["m" => "mscal.chan('0:0~63^4')"])
+    @test count(column(q2, "m")[1]) == 16
+    q3 = query(main, "rownumber() >= 1"; select = ["m" => "mscal.chan('0:8.0~8.05GHz')"])
+    @test count(column(q3, "m")[1]) == count(f -> 8.0e9 <= f <= 8.05e9, cf)
+    # a spw not selected -> all-false mask
+    q4 = query(main, "rownumber() >= 1"; select = ["m" => "mscal.chan('1:0~10')"])
+    @test !any(column(q4, "m")[1])
+end
+
 @testset "TaQL-lite — mscal.* with an ephemeris FIELD" begin
     ms = MeasurementSet(SAMPLE_MS)
     main0 = readtable(SAMPLE_MS)
@@ -322,7 +357,8 @@ if _HAVE_TAQL
         for (fn, spec) in [("baseline", "0"), ("baseline", "0 & 1"),
                            ("baseline", "!0"), ("field", "0"), ("spw", "0"),
                            ("field", "0~2"), ("uvdist", "200~1000m"),
-                           ("uvdist", "10~100klambda"), ("uvdist", ">1km")]
+                           ("uvdist", "10~100klambda"), ("uvdist", ">1km"),
+                           ("spw", "0:5~20")]
             rdir = joinpath(mktempdir(), "sel")
             ok = try
                 _taqlcmd("SELECT FROM \$1 WHERE mscal.$fn('$spec') GIVING '$rdir'",
