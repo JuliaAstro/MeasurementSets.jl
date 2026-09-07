@@ -121,10 +121,12 @@ function _tql_cols(t::AbstractTable, names, asts...)
         any(x -> x !== nothing && _has_qty(x), a)
     end
     plain, mscal = _mscal_split(names)
+    plain, stokes = _stokes_split(plain)
     d = Dict{String,AbstractVector}(
         n => (c = _load_col(column(t, n)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
         for n in plain)
     isempty(mscal) || merge!(d, _mscal_columns(t, mscal))
+    isempty(stokes) || merge!(d, _stokes_setups(t, stokes))
     return d
 end
 
@@ -278,8 +280,16 @@ sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
 ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000;
 O(nrow)), `mscal.delay()` (geometric delay, s). The `1` / `2` suffix
 picks `ANTENNA1` / `ANTENNA2`; no suffix uses antenna 0 (array-centre
-fallback). Not the CASA-MSSelection `mscal.baseline` / `mscal.spw`
-selection functions, nor `mscal.stokes`.
+fallback).
+
+`mscal.stokes(col [, 'types'] [, rescale])` (Phase 78) converts a
+`DATA` / `FLAG` / `WEIGHT` array cell between correlation bases. `types`
+(default `'IQUV'`) is an alias (`IQUV` / `CIRC` / `LIN`) or a
+comma-list (`'I'`, `'I,V'`, `'XX,YY'`); the input basis comes from
+`POLARIZATION.CORR_TYPE` row 1. The result is a `(nOut, nchan)` matrix.
+
+Not the CASA-MSSelection `mscal.baseline` / `mscal.spw` selection
+functions.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 boolean-mask array subscripts.

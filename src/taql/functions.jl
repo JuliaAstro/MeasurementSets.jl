@@ -199,6 +199,13 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     n = length(args)
     if startswith(name, "mscal.")
         fn = name[7:end]
+        if fn == "stokes"
+            1 <= n <= 3 || throw(ArgumentError(
+                "TaQL-lite: mscal.stokes takes 1 to 3 arguments in \"$src\""))
+            typestr = n >= 2 ? _stokes_str_arg(args[2], src) : "IQUV"
+            rescale = n >= 3 ? _stokes_bool_arg(args[3], src) : false
+            return TQLStokes(args[1], _parse_stokes_types(typestr), rescale)
+        end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
         n == 0 || throw(ArgumentError("TaQL-lite: $name() takes no arguments in \"$src\""))

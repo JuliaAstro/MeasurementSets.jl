@@ -160,3 +160,221 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     end
     return out
 end
+
+# ---------------------------------------------------------------------------
+# Phase 78: `mscal.stokes(col [, 'types'] [, rescale])` -- polarization /
+# correlation-basis conversion of a DATA / FLAG / WEIGHT array cell.
+#
+# A port of casacore's `StokesConverter`: the per-cell result is a matrix
+# multiply `out[o,ch] = Sum_j conv[o,j] * in[j,ch]` (Complex data), an
+# any-of-contributing test (Bool flags), or the weight-propagation formula
+# (Float weights).  The conversion matrix is keyed by the input basis
+# (from `POLARIZATION.CORR_TYPE` row 1) and the requested output types.
+#
+# Threading mirrors `mscal.*`: `_tqlrefs!(::TQLStokes)` pushes a sentinel
+# name `"::stokes::<types>[:r]"` into the `needed` set; `_tql_cols` /
+# `_vtq_prepare!` split those with `_stokes_split` and merge the result of
+# `_stokes_setups(t, keys)` (a `Dict` of length-1 vectors holding the
+# `StokesSetup`).  `_tqleval` / `_geval` then apply it to the arg's value.
+
+struct TQLStokes <: TQLExpr
+    arg::TQLExpr
+    outtypes::Vector{Int}      # 1..12 (I,Q,U,V / RR,RL,LR,LL / XX,XY,YX,YY)
+    rescale::Bool
+end
+
+_stokes_key(e::TQLStokes) =
+    "::stokes::" * join(e.outtypes, ",") * (e.rescale ? ":r" : "")
+
+_tqleval(e::TQLStokes, cols, i) =
+    _stokes_convert(cols[_stokes_key(e)][1], _tqleval(e.arg, cols, i))
+_geval(e::TQLStokes, cols, g) =
+    _stokes_convert(cols[_stokes_key(e)][1], _geval(e.arg, cols, g))
+_tqlrefs!(seen, e::TQLStokes) = (_tqlrefs!(seen, e.arg); push!(seen, _stokes_key(e)))
+_has_aggr(e::TQLStokes) = _has_aggr(e.arg)
+_has_qty(e::TQLStokes) = _has_qty(e.arg)
+
+const _STOKES_NAMES = Dict{String,Int}(
+    "I" => 1, "Q" => 2, "U" => 3, "V" => 4,
+    "RR" => 5, "RL" => 6, "LR" => 7, "LL" => 8,
+    "XX" => 9, "XY" => 10, "YX" => 11, "YY" => 12,
+    "RX" => 13, "RY" => 14, "LX" => 15, "LY" => 16,
+    "XR" => 17, "XL" => 18, "YR" => 19, "YL" => 20)
+
+const _STOKES_ALIASES = Dict{String,String}(
+    "IQUV" => "I,Q,U,V", "STOKES" => "I,Q,U,V",
+    "CIRC" => "RR,RL,LR,LL", "CIRCULAR" => "RR,RL,LR,LL",
+    "LIN" => "XX,XY,YX,YY", "LINEAR" => "XX,XY,YX,YY")
+
+function _parse_stokes_types(s::AbstractString)
+    up = uppercase(strip(s))
+    up = get(_STOKES_ALIASES, up, up)
+    out = Int[]
+    for tok in split(up, ',')
+        t = strip(tok)
+        isempty(t) && continue
+        haskey(_STOKES_NAMES, t) || throw(ArgumentError(
+            "mscal.stokes: unknown polarization type \"$t\""))
+        code = _STOKES_NAMES[t]
+        code <= 12 || throw(ArgumentError(
+            "mscal.stokes: output type \"$t\" (mixed-hand RX..YL) is not supported"))
+        push!(out, code)
+    end
+    isempty(out) && throw(ArgumentError("mscal.stokes: empty polarization type list"))
+    return out
+end
+
+function _stokes_str_arg(a::TQLExpr, src::AbstractString)
+    (a isa TQLLit && a.value isa AbstractString) || throw(ArgumentError(
+        "TaQL-lite: mscal.stokes type argument must be a string literal in \"$src\""))
+    return a.value
+end
+
+function _stokes_bool_arg(a::TQLExpr, src::AbstractString)
+    (a isa TQLLit && a.value isa Bool) || throw(ArgumentError(
+        "TaQL-lite: mscal.stokes rescale argument must be a boolean literal in \"$src\""))
+    return a.value
+end
+
+# --- the conversion matrices (hardcoded 4x4, ComplexF64) -------------------
+# `_STOKES_BASE[(from, to)]` is M with `to_vec = M * from_vec`, indexed
+# `M[canon(to_code), canon(from_code)]` where canon = (code-1) % 4 + 1.
+
+function _m4mul(A, B)
+    C = zeros(ComplexF64, 4, 4)
+    for i in 1:4, j in 1:4
+        s = zero(ComplexF64)
+        for k in 1:4
+            s += A[i, k] * B[k, j]
+        end
+        C[i, j] = s
+    end
+    return C
+end
+
+const _M_LIN_FROM_IQUV = ComplexF64[.5 .5 0 0; 0 0 .5 .5im; 0 0 .5 -.5im; .5 -.5 0 0]
+const _M_IQUV_FROM_LIN = ComplexF64[1 0 0 1; 1 0 0 -1; 0 1 1 0; 0 -1im 1im 0]
+const _M_CIRC_FROM_IQUV = ComplexF64[.5 0 0 .5; 0 .5 .5im 0; 0 .5 -.5im 0; .5 0 0 -.5]
+const _M_IQUV_FROM_CIRC = ComplexF64[1 0 0 1; 0 1 1 0; 0 -1im 1im 0; 1 0 0 -1]
+const _M_I4 = ComplexF64[1 0 0 0; 0 1 0 0; 0 0 1 0; 0 0 0 1]
+
+const _STOKES_BASE = Dict{Tuple{Symbol,Symbol},Matrix{ComplexF64}}(
+    (:iquv, :iquv) => _M_I4, (:circ, :circ) => _M_I4, (:lin, :lin) => _M_I4,
+    (:iquv, :lin) => _M_LIN_FROM_IQUV, (:lin, :iquv) => _M_IQUV_FROM_LIN,
+    (:iquv, :circ) => _M_CIRC_FROM_IQUV, (:circ, :iquv) => _M_IQUV_FROM_CIRC,
+    (:lin, :circ) => _m4mul(_M_CIRC_FROM_IQUV, _M_IQUV_FROM_LIN),
+    (:circ, :lin) => _m4mul(_M_LIN_FROM_IQUV, _M_IQUV_FROM_CIRC))
+
+_stokes_canon(t::Int) = (t - 1) % 4 + 1
+
+function _stokes_frame(codes)
+    fr = nothing
+    for c in codes
+        f = 1 <= c <= 4 ? :iquv : 5 <= c <= 8 ? :circ : 9 <= c <= 12 ? :lin :
+            error("mscal.stokes: correlation code $c (mixed-hand RX..YL / >20) is not supported")
+        fr === nothing ? (fr = f) : (fr === f ||
+            error("mscal.stokes: input correlations span more than one polarization frame"))
+    end
+    fr === nothing && error("mscal.stokes: empty correlation list")
+    return fr
+end
+
+_stokes_factor(t::Int, rescale::Bool) =
+    !rescale ? 1.0 : (5 <= t <= 12 ? 0.5 : 13 <= t <= 20 ? sqrt(2) / 4 : 1.0)
+
+struct StokesSetup
+    cmat::Matrix{ComplexF64}   # nOut x nIn
+    fmat::BitMatrix            # cmat .!= 0
+    wmat::Matrix{Float64}      # abs.(cmat)
+end
+
+function _stokes_setup(intypes::Vector{Int}, outtypes::Vector{Int}, rescale::Bool)
+    inf = _stokes_frame(intypes)
+    nO, nI = length(outtypes), length(intypes)
+    cmat = zeros(ComplexF64, nO, nI)
+    for o in 1:nO
+        base = _STOKES_BASE[(inf, _stokes_frame((outtypes[o],)))]
+        for j in 1:nI
+            cmat[o, j] = base[_stokes_canon(outtypes[o]), _stokes_canon(intypes[j])] *
+                         _stokes_factor(intypes[j], rescale) /
+                         _stokes_factor(outtypes[o], rescale)
+        end
+    end
+    return StokesSetup(cmat, cmat .!= 0, abs.(cmat))
+end
+
+# --- applying a setup to one array cell -----------------------------------
+
+function _stokes_convert(s::StokesSetup, x::AbstractMatrix{<:Complex})
+    nI, nch = size(x)
+    nI == size(s.cmat, 2) || throw(ArgumentError(
+        "mscal.stokes: cell has $nI correlations, POLARIZATION.CORR_TYPE has $(size(s.cmat, 2))"))
+    out = zeros(ComplexF64, size(s.cmat, 1), nch)
+    @inbounds for ch in 1:nch, o in axes(out, 1), j in 1:nI
+        out[o, ch] += s.cmat[o, j] * x[j, ch]
+    end
+    return out
+end
+
+function _stokes_convert(s::StokesSetup, x::AbstractMatrix{Bool})
+    nI, nch = size(x)
+    nI == size(s.cmat, 2) || throw(ArgumentError(
+        "mscal.stokes: FLAG cell has $nI correlations, expected $(size(s.cmat, 2))"))
+    out = falses(size(s.cmat, 1), nch)
+    @inbounds for ch in 1:nch, o in axes(out, 1)
+        out[o, ch] = any(j -> s.fmat[o, j] && x[j, ch], 1:nI)
+    end
+    return out
+end
+
+function _stokes_convert(s::StokesSetup, x::AbstractMatrix{<:Real})
+    nI, nch = size(x)
+    nI == size(s.cmat, 2) || throw(ArgumentError(
+        "mscal.stokes: WEIGHT cell has $nI correlations, expected $(size(s.cmat, 2))"))
+    out = zeros(Float64, size(s.cmat, 1), nch)
+    @inbounds for ch in 1:nch, o in axes(out, 1)
+        acc = 0.0
+        for j in 1:nI
+            w = s.wmat[o, j]
+            (w == 0 || x[j, ch] == 0) && continue
+            acc += w * w / x[j, ch]
+        end
+        out[o, ch] = acc == 0 ? 0.0 : 1.0 / acc
+    end
+    return out
+end
+
+# WEIGHT / SIGMA cell is a bare `(ncorr,)` vector -> one channel, drop it.
+_stokes_convert(s::StokesSetup, x::AbstractVector) =
+    vec(_stokes_convert(s, reshape(x, :, 1)))
+
+# --- name-set threading ---------------------------------------------------
+
+function _stokes_split(names)
+    rest = String[]
+    keys = String[]
+    for n in names
+        s = String(n)
+        startswith(s, "::stokes::") ? push!(keys, s) : push!(rest, s)
+    end
+    return rest, keys
+end
+
+function _stokes_setups(t::AbstractTable, keys::AbstractVector{<:AbstractString})
+    isempty(keys) && return Dict{String,AbstractVector}()
+    subs = Dict(subtables(t))
+    haskey(subs, "POLARIZATION") || error(
+        "mscal.stokes: needs an MS with a POLARIZATION subtable")
+    pol = readtable(subs["POLARIZATION"])
+    nrow(pol) >= 1 || error("mscal.stokes: POLARIZATION subtable is empty")
+    intypes = Int.(collect(column(pol, "CORR_TYPE")[1]))
+    d = Dict{String,AbstractVector}()
+    for k in keys
+        body = k[length("::stokes::")+1:end]
+        rescale = endswith(body, ":r")
+        rescale && (body = body[1:end-2])
+        outtypes = parse.(Int, split(body, ','))
+        d[k] = Any[_stokes_setup(intypes, outtypes, rescale)]
+    end
+    return d
+end

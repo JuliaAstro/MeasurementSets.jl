@@ -87,6 +87,61 @@ end
     @test_throws ErrorException query(readtable(dir), "mscal.el1() > 0")
 end
 
+@testset "TaQL-lite — mscal.stokes() unit" begin
+    p(s) = MSv2._taqllite_parse(s, Set(["A"]))
+    @test p("mscal.stokes(A, 'I') > 0").lhs isa MSv2.TQLStokes
+    @test p("mscal.stokes(A) > 0").lhs.outtypes == [1, 2, 3, 4]
+    @test p("mscal.stokes(A, 'CIRC') > 0").lhs.outtypes == [5, 6, 7, 8]
+    @test p("mscal.stokes(A, 'XX,YY') > 0").lhs.outtypes == [9, 12]
+    @test p("mscal.stokes(A, 'I', true) > 0").lhs.rescale
+    @test_throws ArgumentError p("mscal.stokes(A, 'Ptotal') > 0")
+    @test_throws ArgumentError p("mscal.stokes(A, 'RX') > 0")
+    @test_throws ArgumentError p("mscal.stokes() > 0")
+    @test_throws ArgumentError p("mscal.stokes(A, B) > 0")     # non-literal type
+    @test_throws ArgumentError p("mscal.stokes(A, 'I', 1) > 0") # non-bool rescale
+
+    # conversion matrices, directly
+    s = MSv2._stokes_setup([5, 6, 7, 8], [1], false)      # circ -> I
+    @test s.cmat ≈ ComplexF64[1 0 0 1]
+    s2 = MSv2._stokes_setup([5, 6, 7, 8], [1, 2, 3, 4], false)
+    @test s2.cmat[3, :] ≈ ComplexF64[0, -1im, 1im, 0]     # U = i(LR - RL)
+    sr = MSv2._stokes_setup([5, 6, 7, 8], [1], true)      # rescale halves RR/LL
+    @test sr.cmat ≈ ComplexF64[0.5 0 0 0.5]
+    @test_throws Exception MSv2._stokes_setup([5, 9, 7, 8], [1], false)  # mixed frame
+end
+
+@testset "TaQL-lite query — mscal.stokes()" begin
+    main = readtable(SAMPLE_MS; precision = :full)
+    q = query(main, "rownumber() >= 1"; select = [
+        "si" => "mscal.stokes(DATA, 'I')", "iquv" => "mscal.stokes(DATA)",
+        "fi" => "mscal.stokes(FLAG, 'I')"])
+    D = column(main, "DATA")
+    F = column(main, "FLAG")
+    nch = size(D[1], 2)
+    for i in (3, 17, 250, 599)
+        @test size(column(q, "si")[i]) == (1, nch)
+        @test vec(column(q, "si")[i]) ≈ ComplexF64.(D[i][1, :] .+ D[i][4, :])
+        @test size(column(q, "iquv")[i]) == (4, nch)
+        @test size(column(q, "fi")[i]) == (1, nch)
+        @test vec(column(q, "fi")[i]) == (F[i][1, :] .| F[i][4, :])
+    end
+
+    # compose with a reduction + filter
+    r = query(main, "mean(abs(mscal.stokes(DATA, 'I'))) >= 0.0")
+    @test nrow(r) == nrow(main)
+
+    # groupby
+    g = groupby(main, "ANTENNA1"; select = [
+        "a" => :ANTENNA1, "m" => "gmean(mean(abs(mscal.stokes(DATA, 'I'))))"])
+    @test length(g.a) >= 1
+
+    # error: no POLARIZATION subtable
+    dir = joinpath(mktempdir(), "nopol")
+    write_table(dir, "T", Pair{String,Any}["DATA" => [rand(ComplexF32, 4, 2) for _ in 1:3]];
+                nrow = 3)
+    @test_throws ErrorException query(readtable(dir), "any(mscal.stokes(DATA, 'I') != 0.0)")
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite — mscal.* vs real TaQL" begin
         # derivedmscal UDFs must be registered in this casacore build
@@ -112,6 +167,26 @@ if _HAVE_TAQL
         else
             @info "derivedmscal UDFs not registered in this casacore build; " *
                   "skipping mscal cross-check"
+        end
+    end
+
+    @testset "TaQL-lite — mscal.stokes() vs real TaQL" begin
+        ts = try
+            _taqlcmd("SELECT mscal.stokes(DATA, 'I') AS SI, mscal.stokes(DATA) AS SA " *
+                     "FROM \$1", CCT.Table(SAMPLE_MS))
+        catch
+            nothing
+        end
+        if ts !== nothing
+            main = readtable(SAMPLE_MS; precision = :full)
+            q = query(main, "rownumber() >= 1"; select = [
+                "si" => "mscal.stokes(DATA, 'I')", "sa" => "mscal.stokes(DATA)"])
+            for i in (5, 123, 400)
+                @test vec(column(q, "si")[i]) ≈ vec(ComplexF64.(ts[:SI][i])) rtol = 1e-5
+                @test column(q, "sa")[i] ≈ ComplexF64.(ts[:SA][i]) rtol = 1e-5
+            end
+        else
+            @info "mscal.stokes UDF not available in this casacore build; skipping"
         end
     end
 end
