@@ -52,6 +52,8 @@ _pe_empty(::Type{Bool}) = false
 _pe_empty(::Type{T}) where {T} = zero(T)
 _geval(e::TQLCol, cols, g) = cols[e.name][g[1]]
 _geval(e::TQLLit, cols, g) = e.value
+_geval(e::TQLQuantityLit, cols, g) = e.value
+_geval(e::TQLArrayLit, cols, g) = [_geval(x, cols, g) for x in e.elems]
 _geval(e::TQLCmp, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
 _geval(e::TQLArith, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
 _geval(e::TQLNeg, cols, g) = _bcast(-, _geval(e.a, cols, g))
@@ -209,7 +211,7 @@ function query(gt::GroupedTable, wherestr::AbstractString;
     keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tqleval(ast, cd, i)]
     keep = _apply_orderby(keep, orderby, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
-    ps = _select_materialize(cls, n -> column(gt, n), keep)
+    ps = _select_materialize(cls, gt, keep)
     return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
 end
 
@@ -231,7 +233,7 @@ function query(f::Function, gt::GroupedTable;
     keep = [i for (i, row) in enumerate(rws) if f(row)]
     keep = _apply_orderby(keep, orderkeys, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
-    ps = _select_materialize(cls, n -> column(gt, n), keep)
+    ps = _select_materialize(cls, gt, keep)
     return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
 end
 
@@ -315,7 +317,7 @@ function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
     elseif anyclosure
         union!(needed, columnnames(t))
     end
-    loaded = Dict{String,AbstractVector}(n => _load_col(column(t, n)) for n in needed)
+    loaded = _tql_cols(t, needed, whereast, havingast, extrarefs)
 
     rows =
         wherearg === nothing ? collect(1:nrow(t)) :

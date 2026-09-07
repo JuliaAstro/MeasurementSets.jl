@@ -22,8 +22,77 @@ _tql_arraymask(x::TQLMArray) = x.mask
 _tql_arraymask(x::AbstractArray) = falses(size(x))
 _tql_arraymask(_) = false
 
-# name => (callable-over-arg-values, allowed arg count).  `min`/`max` are
-# arity-overloaded and handled in `_make_func`, not here.
+# --- date/time (Phase 69) --------------------------------------------
+# Every TaQL-lite date value is an MJD `Float64` (days) -- so `_bcast`,
+# `isless`, ORDER BY all keep working. casacore's `datetime`/`mjd`/... are
+# built-in (`casa/Quanta` only). `Dates` (stdlib) does the parsing.
+const _TQL_MJD0 = Dates.DateTime(1858, 11, 17)
+_tql_mjd_of(dt::Dates.DateTime) = (dt - _TQL_MJD0) / Dates.Millisecond(86_400_000)
+_tql_dt_of(m::Real) = _TQL_MJD0 + Dates.Millisecond(round(Int, float(m) * 86_400_000))
+
+const _TQL_DT_FORMATS = (
+    Dates.DateFormat("yyyy-mm-ddTHH:MM:SS.s"),
+    Dates.DateFormat("yyyy-mm-ddTHH:MM:SS"),
+    Dates.DateFormat("yyyy-mm-dd HH:MM:SS"),
+    Dates.DateFormat("yyyy-mm-dd"),
+    Dates.DateFormat("yyyy/mm/dd/HH:MM:SS"),
+    Dates.DateFormat("yyyy/mm/dd"),
+    Dates.DateFormat("dduuuyyyy/HH:MM:SS"),
+    Dates.DateFormat("dduuuyyyy"),
+    Dates.DateFormat("dd-uuu-yyyy/HH:MM:SS"),
+    Dates.DateFormat("dd-uuu-yyyy"),
+)
+
+function _tql_parse_datetime(s::AbstractString)
+    ss = strip(String(s))
+    isempty(ss) && return _tql_mjd_of(Dates.now())
+    for f in _TQL_DT_FORMATS
+        v = tryparse(Dates.DateTime, ss, f)
+        v === nothing || return _tql_mjd_of(v)
+    end
+    v = tryparse(Dates.DateTime, ss)
+    v === nothing && throw(ArgumentError(
+        "TaQL-lite: cannot parse datetime \"$s\" — try ISO " *
+        "(`2020-02-12`, `2020-02-12T03:04:05`)"))
+    return _tql_mjd_of(v)
+end
+
+_tql_datetime(a...) = isempty(a) ? _tql_mjd_of(Dates.now()) :
+    a[1] isa AbstractString ? _tql_parse_datetime(a[1]) : float(a[1])
+_tql_now_mjd() = _tql_mjd_of(Dates.now())
+
+_pad2(n) = lpad(n, 2, '0')
+# radians -> `HH:MM:SS.sss` (of time) / `+DD.MM.SS.sss` (of arc); the
+# angle is quantised to milliseconds/milliarcsec as an integer first so
+# rounding never leaves a `60` in a field.
+function _tql_hms(rad::Real)
+    tms = mod(round(Int, mod(float(rad) * (12 / pi), 24) * 3_600_000), 24 * 3_600_000)
+    h, r = divrem(tms, 3_600_000)
+    m, r = divrem(r, 60_000)
+    sec, ms = divrem(r, 1000)
+    string(_pad2(h), ":", _pad2(m), ":", _pad2(sec), ".", lpad(ms, 3, '0'))
+end
+function _tql_dms(rad::Real)
+    sgn = signbit(float(rad)) ? "-" : "+"
+    tmas = round(Int, abs(float(rad)) * (180 / pi) * 3_600_000)
+    d, r = divrem(tmas, 3_600_000)
+    m, r = divrem(r, 60_000)
+    sec, ms = divrem(r, 1000)
+    string(sgn, _pad2(d), ".", _pad2(m), ".", _pad2(sec), ".", lpad(ms, 3, '0'))
+end
+
+# great-circle angular distance between two `[lon, lat]` radian points
+# (SOFA `seps` -- the atan2 form, numerically stable near 0 and π).
+function _tql_angdist(lon1::Real, lat1::Real, lon2::Real, lat2::Real)
+    dlon = lon2 - lon1
+    x = cos(lat2) * sin(dlon)
+    y = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dlon)
+    z = sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(dlon)
+    return atan(hypot(x, y), z)
+end
+
+# name => (callable-over-arg-values, allowed arg count).  `min`/`max` and
+# `angdist` are arity-overloaded and handled in `_make_func`, not here.
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- unary elementwise numeric ---
     "abs" => (_ew(abs), 1:1), "amplitude" => (_ew(abs), 1:1), "ampl" => (_ew(abs), 1:1),
@@ -70,6 +139,27 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "trim" => (strip, 1:1), "ltrim" => (lstrip, 1:1), "rtrim" => (rstrip, 1:1),
     # --- misc ---
     "iif" => (ifelse, 3:3),
+    # --- date/time (MJD-Float days) + angle strings (Phase 69) ---
+    "datetime" => (_tql_datetime, 0:1),
+    "mjd" => ((a...) -> isempty(a) ? _tql_now_mjd() : float(a[1]), 0:1),
+    "mjdtodate" => (x -> float(x), 1:1),
+    "date" => ((a...) -> floor(isempty(a) ? _tql_now_mjd() : float(a[1])), 0:1),
+    "time" => ((a...) -> (m = isempty(a) ? _tql_now_mjd() : float(a[1]); 2pi * (m - floor(m))), 0:1),
+    "year" => (x -> Dates.year(_tql_dt_of(x)), 1:1),
+    "month" => (x -> Dates.month(_tql_dt_of(x)), 1:1),
+    "day" => (x -> Dates.day(_tql_dt_of(x)), 1:1),
+    "week" => (x -> Dates.week(_tql_dt_of(x)), 1:1),
+    "weekday" => (x -> Dates.dayofweek(_tql_dt_of(x)), 1:1),
+    "dow" => (x -> Dates.dayofweek(_tql_dt_of(x)), 1:1),
+    "cdate" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy"), 1:1),
+    "ctime" => (x -> Dates.format(_tql_dt_of(x), "HH:MM:SS"), 1:1),
+    "cmonth" => (x -> Dates.format(_tql_dt_of(x), "uuu"), 1:1),
+    "cdow" => (x -> Dates.format(_tql_dt_of(x), "eee"), 1:1),
+    "ctod" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy/HH:MM:SS"), 1:1),
+    "cdatetime" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy/HH:MM:SS"), 1:1),
+    "hms" => (x -> _tql_hms(float(x)), 1:1),
+    "dms" => (x -> _tql_dms(float(x)), 1:1),
+    "normangle" => (x -> rem2pi(float(x), RoundNearest), 1:1),
 )
 
 # g-prefixed aggregate functions.  `_geval(::TQLAggr)` collects the
@@ -133,6 +223,12 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         n in 1:2 || throw(ArgumentError("TaQL-lite: $name() takes 1 or 2 arguments in \"$src\""))
         base = name == "min" ? min : max
         fn = n == 1 ? _red(x -> (name == "min" ? minimum : maximum)(x)) : _ew2(base)
+        return TQLFunc(fn, args)
+    elseif name in ("angdist", "angdistx", "angulardistance", "angulardistancex")
+        n in (2, 4) || throw(ArgumentError(
+            "TaQL-lite: $name() takes 4 scalar radians or two `[lon, lat]` arrays in \"$src\""))
+        fn = n == 4 ? ((a, b, c, d) -> _tql_angdist(a, b, c, d)) :
+                      ((a, b) -> _tql_angdist(a[1], a[2], b[1], b[2]))
         return TQLFunc(fn, args)
     end
     haskey(_TQL_FUNCS, name) || throw(ArgumentError(

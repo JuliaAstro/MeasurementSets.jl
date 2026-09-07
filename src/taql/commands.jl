@@ -72,12 +72,18 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
         _tqlrefs!(needed, a)
         levels === nothing || foreach(ax -> _axes_refs!(needed, ax), levels)
     end
+    whereast = nothing
     if where isa AbstractString
         union!(needed, _tql_where_refs(where, rd))
+        whereast = _taqllite_parse(String(where), vn)
     elseif where isa Function
         union!(needed, columnnames(rd))
     end
-    cols = Dict{String,AbstractVector}(n => _load_col(column(rd, n)) for n in needed)
+    cols = _tql_cols(rd, needed, [s[3] for s in specs], whereast)
+
+    # unit-strip a `Quantity` SET RHS to each target column's own unit
+    _qty = whereast !== nothing && _has_qty(whereast) || any(_has_qty(s[3]) for s in specs)
+    colunit(c) = _qty ? columnunit(rd, c) : nothing
 
     rows = _where_rows(rd, where, cols)
     isempty(rows) && return 0
@@ -102,14 +108,15 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
 
     edit(path) do t
         for (c, ops) in bycol
+            u = colunit(c)
             if length(ops) == 1 && ops[1][1] === nothing
                 a = ops[1][2]
                 if where === nothing
-                    t[c][:] = [_unwrap_marray(_tqleval(a, cols, i)) for i in 1:nr]
+                    t[c][:] = [_tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u) for i in 1:nr]
                 else
                     ec = t[c]
                     for i in rows
-                        ec[i] = _unwrap_marray(_tqleval(a, cols, i))
+                        ec[i] = _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u)
                     end
                 end
             else
@@ -118,7 +125,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
                 for i in rows
                     cur = nothing
                     for (levels, a) in ops
-                        ev = x -> _unwrap_marray(_tqleval(x, cols, i))
+                        ev = x -> _tql_write_strip(_unwrap_marray(_tqleval(x, cols, i)), u)
                         if levels === nothing
                             cur = ev(a)
                         else

@@ -74,4 +74,37 @@ function MS.qcolumn(t::MS.AbstractTable, name::AbstractString; precision=nothing
     return vals .* u
 end
 
+
+# --- TaQL-lite quantity literals (Phase 69) ----------------------------
+
+# `1.4GHz` -> a Unitful.Quantity (parse-time; errors on an unknown unit)
+MS._tql_quantity(num::Real, unit::AbstractString) = num * _ms_uparse(unit)
+
+# attach a column's QuantumUnits so a `col > 1.4GHz` comparison goes
+# through Unitful; a unitless column (`u === nothing`) stays plain, so
+# `col > 1.4GHz` then raises Unitful's DimensionError (casacore: "units
+# do not conform").
+MS._tql_unit_attach(col::AbstractVector, u) =
+    u === nothing ? col :
+    u isa Tuple  ? error("TaQL quantity comparison: column has a mixed unit $u — " *
+                         "compare against a plain number instead") :
+    col .* u
+
+# a computed `select` / VirtualTaQL result that came out as a Quantity:
+# dimensionless -> the plain number; dimensional -> a clear error.
+function MS._tql_result_strip(x::Unitful.AbstractQuantity)
+    try
+        return Unitful.ustrip(Unitful.NoUnits, x)
+    catch
+        error("a TaQL-lite expression may not yield a dimensional quantity " *
+              "($(Unitful.unit(x))) — compare it (`> 1GHz`) or normalise it (`/ 1GHz`)")
+    end
+end
+
+# an `update!` SET RHS Quantity -> the target column's unit, stripped.
+MS._tql_write_strip(x::Unitful.AbstractQuantity, u) =
+    u === nothing ?
+        error("update!: SET expression yields $(x) but the target column has no unit") :
+        Unitful.ustrip(Unitful.uconvert(u, x))
+
 end # module

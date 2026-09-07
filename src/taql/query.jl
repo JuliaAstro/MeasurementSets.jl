@@ -108,6 +108,23 @@ function _select_spec(parent::AbstractTable, select::AbstractVector{<:Pair})
     return namemap, order
 end
 
+# Load the columns a TaQL-lite expression references. When any parsed AST
+# holds a quantity literal (`1.4GHz`), attach each unit-bearing column's
+# `QuantumUnits` (via the Unitful ext) so the comparison goes through
+# Unitful -- a bare-number column vs a unit literal then raises a
+# DimensionError (casacore's "units do not conform"). `asts` entries may
+# be `nothing`, a `TQLExpr`, or an iterable of those.
+function _tql_cols(t::AbstractTable, names, asts...)
+    need = any(asts) do a
+        a === nothing ? false :
+        a isa TQLExpr ? _has_qty(a) :
+        any(x -> x !== nothing && _has_qty(x), a)
+    end
+    Dict{String,AbstractVector}(
+        n => (c = _load_col(column(t, n)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
+        for n in names)
+end
+
 # classify `select` pairs against `validnames` into 3-tuples:
 # `(outname, :proj, srcname)`, `(outname, :expr, TQLExpr)`, or
 # `(valname, :mpair, (maskname, TQLExpr))` -- the last emits TWO output
@@ -165,26 +182,31 @@ end
 _select_all_proj(cls) = all(c -> c[2] === :proj, cls)
 
 # materialise the `select` output -> `Symbol => column` pairs in output
-# order (a `:mpair` entry contributes two). `getcol(name)` fetches a
-# source column; `rows` are the surviving 1-based indices (ORDER
-# BY-sorted).
-function _select_materialize(cls, getcol, rows::Vector{Int})
+# order (a `:mpair` entry contributes two). `src` is the source table;
+# `rows` are the surviving 1-based indices (ORDER BY-sorted). A computed
+# column whose values come out as a `Unitful.Quantity` (a quantity
+# literal was used) is stripped to a plain number -- dimensionless only.
+function _select_materialize(cls, src::AbstractTable, rows::Vector{Int})
+    exprasts = TQLExpr[]
     refs = Set{String}()
     for (_, kind, v) in cls
-        kind === :expr && _tqlrefs!(refs, v)
-        kind === :mpair && _tqlrefs!(refs, v[2])
+        if kind === :expr
+            _tqlrefs!(refs, v); push!(exprasts, v)
+        elseif kind === :mpair
+            _tqlrefs!(refs, v[2]); push!(exprasts, v[2])
+        end
     end
-    cd = Dict{String,AbstractVector}(n => getcol(n) for n in refs)
+    cd = _tql_cols(src, refs, exprasts)
+    _strip(x) = _tql_result_strip(_unwrap_marray(x))
     out = Pair{Symbol,AbstractVector}[]
     for (nm, kind, v) in cls
         if kind === :proj
-            push!(out, Symbol(nm) => _mapcol(getcol(v), rows))
+            push!(out, Symbol(nm) => _mapcol(column(src, v), rows))
         elseif kind === :expr
-            push!(out, Symbol(nm) =>
-                identity.(Any[_unwrap_marray(_tqleval(v, cd, i)) for i in rows]))
+            push!(out, Symbol(nm) => identity.(Any[_strip(_tqleval(v, cd, i)) for i in rows]))
         else                                       # :mpair -> data + mask
             vals = Any[_tqleval(v[2], cd, i) for i in rows]
-            push!(out, Symbol(nm) => identity.(Any[_unwrap_marray(x) for x in vals]))
+            push!(out, Symbol(nm) => identity.(Any[_strip(x) for x in vals]))
             push!(out, Symbol(v[1]) => identity.(Any[
                 x isa TQLMArray ? x.mask : _bcast(!isfinite, _unwrap_marray(x)) for x in vals]))
         end
@@ -245,12 +267,19 @@ together with its mask column.
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
-boolean-mask array subscripts, units, or date/time / measures
-functions.  Supported: 1-based array element/slice indexing
-(`DATA[1,1]`, `V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`), `BETWEEN` /
-`NOT BETWEEN` (inclusive), bitwise `& | ^ ~` (`^` is xor -- use `**`
-for exponentiation), and `~=` / `!~=` approximate equality (casacore's
-`near`, relative tolerance `1e-5`).
+boolean-mask array subscripts, no `mscal.*` / measures-frame functions.
+Supported: 1-based array element/slice indexing (`DATA[1,1]`,
+`V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`), array literals `[a, b, ...]`,
+`BETWEEN` / `NOT BETWEEN` (inclusive), bitwise `& | ^ ~` (`^` is xor --
+use `**` for exponentiation), `~=` / `!~=` approximate equality
+(casacore's `near`, relative tolerance `1e-5`), scientific-notation
+number literals (`1.4e9`), **quantity literals** (`1.4GHz`, `10arcsec`,
+`30deg` -- compared against a column carrying a `QuantumUnits` keyword;
+needs the Unitful extension), and **date/time + angle functions**:
+`datetime`/`mjd`/`mjdtodate`/`date`/`time` (all MJD-day `Float64`),
+`year`/`month`/`day`/`week`/`weekday`, `cdate`/`ctime`/`cmonth`/`cdow`/
+`ctod`, `hms`/`dms`, `normangle`, `angdist`/`angdistx` (4 scalar radians
+or two `[lon, lat]` arrays).
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
@@ -261,7 +290,7 @@ function query(t::AbstractTable, wherestr::AbstractString;
     for k in orderby
         push!(needed, k.name)
     end
-    cols = Dict(n => _load_col(column(t, n)) for n in needed)
+    cols = _tql_cols(t, needed, ast)
     matched = ast === nothing ? collect(1:nrow(t)) :
               [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
     matched = _apply_orderby(matched, orderby, cols)
@@ -272,7 +301,7 @@ function query(t::AbstractTable, wherestr::AbstractString;
         return RefTable("", parent, rows, namemap, order,
                         parent.type, parent.subtype, parent.readme)
     end
-    ps = _select_materialize(cls, n -> column(t, n), matched)
+    ps = _select_materialize(cls, t, matched)
     return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
 end
 
@@ -325,7 +354,7 @@ function query(f::Function, t::AbstractTable;
         return RefTable("", parent, rows2, namemap, order,
                         parent.type, parent.subtype, parent.readme)
     end
-    ps = _select_materialize(cls, n -> column(t, n), matched)
+    ps = _select_materialize(cls, t, matched)
     return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
 end
 

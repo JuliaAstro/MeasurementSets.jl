@@ -70,6 +70,27 @@ returned unchanged. Needs the Unitful extension.
 """
 qcolumn(args...; kwargs...) = _unitful_load_hint()
 
+# --- TaQL-lite quantity-literal support (Phase 69). ---------------------
+# `_tql_quantity` builds a `Unitful.Quantity` from a parsed `NUMunit`
+# literal -- it MUST fail without Unitful (the parser calls it), so the
+# core stub errors. `_tql_unit_attach` gets a real method too. The other
+# two are working identities in core: a plain (non-`Quantity`) value
+# needs no stripping, and without Unitful there are no `Quantity`s.
+
+_tql_quantity(args...) = error(
+    "MeasurementSets: TaQL quantity literals (e.g. `1.4GHz`) need Unitful — " *
+    "`import Unitful, UnitfulAngles, UnitfulAstro` first")
+
+_tql_unit_attach(args...) = _unitful_load_hint()
+
+"""Strip a dimensionless `Quantity` result of a TaQL-lite expression to a
+plain number; error on a dimensional one. Identity for anything else."""
+_tql_result_strip(x) = x
+
+"""Convert/strip a `Quantity` written by an `update!` SET RHS to the
+target column's unit `u`. Identity for a plain value."""
+_tql_write_strip(x, u) = x
+
 """
     UNITS_NO_JULIA_COUNTERPART
 

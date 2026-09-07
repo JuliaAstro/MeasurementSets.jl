@@ -1193,3 +1193,49 @@ transitive dependency of `SOFA.jl`, so `import SOFA` still activates the
 extension).
 
 No API, return-type, or behaviour change. 2592 tests.
+
+### Phase 69 — TaQL-lite quantity literals + date/time & angle functions
+
+The string expression grammar (shared by `query` / `groupby` / `join` /
+`update!` / `VirtualTaQLColumn` CALC) gains two loosely-coupled features.
+
+**Quantity literals.** `1.4GHz`, `10arcsec`, `30deg` — a number token
+immediately followed (no space) by a unit. Compared against a column
+that carries a `QuantumUnits` keyword, the comparison goes through
+Unitful: `query(spw, "CHAN_FREQ > 1.4GHz")`. When an expression uses a
+quantity literal, every referenced unit-bearing column is loaded with
+its unit attached, so a bare-number comparison against such a column
+then raises a `DimensionError` (casacore's "units do not conform" — a
+deliberately stricter reading; only bites when bare and unit literals
+are mixed against one column). A computed `select` / CALC expression
+whose result is a dimensionless quantity (`"CHAN_FREQ / 1GHz"`) is
+stripped to a plain number; a dimensional result errors. An `update!`
+SET RHS that evaluates to a quantity is converted to the target
+column's unit. Needs the Unitful extension (`import Unitful,
+UnitfulAngles, UnitfulAstro`); the parser errors clearly without it.
+
+**Date/time + angle functions** (pure, no weak-dep gating — `Dates`
+stdlib + trig). Every date value is an **MJD `Float64`** (days), so
+`_bcast` / `isless` / `ORDER BY` all keep working:
+
+- `datetime('2020-02-12')` / `datetime()` / `mjd(x)` / `mjd()` /
+  `mjdtodate(x)` / `date(x)` / `time(x)`
+- `year` / `month` / `day` / `week` / `weekday` / `dow`
+- `cdate` / `ctime` / `cmonth` / `cdow` / `ctod` (formatted strings)
+- `hms(rad)` / `dms(rad)` — sexagesimal strings
+- `normangle(rad)` — wrap to `(−π, π]`
+- `angdist` / `angdistx` — great-circle distance, `angdist(lon1, lat1,
+  lon2, lat2)` or `angdist([lon1, lat1], [lon2, lat2])`
+
+**Also:** general array literals `[a, b, c]` in any expression position
+(not just `IN`); scientific-notation number literals (`1.4e9`, `1e-9`)
+— previously an "unknown column" error.
+
+**Non-goals:** measure literals / a `TQLMeasure` node (casacore core
+TaQL has none); `mscal.azel()` / measures-frame functions; the
+multi-point (2N-element) `angdist` array form; a `BigFloat` / `Float128`
+high-precision MJD variant (considered, deferred); the spaced postfix
+`3 km` unit form (no-space `3km` only); input angle literals (`30d15m`
+as a value — only the `hms(rad)` *function*).
+
+2638 tests.

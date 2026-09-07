@@ -56,14 +56,18 @@ function _vtq_prepare!(v::VirtualTaQLColumn)
         throw(ArgumentError(
             "VirtualTaQLColumn column \"$(v.vdesc.name)\": cannot evaluate CALC " *
             "expression \"$(v.exprstr)\" — $(sprint(showerror, err)). TaQL-lite " *
-            "supports arithmetic, comparisons, LIKE/regex, a function library and " *
-            "IN; array indexing, units, date/time and measures functions are not."))
+            "supports arithmetic, comparisons, LIKE/regex, a function library, IN, " *
+            "unit literals (`1.4GHz`) and date/time functions; array indexing and " *
+            "measures functions are not."))
     end
     refs = Set{String}()
     _tqlrefs!(refs, ast)
     v.ast = ast
     if isempty(refs)
-        v.const_value = _tqleval(ast, Dict{String,AbstractVector}(), 1)
+        v.const_value = _tql_result_strip(_tqleval(ast, Dict{String,AbstractVector}(), 1))
+    elseif _has_qty(ast)
+        v.cols = Dict{String,AbstractVector}(
+            n => _tql_unit_attach(column(v.table, n), columnunit(v.table, n)) for n in refs)
     else
         v.cols = Dict{String,AbstractVector}(n => column(v.table, n) for n in refs)
     end
@@ -72,7 +76,8 @@ function _vtq_prepare!(v::VirtualTaQLColumn)
 end
 
 _vtq_raw(v::VirtualTaQLColumn, row::Integer) =
-    v.cols === nothing ? v.const_value : _tqleval(v.ast, v.cols, Int(row))
+    v.cols === nothing ? v.const_value :
+    _tql_result_strip(_tqleval(v.ast, v.cols, Int(row)))
 
 # cast an evaluated value to the column's declared Julia type
 function _vtq_cast(v::VirtualTaQLColumn, raw, J::Type)

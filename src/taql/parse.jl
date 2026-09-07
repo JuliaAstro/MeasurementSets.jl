@@ -3,11 +3,11 @@
 # ======================================================================
 
 struct TQLToken
-    kind::Symbol     # :ident | :num | :str | :op | :arithop | :patlit |
+    kind::Symbol     # :ident | :num | :qty | :str | :op | :arithop | :patlit |
                       # :lparen | :rparen | :lbracket | :rbracket | :comma | :colon | :eof
     text::String
-    value::Any        # :num/:str -> the literal value; :patlit ->
-                      # (; flavor::Symbol, pattern::String, icase::Bool); else nothing
+    value::Any        # :num/:str -> the literal value; :qty -> (num, unit::String);
+                      # :patlit -> (; flavor::Symbol, pattern::String, icase::Bool); else nothing
 end
 
 # comparison / logical / match / bitwise operator chars -- grouped into
@@ -67,9 +67,34 @@ function _taqllite_tokenize(s::AbstractString)
                 sawdot |= cs[j] == '.'
                 j += 1
             end
+            # scientific notation: `1.4e9`, `1e-9`, `2E+3`
+            isexp = false
+            if j + 1 <= n && (cs[j] == 'e' || cs[j] == 'E') &&
+               (isdigit(cs[j+1]) || ((cs[j+1] == '+' || cs[j+1] == '-') &&
+                                     j + 2 <= n && isdigit(cs[j+2])))
+                isexp = true
+                j += (cs[j+1] == '+' || cs[j+1] == '-') ? 2 : 1
+                while j <= n && isdigit(cs[j])
+                    j += 1
+                end
+            end
             text = join(cs[i:j-1])
-            val = sawdot ? parse(Float64, text) : parse(Int64, text)
-            push!(toks, TQLToken(:num, text, val))
+            val = (sawdot || isexp) ? parse(Float64, text) : parse(Int64, text)
+            # a unit run immediately adjacent (no space) -> a quantity
+            # literal (`1.4GHz`, `10arcsec`, `30deg`); casacore's
+            # FLINTUNIT. First char must be a letter or `°`; the run is
+            # letters / digits / `°` / `µ` (a single unit token -- a
+            # compound like `km/s` is not a literal, compare a column).
+            if j <= n && (isletter(cs[j]) || cs[j] == '°')
+                u0 = j
+                while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '°' || cs[j] == 'µ')
+                    j += 1
+                end
+                unit = join(cs[u0:j-1])
+                push!(toks, TQLToken(:qty, string(text, unit), (val, unit)))
+            else
+                push!(toks, TQLToken(:num, text, val))
+            end
             i = j
         elseif isletter(c) || c == '_'
             j = i
@@ -489,9 +514,24 @@ function _parse_atom_base!(p::TQLParser)
         _expect_kind!(p, :rparen, "')'")
         return e
     end
+    if _peek(p).kind === :lbracket           # array literal [a, b, ...]
+        _advance!(p)
+        elems = TQLExpr[]
+        if _peek(p).kind !== :rbracket
+            push!(elems, _parse_or!(p))
+            while _peek(p).kind === :comma
+                _advance!(p)
+                push!(elems, _parse_or!(p))
+            end
+        end
+        _expect_kind!(p, :rbracket, "']'")
+        return TQLArrayLit(elems)
+    end
     t = _advance!(p)
     if t.kind === :num
         return TQLLit(t.value)
+    elseif t.kind === :qty
+        return TQLQuantityLit(_tql_quantity(t.value[1], t.value[2]))
     elseif t.kind === :str
         return TQLLit(t.value)
     elseif t.kind === :ident
