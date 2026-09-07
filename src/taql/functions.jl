@@ -197,6 +197,13 @@ const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
 
 function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     n = length(args)
+    if startswith(name, "mscal.")
+        fn = name[7:end]
+        fn in _MSCAL_FUNCS || throw(ArgumentError(
+            "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
+        n == 0 || throw(ArgumentError("TaQL-lite: $name() takes no arguments in \"$src\""))
+        return TQLMScal(fn)
+    end
     if haskey(_TQL_AGGRS, name)
         if name == "gcount"
             n in 0:1 || throw(ArgumentError("TaQL-lite: gcount() takes 0 or 1 arguments in \"$src\""))

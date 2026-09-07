@@ -140,6 +140,14 @@ end
 
 _frame_eop(frame) = _eop(_frame_scale_mjd(frame, UTC))
 
+# local apparent sidereal time (rad) = GAST + observatory east longitude
+function MS._lst(frame::MeasFrame)
+    uta, utb = _frame_ut1(frame)
+    tta, ttb = _frame_tt(frame)
+    elong, _, _ = _frame_site(frame)
+    mod2pi(SOFA.gst06a(uta, utb, tta, ttb) + elong)
+end
+
 # ======================================================================
 # direction  (hub = ICRS; J2000 ≈ ICRS)
 # ======================================================================

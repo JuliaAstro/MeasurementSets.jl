@@ -63,13 +63,16 @@ function _vtq_prepare!(v::VirtualTaQLColumn)
     refs = Set{String}()
     _tqlrefs!(refs, ast)
     v.ast = ast
+    plain, mscal = _mscal_split(refs)
     if isempty(refs)
         v.const_value = _tql_result_strip(_tqleval(ast, Dict{String,AbstractVector}(), 1))
     elseif _has_qty(ast)
         v.cols = Dict{String,AbstractVector}(
-            n => _tql_unit_attach(column(v.table, n), columnunit(v.table, n)) for n in refs)
+            n => _tql_unit_attach(column(v.table, n), columnunit(v.table, n)) for n in plain)
+        isempty(mscal) || merge!(v.cols, _mscal_columns(v.table, mscal))
     else
-        v.cols = Dict{String,AbstractVector}(n => column(v.table, n) for n in refs)
+        v.cols = Dict{String,AbstractVector}(n => column(v.table, n) for n in plain)
+        isempty(mscal) || merge!(v.cols, _mscal_columns(v.table, mscal))
     end
     v.prepared = true
     return v

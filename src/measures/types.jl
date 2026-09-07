@@ -285,3 +285,13 @@ end
 _mconv(m::Measure, ::Type{<:RefFrame}, ::MeasFrame) = error(
     "MeasurementSets: reference-frame conversion needs SOFA.jl — run `import SOFA` " *
     "(and `import EarthOrientation` for ΔUT1 / polar-motion accuracy)")
+
+"""
+    _lst(frame::MeasFrame) -> Float64
+
+Local apparent sidereal time (radians) at `frame.position` for
+`frame.epoch` -- Greenwich apparent sidereal time plus the observatory
+east longitude.  Real method in `ext/SOFAExt.jl`.
+"""
+_lst(args...) = error(
+    "MeasurementSets: local sidereal time needs SOFA.jl — run `import SOFA`")

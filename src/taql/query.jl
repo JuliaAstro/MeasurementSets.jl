@@ -120,9 +120,12 @@ function _tql_cols(t::AbstractTable, names, asts...)
         a isa TQLExpr ? _has_qty(a) :
         any(x -> x !== nothing && _has_qty(x), a)
     end
-    Dict{String,AbstractVector}(
+    plain, mscal = _mscal_split(names)
+    d = Dict{String,AbstractVector}(
         n => (c = _load_col(column(t, n)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
-        for n in names)
+        for n in plain)
+    isempty(mscal) || merge!(d, _mscal_columns(t, mscal))
+    return d
 end
 
 # classify `select` pairs against `validnames` into 3-tuples:
@@ -266,8 +269,20 @@ together with its mask column.
 
 A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 
+`mscal.*` derived-MS functions (Phase 77, needs `import SOFA` and an MS
+MAIN table with `ANTENNA` / `FIELD` subtables): `mscal.ha1()` /
+`ha2()` / `ha()` (hour angle, rad), `mscal.hadec1()` (`[ha, dec]`),
+`mscal.azel1()` (`[az, el]`), `mscal.az1()` / `el1()` (scalar),
+`mscal.pa1()` (parallactic angle), `mscal.last1()` (local apparent
+sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
+ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000;
+O(nrow)), `mscal.delay()` (geometric delay, s). The `1` / `2` suffix
+picks `ANTENNA1` / `ANTENNA2`; no suffix uses antenna 0 (array-centre
+fallback). Not the CASA-MSSelection `mscal.baseline` / `mscal.spw`
+selection functions, nor `mscal.stokes`.
+
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
-boolean-mask array subscripts, no `mscal.*` / measures-frame functions.
+boolean-mask array subscripts.
 Supported: 1-based array element/slice indexing (`DATA[1,1]`,
 `V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`), array literals `[a, b, ...]`,
 `BETWEEN` / `NOT BETWEEN` (inclusive), bitwise `& | ^ ~` (`^` is xor --

@@ -25,6 +25,7 @@
 include("ast.jl")
 include("parse.jl")
 include("functions.jl")
+include("mscal.jl")
 include("query.jl")
 include("groupby.jl")
 include("join.jl")
