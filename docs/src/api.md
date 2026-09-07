@@ -67,6 +67,7 @@ measinfo
 MeasInfo
 measure
 measconvert
+observatory
 MeasFrame
 MEpoch
 MDirection

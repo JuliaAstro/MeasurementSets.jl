@@ -123,6 +123,17 @@ end
     @test column(qd, "efix")[3] != column(qd, "e0")[3]
     @test nrow(query(main, "mscal.el1('SUN') > -10.0")) == nrow(main)
     @test_throws ErrorException query(main, "mscal.el1('NOSUCH') > 0")
+
+    # Phase 90: suffix-less mscal.ha() / azel() use the array centre
+    # (OBSERVATION.TELESCOPE_NAME = "EVLA" -> the Observatories table),
+    # close to but not identical to antenna 0
+    qc = query(main, "rownumber() >= 1"; select = [
+        "ha" => "mscal.ha()", "ha1" => "mscal.ha1()",
+        "el" => "mscal.azel()"])
+    for i in (3, 250, 599)
+        @test abs(column(qc, "ha")[i] - column(qc, "ha1")[i]) < deg2rad(0.1)
+        @test length(column(qc, "el")[i]) == 2
+    end
 end
 
 @testset "TaQL-lite — mscal.* error cases" begin

@@ -207,6 +207,13 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
   present. Polynomial (`numpoly > 0`) `PHASE_DIR` and the
   `DiskLong`/`DiskLat` sub-Earth point are out of scope.
 
+- **Observatories**: [`observatory("VLA")`](@ref) returns the ITRF
+  position of a known telescope (a bundled snapshot of casacore's
+  `Observatories` data table — VLA / ALMA / ATCA / GBT / WSRT / GMRT /
+  MeerKAT / … ~50 entries). Used as the array-centre reference for the
+  suffix-less `mscal.ha()` / `mscal.azel()` / … (keyed by
+  `OBSERVATION.TELESCOPE_NAME`).
+
 Backed by the pure-Julia [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl)
 (v2, IAU SOFA port). Without `EarthOrientation.jl` the conversions run at
 ~1 arcsecond (ΔUT1 = 0, no polar motion) with a one-time warning. `J2000`

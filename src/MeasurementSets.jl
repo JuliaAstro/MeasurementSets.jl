@@ -59,6 +59,7 @@ include("datamanagers/dysco.jl")
 include("tables/column.jl")
 include("tables/units.jl")
 include("measures/types.jl")
+include("measures/observatories.jl")
 include("measures/measinfo.jl")
 include("measures/read.jl")
 include("measures/ephemeris.jl")
@@ -80,7 +81,7 @@ export BFloat16                       # re-exported from BFloat16s (for `precisi
 export VariableShape, VariableDims, isarray
 export Column, column, getcolumn, getcell
 export columnunit, qcolumn, UNITS_NO_JULIA_COUNTERPART   # real methods via UnitfulExt
-export measure, measinfo, measconvert, MeasFrame, MeasInfo   # conversions via SOFAExt
+export measure, measinfo, measconvert, MeasFrame, MeasInfo, observatory   # conversions via SOFAExt
 export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, reftype
 export MBaseline, MuvW
 export Ephemeris, open_ephemeris, field_ephemeris, ephemeris_direction,

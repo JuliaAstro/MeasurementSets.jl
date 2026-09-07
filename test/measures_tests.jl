@@ -18,6 +18,18 @@ const _HAVE_MEAS_CASA = isfile(_MEAS_CASA)
     @test Base.get_extension(MSv2, :EarthOrientationExt) !== nothing
 end
 
+@testset "measures — Observatories table" begin
+    @test observatory("VLA") isa MPosition{ITRF}
+    @test observatory("alma") isa MPosition{ITRF}      # case-insensitive
+    @test observatory("  ATCA ") isa MPosition{ITRF}   # trimmed
+    @test observatory("no-such-scope") === nothing
+    # VLA geocentric position magnitude ≈ Earth radius + ~2 km
+    p = observatory("VLA")
+    @test 6.37e6 < hypot(p.x, p.y, p.z) < 6.38e6
+    # ITRF longitude ≈ -107.6° (VLA site)
+    @test rad2deg(atan(p.y, p.x)) ≈ -107.6 atol = 0.2
+end
+
 @testset "measures — MEASINFO parse" begin
     ms = MeasurementSet(SAMPLE_MS)
     main = readtable(SAMPLE_MS)
