@@ -1583,7 +1583,24 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
-### Phase 87 — bare sexagesimal literals in the grammar
+### Phase 88 — `LGROUP` / `CMB` velocity frames
+
+`measconvert` for `MFrequency` / `MRadialVelocity` now handles the two
+remaining casacore velocity frames:
+
+- `LGROUP` — the Local Group barycentre (casacore
+  `MeasTable::calcVelocityLGROUP`, 308 km/s).
+- `CMB` — the cosmic-microwave-background rest frame (the dipole,
+  F. Ghigo's 369.5 km/s toward the galactic-coordinate direction).
+
+`VEL_LGROUP` / `VEL_CMB` added to `src/constants.jl`; the `LGROUP_BARY`
+/ `CMB_BARY` routes in `ext/SOFAExt.jl` are the same Doppler-shift form
+as `LSRK↔BARY`. Round-trip verified; the constants are copied verbatim
+from `MeasTable.cc` (no `casatools` oracle for these two).
+
+Also: corrected the stale "`RefOff` is parsed-and-carried" comment —
+it is ignored (no standard MS column carries one).
+
 
 ```julia
 query(main, "PHASE_DIR[1] > 10h30m AND PHASE_DIR[2] BETWEEN 40d AND 50d")

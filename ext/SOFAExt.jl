@@ -20,6 +20,7 @@ using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocit
     RefFrame, MeasFrame, reftype,
     UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
+    LGROUP, CMB,
     MERCURY, VENUS, MARS, JUPITER, SATURN, URANUS, NEPTUNE, SUN, MOON,
     OtherRef, _dir_xyz, _xyz_dir
 
@@ -31,6 +32,8 @@ const DAYSEC      = MS.SEC_PER_DAY       # 86400.0
 const _VEL_LSRK   = MS.VEL_LSRK
 const _VEL_LSRD   = MS.VEL_LSRD
 const _VEL_LSRGAL = MS.VEL_LSRGAL
+const _VEL_LGROUP = MS.VEL_LGROUP
+const _VEL_CMB    = MS.VEL_CMB
 
 _dot(a, b) = a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
 
@@ -352,6 +355,10 @@ function _freq_to_bary(f::MFrequency{A}, n, frame::MeasFrame) where {A}
     elseif A === TOPO
         fgeo = _dopp(f.hz, _dot(_v_obs_geo(frame), n) / C_LIGHT, -1)   # TOPO->GEO
         return _dopp(fgeo, _dot(_v_earth_bary(frame), n) / C_LIGHT, -1)
+    elseif A === LGROUP
+        return _dopp(f.hz, _dot(_VEL_LGROUP, n) / C_LIGHT, +1)
+    elseif A === CMB
+        return _dopp(f.hz, _dot(_VEL_CMB, n) / C_LIGHT, +1)
     end
     error("MeasurementSets: frequency frame $(nameof(A)) is not supported")
 end
@@ -370,6 +377,10 @@ function _bary_to_freq(hz::Float64, ::Type{B}, n, frame::MeasFrame) where {B}
     elseif B === TOPO
         fgeo = _dopp(hz, _dot(_v_earth_bary(frame), n) / C_LIGHT, +1)
         return MFrequency{B}(_dopp(fgeo, _dot(_v_obs_geo(frame), n) / C_LIGHT, +1))
+    elseif B === LGROUP
+        return MFrequency{B}(_dopp(hz, _dot(_VEL_LGROUP, n) / C_LIGHT, -1))
+    elseif B === CMB
+        return MFrequency{B}(_dopp(hz, _dot(_VEL_CMB, n) / C_LIGHT, -1))
     end
     error("MeasurementSets: frequency frame $(nameof(B)) is not supported")
 end
@@ -403,6 +414,10 @@ function _rv_to_bary(m::MRadialVelocity{A}, n, frame::MeasFrame) where {A}
     elseif A === TOPO
         b = _radd(b, _dot(_v_obs_geo(frame), n) / C_LIGHT)     # TOPO->GEO
         return _radd(b, _dot(_v_earth_bary(frame), n) / C_LIGHT) * C_LIGHT
+    elseif A === LGROUP
+        return _radd(b, -_dot(_VEL_LGROUP, n) / C_LIGHT) * C_LIGHT
+    elseif A === CMB
+        return _radd(b, -_dot(_VEL_CMB, n) / C_LIGHT) * C_LIGHT
     end
     error("MeasurementSets: radial-velocity frame $(nameof(A)) is not supported")
 end
@@ -422,6 +437,10 @@ function _bary_to_rv(mps::Float64, ::Type{B}, n, frame::MeasFrame) where {B}
     elseif B === TOPO
         b = _radd(b, -_dot(_v_earth_bary(frame), n) / C_LIGHT) # BARY->GEO
         return MRadialVelocity{B}(_radd(b, -_dot(_v_obs_geo(frame), n) / C_LIGHT) * C_LIGHT)
+    elseif B === LGROUP
+        return MRadialVelocity{B}(_radd(b, _dot(_VEL_LGROUP, n) / C_LIGHT) * C_LIGHT)
+    elseif B === CMB
+        return MRadialVelocity{B}(_radd(b, _dot(_VEL_CMB, n) / C_LIGHT) * C_LIGHT)
     end
     error("MeasurementSets: radial-velocity frame $(nameof(B)) is not supported")
 end

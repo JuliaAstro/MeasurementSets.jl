@@ -86,7 +86,8 @@ export MBaseline, MuvW
 export Ephemeris, open_ephemeris, field_ephemeris, ephemeris_direction,
     ephemeris_radvel, ephemeris_distance
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
-    HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO
+    HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
+    LGROUP, CMB
 export MERCURY, VENUS, MARS, JUPITER, SATURN, URANUS, NEPTUNE, SUN, MOON
 export MDoppler, DopplerType, RADIO, OPTICAL, RATIO, BETA, GAMMA, Z, RELATIVISTIC
 export doppler, frequency, radialvelocity, restfrequency, shiftfreq

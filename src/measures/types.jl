@@ -60,6 +60,8 @@ for (T, doc) in [
         (:BARY,     "Solar-system barycentre (frequency / radial velocity)."),
         (:GEO,      "Geocentric (frequency / radial velocity)."),
         (:GALACTO,  "Galactocentric (frequency / radial velocity)."),
+        (:LGROUP,   "Local Group barycentre, ~308 km/s (frequency / radial velocity)."),
+        (:CMB,      "Cosmic microwave background rest frame, ~369.5 km/s (frequency / radial velocity)."),
     ]
     @eval struct $T <: RefFrame end
     @eval @doc $doc $T

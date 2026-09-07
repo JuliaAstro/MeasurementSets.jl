@@ -8,8 +8,8 @@
 #   TabRefTypes -- Vector{String}   (code -> name map for VarRefCol)
 #   TabRefCodes -- Vector{UInt}
 # plus the sibling `QuantumUnits` keyword for the value's unit(s).
-# (`RefOff`, an offset-measure sub-record, is parsed-and-carried but not
-# applied -- see the phase non-goals.)
+# (`RefOff`, an offset-measure sub-record, is currently ignored -- no
+# standard MS column carries one; see the phase non-goals.)
 #
 # Ref: casacore/measures/TableMeasures/TableMeasRefDesc.cc:117-155 (read),
 #      TableMeasDescBase::write (.cc:126-160) + MeasureHolder::toRecord.
@@ -50,10 +50,12 @@ const _MEAS_FRAMES = Dict{Symbol,Dict{String,DataType}}(
     :position => Dict("ITRF" => ITRF, "WGS84" => WGS84),
     :frequency => Dict(
         "REST" => REST, "LSRK" => LSRK, "LSR" => LSRK, "LSRD" => LSRD,
-        "BARY" => BARY, "GEO" => GEO, "TOPO" => TOPO, "GALACTO" => GALACTO),
+        "BARY" => BARY, "GEO" => GEO, "TOPO" => TOPO, "GALACTO" => GALACTO,
+        "LGROUP" => LGROUP, "CMB" => CMB),
     :radialvelocity => Dict(
         "LSRK" => LSRK, "LSR" => LSRK, "LSRD" => LSRD, "BARY" => BARY,
-        "GEO" => GEO, "TOPO" => TOPO, "GALACTO" => GALACTO),
+        "GEO" => GEO, "TOPO" => TOPO, "GALACTO" => GALACTO,
+        "LGROUP" => LGROUP, "CMB" => CMB),
     :doppler => Dict(
         "RADIO" => RADIO, "OPTICAL" => OPTICAL, "Z" => OPTICAL,
         "RATIO" => RATIO, "BETA" => BETA, "TRUE" => BETA,
@@ -168,6 +170,7 @@ const _FRAME_STRING = Dict{DataType,String}(
     AZEL => "AZEL", AZELGEO => "AZELGEO", ITRF => "ITRF", WGS84 => "WGS84",
     TOPO => "TOPO", REST => "REST", LSRK => "LSRK", LSRD => "LSRD",
     BARY => "BARY", GEO => "GEO", GALACTO => "GALACTO",
+    LGROUP => "LGROUP", CMB => "CMB",
     # solar-system-body direction frames
     MERCURY => "MERCURY", VENUS => "VENUS", MARS => "MARS",
     JUPITER => "JUPITER", SATURN => "SATURN", URANUS => "URANUS",
