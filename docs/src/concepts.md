@@ -168,3 +168,12 @@ The write path takes a `measures =` keyword on
 "J2000"))` or the per-row `(; kind, varrefcol, tabtypes, tabcodes)`
 form — and `copyms` / `copytable` round-trip a column's `MEASINFO`
 verbatim.
+
+**Doppler shifts** are the other spectral axis — the *convention*
+(`RADIO` / `OPTICAL` / `RATIO` / `BETA` / `GAMMA`) rather than a
+reference frame. `MDoppler{RADIO}(0.01)`; `measconvert(d, OPTICAL)`
+changes convention (pure algebra — no `SOFA`); and, given a rest
+frequency, `doppler(f, ν₀)` / `frequency(d, ν₀)` / `restfrequency(f, d)`
+bridge to/from [`MFrequency`](@ref), `doppler(v)` / `radialvelocity(d)`
+to/from [`MRadialVelocity`](@ref). A Doppler value is frame-agnostic —
+`measconvert` the frequency to the frame you want *first*, then bridge.

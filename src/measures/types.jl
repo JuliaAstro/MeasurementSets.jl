@@ -68,6 +68,28 @@ end
 "A reference-frame name string casacore uses that this package parses but does not convert."
 struct OtherRef{S} <: RefFrame end
 
+"""A Doppler-shift convention (`RADIO` / `OPTICAL` / `RATIO` / `BETA` / `GAMMA`)."""
+abstract type DopplerType end
+
+for (T, doc) in [
+        (:RADIO,   "Radio velocity `cΔν/ν₀` (`D = 1 − ν/ν₀`)."),
+        (:OPTICAL, "Optical velocity / redshift `z = cΔλ/λ₀` (`D = ν₀/ν − 1`)."),
+        (:RATIO,   "The frequency ratio `ν/ν₀` itself."),
+        (:BETA,    "True relativistic velocity `v/c` (`D = (1−F²)/(1+F²)`, `F = ν/ν₀`)."),
+        (:GAMMA,   "The Lorentz factor `γ` (`D = (1+F²)/(2F)`)."),
+    ]
+    @eval struct $T <: DopplerType end
+    @eval @doc $doc $T
+end
+
+"""Alias for [`OPTICAL`](@ref) — casacore's `Z` (redshift) spelling."""
+const Z = OPTICAL
+"""Alias for [`BETA`](@ref) — casacore's `RELATIVISTIC` spelling."""
+const RELATIVISTIC = BETA
+
+"A Doppler-convention name string casacore uses that this package parses but does not convert."
+struct OtherDoppler{S} <: DopplerType end
+
 # ======================================================================
 # measure value types  -- parametric on the reference frame
 # ======================================================================
@@ -125,7 +147,20 @@ struct MRadialVelocity{R<:RefFrame}
     mps::Float64
 end
 
-const Measure = Union{MEpoch,MDirection,MPosition,MFrequency,MRadialVelocity}
+"""
+    MDoppler{C}(d)
+
+A Doppler shift as a dimensionless value in convention `C`
+(`RADIO` / `OPTICAL` / `RATIO` / `BETA` / `GAMMA`). `measconvert(d, C2)`
+changes convention; [`doppler`](@ref) / [`frequency`](@ref) /
+[`radialvelocity`](@ref) / [`restfrequency`](@ref) bridge to the other
+spectral measures (a rest frequency is needed where one is).
+"""
+struct MDoppler{C<:DopplerType}
+    d::Float64
+end
+
+const Measure = Union{MEpoch,MDirection,MPosition,MFrequency,MRadialVelocity,MDoppler}
 
 """
     reftype(m::Measure) -> Type{<:RefFrame}
@@ -137,6 +172,7 @@ reftype(::MDirection{R}) where {R}      = R
 reftype(::MPosition{R}) where {R}       = R
 reftype(::MFrequency{R}) where {R}      = R
 reftype(::MRadialVelocity{R}) where {R} = R
+reftype(::MDoppler{C}) where {C}        = C
 
 # --- direction <-> unit vector (radians <-> xyz) ---------------------
 _dir_xyz(d::MDirection) = (cos(d.lat) * cos(d.lon), cos(d.lat) * sin(d.lon), sin(d.lat))
@@ -150,6 +186,7 @@ Base.show(io::IO, m::MDirection{R}) where {R}   = print(io, "MDirection{$(nameof
 Base.show(io::IO, m::MPosition{R}) where {R}    = print(io, "MPosition{$(nameof(R))}(", m.x, ", ", m.y, ", ", m.z, " m)")
 Base.show(io::IO, m::MFrequency{R}) where {R}   = print(io, "MFrequency{$(nameof(R))}(", m.hz, " Hz)")
 Base.show(io::IO, m::MRadialVelocity{R}) where {R} = print(io, "MRadialVelocity{$(nameof(R))}(", m.mps, " m/s)")
+Base.show(io::IO, m::MDoppler{C}) where {C}     = print(io, "MDoppler{$(nameof(C))}(", m.d, ")")
 
 # ======================================================================
 # conversion frame  -- supplies epoch / position / direction as needed

@@ -36,6 +36,10 @@ const _MEAS_FRAMES = Dict{Symbol,Dict{String,DataType}}(
     :radialvelocity => Dict(
         "LSRK" => LSRK, "LSR" => LSRK, "LSRD" => LSRD, "BARY" => BARY,
         "GEO" => GEO, "TOPO" => TOPO, "GALACTO" => GALACTO),
+    :doppler => Dict(
+        "RADIO" => RADIO, "OPTICAL" => OPTICAL, "Z" => OPTICAL,
+        "RATIO" => RATIO, "BETA" => BETA, "TRUE" => BETA,
+        "RELATIVISTIC" => BETA, "GAMMA" => GAMMA),
     :uvw => Dict("J2000" => J2000, "ITRF" => ITRF, "APP" => APP),
 )
 
@@ -51,6 +55,7 @@ const _MEAS_ENUM = Dict{Symbol,Vector{String}}(
                    "LGROUP", "CMB"],
     :radialvelocity => ["LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO",
                         "LGROUP", "CMB"],
+    :doppler => ["RADIO", "Z", "RATIO", "BETA", "GAMMA"],
     :epoch => ["LAST", "LMST", "GMST1", "GAST", "UT1", "UT2", "UTC", "TAI",
                "TDT", "TCG", "TDB", "TCB"],
 )
@@ -128,7 +133,8 @@ _frame_type(kind::Symbol, s::AbstractString) =
 # ------------------------------------------------------------------
 
 _frame_string(::Type{OtherRef{S}}) where {S} = String(S)
-_frame_string(R::Type{<:RefFrame}) = _FRAME_STRING[R]
+_frame_string(::Type{OtherDoppler{S}}) where {S} = String(S)
+_frame_string(R::Type{<:Union{RefFrame,DopplerType}}) = _FRAME_STRING[R]
 
 const _FRAME_STRING = Dict{DataType,String}(
     UTC => "UTC", TAI => "TAI", TT => "TT", TDB => "TDB", UT1 => "UT1",
@@ -136,7 +142,10 @@ const _FRAME_STRING = Dict{DataType,String}(
     GALACTIC => "GALACTIC", ECLIPTIC => "ECLIPTIC", HADEC => "HADEC",
     AZEL => "AZEL", AZELGEO => "AZELGEO", ITRF => "ITRF", WGS84 => "WGS84",
     TOPO => "TOPO", REST => "REST", LSRK => "LSRK", LSRD => "LSRD",
-    BARY => "BARY", GEO => "GEO", GALACTO => "GALACTO")
+    BARY => "BARY", GEO => "GEO", GALACTO => "GALACTO",
+    # Doppler conventions -- casacore `showType` spells BETA as "TRUE"
+    RADIO => "RADIO", OPTICAL => "OPTICAL", RATIO => "RATIO",
+    BETA => "TRUE", GAMMA => "GAMMA")
 
 _kwpush_mi!(r::Record, name, t::CasaType, v) =
     (push!(r.names, name); push!(r.types, t); push!(r.values, v); push!(r.comments, ""))

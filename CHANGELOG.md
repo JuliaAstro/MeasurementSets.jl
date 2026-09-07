@@ -1308,3 +1308,41 @@ them); a standalone `MDoppler` measure or an `MFrequency` ↔
 `MRadialVelocity` bridge given a rest frequency (a distinct feature).
 
 2699 tests.
+
+### Phase 72 — `MDoppler` measure + frequency ↔ velocity bridge
+
+The Phase 71 non-goal: the Doppler-shift *value* — its **convention**
+(RADIO / OPTICAL / RATIO / BETA / GAMMA), orthogonal to the reference
+*frame*. Pure algebra (`c` is the only constant, exact SI) → **core, no
+`import SOFA`**.
+
+```julia
+d = MDoppler{RADIO}(0.01)
+measconvert(d, OPTICAL)                        # convention -> convention
+
+ν₀ = 1.42040575e9                              # HI rest frequency
+doppler(MFrequency{LSRK}(1.4e9), ν₀)           # -> MDoppler{BETA}
+frequency(d, ν₀)                               # MDoppler + rest -> MFrequency{LSRK}
+restfrequency(MFrequency{LSRK}(1.4e9), d)      # -> MFrequency{REST}
+radialvelocity(d)                              # -> MRadialVelocity{LSRK}  (c·β)
+doppler(MRadialVelocity{LSRK}(3e5))            # -> MDoppler{BETA}         (β = v/c)
+```
+
+- `measconvert(::MDoppler, C2)` uses casacore `MCDoppler`'s hub =
+  `RATIO` (`F = ν/ν₀`) route formulas; `BETA` = `RELATIVISTIC` = `v/c`,
+  `Z` = `OPTICAL`.
+- `doppler` / `frequency` / `radialvelocity` / `restfrequency` mirror
+  casacore `MFrequency::to{Doppler,Rest}` / `fromDoppler` /
+  `MRadialVelocity::{to,from}Doppler` — the frame of a `fromDoppler`
+  result defaults to `LSRK` (casacore's choice).
+- `:doppler` MEASINFO read + write (`_MEAS_FRAMES` / `_MEAS_ENUM` /
+  `_measure_column_spec`) — completeness; no real MS stores one.
+- Verified against `casatools.measures()` to `rtol = 1e-12` (casatools
+  reports every doppler `m0` as `value·c` in "m/s" — the fixture
+  divides it back out).
+
+**Non-goals:** `MDoppler` reference-*frame* handling (frame-agnostic —
+`measconvert` the frequency first); `MDoppler::shiftFrequency` (an
+array helper); a `VarRefCol` `:doppler` write path.
+
+2725 tests.
