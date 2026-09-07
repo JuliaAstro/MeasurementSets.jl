@@ -233,6 +233,32 @@ end
     @test !any(column(q4, "m")[1])
 end
 
+@testset "TaQL-lite — mscal.corr() / mscal.feed()" begin
+    main = readtable(SAMPLE_MS)
+    N = nrow(main)
+    f1 = column(main, "FEED1")[:]
+    f2 = "FEED2" in Set(columnnames(main)) ? column(main, "FEED2")[:] : f1
+
+    @test MSv2._parse_corr_types("RR,LL") == Set([5, 8])
+    @test MSv2._parse_corr_types("9,I") == Set([9, 1])
+    @test_throws ArgumentError MSv2._parse_corr_types("ZZ")
+
+    # sample CORR_TYPE = [5,6,7,8] = RR/RL/LR/LL
+    @test nrow(query(main, "mscal.corr('RR')")) == N
+    @test nrow(query(main, "mscal.corr('6')")) == N                 # RL by code
+    @test nrow(query(main, "mscal.corr('XX')")) == 0                # not in setup
+    @test nrow(query(main, "mscal.corr('RR,XX')")) == N             # any match
+
+    # feed: antenna-grammar form on FEED1/FEED2 (all feeds 0 in the sample)
+    @test nrow(query(main, "mscal.feed('0')")) ==
+          count(i -> f1[i] == 0 || f2[i] == 0, 1:N)
+    @test nrow(query(main, "mscal.feed('1')")) == 0
+    @test nrow(query(main, "mscal.feed('0 & 0')")) == 0             # & excludes autocorr
+    @test nrow(query(main, "mscal.feed('0 && 0')")) == N            # && keeps it
+    @test nrow(query(main, "mscal.feed('!0')")) ==
+          count(i -> !(f1[i] == 0 || f2[i] == 0), 1:N)
+end
+
 @testset "TaQL-lite — mscal.* with an ephemeris FIELD" begin
     ms = MeasurementSet(SAMPLE_MS)
     main0 = readtable(SAMPLE_MS)
@@ -358,7 +384,7 @@ if _HAVE_TAQL
                            ("baseline", "!0"), ("field", "0"), ("spw", "0"),
                            ("field", "0~2"), ("uvdist", "200~1000m"),
                            ("uvdist", "10~100klambda"), ("uvdist", ">1km"),
-                           ("spw", "0:5~20")]
+                           ("spw", "0:5~20"), ("corr", "RR"), ("feed", "0")]
             rdir = joinpath(mktempdir(), "sel")
             ok = try
                 _taqlcmd("SELECT FROM \$1 WHERE mscal.$fn('$spec') GIVING '$rdir'",

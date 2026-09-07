@@ -104,7 +104,9 @@ ids / `N~M` ranges / name globs, `!` to subtract, `L & R` baselines
 ranges. `mscal.spw('0:5~20')` takes an optional `:chanlist` (channel
 index ranges `a~b`/`a~b^step` or `CHAN_FREQ` ranges `f1~f2GHz`);
 `mscal.chan('0:5~20')` returns the per-row selected-channel `BitVector`.
-`mscal.corr` / `mscal.feed` are not included.
+`mscal.corr('RR,LL')` (polarization-setup match) and `mscal.feed('0 & 1')`
+(the `mscal.baseline` form on `FEED1`/`FEED2`) round out the selection
+set.
 
 ## Physical units
 
