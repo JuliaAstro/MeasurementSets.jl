@@ -1583,7 +1583,26 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
-### Phase 85 — optional direction argument for `mscal.*`
+### Phase 86 — sexagesimal angle parsing
+
+```julia
+query(main, "mscal.el1('10h42m31.3, 45d51m16')")     # a J2000 direction
+query(t, "abs(RA - angle('10h30m')) < 0.01")         # angle() in any expression
+```
+
+- `_parse_sexagesimal(s, kind)` (`src/taql/functions.jl`) — `kind` ∈
+  `:ra` (h/m/s time, ×15 → degrees) / `:dec` (d/m/s degrees). Accepts
+  `10h42m31.3s`, `10:42:31.3`, `10 42 31.3`, a leading sign, or a bare
+  decimal (degrees). Returns radians.
+- A new `angle('...')` TaQL-lite function — sexagesimal string →
+  radians (`h` in the string ⇒ hour angle).
+- `mscal.*` direction argument (Phase 85) now also accepts a
+  comma-separated sexagesimal `'RA, DEC'` string, in addition to the
+  `[ra, dec]` radian pair.
+- Non-goal: a bare sexagesimal *literal* in the grammar (`WHERE RA >
+  10h30m`) — needs a tokenizer + node change; `angle('10h30m')` covers
+  it.
+
 
 The Phase-77 direction functions (`ha` / `hadec` / `azel` / `az` /
 `el` / `pa` / `itrf` / `delay`) take an optional direction argument

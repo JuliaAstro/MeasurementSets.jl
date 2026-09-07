@@ -42,6 +42,29 @@ const _TQL_DT_FORMATS = (
     Dates.DateFormat("dd-uuu-yyyy"),
 )
 
+# Parse a sexagesimal angle. `kind` -> `:ra` (h/m/s time, ×15 to
+# degrees), `:dec` / `:angle` (d/m/s degrees). Accepts `10h42m31.3s`,
+# `10:42:31.3`, `10 42 31.3`, a leading sign, or a bare decimal (degrees).
+# Returns radians.
+function _parse_sexagesimal(s::AbstractString, kind::Symbol)
+    t = strip(String(s))
+    neg = startswith(t, "-")
+    (neg || startswith(t, "+")) && (t = strip(t[nextind(t, 1):end]))
+    fields = if occursin(r"[hdms]"i, t)
+        parse.(Float64, split(t, r"[hdms]"i; keepempty = false))
+    elseif occursin(':', t)
+        parse.(Float64, split(t, ':'; keepempty = false))
+    elseif occursin(r"\s", t)
+        parse.(Float64, split(t))
+    else
+        return (neg ? -1.0 : 1.0) * deg2rad(parse(Float64, t))   # decimal degrees
+    end
+    isempty(fields) && throw(ArgumentError("TaQL-lite: bad sexagesimal value \"$s\""))
+    v = fields[1] + get(fields, 2, 0.0) / 60 + get(fields, 3, 0.0) / 3600
+    kind === :ra && (v *= 15.0)
+    return (neg ? -1.0 : 1.0) * deg2rad(v)
+end
+
 function _tql_parse_datetime(s::AbstractString)
     ss = strip(String(s))
     isempty(ss) && return _tql_mjd_of(Dates.now())
@@ -159,6 +182,9 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "hms" => (x -> _tql_hms(float(x)), 1:1),
     "dms" => (x -> _tql_dms(float(x)), 1:1),
     "normangle" => (x -> rem2pi(float(x), RoundNearest), 1:1),
+    # sexagesimal string -> radians (`h` in the string => hour angle)
+    "angle" => (s -> _parse_sexagesimal(String(s),
+                     occursin(r"[hH]", String(s)) ? :ra : :dec), 1:1),
 )
 
 # g-prefixed aggregate functions.  `_geval(::TQLAggr)` collects the

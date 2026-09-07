@@ -84,7 +84,8 @@ literals** (`1.4GHz`, `10arcsec` — compared against a column that
 carries a `QuantumUnits` keyword; needs the Unitful extension), and
 **date/time + angle functions** (`datetime`, `mjd`, `mjdtodate`,
 `date`, `time`, `year`/`month`/`day`/`weekday`, `cdate`/`ctime`/…,
-`hms`/`dms`, `normangle`, `angdist`/`angdistx` — dates are an MJD
+`hms`/`dms`, `angle` (sexagesimal `'10h30m'` → radians), `normangle`,
+`angdist`/`angdistx` — dates are an MJD
 `Float64`). With `import SOFA`, **`mscal.*` derived-MS functions** —
 `mscal.ha1()` / `mscal.hadec1()` / `mscal.azel1()` / `mscal.az1()` /
 `mscal.el1()` / `mscal.pa1()` (parallactic angle) / `mscal.last1()`
@@ -94,7 +95,8 @@ carries a `QuantumUnits` keyword; needs the Unitful extension), and
 `groupby(main, "FIELD_ID"; select = ["az" => "gmean(mscal.az1())"])`).
 The direction functions take an optional direction argument — a body
 name (`mscal.el1('SUN')`), a FIELD direction column
-(`mscal.az1('DELAY_DIR')`), or a `[ra, dec]` J2000 pair.
+(`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000 pair (radians), or a
+sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
 `mscal.stokes(col [, 'types'] [, rescale])` converts a `DATA` / `FLAG` /
 `WEIGHT` array cell between correlation bases (`'IQUV'` / `'CIRC'` /
 `'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`.

@@ -285,8 +285,9 @@ picks `ANTENNA1` / `ANTENNA2`; no suffix uses antenna 0 (array-centre
 fallback). The direction functions (`ha` / `hadec` / `azel` / `az` /
 `el` / `pa` / `itrf` / `delay`) take an optional direction argument
 instead of `FIELD.PHASE_DIR` — a body name (`mscal.el1('SUN')`), a
-FIELD direction column (`mscal.az1('DELAY_DIR')`), or a `[ra, dec]`
-J2000 pair in radians (`mscal.hadec1([2.0, 0.5])`).
+FIELD direction column (`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000
+pair in radians (`mscal.hadec1([2.0, 0.5])`), or a sexagesimal
+`'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
 
 `mscal.stokes(col [, 'types'] [, rescale])` (Phase 78) converts a
 `DATA` / `FLAG` / `WEIGHT` array cell between correlation bases. `types`
@@ -330,8 +331,9 @@ number literals (`1.4e9`), **quantity literals** (`1.4GHz`, `10arcsec`,
 needs the Unitful extension), and **date/time + angle functions**:
 `datetime`/`mjd`/`mjdtodate`/`date`/`time` (all MJD-day `Float64`),
 `year`/`month`/`day`/`week`/`weekday`, `cdate`/`ctime`/`cmonth`/`cdow`/
-`ctod`, `hms`/`dms`, `normangle`, `angdist`/`angdistx` (4 scalar radians
-or two `[lon, lat]` arrays).
+`ctod`, `hms`/`dms` (radians → sexagesimal string), `angle('10h30m')`
+(sexagesimal string → radians), `normangle`, `angdist`/`angdistx`
+(4 scalar radians or two `[lon, lat]` arrays).
 """
 function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
