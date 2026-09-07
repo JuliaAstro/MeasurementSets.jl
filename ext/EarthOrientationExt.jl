@@ -7,14 +7,13 @@ module EarthOrientationExt
 
 import EarthOrientation as EO
 import MeasurementSets as MS
-using Dates: DateTime, Millisecond
+using Dates: Millisecond
 
-const _MJD_EPOCH = DateTime(1858, 11, 17)
-const _ARCSEC = deg2rad(1 / 3600)
 const _READY = Ref(false)
 const _WARNED = Ref(false)
 
-_datetime(mjd::Float64) = _MJD_EPOCH + Millisecond(round(Int, mjd * 86_400_000))
+# `MJD_EPOCH` / `ARCSEC` / `MSEC_PER_DAY` are shared -- see src/constants.jl
+_datetime(mjd::Float64) = MS.MJD_EPOCH + Millisecond(round(Int, mjd * MS.MSEC_PER_DAY))
 
 function _ensure!()
     _READY[] && return
@@ -40,7 +39,7 @@ function _eop_lookup(mjd_utc::Float64)
         dut1 = EO.getΔUT1(dt; outside_range=:nothing)
         xp = EO.getxp(dt; outside_range=:nothing)
         yp = EO.getyp(dt; outside_range=:nothing)
-        return (dut1=Float64(dut1), xp=Float64(xp) * _ARCSEC, yp=Float64(yp) * _ARCSEC)
+        return (dut1=Float64(dut1), xp=Float64(xp) * MS.ARCSEC, yp=Float64(yp) * MS.ARCSEC)
     catch err
         if !_WARNED[]
             @warn "MeasurementSets: IERS EOP lookup failed ($err); ΔUT1 = 0, no polar motion"

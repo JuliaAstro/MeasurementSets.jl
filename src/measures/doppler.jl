@@ -6,7 +6,7 @@
 # Mirrors casacore `MDoppler` / `MCDoppler` / `MFrequency::to{Doppler,
 # Rest}` / `MFrequency::fromDoppler` / `MRadialVelocity::{to,from}Doppler`.
 
-const _C_LIGHT = 2.99792458e8               # m/s, exact (casa/BasicSL/Constants.h)
+# `C_LIGHT` (m/s) is the one shared constant -- see `src/constants.jl`.
 
 # --- convention <-> convention (casacore hub = RATIO, the ratio F = ν/ν₀)
 
@@ -50,7 +50,7 @@ function doppler(f::MFrequency, restfreq)
     t = (f.hz / _hz(restfreq))^2
     MDoppler{BETA}((1 - t) / (1 + t))
 end
-doppler(v::MRadialVelocity) = MDoppler{BETA}(v.mps / _C_LIGHT)
+doppler(v::MRadialVelocity) = MDoppler{BETA}(v.mps / C_LIGHT)
 
 """
     radialvelocity(d::MDoppler) -> MRadialVelocity{LSRK}
@@ -58,7 +58,7 @@ doppler(v::MRadialVelocity) = MDoppler{BETA}(v.mps / _C_LIGHT)
 The true radial velocity `c·β` of a Doppler shift (casacore
 `fromDoppler`; the result frame defaults to `LSRK`).
 """
-radialvelocity(d::MDoppler) = MRadialVelocity{LSRK}(_C_LIGHT * measconvert(d, BETA).d)
+radialvelocity(d::MDoppler) = MRadialVelocity{LSRK}(C_LIGHT * measconvert(d, BETA).d)
 
 """
     frequency(d::MDoppler, restfreq) -> MFrequency{LSRK}

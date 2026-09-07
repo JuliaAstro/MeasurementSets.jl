@@ -1346,3 +1346,22 @@ doppler(MRadialVelocity{LSRK}(3e5))            # -> MDoppler{BETA}         (β =
 array helper); a `VarRefCol` `:doppler` write path.
 
 2725 tests.
+
+### Phase 73 — shared constants file
+
+The physical / astronomical / calendar constants that were repeated
+across `src/` and the extensions (speed of light — a bare literal in
+Phase 72 *and* `SOFA.LIGHTSPEED` in the SOFA extension; seconds- and
+milliseconds-per-day; the MJD reference epoch; one arcsecond; the AU;
+the casacore LSR-motion velocity vectors) are now defined once in
+`src/constants.jl` — `MeasurementSets.C_LIGHT`, `SEC_PER_DAY`,
+`MSEC_PER_DAY`, `MJD_JD_OFFSET`, `MJD_EPOCH`, `ARCSEC`, `AU_METRES`,
+`VEL_LSRK` / `VEL_LSRD` / `VEL_LSRGAL`. `src/measures/`, `src/taql/`,
+`ext/SOFAExt.jl` and `ext/EarthOrientationExt.jl` reference these (the
+extensions keep short local aliases). Every value is an exact SI / IAU
+definition and was verified equal to the `SOFA.jl` constant it replaced
+— behaviour-preserving, test count unchanged. Format-internal magic
+numbers (Dysco bit widths, CTDS type codes, container header offsets)
+stay with their subsystems.
+
+2725 tests.

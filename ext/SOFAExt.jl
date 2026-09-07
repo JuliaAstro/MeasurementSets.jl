@@ -7,8 +7,8 @@
 #
 # Hubs: epoch -> TAI, direction -> ICRS (J2000 treated as ICRS, a ~0.02"
 # frame-bias simplification -- documented), frequency -> BARY.
-# Velocity-frame constants are copied verbatim from casacore
-# `measures/Measures/MeasTable.cc:3616-3690` (index 0 = J2000).
+# Physical constants (c, AU, the LSR velocity vectors from casacore
+# `MeasTable.cc:3616-3690`) live in `src/constants.jl`.
 
 module SOFAExt
 
@@ -21,15 +21,14 @@ using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocit
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
     OtherRef, _dir_xyz, _xyz_dir
 
-const C_LIGHT = SOFA.LIGHTSPEED          # m/s
-const AU_M    = SOFA.ASTRUNIT            # m
-const MJD0    = SOFA.MJD0                # 2400000.5
-const DAYSEC  = SOFA.SECPERDAY           # 86400.0
-
-# casacore MeasTable velocity vectors (J2000, m/s)
-const _VEL_LSRK    = 20_000.0        .* (0.0145021, -0.865863, 0.500071)
-const _VEL_LSRD    = sqrt(274.0)*1e3 .* (-0.0385568, -0.881138, 0.471285)
-const _VEL_LSRGAL  = 220_000.0       .* (0.494109, -0.44483, 0.746982)
+# All shared -- see `src/constants.jl` (each equals its `SOFA.jl` value).
+const C_LIGHT     = MS.C_LIGHT           # m/s
+const AU_M        = MS.AU_METRES         # m
+const MJD0        = MS.MJD_JD_OFFSET     # 2400000.5
+const DAYSEC      = MS.SEC_PER_DAY       # 86400.0
+const _VEL_LSRK   = MS.VEL_LSRK
+const _VEL_LSRD   = MS.VEL_LSRD
+const _VEL_LSRGAL = MS.VEL_LSRGAL
 
 _dot(a, b) = a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
 

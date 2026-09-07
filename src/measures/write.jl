@@ -15,7 +15,7 @@ _measure_column_spec(::AbstractVector) = nothing
 
 function _measure_column_spec(vals::AbstractVector{<:MEpoch})
     isempty(vals) && return nothing
-    (; data = Float64[m.mjd * _SEC_PER_DAY for m in vals],
+    (; data = Float64[m.mjd * SEC_PER_DAY for m in vals],
        kind = :epoch, ref = _frame_string(reftype(first(vals))), units = ["s"])
 end
 function _measure_column_spec(vals::AbstractVector{<:MDirection})
