@@ -1167,3 +1167,29 @@ a per-row loop:
   extra memory (a `WHERE` usually references 1–3 scalar columns).
 
 No API or behaviour change.
+
+### Performance — tiled reads no longer box every element
+
+`reinterpret(T, ::Vector{UInt8})` followed by per-element indexing is an
+allocating slow path in Julia when `sizeof(T) > 1` (each access boxes a
+`ReinterpretArray` value). Every `TiledStMan` read went through it:
+
+- `getcell` on a `DATA` cell allocated **~144 KB** (the cell is 2 KB);
+  `column(t, "DATA")[:]` allocated ~22 KB/cell.
+
+`read_plane` / `read_cube_whole` / `_read_cube_bulk` now copy each
+contiguous on-disk run with `unsafe_load` over a pinned pointer
+(`_rd_run!`, handling `Real` and `Complex` endianness). Measured on the
+fixture MS: `DATA` `getcell` **144 KB → ~3 KB/cell**, `UVW` 2.0 → 0.9 KB,
+`DATA[:]` bulk 22 → 2.2 KB/cell. The `RefTable` / partial-`rows=`
+materialise path (always per-cell) benefits directly.
+
+Also: the tile-layout computation (`sortperm` + allocation) is memoised
+per tileshape on the `TiledStMan` instead of recomputed on every
+`read_plane`; fixed-size index vectors became `NTuple`s; and the
+`SOFA` extension uses `StaticArrays` `SVector` for its 3-vector / rotation
+math (`StaticArrays` added as a weak dependency — it is already a
+transitive dependency of `SOFA.jl`, so `import SOFA` still activates the
+extension).
+
+No API, return-type, or behaviour change. 2592 tests.

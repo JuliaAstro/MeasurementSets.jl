@@ -14,6 +14,7 @@ module SOFAExt
 
 import SOFA
 import MeasurementSets as MS
+using StaticArrays: SVector
 using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity,
     RefFrame, MeasFrame, reftype,
     UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
@@ -129,7 +130,7 @@ function _frame_site(frame::MeasFrame; geodetic::Bool=true)
     p = frame.position
     p === nothing && error("MeasurementSets: this conversion needs `frame.position`")
     if geodetic
-        g = SOFA.gc2gd(:WGS84, [p.x, p.y, p.z])           # (ϵ=elong, ϕ=lat, r=height)
+        g = SOFA.gc2gd(:WGS84, SVector(p.x, p.y, p.z))    # (ϵ=elong, ϕ=lat, r=height)
         return (g.ϵ, g.ϕ, g.r)
     end
     r = hypot(p.x, p.y, p.z)
@@ -176,10 +177,7 @@ function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
         tta, ttb = _frame_tt(frame)
         eop = _frame_eop(frame)
         rc2t = SOFA.c2t06a(tta, ttb, uta, utb, eop.xp, eop.yp)   # GCRS->ITRS
-        v = _dir_xyz(m)
-        g = (rc2t[1,1]*v[1] + rc2t[2,1]*v[2] + rc2t[3,1]*v[3],
-             rc2t[1,2]*v[1] + rc2t[2,2]*v[2] + rc2t[3,2]*v[3],
-             rc2t[1,3]*v[1] + rc2t[2,3]*v[2] + rc2t[3,3]*v[3])
+        g = rc2t' * SVector(_dir_xyz(m))                         # ITRS -> GCRS
         d = _xyz_dir(ICRS, g...)
         return (d.lon, d.lat)
     end
@@ -210,11 +208,8 @@ function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) w
         uta, utb = _frame_ut1(frame)
         tta, ttb = _frame_tt(frame)
         eop = _frame_eop(frame)
-        rc2t = SOFA.c2t06a(tta, ttb, uta, utb, eop.xp, eop.yp)
-        v = (cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat))
-        g = (rc2t[1,1]*v[1] + rc2t[1,2]*v[2] + rc2t[1,3]*v[3],
-             rc2t[2,1]*v[1] + rc2t[2,2]*v[2] + rc2t[2,3]*v[3],
-             rc2t[3,1]*v[1] + rc2t[3,2]*v[2] + rc2t[3,3]*v[3])
+        rc2t = SOFA.c2t06a(tta, ttb, uta, utb, eop.xp, eop.yp)   # GCRS -> ITRS
+        g = rc2t * SVector(cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat))
         return _xyz_dir(B, g...)
     end
     error("MeasurementSets: direction frame $(nameof(B)) is not supported")

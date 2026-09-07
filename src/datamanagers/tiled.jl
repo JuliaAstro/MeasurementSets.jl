@@ -60,6 +60,7 @@ mutable struct TiledStMan
     cube::Vector{Int}             # 1-based cube index per interval
     pos::Vector{Int}              # 1-based last last-axis position per interval
     container::Union{Nothing,Container}   # MultiFile/MultiHDF5, if present (Phase 20)
+    layout::Dict{Dims,Tuple{Int,Vector{Int}}}   # tileshape -> (tile bytes, per-col block offsets)
 end
 
 DATAMANAGERS["TiledShapeStMan"]  = TiledStMan
@@ -92,7 +93,10 @@ function _tile_layout(types::Vector{CasaType}, tileshape)
     end
     return acc, offs
 end
-_tile_layout(tsm::TiledStMan, cube::TSMCube) = _tile_layout(tsm.types, cube.tileshape)
+# memoised per tileshape -- the `sortperm` + allocation happen once per DM
+# instance rather than on every `read_plane` / bulk read.
+_tile_layout(tsm::TiledStMan, cube::TSMCube) =
+    get!(() -> _tile_layout(tsm.types, cube.tileshape), tsm.layout, cube.tileshape)
 
 # --- header parsing ----------------------------------------------
 
@@ -142,7 +146,8 @@ function Base.open(::Type{TiledStMan}, t::Table, dm::DataManagerInfo)
     a = AipsIO(_dmfile_read(t, name); endian=:big)   # header file is big-endian
     tsm = TiledStMan(path, t.endian, :column, dm.sequ, CasaType[], "", 0,
                      Dict{Int,String}(), Dict{Int,AbstractVector{UInt8}}(),
-                     TSMCube[], Int[], Int[], Int[], t.container)
+                     TSMCube[], Int[], Int[], Int[], t.container,
+                     Dict{Dims,Tuple{Int,Vector{Int}}}())
 
     wrapper = getnexttype(a)                         # peek outer wrapper
     read_u32(a)                                      # wrapper version
@@ -213,6 +218,29 @@ _colmajor_offset(pos, dims) = begin
     off
 end
 
+# host-endian conversion that also covers `Complex` (Base's `ntoh`/`ltoh`
+# are Real-only).
+_hostconv(x::Real, big::Bool)    = big ? ntoh(x) : ltoh(x)
+_hostconv(z::Complex, big::Bool) = Complex(_hostconv(real(z), big), _hostconv(imag(z), big))
+
+# Copy `n` contiguous on-disk `T` values from byte offset `b` (0-based) of
+# `bytes` into `dest[doff+1 : doff+n]` (converted to `eltype(dest)`),
+# endian-corrected.  Uses `unsafe_load` via a pinned pointer:
+# `reinterpret(T, ::Vector{UInt8})` + indexing is an allocating slow path
+# in Julia when `sizeof(T) > 1`.  `bytes` is a real `Vector{UInt8}` or a
+# contiguous `view` (Phase-20 container) -- both give a valid `pointer`.
+@inline function _rd_run!(dest::AbstractVector, doff::Int, ::Type{T},
+                          bytes::AbstractVector{UInt8}, b::Int, n::Int, big::Bool) where {T}
+    D = eltype(dest)
+    GC.@preserve bytes begin
+        p = Ptr{T}(pointer(bytes) + b)
+        @inbounds for k in 1:n
+            dest[doff + k] = convert(D, _hostconv(unsafe_load(p, k), big))
+        end
+    end
+    return dest
+end
+
 """
     read_plane(tsm, cube, lastpos, colidx) -> Array
 
@@ -225,37 +253,53 @@ function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int, colidx::Int)
     nd = length(cube.cubeshape)
     cs = cube.cubeshape
     ts = cube.tileshape
-    tpd = Int[cld(cs[d], ts[d]) for d in 1:nd]
-    planeshape = cs[1:nd-1]
-    out = Array{T}(undef, planeshape...)
+    tpd = ntuple(d -> cld(cs[d], ts[d]), nd)
+    ps  = ntuple(d -> cs[d], nd - 1)              # plane shape
+    out = Array{T}(undef, ps...)
 
     bytes = _tsmbytes(tsm, cube.sequ)
     bbytes, offs = _tile_layout(tsm, cube)
     coloff = offs[colidx]
     esz = T === Bool ? 0 : sizeof(T)
-    swap = tsm.endian === :big ? ntoh : ltoh
+    big = tsm.endian === :big
 
     tlast_tile = lastpos ÷ ts[nd]
     tlast_in   = lastpos % ts[nd]
 
-    for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, nd-1))
-        tilecoord = ntuple(d -> d < nd ? lt[d] : tlast_tile, nd)
-        tilenr = _colmajor_offset(tilecoord, tpd)
-        base = cube.offset + tilenr * bbytes + coloff
-
-        los = ntuple(d -> lt[d] * ts[d], nd-1)
-        his = ntuple(d -> min((lt[d]+1) * ts[d], cs[d]) - 1, nd-1)
-
-        for pix in CartesianIndices(ntuple(d -> los[d]:his[d], nd-1))
-            tl = ntuple(d -> d < nd ? pix[d] - los[d] : tlast_in, nd)
-            k = _colmajor_offset(tl, ts)          # element index within tile
-            dst = CartesianIndex(ntuple(d -> pix[d] + 1, nd-1))
-            if T === Bool
+    if T === Bool
+        # bit-unpack (rare); per-element
+        for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, nd-1))
+            tilecoord = ntuple(d -> d < nd ? lt[d] : tlast_tile, nd)
+            base = cube.offset + _colmajor_offset(tilecoord, tpd) * bbytes + coloff
+            los = ntuple(d -> lt[d] * ts[d], nd-1)
+            his = ntuple(d -> min((lt[d]+1) * ts[d], cs[d]) - 1, nd-1)
+            for pix in CartesianIndices(ntuple(d -> los[d]:his[d], nd-1))
+                tl = ntuple(d -> d < nd ? pix[d] - los[d] : tlast_in, nd)
+                k = _colmajor_offset(tl, ts)
                 byte = bytes[base + (k >> 3) + 1]
-                out[dst] = (byte >> (k & 7)) & 0x01 == 0x01
-            else
-                b = base + k * esz
-                out[dst] = swap(reinterpret(T, @view bytes[b+1 : b+esz])[1])
+                out[CartesianIndex(ntuple(d -> pix[d] + 1, nd-1))] =
+                    (byte >> (k & 7)) & 0x01 == 0x01
+            end
+        end
+    elseif all(d -> tpd[d] == 1, 1:nd-1)
+        # leading axes untiled (the common MS layout): the whole plane is
+        # one contiguous run inside the last tile -- one bulk copy.
+        base = cube.offset + tlast_tile * bbytes + coloff
+        _rd_run!(vec(out), 0, T, bytes, base + tlast_in * prod(ps) * esz, prod(ps), big)
+    else
+        # leading axes tiled (rare): one contiguous dim-1 run per tile /
+        # higher-dim position.
+        for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, nd-1))
+            tilecoord = ntuple(d -> d < nd ? lt[d] : tlast_tile, nd)
+            base = cube.offset + _colmajor_offset(tilecoord, tpd) * bbytes + coloff
+            los = ntuple(d -> lt[d] * ts[d], nd-1)
+            his = ntuple(d -> min((lt[d]+1) * ts[d], cs[d]) - 1, nd-1)
+            n1  = his[1] - los[1] + 1
+            for pix in CartesianIndices(ntuple(d -> d == 1 ? (los[1]:los[1]) : (los[d]:his[d]), nd-1))
+                tl = ntuple(d -> d == 1 ? 0 : d < nd ? pix[d] - los[d] : tlast_in, nd)
+                k  = _colmajor_offset(tl, ts)
+                doff = _colmajor_offset(ntuple(d -> d == 1 ? los[1] : pix[d], nd-1), ps)
+                _rd_run!(vec(out), doff, T, bytes, base + k * esz, n1, big)
             end
         end
     end
@@ -274,29 +318,35 @@ function read_cube_whole(tsm::TiledStMan, colidx::Int, cube::TSMCube;
     Tout = astype === nothing ? T : astype
     nd = length(cube.cubeshape)
     cs, ts = cube.cubeshape, cube.tileshape
-    tpd = Int[cld(cs[d], ts[d]) for d in 1:nd]
+    tpd = ntuple(d -> cld(cs[d], ts[d]), nd)
     out = Array{Tout}(undef, cs...)
 
     bytes = _tsmbytes(tsm, cube.sequ)
     bbytes, offs = _tile_layout(tsm, cube)
     coloff = offs[colidx]
     esz = T === Bool ? 0 : sizeof(T)
-    swap = tsm.endian === :big ? ntoh : ltoh
+    big = tsm.endian === :big
 
+    if T !== Bool && all(d -> tpd[d] == 1, 1:nd)
+        _rd_run!(vec(out), 0, T, bytes, cube.offset + coloff, prod(cs), big)   # single tile
+        return out
+    end
     for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, nd))
         tilenr = _colmajor_offset(ntuple(d -> lt[d], nd), tpd)
         base = cube.offset + tilenr * bbytes + coloff
         los = ntuple(d -> lt[d] * ts[d], nd)
         his = ntuple(d -> min((lt[d]+1) * ts[d], cs[d]) - 1, nd)
-        for pix in CartesianIndices(ntuple(d -> los[d]:his[d], nd))
-            k = _colmajor_offset(ntuple(d -> pix[d] - los[d], nd), ts)
-            dst = CartesianIndex(ntuple(d -> pix[d] + 1, nd))
+        n1  = his[1] - los[1] + 1
+        for pix in CartesianIndices(ntuple(d -> d == 1 ? (los[1]:los[1]) : (los[d]:his[d]), nd))
+            k    = _colmajor_offset(ntuple(d -> d == 1 ? 0 : pix[d] - los[d], nd), ts)
+            doff = _colmajor_offset(ntuple(d -> d == 1 ? los[1] : pix[d], nd), cs)
             if T === Bool
-                byte = bytes[base + (k >> 3) + 1]
-                out[dst] = (byte >> (k & 7)) & 0x01 == 0x01
+                for m in 0:n1-1
+                    byte = bytes[base + ((k + m) >> 3) + 1]
+                    out[doff + m + 1] = (byte >> ((k + m) & 7)) & 0x01 == 0x01
+                end
             else
-                b = base + k * esz
-                out[dst] = Tout(swap(reinterpret(T, @view bytes[b+1 : b+esz])[1]))
+                _rd_run!(vec(out), doff, T, bytes, base + k * esz, n1, big)
             end
         end
     end
@@ -333,13 +383,13 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
     cs, ts = cube.cubeshape, cube.tileshape
     all(cld(cs[d], ts[d]) == 1 for d in 1:nd-1) || return nothing
 
-    planeshape = cs[1:nd-1]
+    planeshape = ntuple(d -> cs[d], nd - 1)
     planelen = prod(planeshape)
     rowspertile = ts[nd]
     bytes = _tsmbytes(tsm, cube.sequ)
     bbytes, offs = _tile_layout(tsm, cube)
     coloff = offs[colidx]
-    swap = tsm.endian === :big ? ntoh : ltoh
+    big = tsm.endian === :big
 
     backing = Vector{Tout}(undef, nrow * planelen)
     for r in 1:nrow
@@ -347,11 +397,7 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
         tile = p ÷ rowspertile
         within = (p % rowspertile) * planelen
         b = cube.offset + tile * bbytes + coloff + within * sizeof(T)
-        raw = reinterpret(T, @view bytes[b+1 : b + planelen*sizeof(T)])
-        dst = (r - 1) * planelen
-        @inbounds for k in 1:planelen
-            backing[dst + k] = Tout(swap(raw[k]))
-        end
+        _rd_run!(backing, (r - 1) * planelen, T, bytes, b, planelen, big)
     end
     return [reshape(view(backing, (r-1)*planelen+1 : r*planelen), planeshape...)
             for r in 1:nrow]
@@ -709,8 +755,8 @@ function write_plane!(bytes::AbstractVector{UInt8}, tsm::TiledStMan, cube::TSMCu
     T = juliatype(tsm.types[colidx])
     nd = length(cube.cubeshape)
     cs, ts = cube.cubeshape, cube.tileshape
-    tpd = Int[cld(cs[d], ts[d]) for d in 1:nd]
-    planeshape = cs[1:nd-1]
+    tpd = ntuple(d -> cld(cs[d], ts[d]), nd)
+    planeshape = ntuple(d -> cs[d], nd - 1)
     v = vec(plane)
     length(v) == prod(planeshape; init=1) ||
         error("write_plane!: value has $(size(plane)), cell shape is $planeshape")
@@ -824,5 +870,6 @@ function tsm_extend_rows!(tsm::TiledStMan, cols::Vector{<:ColumnDesc},
     tsm.cube = [ridx]
     tsm.pos = [Int(newnrow)]
     delete!(tsm.data, cube.sequ)
+    empty!(tsm.layout)
     return tsm
 end
