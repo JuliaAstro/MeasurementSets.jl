@@ -1583,6 +1583,62 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 94 — full MSSelection time grammar + uvdist `:P%`
+
+```julia
+query(main, "mscal.time('2024/05/24/09:00:00~11:00:00')")   # t1 inherits t0's date
+query(main, "mscal.time('[09:00:00~11:00:00]')")            # edge-inclusive
+query(main, "mscal.time('09:00:00 + 02:00:00')")            # t0 .. t0+2h
+query(main, "mscal.time('2024/05/24/10:08:00')")            # ± EXPOSURE/2
+query(main, "mscal.uvdist('100klambda:10%')")               # 90–110 klambda
+```
+
+- `mscal.time` now implements casacore's `MSTimeParse` grammar: a single
+  time (`|TIME − t0| ≤ EXPOSURE/2`), `t0~t1`, edge-inclusive `[t0~t1]`,
+  buffered `N[t0~t1]`, `t0+dur`, `>t0` / `<t1`. Each time is
+  `Y/[M/[D/]][h:[m:[s]]]` with `*` wildcards; a missing component
+  defaults to the **first MAIN-row TIME** (a `~` range's upper bound
+  inherits from the lower). ISO / `d U y` datetimes still parse.
+- `mscal.uvdist('<expr>:P%')` widens the range by ±P percent
+  (casacore `uvwdistexpr COLON FNUMBER PERCENT`); a bare value now needs
+  a `:P%` to be a range.
+- Hand-computed (no `derivedmscal` UDF for the exotic time forms).
+
+### Phase 93 — polynomial `PHASE_DIR` + ephemeris sub-Earth point
+
+- `measure(fld, "PHASE_DIR", row; epoch)` now evaluates a FIELD
+  direction as a **time polynomial** when `NUM_POLY > 0` (or the cell is
+  `(2, n+1)` with `n > 1`): `dir = c[:,1] + Σ c[:,k]·dtᵏ`, `dt =
+  epoch − FIELD.TIME` (s) — casacore `MSFieldColumns::interpolateDirMeas`.
+  Without `epoch`, or `dt ≈ 0`, the 0-order term (unchanged). `mscal.*`
+  memoises a polynomial field per `(field, TIME)` like an ephemeris field.
+- `ephemeris_diskpos(e, mjd) -> (lon, lat)` — the sub-observer point on
+  a body's surface from an ephemeris table's optional `DiskLong` /
+  `DiskLat` columns, great-circle (SLERP) interpolated between the
+  bracketing rows (casacore `MeasComet::getDisk`). `Ephemeris` gains
+  `disklon` / `disklat`. Exported.
+
+### Phase 92 — `EarthMagneticMachine` (line-of-sight field)
+
+```julia
+m = EarthMagneticMachine(350e3, observatory("VLA"), MEpoch{UTC}(mjd))
+r = m(MDirection{J2000}(ra, dec))
+r.losfield        # nT parallel to the line of sight (× slant TEC × 2.63e-13 → RM)
+r.field, r.subpoint, r.sublon, r.sublat
+```
+
+- `emm_lineofsight(dir, height, pos, epoch)` / `EarthMagneticMachine` —
+  port of casacore `measures/Measures/EarthMagneticMachine`. Intersects
+  the line of sight to `dir` with a sphere `height` m above the
+  observer's geocentric radius, samples the bundled IGRF-14 field there
+  (`_earthfield_itrf`), and projects onto the line of sight. `dir` may be
+  in any direction frame (rotated to ITRF via `epoch` + `pos`).
+  Real method in `ext/SOFAExt.jl`; exported `EarthMagneticMachine`,
+  `emm_lineofsight`.
+- CASA cross-check: `test/measures_fixture.py` re-derives the same
+  geometry with `me` + numpy and `me.earthmagnetic` at the pierce point
+  — the geometry matches exactly, the field to ~3% (IGRF-12 vs -14).
+
 ### Phase 91 — `MEarthMagnetic` measure + IGRF-14 model
 
 ```julia

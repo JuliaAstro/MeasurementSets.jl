@@ -134,6 +134,39 @@ for fr in ("ITRF", "J2000"):
     emparts.append(f"{fr} = ({mm['m0']['value']!r}, {mm['m1']['value']!r}, {mm['m2']['value']!r})")
 L.append(f"  earthmagnetic = ({', '.join(emparts)}),")
 
+# EarthMagneticMachine: independent re-derivation of the line-of-sight
+# field geometry using casacore's `me` + numpy, at EMM_HEIGHT above the
+# observer toward (SRC_RA, SRC_DEC).  casacore ships IGRF-12 (~150 nT
+# model-generation difference from the bundled IGRF-14), so the Julia
+# test compares the geometry tightly and the field loosely.
+import math
+EMM_HEIGHT = 350.0e3
+me.doframe(e0)
+me.doframe(pos)
+dd = me.measure(me.direction("j2000", qa.quantity(SRC_RA, "rad"),
+                             qa.quantity(SRC_DEC, "rad")), "itrf")
+dlon, dlat = dd["m0"]["value"], dd["m1"]["value"]
+ux = math.cos(dlat) * math.cos(dlon)
+uy = math.cos(dlat) * math.sin(dlon)
+uz = math.sin(dlat)
+px, py, pz = OBS_XYZ
+posl = math.sqrt(px * px + py * py + pz * pz)
+subl = EMM_HEIGHT * (EMM_HEIGHT + 2 * posl)
+an = px * ux + py * uy + pz * uz
+xr = math.sqrt(an * an + subl)
+xr = min(abs(-an + xr), abs(-an - xr))
+sx, sy, sz = px + xr * ux, py + xr * uy, pz + xr * uz
+bfield_sub = me.earthmagnetic("IGRF")
+me.doframe(me.position("itrf", qa.quantity(sx, "m"), qa.quantity(sy, "m"),
+                       qa.quantity(sz, "m")))
+bm = me.measure(bfield_sub, "itrf")
+bx, by, bz = bm["m0"]["value"], bm["m1"]["value"], bm["m2"]["value"]
+L.append(f"  emm = (height = {EMM_HEIGHT!r}, "
+         f"dir_itrf = ({dlon!r}, {dlat!r}), "
+         f"subpoint = ({sx!r}, {sy!r}, {sz!r}), "
+         f"field = ({bx!r}, {by!r}, {bz!r}), "
+         f"losfield = {bx * ux + by * uy + bz * uz!r}),")
+
 L.append(")")
 
 with open(sys.argv[1], "w") as fh:

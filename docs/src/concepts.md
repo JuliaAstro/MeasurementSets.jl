@@ -193,6 +193,10 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
   `measconvert(MEarthMagnetic{IGRF}(...), R; frame)` evaluates the model
   at `frame.position` / `frame.epoch` and rotates to `R`. casacore ships
   IGRF-12, so a cross-check differs by ~100–200 nT (model generation).
+  [`EarthMagneticMachine`](@ref)`(height, pos, epoch)` (or
+  [`emm_lineofsight`](@ref)) gives the field where the line of sight to a
+  source pierces a shell `height` metres up — the parallel-field input to
+  ionospheric Faraday-rotation / RM corrections.
 
 - **Solar-system body** (`SUN` / `MOON` / `MERCURY` / `VENUS` / `MARS`
   / `JUPITER` / `SATURN` / `URANUS` / `NEPTUNE`): a `FIELD.PHASE_DIR`
@@ -213,8 +217,10 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
   casacore's `MeasComet::get`); `measure(fld, "PHASE_DIR", row; epoch)`
   and the `mscal.*` functions use it automatically for a moving-target
   field. Sub-arcmin, so it supersedes `plan94` when a real ephemeris is
-  present. Polynomial (`numpoly > 0`) `PHASE_DIR` and the
-  `DiskLong`/`DiskLat` sub-Earth point are out of scope.
+  present. A `FIELD` with `NUM_POLY > 0` (a `(2, NUM_POLY+1)` `PHASE_DIR`
+  cell) is evaluated as a time polynomial about `FIELD.TIME`;
+  [`ephemeris_diskpos`](@ref) gives the sub-observer point on the body
+  from the table's optional `DiskLong` / `DiskLat` columns.
 
 - **Observatories**: [`observatory("VLA")`](@ref) returns the ITRF
   position of a known telescope (a bundled snapshot of casacore's

@@ -79,12 +79,15 @@ MBaseline
 MuvW
 MEarthMagnetic
 earthfield
+EarthMagneticMachine
+emm_lineofsight
 Ephemeris
 open_ephemeris
 field_ephemeris
 ephemeris_direction
 ephemeris_radvel
 ephemeris_distance
+ephemeris_diskpos
 doppler
 frequency
 radialvelocity

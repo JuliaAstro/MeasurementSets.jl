@@ -359,6 +359,24 @@ end
     d = Dates.Date(Dates.DateTime(1858, 11, 17) + Dates.Day(floor(Int, lo)))
     @test nrow(query(main, "mscal.time('$(d)T00:00:00~$(d)T23:59:59')")) == N
 
+    # Phase 94: full MSSelection time grammar — single time, [t0~t1]
+    # edge-inclusive, N[...] buffer, t0+dur, MS-derived field defaults
+    y, mo, dd = Dates.year(d), Dates.month(d), Dates.day(d)
+    dstr = "$y/$(lpad(mo,2,'0'))/$(lpad(dd,2,'0'))"
+    @test nrow(query(main, "mscal.time('$dstr/00:00:00~$dstr/23:59:59')")) == N
+    @test nrow(query(main, "mscal.time('[$dstr/00:00:00~$dstr/23:59:59]')")) == N
+    @test nrow(query(main, "mscal.time('$dstr/00:00:00+24:00:00')")) == N   # +1 day
+    # time-only (date defaults to the first row's) selects the whole run
+    @test nrow(query(main, "mscal.time('00:00:00~23:59:59')")) == N
+    # a single time ± EXPOSURE/2 picks that integration's rows
+    exp = Float64.(column(main, "EXPOSURE")[:])
+    dTexp = (isempty(exp) ? 2.0 : sum(exp) / length(exp)) / 2
+    t1s = tm[1]
+    dt1 = Dates.DateTime(1858, 11, 17) + Dates.Millisecond(round(Int, t1s * 1000))
+    tstr = Dates.format(dt1, "yyyy/mm/dd/HH:MM:SS")
+    @test nrow(query(main, "mscal.time('$tstr')")) ==
+          count(x -> abs(x - t1s) <= dTexp + 1e-6, tm)
+
     # uvdist: metres, km, wavelength (sample has one spw, REF_FREQUENCY 7.988 GHz)
     @test nrow(query(main, "mscal.uvdist('200~1000m')")) ==
           count(x -> 200 <= x <= 1000, d2d)
@@ -369,8 +387,14 @@ end
     @test nrow(query(main, "mscal.uvdist('10~100klambda')")) ==
           count(x -> 10e3 <= lam(x) <= 100e3, d2d)
 
+    # Phase 94: `:P%` tolerance widening
+    @test nrow(query(main, "mscal.uvdist('500m:20%')")) ==
+          count(x -> 400 <= x <= 600, d2d)
+    @test nrow(query(main, "mscal.uvdist('200~1000m:10%')")) ==
+          count(x -> 180 <= x <= 1100, d2d)
+
     # errors
-    @test_throws ArgumentError query(main, "mscal.uvdist('100')")   # bare single
+    @test_throws ArgumentError query(main, "mscal.uvdist('foo')")   # not a range
     @test_throws ArgumentError query(main, "mscal.uvdist('1~2parsec')")
     @test_throws ArgumentError query(main, "mscal.uvdist('1~2m, 3~4klambda')")  # mixed
     @test_throws ArgumentError query(main, "mscal.time('not a date')")
