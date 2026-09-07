@@ -5,6 +5,7 @@
 
 [![Build Status](https://github.com/JuliaAstro/MeasurementSets.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/JuliaAstro/MeasurementSets.jl/actions/workflows/CI.yml?query=branch%3Amain)
 [![Coverage](https://codecov.io/gh/JuliaAstro/MeasurementSets.jl/graph/badge.svg)](https://codecov.io/gh/JuliaAstro/MeasurementSets.jl)
+[![Aqua](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A pure-Julia reader and writer for the **Measurement Set version 2** data

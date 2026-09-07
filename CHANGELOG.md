@@ -1583,7 +1583,19 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
-### Phase 88 — `LGROUP` / `CMB` velocity frames
+### Phase 89 — Aqua.jl quality checks
+
+- New `test/aqua_tests.jl` runs `Aqua.test_all` (ambiguities, undefined
+  exports, stale deps, compat bounds, unbound type parameters, project
+  extras, persistent tasks — all clean). `Base.delete!` / `Base.insert!`
+  (the `taql`-style write commands, Phases 30-31, which accept a path
+  string) are whitelisted for the type-piracy check.
+- Filled in the missing `[compat]` bounds Aqua flagged — `Dates`,
+  `Mmap`, `Random` (stdlibs), and the test-only `Aqua` / `Casacore` /
+  `CxxWrap` / `Test` extras. Every dependency now carries a bound.
+- README gains an Aqua badge. The CI workflow (Phase 67) already runs
+  the full test suite, so Aqua runs on every PR.
+
 
 `measconvert` for `MFrequency` / `MRadialVelocity` now handles the two
 remaining casacore velocity frames:

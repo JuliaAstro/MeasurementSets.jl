@@ -29,21 +29,29 @@ SOFAExt = ["SOFA", "StaticArrays"]
 UnitfulExt = ["Unitful", "UnitfulAngles", "UnitfulAstro"]
 
 [compat]
+Aqua = "0.8"
 BFloat16s = "0.6"
+Casacore = "0.4"
+CxxWrap = "0.16, 0.17"
+Dates = "1"
 Distributions = "0.25"
 EarthOrientation = "0.7"
 HDF5 = "0.17"
+Mmap = "1"
+Random = "1"
 SOFA = "2"
 SpecialFunctions = "2"
 StaticArrays = "1"
 Statistics = "1"
 Tables = "1"
+Test = "1"
 Unitful = "1"
 UnitfulAngles = "0.7"
 UnitfulAstro = "1"
 julia = "1.10.10"
 
 [extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 Casacore = "72bb1062-94f5-49fa-bb69-94b615203ad9"
 CxxWrap = "1f15a43c-97ca-5a2a-ae31-89f07a497df4"
 EarthOrientation = "732a3c5d-d6c0-58bc-adb1-1b51709a25e2"
@@ -56,4 +64,4 @@ UnitfulAngles = "6fb2a4bd-7999-5318-a3b2-8ad61056cd98"
 UnitfulAstro = "6112ee07-acf9-5e0f-b108-d242c714bf9f"
 
 [targets]
-test = ["Test", "Casacore", "CxxWrap", "HDF5", "SOFA", "StaticArrays", "EarthOrientation", "Unitful", "UnitfulAngles", "UnitfulAstro"]
+test = ["Test", "Aqua", "Casacore", "CxxWrap", "HDF5", "SOFA", "StaticArrays", "EarthOrientation", "Unitful", "UnitfulAngles", "UnitfulAstro"]
