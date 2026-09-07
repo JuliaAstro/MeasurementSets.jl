@@ -94,9 +94,13 @@ carries a `QuantumUnits` keyword; needs the Unitful extension), and
 `groupby(main, "FIELD_ID"; select = ["az" => "gmean(mscal.az1())"])`).
 `mscal.stokes(col [, 'types'] [, rescale])` converts a `DATA` / `FLAG` /
 `WEIGHT` array cell between correlation bases (`'IQUV'` / `'CIRC'` /
-`'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`. The
-CASA-MSSelection `mscal.baseline` / `mscal.spw` selection functions are
-not included.
+`'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`.
+`mscal.<sel>('spec')` (`baseline` / `field` / `spw` / `scan` / `state` /
+`array` / `obs`) is MSSelection-lite row selection — a comma-list of
+ids / `N~M` ranges / name globs, `!` to subtract, `L & R` baselines
+(`query(main, "mscal.baseline('ea01 & *') AND mscal.field('3C*')")`).
+`mscal.time` / `mscal.uvdist` and `spw` channel sub-selection are not
+included.
 
 ## Physical units
 

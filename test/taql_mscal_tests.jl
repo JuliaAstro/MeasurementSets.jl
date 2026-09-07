@@ -150,6 +150,53 @@ end
     @test_throws ErrorException query(readtable(dir), "any(mscal.stokes(DATA, 'I') != 0.0)")
 end
 
+@testset "TaQL-lite — mscal.<sel>() MSSelection-lite" begin
+    p(s) = MSv2._taqllite_parse(s, Set(["A"]))
+    @test p("mscal.baseline('0') > 0").lhs isa MSv2.TQLMSSel
+    @test p("mscal.field('3C*') > 0").lhs.fn == "field"
+    @test p("mscal.spw('0~3') > 0").lhs.spec == "0~3"
+    @test_throws ArgumentError p("mscal.baseline() > 0")
+    @test_throws ArgumentError p("mscal.baseline(A) > 0")     # non-literal spec
+
+    # id-set / term parsing, directly
+    n2i = Dict("ea01" => [0], "ea02" => [1], "ea10" => [9])
+    @test MSv2._mssel_idset("0~2", 0:9, n2i) == Set([0, 1, 2])
+    @test MSv2._mssel_idset(">7", 0:9, n2i) == Set([8, 9])
+    @test MSv2._mssel_idset("ea0?", 0:9, n2i) == Set([0, 1])       # glob on names
+    @test MSv2._mssel_idset("!ea01", 0:9, n2i) == Set(1:9)         # all-except
+    @test MSv2._mssel_idset("/ea1./", 0:9, n2i) == Set([9])        # regex
+
+    main = readtable(SAMPLE_MS)
+    a1 = column(main, "ANTENNA1")[:]
+    a2 = column(main, "ANTENNA2")[:]
+    fid = column(main, "FIELD_ID")[:]
+    nb(pred) = count(i -> pred(Int(a1[i]), Int(a2[i])), 1:nrow(main))
+
+    @test nrow(query(main, "mscal.baseline('0')")) ==
+          nb((x, y) -> x == 0 || y == 0)
+    @test nrow(query(main, "mscal.baseline('ea01')")) ==
+          nb((x, y) -> x == 0 || y == 0)               # ea01 == id 0
+    @test nrow(query(main, "mscal.baseline('0 & 1')")) ==
+          nb((x, y) -> (x, y) in ((0, 1), (1, 0)))
+    @test nrow(query(main, "mscal.baseline('!ea01')")) ==
+          nb((x, y) -> !(x == 0 || y == 0))
+    @test nrow(query(main, "mscal.field('0')")) == count(==(0), fid)
+    @test nrow(query(main, "mscal.spw('0')")) == nrow(main)        # sample has 1 spw
+    @test nrow(query(main, "mscal.field('nosuchfield')")) == 0
+
+    # composes with the rest of the grammar + groupby
+    r = query(main, "mscal.baseline('0~4') AND mscal.field('0')")
+    @test 0 < nrow(r) <= nrow(main)
+    g = groupby(main, "FIELD_ID"; where = "mscal.baseline('0')",
+                select = ["f" => :FIELD_ID, "n" => "gcount()"])
+    @test sum(g.n) == nb((x, y) -> x == 0 || y == 0)
+
+    # error: selection on a non-MS table
+    dir = joinpath(mktempdir(), "notms2")
+    write_table(dir, "T", Pair{String,Any}["X" => collect(1:4)]; nrow = 4)
+    @test_throws ErrorException query(readtable(dir), "mscal.field('0')")
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite — mscal.* vs real TaQL" begin
         # derivedmscal UDFs must be registered in this casacore build
@@ -195,6 +242,24 @@ if _HAVE_TAQL
             end
         else
             @info "mscal.stokes UDF not available in this casacore build; skipping"
+        end
+    end
+
+    @testset "TaQL-lite — mscal.<sel>() vs real TaQL" begin
+        main = readtable(SAMPLE_MS)
+        for (fn, spec) in [("baseline", "0"), ("baseline", "0 & 1"),
+                           ("baseline", "!0"), ("field", "0"), ("spw", "0"),
+                           ("field", "0~2")]
+            rdir = joinpath(mktempdir(), "sel")
+            ok = try
+                _taqlcmd("SELECT FROM \$1 WHERE mscal.$fn('$spec') GIVING '$rdir'",
+                         CCT.Table(SAMPLE_MS))
+                true
+            catch
+                false
+            end
+            ok || continue
+            @test nrow(query(main, "mscal.$fn('$spec')")) == nrow(readtable(rdir))
         end
     end
 end

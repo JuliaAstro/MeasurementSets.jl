@@ -206,6 +206,11 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
             rescale = n >= 3 ? _stokes_bool_arg(args[3], src) : false
             return TQLStokes(args[1], _parse_stokes_types(typestr), rescale)
         end
+        if fn in _MSSEL_FUNCS
+            n == 1 || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn takes one selection-string argument in \"$src\""))
+            return TQLMSSel(fn, _mssel_str_arg(args[1], src))
+        end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
         n == 0 || throw(ArgumentError("TaQL-lite: $name() takes no arguments in \"$src\""))

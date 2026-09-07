@@ -1523,3 +1523,33 @@ row; Phase 79 memoizes the 3×3 (as its three result columns, three
 `UVW`. On a real MAIN this is one matrix per integration-baseline pair
 instead of one per row. No behaviour change — cross-checked against a
 direct per-row `measconvert` to `rtol = 1e-9`.
+
+### Phase 80 — `mscal.<sel>()` MSSelection-lite selection functions
+
+The `derivedmscal` row-selection UDFs in the TaQL-lite grammar —
+`mscal.baseline` / `mscal.field` / `mscal.spw` / `mscal.scan` /
+`mscal.state` / `mscal.array` / `mscal.obs`, each `mscal.<sel>('spec')`
+returning a per-MAIN-row `Bool`.
+
+```julia
+query(main, "mscal.baseline('ea01 & *') AND mscal.field('3C286')")
+query(main, "mscal.spw('0~3') AND NOT mscal.scan('1,2')")
+```
+
+- `spec` is a comma-list of terms; a row passes if it matches ANY.
+  Terms: `N`, `N~M` (inclusive range), `>N` / `<N` / `>=N` / `<=N`,
+  an exact name, a glob (`* ? [...]`), or `/regex/` — names matched
+  against the type's NAME column (`ANTENNA.NAME`, `FIELD.NAME`,
+  `SPECTRAL_WINDOW.NAME`, `STATE.OBS_MODE`). A `!`-prefixed term is
+  subtracted (a spec of only `!`-terms selects everything else).
+- `mscal.baseline` additionally: `L & R` / `L && R` (baseline between
+  two antenna sets — `&` drops autocorrelations, `&&` keeps them;
+  `L &` repeats `L`), and a whole-spec `!` negation. `spw` maps the
+  row's `DATA_DESC_ID` through `DATA_DESCRIPTION.SPECTRAL_WINDOW_ID`.
+- A hand-written comma-list parser (not a port of casacore's per-type
+  yacc grammars). Threads like `mscal.*` — a `TQLMSSel` node, a
+  `"::mssel::<fn>::<spec>"` sentinel split by `_mssel_split` in
+  `_tql_cols` / `_vtq_prepare!`.
+- Cross-checked against real `derivedmscal` (row counts match).
+- Non-goals: `mscal.time` (date grammar) / `mscal.uvdist` (units);
+  channel sub-selection on `spw` (`0:5~20`); `mscal.corr` / `mscal.feed`.
