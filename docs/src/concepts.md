@@ -180,7 +180,8 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
 - **Direction**: `J2000` / `ICRS` / `B1950` / `APP` / `GALACTIC` /
   `ECLIPTIC` / `AZEL` / `AZELGEO` / `HADEC` / `ITRF`.
 - **Frequency** and **radial velocity**: `TOPO` / `GEO` / `BARY` /
-  `LSRK` / `LSRD` / `GALACTO`.
+  `LSRK` / `LSRD` / `GALACTO` / `LGROUP` (Local Group, ~308 km/s) /
+  `CMB` (CMB dipole, ~369.5 km/s).
 - **Baseline** ([`MBaseline`](@ref)) and **uvw** ([`MuvW`](@ref), the
   `UVW` column): rotated between any direction frame; a `uvw` conversion
   also needs `frame.direction` (the phase centre) for the pole rotation.

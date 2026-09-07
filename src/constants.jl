@@ -38,3 +38,7 @@ const VEL_LSRK = 20_000.0 .* (0.0145021, -0.865863, 0.500071)
 const VEL_LSRD = sqrt(274.0) * 1e3 .* (-0.0385568, -0.881138, 0.471285)
 "Galactic-rotation velocity toward the LSRD frame, J2000, m/s."
 const VEL_LSRGAL = 220_000.0 .* (0.494109, -0.44483, 0.746982)
+"Local Group barycentre velocity wrt BARY, J2000, m/s (casacore `MeasTable::calcVelocityLGROUP`, 308 km/s)."
+const VEL_LGROUP = 308_000.0 .* (0.593553979227, -0.177954636914, 0.784873124106)
+"CMB rest-frame velocity wrt BARY, J2000, m/s (casacore `MeasTable::calcVelocityCMB`, F. Ghigo, 369.5 km/s)."
+const VEL_CMB = 369_500.0 .* (-0.97176985257, 0.202393953108, -0.121243727187)

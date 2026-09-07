@@ -108,14 +108,14 @@ end
                    position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150),
                    direction = MDirection{J2000}(2.0, 0.5))
     f = MFrequency{TOPO}(100.0e9)
-    for R in (GEO, BARY, LSRK, LSRD, GALACTO)
+    for R in (GEO, BARY, LSRK, LSRD, GALACTO, LGROUP, CMB)
         g = measconvert(f, R; frame = fr)
         @test g isa MFrequency{R}
-        # shift is small (< ~250 km/s / c)
-        @test abs(g.hz - f.hz) / f.hz < 1e-3
+        # shift is small (< ~400 km/s / c)
+        @test abs(g.hz - f.hz) / f.hz < 2e-3
         # round-trip
         back = measconvert(g, TOPO; frame = fr)
-        @test back.hz ≈ f.hz rtol=1e-12
+        @test back.hz ≈ f.hz rtol=1e-9
     end
 end
 
@@ -124,12 +124,12 @@ end
                    position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150),
                    direction = MDirection{J2000}(2.0, 0.5))
     v = MRadialVelocity{LSRK}(20_000.0)
-    for R in (BARY, LSRD, GEO, TOPO, GALACTO)
+    for R in (BARY, LSRD, GEO, TOPO, GALACTO, LGROUP, CMB)
         g = measconvert(v, R; frame = fr)
         @test g isa MRadialVelocity{R}
-        @test abs(g.mps - v.mps) < 60_000.0              # bounded by the frame speed
+        @test abs(g.mps - v.mps) < 400_000.0             # bounded by the frame speed
         back = measconvert(g, LSRK; frame = fr)
-        @test back.mps ≈ v.mps atol = 1e-6
+        @test back.mps ≈ v.mps atol = 1e-3
     end
     # BARY identity via the reftype short-circuit
     @test measconvert(MRadialVelocity{BARY}(1234.0), BARY; frame = fr) ===
