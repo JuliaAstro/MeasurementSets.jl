@@ -1583,7 +1583,27 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
-### Phase 89 — Aqua.jl quality checks
+### Phase 90 — bundled Observatories table
+
+```julia
+observatory("VLA")     # -> MPosition{ITRF}(...)  (case-insensitive)
+query(main, "mscal.ha() > 0")   # array centre from OBSERVATION.TELESCOPE_NAME
+```
+
+- New `src/measures/observatories.jl` — `observatory(name)` returns the
+  ITRF position of a known telescope (~50 entries: VLA / EVLA / ALMA /
+  ACA / APEX / ATCA / GBT / WSRT / GMRT / LOFAR / MWA / ASKAP /
+  MeerKAT / SKA-MID / SKA-LOW / Effelsberg / NOEMA / SMA / JCMT /
+  Arecibo / FAST / …). A bundled snapshot of casacore's
+  `geodetic/Observatories` data table, converted to ITRF Cartesian;
+  station-array placeholders (VLBA / EVN, position 0,0,0) omitted.
+- The suffix-less `mscal.ha()` / `mscal.hadec()` / `mscal.azel()` /
+  `mscal.pa()` / `mscal.itrf()` / `mscal.delay()` now use the real
+  array centre — `OBSERVATION.TELESCOPE_NAME` (per row via
+  `OBSERVATION_ID`) looked up in the table — instead of antenna 0. A
+  lookup miss falls back to antenna 0 with a one-time warning.
+- `observatory` exported.
+
 
 - New `test/aqua_tests.jl` runs `Aqua.test_all` (ambiguities, undefined
   exports, stale deps, compat bounds, unbound type parameters, project

@@ -102,11 +102,34 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     ant = readtable(subs["ANTENNA"])
     antpos = measure(ant, "POSITION")                 # Vector{MPosition{ITRF}}
     fld = readtable(subs["FIELD"])
+
+    # array-centre position for a suffix-less `mscal.ha()`/`azel()`/… --
+    # OBSERVATION.TELESCOPE_NAME -> the bundled Observatories table, else
+    # a one-time warn + antenna 0.
+    obsid = "OBSERVATION_ID" in cn ? Int.(column(t, "OBSERVATION_ID")[:]) :
+            zeros(Int, n)
+    telname = haskey(subs, "OBSERVATION") ?
+              String.(column(readtable(subs["OBSERVATION"]), "TELESCOPE_NAME")[:]) :
+              String[]
+    _warned_obs = Ref(false)
+    _centrepos(oi) = begin
+        p = (1 <= oi + 1 <= length(telname)) ? observatory(telname[oi + 1]) : nothing
+        if p === nothing
+            _warned_obs[] || (@warn "mscal.*: no Observatories entry for " *
+                "telescope $(get(telname, oi + 1, "?")); using antenna 0 as the array centre";
+                _warned_obs[] = true)
+            antpos[1]
+        else
+            p
+        end
+    end
+    centrepos = Dict{Int,Any}(o => _centrepos(o) for o in unique(obsid))
     fdir = Dict{Int,Any}()                            # static field id -> J2000 direction
     fdir_t = Dict{Tuple{Int,Float64},Any}()           # (ephemeris field, TIME) -> J2000
     feph = Dict{Int,Any}()                            # field id -> Ephemeris | nothing
 
-    _antid(f, i) = endswith(f, "2") ? a2[i] : endswith(f, "1") ? a1[i] : 0
+    # suffix-less -> -1 (array centre); a `*1`/`*2` -> the antenna
+    _antid(f, i) = endswith(f, "2") ? a2[i] : endswith(f, "1") ? a1[i] : -1
 
     _fe(fi) = get!(() -> field_ephemeris(fld, fi), feph, fi)
 
@@ -151,12 +174,16 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         end
     end
 
-    # memo: (antenna id, direction key, TIME seconds) -> frame-converted values
+    # memo: (position key, direction key, TIME seconds) -> frame-converted values.
+    # antid >= 0 is an antenna; antid < 0 means the array centre for
+    # OBSERVATION_ID `-antid-1`.
     memo = Dict{Tuple{Int,Any,Float64},NamedTuple}()
     function _cache(antid::Int, dir::AbstractString, i::Int)
         dj, dkey = _djfor(dir, i)
-        get!(memo, (antid, dkey, tsec[i])) do
-            fr = MeasFrame(epoch = epochs[i], position = antpos[antid + 1], direction = dj)
+        pkey = antid >= 0 ? antid : -obsid[i] - 1
+        get!(memo, (pkey, dkey, tsec[i])) do
+            pos = antid >= 0 ? antpos[antid + 1] : centrepos[obsid[i]]
+            fr = MeasFrame(epoch = epochs[i], position = pos, direction = dj)
             hd = measconvert(dj, HADEC; frame = fr)
             ae = measconvert(dj, AZEL; frame = fr)
             it = measconvert(dj, ITRF; frame = fr)
@@ -174,7 +201,7 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         if f == "delay"
             v = Vector{Float64}(undef, n)
             for i in 1:n
-                x = _cache(0, dir, i).itrf_xyz
+                x = _cache(-1, dir, i).itrf_xyz
                 d = _pvec(antpos[a1[i] + 1]) .- _pvec(antpos[a2[i] + 1])
                 v[i] = (x[1]*d[1] + x[2]*d[2] + x[3]*d[3]) / C_LIGHT
             end
@@ -208,7 +235,7 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         elseif startswith(f, "azel")
             out[_mscal_key(spec)] = [collect(_cache(_antid(f, i), dir, i).azel) for i in 1:n]
         elseif f == "itrf"
-            out[_mscal_key(spec)] = [collect(_cache(0, dir, i).itrf_ll) for i in 1:n]
+            out[_mscal_key(spec)] = [collect(_cache(_antid(f, i), dir, i).itrf_ll) for i in 1:n]
         elseif startswith(f, "ha")
             out[_mscal_key(spec)] = Float64[_cache(_antid(f, i), dir, i).hadec[1] for i in 1:n]
         elseif startswith(f, "az")

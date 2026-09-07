@@ -281,8 +281,9 @@ MAIN table with `ANTENNA` / `FIELD` subtables): `mscal.ha1()` /
 sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
 ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000),
 `mscal.delay()` (geometric delay, s). The `1` / `2` suffix
-picks `ANTENNA1` / `ANTENNA2`; no suffix uses antenna 0 (array-centre
-fallback). The direction functions (`ha` / `hadec` / `azel` / `az` /
+picks `ANTENNA1` / `ANTENNA2`; no suffix uses the array centre —
+`OBSERVATION.TELESCOPE_NAME` looked up in the bundled Observatories
+table, falling back to antenna 0. The direction functions (`ha` / `hadec` / `azel` / `az` /
 `el` / `pa` / `itrf` / `delay`) take an optional direction argument
 instead of `FIELD.PHASE_DIR` — a body name (`mscal.el1('SUN')`), a
 FIELD direction column (`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000
