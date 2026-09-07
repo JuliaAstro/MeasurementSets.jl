@@ -32,6 +32,8 @@ struct Ephemeris
     dec::Vector{Float64}     # deg
     rho::Vector{Float64}     # AU
     radvel::Vector{Float64}  # AU/d
+    disklon::Union{Nothing,Vector{Float64}}   # sub-observer longitude, deg (optional)
+    disklat::Union{Nothing,Vector{Float64}}   # sub-observer latitude,  deg (optional)
 end
 
 const _EPHEM_POSREFSYS = Dict("J2000" => J2000, "B1950" => B1950,
@@ -67,10 +69,13 @@ function open_ephemeris(path::AbstractString)
     cn = Set(columnnames(t))
     all(c -> c in cn, ("MJD", "RA", "DEC", "Rho", "RadVel")) || error(
         "open_ephemeris: $path is missing an MJD/RA/DEC/Rho/RadVel column")
+    _diskcol(n) = n in cn ? Float64.(column(t, n)[:]) : nothing
+    dlon = _diskcol("DiskLong"); dlat = _diskcol("DiskLat")
+    (dlon === nothing) != (dlat === nothing) && (dlon = dlat = nothing)  # need both
     return Ephemeris(String(path), name, frame, mjd0, dmjd,
                      Float64.(column(t, "MJD")[:]), Float64.(column(t, "RA")[:]),
                      Float64.(column(t, "DEC")[:]), Float64.(column(t, "Rho")[:]),
-                     Float64.(column(t, "RadVel")[:]))
+                     Float64.(column(t, "RadVel")[:]), dlon, dlat)
 end
 
 # bracketing row + fractional offset (casacore `MeasComet::fillMeas`)
@@ -151,3 +156,33 @@ end
 # `MVDirection::shift(offset, True)` (longitude scaled by 1/cos(lat)).
 _ephem_shift(lon, lat, dlon, dlat) =
     (dlon == 0 && dlat == 0) ? (lon, lat) : (lon + dlon / cos(lat + dlat), lat + dlat)
+
+# great-circle (SLERP) interpolation between two (lon, lat) points --
+# equivalent to casacore's separation + positionAngle + shiftAngle, and
+# correct near the pole where a plain linear interp of lon/lat is not.
+function _slerp_lonlat(lon0, lat0, lon1, lat1, f)
+    u0 = (cos(lat0) * cos(lon0), cos(lat0) * sin(lon0), sin(lat0))
+    u1 = (cos(lat1) * cos(lon1), cos(lat1) * sin(lon1), sin(lat1))
+    d = clamp(u0[1] * u1[1] + u0[2] * u1[2] + u0[3] * u1[3], -1.0, 1.0)
+    Ω = acos(d)
+    u = Ω < 1e-9 ? u0 :
+        (sin((1 - f) * Ω) .* u0 .+ sin(f * Ω) .* u1) ./ sin(Ω)
+    r = hypot(u...)
+    (atan(u[2], u[1]), asin(clamp(u[3] / r, -1.0, 1.0)))
+end
+
+"""
+    ephemeris_diskpos(e::Ephemeris, mjd) -> (lon, lat)
+
+The sub-observer point on the target body's surface at `mjd` — the
+`DiskLong` / `DiskLat` ephemeris columns (rad), great-circle
+interpolated between the bracketing rows (casacore `MeasComet::getDisk`).
+Errors if the table has no `DiskLong` / `DiskLat` columns.
+"""
+function ephemeris_diskpos(e::Ephemeris, mjd::Real)
+    e.disklon === nothing && error(
+        "ephemeris \"$(e.name)\": no DiskLong / DiskLat columns")
+    i0, f = _ephem_bracket(e, mjd)
+    _slerp_lonlat(deg2rad(e.disklon[i0]), deg2rad(e.disklat[i0]),
+                  deg2rad(e.disklon[i0 + 1]), deg2rad(e.disklat[i0 + 1]), f)
+end

@@ -1583,6 +1583,20 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 93 — polynomial `PHASE_DIR` + ephemeris sub-Earth point
+
+- `measure(fld, "PHASE_DIR", row; epoch)` now evaluates a FIELD
+  direction as a **time polynomial** when `NUM_POLY > 0` (or the cell is
+  `(2, n+1)` with `n > 1`): `dir = c[:,1] + Σ c[:,k]·dtᵏ`, `dt =
+  epoch − FIELD.TIME` (s) — casacore `MSFieldColumns::interpolateDirMeas`.
+  Without `epoch`, or `dt ≈ 0`, the 0-order term (unchanged). `mscal.*`
+  memoises a polynomial field per `(field, TIME)` like an ephemeris field.
+- `ephemeris_diskpos(e, mjd) -> (lon, lat)` — the sub-observer point on
+  a body's surface from an ephemeris table's optional `DiskLong` /
+  `DiskLat` columns, great-circle (SLERP) interpolated between the
+  bracketing rows (casacore `MeasComet::getDisk`). `Ephemeris` gains
+  `disklon` / `disklat`. Exported.
+
 ### Phase 92 — `EarthMagneticMachine` (line-of-sight field)
 
 ```julia

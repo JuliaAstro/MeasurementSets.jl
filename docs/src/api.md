@@ -87,6 +87,7 @@ field_ephemeris
 ephemeris_direction
 ephemeris_radvel
 ephemeris_distance
+ephemeris_diskpos
 doppler
 frequency
 radialvelocity

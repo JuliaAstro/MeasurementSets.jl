@@ -24,10 +24,18 @@ function measure(t::AbstractTable, col::AbstractString, row::Integer;
     mi = measinfo(t, col)
     mi === nothing && throw(ArgumentError("column \"$col\" has no MEASINFO keyword"))
     if epoch !== nothing && mi.kind === :direction && t isa Table
+        cell = getcell(t, col, row)
+        npoly = _field_numpoly(t, row, cell)
+        if npoly > 0 && "TIME" in Set(columnnames(t))
+            R = _frame_type(mi.kind, _ref_string(mi, t, col, row))
+            dt = epoch.mjd * SEC_PER_DAY - Float64(getcell(t, "TIME", row))
+            lo, la = _poly_dir(cell, npoly, dt)
+            return MDirection{R}(lo, la)
+        end
         e = field_ephemeris(t, row - 1)
         if e !== nothing
             d = ephemeris_direction(e, epoch.mjd)      # UTC ~ TDB (coarse table)
-            off = _lonlat(getcell(t, col, row))
+            off = _lonlat(cell)
             lo, la = _ephem_shift(d.lon, d.lat, off[1], off[2])
             return MDirection{e.frame}(lo, la)
         end
@@ -102,6 +110,26 @@ _scalar(v::Real) = v
 _scalar(v::AbstractArray) = length(v) == 1 ? first(v) : first(v)
 
 _vec3(v::AbstractArray) = (Float64(v[1]), Float64(v[2]), Float64(v[3]))
+
+# number of polynomial terms of a FIELD direction cell: the `NUM_POLY`
+# column if present, else inferred from a `(2, npoly+1)` cell shape.
+function _field_numpoly(t, row, cell)
+    "NUM_POLY" in Set(columnnames(t)) && return Int(getcell(t, "NUM_POLY", row))
+    (cell isa AbstractMatrix && size(cell, 2) > 1) ? size(cell, 2) - 1 : 0
+end
+
+# casacore `MSFieldColumns::interpolateDirMeas`: dir = c[:,0] +
+# Σ_{k=1..npoly} c[:,k]·dt^k  (dt in seconds; `dt≈0` -> the 0-order term).
+function _poly_dir(cell::AbstractMatrix, npoly::Integer, dt::Real)
+    (npoly <= 0 || abs(dt) < 1) && return (Float64(cell[1, 1]), Float64(cell[2, 1]))
+    lon = Float64(cell[1, 1]); lat = Float64(cell[2, 1]); fac = 1.0
+    for k in 2:(npoly + 1)
+        fac *= dt
+        lon += Float64(cell[1, k]) * fac
+        lat += Float64(cell[2, k]) * fac
+    end
+    (lon, lat)
+end
 
 # a direction cell is `[lon, lat]` (rad), possibly a `(2, npoly)` matrix
 # (take the 0-order term), or a 3-vector unit direction.

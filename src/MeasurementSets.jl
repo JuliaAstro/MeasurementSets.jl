@@ -89,7 +89,7 @@ export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, ref
 export MBaseline, MuvW, MEarthMagnetic, IGRF, earthfield
 export EarthMagneticMachine, emm_lineofsight
 export Ephemeris, open_ephemeris, field_ephemeris, ephemeris_direction,
-    ephemeris_radvel, ephemeris_distance
+    ephemeris_radvel, ephemeris_distance, ephemeris_diskpos
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
     LGROUP, CMB

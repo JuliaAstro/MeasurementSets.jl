@@ -125,8 +125,11 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     end
     centrepos = Dict{Int,Any}(o => _centrepos(o) for o in unique(obsid))
     fdir = Dict{Int,Any}()                            # static field id -> J2000 direction
-    fdir_t = Dict{Tuple{Int,Float64},Any}()           # (ephemeris field, TIME) -> J2000
+    fdir_t = Dict{Tuple{Int,Float64},Any}()           # (moving field, TIME) -> J2000
     feph = Dict{Int,Any}()                            # field id -> Ephemeris | nothing
+    # a FIELD with any polynomial PHASE_DIR is time-dependent like an ephemeris
+    _fld_poly = "NUM_POLY" in Set(columnnames(fld)) &&
+                any(>(0), Int.(column(fld, "NUM_POLY")[:]))
 
     # suffix-less -> -1 (array centre); a `*1`/`*2` -> the antenna
     _antid(f, i) = endswith(f, "2") ? a2[i] : endswith(f, "1") ? a1[i] : -1
@@ -135,9 +138,15 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
 
     function _fielddir(fi, i)
         e = _fe(fi)
-        e === nothing && return get!(fdir, fi) do
-            measconvert(measure(fld, "PHASE_DIR", fi + 1), J2000;
-                        frame = MeasFrame(epoch = epochs[i]))
+        if e === nothing
+            _fld_poly || return get!(fdir, fi) do
+                measconvert(measure(fld, "PHASE_DIR", fi + 1), J2000;
+                            frame = MeasFrame(epoch = epochs[i]))
+            end
+            return get!(fdir_t, (fi, tsec[i])) do
+                measconvert(measure(fld, "PHASE_DIR", fi + 1; epoch = epochs[i]),
+                            J2000; frame = MeasFrame(epoch = epochs[i]))
+            end
         end
         get!(fdir_t, (fi, tsec[i])) do
             tdb = measconvert(epochs[i], TDB; frame = MeasFrame(epoch = epochs[i])).mjd

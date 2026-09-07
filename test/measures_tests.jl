@@ -644,3 +644,60 @@ end
         nrow = 1, measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
     @test field_ephemeris(readtable(joinpath(tmp, "F2")), 0) === nothing
 end
+
+# Phase 93: polynomial PHASE_DIR + the ephemeris sub-Earth point.
+@testset "measures — polynomial PHASE_DIR" begin
+    tmp = mktempdir()
+    c = reshape([0.5, 0.2,  1.0e-3, 2.0e-3,  1.0e-6, 3.0e-6], 2, 3)  # (2, npoly+1)
+    write_table(joinpath(tmp, "FIELD"), "FIELD", Pair{String,Any}[
+        "NAME" => ["Poly"], "NUM_POLY" => Int32[2], "TIME" => [1000.0],
+        "PHASE_DIR" => [c]]; nrow = 1,
+        measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
+    fld = readtable(joinpath(tmp, "FIELD"))
+
+    dt = 100.0                       # seconds past FIELD.TIME
+    md = measure(fld, "PHASE_DIR", 1; epoch = MEpoch{UTC}((1000.0 + dt) / MSv2.SEC_PER_DAY))
+    @test md isa MDirection{J2000}
+    @test md.lon ≈ 0.5 + 1.0e-3 * dt + 1.0e-6 * dt^2
+    @test md.lat ≈ 0.2 + 2.0e-3 * dt + 3.0e-6 * dt^2
+    # no epoch, or dt ≈ 0 -> the 0-order term
+    @test measure(fld, "PHASE_DIR", 1) == MDirection{J2000}(0.5, 0.2)
+    @test measure(fld, "PHASE_DIR", 1;
+                  epoch = MEpoch{UTC}(1000.0 / MSv2.SEC_PER_DAY)) ==
+          MDirection{J2000}(0.5, 0.2)
+
+    # NUM_POLY inferred from cell shape when the column is absent
+    write_table(joinpath(tmp, "F3"), "FIELD", Pair{String,Any}[
+        "NAME" => ["P"], "TIME" => [0.0], "PHASE_DIR" => [c]]; nrow = 1,
+        measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
+    m3 = measure(readtable(joinpath(tmp, "F3")), "PHASE_DIR", 1;
+                 epoch = MEpoch{UTC}(50.0 / MSv2.SEC_PER_DAY))
+    @test m3.lon ≈ 0.5 + 1.0e-3 * 50 + 1.0e-6 * 2500
+end
+
+@testset "measures — ephemeris sub-Earth point" begin
+    tmp = mktempdir()
+    ep = joinpath(tmp, "EPHEM0_X_J2000.tab")
+    write_table(ep, "EPHEM", Pair{String,Any}[
+        "MJD" => collect(60000.0:1.0:60002.0), "RA" => fill(10.0, 3),
+        "DEC" => fill(5.0, 3), "Rho" => fill(1.0, 3), "RadVel" => fill(0.0, 3),
+        "DiskLong" => [0.0, 20.0, 40.0], "DiskLat" => [10.0, 12.0, 14.0]]; nrow = 3,
+        keywords = Dict("MJD0" => 59999.0, "dMJD" => 1.0, "NAME" => "X",
+                        "posrefsys" => "J2000"))
+    e = open_ephemeris(ep)
+    @test e.disklon !== nothing
+    # f = 0.5: the great-circle (SLERP) midpoint of (0°,10°)–(20°,12°),
+    # which bulges polewards from the arithmetic mean (10°, 11°).
+    lon, lat = ephemeris_diskpos(e, 60000.5)
+    @test rad2deg(lon) ≈ 9.9657 atol = 1e-3
+    @test rad2deg(lat) ≈ 11.1655 atol = 1e-3
+    @test all(ephemeris_diskpos(e, 60000.0) .≈ (deg2rad(0.0), deg2rad(10.0)))
+
+    # a table with no disk columns errors clearly
+    p2 = joinpath(tmp, "EPHEM1_Y_J2000.tab")
+    write_table(p2, "EPHEM", Pair{String,Any}[
+        "MJD" => collect(60000.0:1.0:60002.0), "RA" => fill(1.0, 3),
+        "DEC" => fill(1.0, 3), "Rho" => fill(1.0, 3), "RadVel" => fill(0.0, 3)];
+        nrow = 3, keywords = Dict("MJD0" => 59999.0, "dMJD" => 1.0))
+    @test_throws ErrorException ephemeris_diskpos(open_ephemeris(p2), 60000.5)
+end
