@@ -427,7 +427,8 @@ _tqlrefs!(seen, e::TQLMSSel)   = push!(seen, _mssel_key(e))
 _has_aggr(::TQLMSSel)          = false
 _has_qty(::TQLMSSel)           = false
 
-const _MSSEL_FUNCS = Set(["baseline", "field", "spw", "scan", "state", "array", "obs"])
+const _MSSEL_FUNCS = Set(["baseline", "field", "spw", "scan", "state", "array",
+                          "obs", "time", "uvdist"])
 
 function _mssel_str_arg(a::TQLExpr, src::AbstractString)
     (a isa TQLLit && a.value isa AbstractString) || throw(ArgumentError(
@@ -540,6 +541,9 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         _mssel_names_to_ids(column(readtable(subs[name]), col)[:]) :
         Dict{String,Vector{Int}}()
 
+    fn == "time" && return _mssel_time(t, spec, cn, n)
+    fn == "uvdist" && return _mssel_uvdist(t, spec, cn, subs, n)
+
     if fn == "baseline"
         _need("ANTENNA1")
         haskey(subs, "ANTENNA") || error("mscal.baseline: no ANTENNA subtable")
@@ -596,4 +600,97 @@ function _mssel_columns(t::AbstractTable, keys::AbstractVector{<:AbstractString}
         d[k] = _mssel_one(t, fn, spec, cn, subs, n)
     end
     return d
+end
+
+# ---------------------------------------------------------------------------
+# Phase 81: `mscal.time('spec')` and `mscal.uvdist('spec')`.
+#
+# time: a comma-list of `t0~t1` ranges (or `>t0` / `<t1` bounds); each
+#   endpoint is an ISO / `YYYY/MM/DD[/HH:MM:SS]` datetime (parsed by the
+#   Phase-69 `_tql_parse_datetime`) or a bare number = MJD days. Compared
+#   against the MAIN `TIME` column (UTC seconds).
+# uvdist: a comma-list of `a~b` ranges (or `<b` / `>a` bounds) with an
+#   optional unit suffix `m` (default) / `km` / `lambda` / `klambda` /
+#   `mlambda`. The 2-D uv-distance `sqrt(u^2 + v^2)` (matching casacore's
+#   fast path). Wavelength units scale per row by
+#   `SPECTRAL_WINDOW.REF_FREQUENCY` of the row's spw.
+
+function _mssel_ranges(spec::AbstractString, parse1)
+    out = Tuple{Float64,Float64}[]
+    for raw in _mssel_commas(spec)
+        term = strip(raw)
+        isempty(term) && continue
+        if startswith(term, ">")
+            push!(out, (parse1(strip(term[2:end])), Inf))
+        elseif startswith(term, "<")
+            push!(out, (-Inf, parse1(strip(term[2:end]))))
+        else
+            m = match(r"^(.*?)\s*~\s*(.*)$", term)
+            m === nothing && throw(ArgumentError(
+                "mscal selection range \"$term\" — give `a~b`, `>a`, or `<b`"))
+            push!(out, (parse1(strip(m[1])), parse1(strip(m[2]))))
+        end
+    end
+    return out
+end
+
+_mssel_inany(x, ranges) = any(r -> r[1] <= x <= r[2], ranges)
+
+function _mssel_time(t::AbstractTable, spec::AbstractString, cn::AbstractSet, n::Integer)
+    "TIME" in cn || error("mscal.time: MAIN table has no TIME column")
+    _p(s) = (v = tryparse(Float64, s); v !== nothing ? v * SEC_PER_DAY :
+             _tql_parse_datetime(s) * SEC_PER_DAY)
+    ranges = _mssel_ranges(spec, _p)
+    tm = Float64.(column(t, "TIME")[:])
+    return Bool[_mssel_inany(tm[i], ranges) for i in 1:n]
+end
+
+const _MSSEL_UV_UNIT = Dict("m" => (1.0, :dist), "km" => (1e3, :dist),
+    "lambda" => (1.0, :wave), "klambda" => (1e3, :wave), "mlambda" => (1e6, :wave))
+
+function _mssel_uvdist(t::AbstractTable, spec::AbstractString, cn::AbstractSet,
+                       subs::AbstractDict, n::Integer)
+    "UVW" in cn || error("mscal.uvdist: MAIN table has no UVW column")
+    kinds = Set{Symbol}()
+    ranges = Tuple{Float64,Float64}[]
+    for raw in _mssel_commas(spec)
+        term = strip(raw)
+        isempty(term) && continue
+        # a term's unit is the trailing letters; it applies to every
+        # number in the term (matching casacore's global-unit behaviour).
+        um = match(r"[a-zA-Z]+\s*$", term)
+        u = um === nothing ? "m" : lowercase(strip(um.match))
+        haskey(_MSSEL_UV_UNIT, u) || throw(ArgumentError(
+            "mscal.uvdist: unknown unit \"$u\" (m / km / lambda / klambda / mlambda)"))
+        scale, k = _MSSEL_UV_UNIT[u]
+        push!(kinds, k)
+        body = strip(um === nothing ? term : term[1:prevind(term, um.offset)])
+        num(s) = parse(Float64, strip(s)) * scale
+        if startswith(body, ">")
+            push!(ranges, (num(body[2:end]), Inf))
+        elseif startswith(body, "<")
+            push!(ranges, (-Inf, num(body[2:end])))
+        else
+            m = match(r"^(.+?)\s*(?:~|(?<![eE])-)\s*(.+)$", body)
+            m === nothing && throw(ArgumentError(
+                "mscal.uvdist: \"$term\" — give `a~b`, `>a`, or `<b`"))
+            push!(ranges, (num(m[1]), num(m[2])))
+        end
+    end
+    length(kinds) <= 1 || throw(ArgumentError(
+        "mscal.uvdist: a spec mixes distance and wavelength units"))
+    kind = Ref(isempty(kinds) ? :dist : first(kinds))
+    uvw = column(t, "UVW")[:]
+    d2d = Float64[hypot(Float64(x[1]), Float64(x[2])) for x in uvw]
+    if kind[] === :dist
+        return Bool[_mssel_inany(d2d[i], ranges) for i in 1:n]
+    end
+    # wavelength: compare d2d * refFreq / c per row's spw
+    haskey(subs, "DATA_DESCRIPTION") && haskey(subs, "SPECTRAL_WINDOW") || error(
+        "mscal.uvdist: wavelength units need DATA_DESCRIPTION + SPECTRAL_WINDOW subtables")
+    ddid = Int.(column(t, "DATA_DESC_ID")[:])
+    dd2spw = Int.(column(readtable(subs["DATA_DESCRIPTION"]), "SPECTRAL_WINDOW_ID")[:])
+    reff = Float64.(column(readtable(subs["SPECTRAL_WINDOW"]), "REF_FREQUENCY")[:])
+    return Bool[_mssel_inany(d2d[i] * reff[dd2spw[ddid[i] + 1] + 1] / C_LIGHT, ranges)
+                for i in 1:n]
 end

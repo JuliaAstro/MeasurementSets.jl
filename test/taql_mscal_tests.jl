@@ -2,6 +2,7 @@
 # subset). Runs against SAMPLE_MS; needs SOFA.
 import SOFA
 import Statistics
+import Dates
 using MeasurementSets: measure, measconvert, MeasFrame, MDirection, MuvW, J2000,
     AZEL, HADEC, ITRF
 
@@ -197,6 +198,38 @@ end
     @test_throws ErrorException query(readtable(dir), "mscal.field('0')")
 end
 
+@testset "TaQL-lite — mscal.time() / mscal.uvdist()" begin
+    main = readtable(SAMPLE_MS)
+    tm = Float64.(column(main, "TIME")[:])
+    N = nrow(main)
+    d2d = [hypot(Float64(x[1]), Float64(x[2])) for x in column(main, "UVW")[:]]
+    lo, hi = extrema(tm ./ 86400)                  # MJD-day bounds
+    mid = (lo + hi) / 2
+
+    # time: MJD-day endpoints, ISO datetime, and bounds
+    @test nrow(query(main, "mscal.time('$(lo - 1)~$(hi + 1)')")) == N
+    @test nrow(query(main, "mscal.time('>$mid')")) == count(>(mid), tm ./ 86400)
+    @test nrow(query(main, "mscal.time('<$mid')")) == count(<=(mid), tm ./ 86400)
+    d = Dates.Date(Dates.DateTime(1858, 11, 17) + Dates.Day(floor(Int, lo)))
+    @test nrow(query(main, "mscal.time('$(d)T00:00:00~$(d)T23:59:59')")) == N
+
+    # uvdist: metres, km, wavelength (sample has one spw, REF_FREQUENCY 7.988 GHz)
+    @test nrow(query(main, "mscal.uvdist('200~1000m')")) ==
+          count(x -> 200 <= x <= 1000, d2d)
+    @test nrow(query(main, "mscal.uvdist('<500')")) == count(<=(500), d2d)
+    @test nrow(query(main, "mscal.uvdist('>1km')")) == count(>=(1000), d2d)
+    reff = column(subtable(MeasurementSet(SAMPLE_MS), "SPECTRAL_WINDOW"), "REF_FREQUENCY")[1]
+    lam(x) = x * reff / MSv2.C_LIGHT
+    @test nrow(query(main, "mscal.uvdist('10~100klambda')")) ==
+          count(x -> 10e3 <= lam(x) <= 100e3, d2d)
+
+    # errors
+    @test_throws ArgumentError query(main, "mscal.uvdist('100')")   # bare single
+    @test_throws ArgumentError query(main, "mscal.uvdist('1~2parsec')")
+    @test_throws ArgumentError query(main, "mscal.uvdist('1~2m, 3~4klambda')")  # mixed
+    @test_throws ArgumentError query(main, "mscal.time('not a date')")
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite — mscal.* vs real TaQL" begin
         # derivedmscal UDFs must be registered in this casacore build
@@ -249,7 +282,8 @@ if _HAVE_TAQL
         main = readtable(SAMPLE_MS)
         for (fn, spec) in [("baseline", "0"), ("baseline", "0 & 1"),
                            ("baseline", "!0"), ("field", "0"), ("spw", "0"),
-                           ("field", "0~2")]
+                           ("field", "0~2"), ("uvdist", "200~1000m"),
+                           ("uvdist", "10~100klambda"), ("uvdist", ">1km")]
             rdir = joinpath(mktempdir(), "sel")
             ok = try
                 _taqlcmd("SELECT FROM \$1 WHERE mscal.$fn('$spec') GIVING '$rdir'",
