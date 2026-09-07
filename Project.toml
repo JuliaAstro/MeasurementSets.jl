@@ -17,6 +17,7 @@ Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
 EarthOrientation = "732a3c5d-d6c0-58bc-adb1-1b51709a25e2"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
 SOFA = "ad3d3fd0-b5f2-51ee-b274-8cdbe62317e2"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 UnitfulAngles = "6fb2a4bd-7999-5318-a3b2-8ad61056cd98"
 UnitfulAstro = "6112ee07-acf9-5e0f-b108-d242c714bf9f"
@@ -24,7 +25,7 @@ UnitfulAstro = "6112ee07-acf9-5e0f-b108-d242c714bf9f"
 [extensions]
 EarthOrientationExt = ["SOFA", "EarthOrientation"]
 HDF5Ext = "HDF5"
-SOFAExt = "SOFA"
+SOFAExt = ["SOFA", "StaticArrays"]
 UnitfulExt = ["Unitful", "UnitfulAngles", "UnitfulAstro"]
 
 [compat]
@@ -34,6 +35,7 @@ EarthOrientation = "0.7"
 HDF5 = "0.17"
 SOFA = "2"
 SpecialFunctions = "2"
+StaticArrays = "1"
 Statistics = "1"
 Tables = "1"
 Unitful = "1"
@@ -47,10 +49,11 @@ CxxWrap = "1f15a43c-97ca-5a2a-ae31-89f07a497df4"
 EarthOrientation = "732a3c5d-d6c0-58bc-adb1-1b51709a25e2"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
 SOFA = "ad3d3fd0-b5f2-51ee-b274-8cdbe62317e2"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 UnitfulAngles = "6fb2a4bd-7999-5318-a3b2-8ad61056cd98"
 UnitfulAstro = "6112ee07-acf9-5e0f-b108-d242c714bf9f"
 
 [targets]
-test = ["Test", "Casacore", "CxxWrap", "HDF5", "SOFA", "EarthOrientation", "Unitful", "UnitfulAngles", "UnitfulAstro"]
+test = ["Test", "Casacore", "CxxWrap", "HDF5", "SOFA", "StaticArrays", "EarthOrientation", "Unitful", "UnitfulAngles", "UnitfulAstro"]
