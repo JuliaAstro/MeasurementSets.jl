@@ -83,6 +83,20 @@ _tql_quantity(args...) = error(
 
 _tql_unit_attach(args...) = _unitful_load_hint()
 
+# Does `s` look like a unit? -- the discriminator for a *spaced* postfix
+# literal (`col > 3 km`).  Core: a small common-unit set (so the common
+# case still lexes without Unitful and `_tql_quantity` then gives the
+# load hint).  `UnitfulExt` overrides with a full `_ms_uparse` try.
+const _COMMON_UNITS = Set([
+    "m", "cm", "mm", "km", "au", "pc", "kpc", "mpc", "lyr",
+    "s", "ms", "us", "ns", "min", "h", "hr", "d", "day", "yr",
+    "hz", "khz", "mhz", "ghz", "thz",
+    "rad", "mrad", "deg", "arcmin", "arcsec", "mas", "sr",
+    "jy", "mjy", "ujy", "k", "mk", "w", "mw", "kw",
+    "g", "kg", "n", "pa", "hpa", "bar", "t", "gauss", "nt",
+    "m/s", "km/s", "cm/s", "rad/s"])
+_tql_known_unit(s::AbstractString) = lowercase(strip(String(s))) in _COMMON_UNITS
+
 """Strip a dimensionless `Quantity` result of a TaQL-lite expression to a
 plain number; error on a dimensional one. Identity for anything else."""
 _tql_result_strip(x) = x

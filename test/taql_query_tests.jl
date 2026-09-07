@@ -2104,6 +2104,29 @@ end
     # groupby HAVING with a unit literal
     g = groupby(t, "K"; select = ["K" => :K, "n" => "gcount()"], having = "gmax(CHAN_FREQ) > 2.0GHz")
     @test collect(g.K) == Int32[1]                       # K=1 max 2.10e9; K=0 max 1.55e9
+
+    # Phase 95: spaced postfix units
+    @test query(t, "CHAN_FREQ > 1.4 GHz").rows == [3, 4]
+    @test query(t, "CHAN_FREQ BETWEEN 1.35 GHz AND 1.6 GHz").rows == [2, 3]
+    toks = MSv2._taqllite_tokenize("1.4 GHz")            # still two tokens
+    @test toks[1].kind === :num && toks[2].kind === :ident
+end
+
+@testset "Phase 95 — observatory() + spaced-unit parsing" begin
+    d = mktempdir()
+    write_table(joinpath(d, "A"), "T", Pair{String,Any}[
+        "P" => [Float64[-1601185.0, -5041977.0, 3554876.0], Float64[0.0, 0.0, 0.0]],
+        "X" => [1.0, 2.0]]; nrow = 2)
+    t = readtable(joinpath(d, "A"))
+    # observatory('VLA') -> [x,y,z]; distance of P from the array centre
+    r = query(t, "sqrt(sum((P - observatory('VLA'))**2)) < 1e5")
+    @test r.rows == [1]                                  # row 1 is near VLA, row 2 far
+    @test_throws ArgumentError query(t, "observatory('NOWHERE')[1] > 0")
+    # a trailing non-unit ident is still an unknown-column parse error
+    @test_throws ArgumentError MSv2._taqllite_parse("X + 1 zork", Set(["X"]))
+    # `_tql_known_unit`
+    @test MSv2._tql_known_unit("GHz") && MSv2._tql_known_unit("km/s")
+    @test !MSv2._tql_known_unit("zork")
 end
 
 @testset "Phase 69 — date/time functions" begin

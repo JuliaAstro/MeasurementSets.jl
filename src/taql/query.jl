@@ -252,7 +252,7 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   (`marray(d, m)`, `arraydata`, `arraymask`; `V[boolexpr]` yields a
   masked array whose reductions skip the excluded elements),
   `iif(cond, a, b)`, `rownumber()` (1-based),
-  `pi`, `e`;
+  `observatory('VLA')` (a telescope's ITRF `[x,y,z]`), `pi`, `e`;
 * an optional trailing `ORDER BY col [ASC|DESC], ...` (bare columns).
 
 Column names are case-sensitive and must name a column of `t`; keywords
@@ -328,8 +328,9 @@ Supported: 1-based array element/slice indexing (`DATA[1,1]`,
 use `**` for exponentiation), `~=` / `!~=` approximate equality
 (casacore's `near`, relative tolerance `1e-5`), scientific-notation
 number literals (`1.4e9`), **quantity literals** (`1.4GHz`, `10arcsec`,
-`30deg` -- compared against a column carrying a `QuantumUnits` keyword;
-needs the Unitful extension), **sexagesimal literals** (`10h30m`,
+`30deg`, or spaced `1.4 GHz` / `3 km` -- compared against a column
+carrying a `QuantumUnits` keyword; needs the Unitful extension),
+**sexagesimal literals** (`10h30m`,
 `45d51m16s`, `12h`, `45d` -- an `h`-prefix is an hour angle ×15, a
 `d`-prefix is degrees; the value is radians), and **date/time + angle
 functions**:

@@ -193,6 +193,14 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # sexagesimal string -> radians (`h` in the string => hour angle)
     "angle" => (s -> _parse_sexagesimal(String(s),
                      occursin(r"[hH]", String(s)) ? :ra : :dec), 1:1),
+    # observatory name -> its ITRF position [x, y, z] (m), from the
+    # bundled Observatories table -- e.g. distance of an antenna from the
+    # array centre: `sqrt(sum((POSITION - observatory('VLA'))**2))`
+    "observatory" => (s -> begin
+        p = observatory(String(s))
+        p === nothing && throw(ArgumentError("TaQL-lite: unknown observatory \"$s\""))
+        Float64[p.x, p.y, p.z]
+    end, 1:1),
 )
 
 # g-prefixed aggregate functions.  `_geval(::TQLAggr)` collects the

@@ -1583,6 +1583,23 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 95 — spaced unit literals + `observatory()` in TaQL-lite
+
+```julia
+query(spw, "CHAN_FREQ > 1.4 GHz")                        # spaced postfix unit
+query(ant, "sqrt(sum((POSITION - observatory('VLA'))**2)) < 1e5")
+```
+
+- A number followed by a **space** then a bare identifier that is not a
+  column and is a known unit (`_tql_known_unit` — a common-unit set in
+  core, a full `_ms_uparse` try in `UnitfulExt`) now lexes as a quantity
+  literal (casacore `simexpr unit`), so `col > 3 km` / `BETWEEN 1.4 GHz
+  AND 1.5 GHz` work alongside the adjacent `1.4GHz` form. A trailing
+  non-unit ident stays an unknown-column error.
+- `observatory('NAME')` — a TaQL-lite function returning a telescope's
+  ITRF `[x, y, z]` (m) from the bundled Observatories table; unknown
+  name errors. Composes with array arithmetic / indexing.
+
 ### Phase 94 — full MSSelection time grammar + uvdist `:P%`
 
 ```julia
