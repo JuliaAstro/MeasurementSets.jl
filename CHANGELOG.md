@@ -1583,6 +1583,26 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 96 — ionospheric Faraday rotation
+
+```julia
+m = EarthMagneticMachine(350e3, observatory("VLA"), MEpoch{UTC}(mjd))
+rm = rotation_measure(m, MDirection{J2000}(ra, dec); stec = 12.0)   # rad/m², STEC in TECU
+Δχ = faraday_rotation(rm, 1.4e9)                                     # RM·λ²
+χ_true = derotate_angle(χ_obs, rm, MFrequency{TOPO}(1.4e9))
+```
+
+- `rotation_measure(dir, epoch, pos; stec, height=350e3)` /
+  `rotation_measure(m::EarthMagneticMachine, dir; stec)` — thin-shell
+  ionospheric RM (rad/m²): `RM_IONOSPHERE · stec · B∥`, `B∥` the
+  line-of-sight field along the propagation direction at the shell
+  pierce point ([`emm_lineofsight`](@ref)), `stec` in TECU. Positive RM
+  ⇔ field toward the observer.
+- `faraday_rotation(rm, freq)` = `rm · (c/freq)²` (`freq` a number or
+  `MFrequency`); `derotate_angle(χ, rm, freq)` = `χ − Δχ`.
+- `const RM_IONOSPHERE = 2.631e-6`. All exported. Pure helpers are core;
+  `rotation_measure` defers the SOFA requirement to `emm_lineofsight`.
+
 ### Phase 95 — spaced unit literals + `observatory()` in TaQL-lite
 
 ```julia
