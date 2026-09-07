@@ -442,6 +442,45 @@ end
     @test (mb.x, mb.y, mb.z) == (200.0, -400.0, 600.0)
 end
 
+# Phase 92: EarthMagneticMachine — line-of-sight field toward a source.
+@testset "measures — EarthMagneticMachine" begin
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    ext === nothing && return
+
+    vla = MPosition{ITRF}(-1601185.365, -5041977.547, 3554875.870)
+    ep = MEpoch{UTC}(60454.4225)
+    posl = hypot(vla.x, vla.y, vla.z)
+    lon = atan(vla.y, vla.x); lat = asin(vla.z / posl)
+    up = MDirection{ITRF}(lon, lat)                 # local vertical
+
+    m = EarthMagneticMachine(350e3, vla, ep)
+    r = m(up)
+    @test r.field isa MEarthMagnetic{ITRF}
+    @test r.subpoint isa MPosition{ITRF}
+    # pierce point sits exactly on the shell
+    @test hypot(r.subpoint.x, r.subpoint.y, r.subpoint.z) ≈ posl + 350e3 rtol = 1e-12
+    # ... and on the line of sight
+    for (s, p, u) in ((r.subpoint.x, vla.x, cos(lat) * cos(lon)),
+                      (r.subpoint.y, vla.y, cos(lat) * sin(lon)),
+                      (r.subpoint.z, vla.z, sin(lat)))
+        @test (s - p) / u ≈ 350e3 rtol = 1e-9
+    end
+    # sub-point longitude matches
+    @test rem2pi(r.sublon - atan(r.subpoint.y, r.subpoint.x), RoundNearest) ≈ 0 atol = 1e-12
+
+    # height 0 -> pierce point is the observer, losfield == vertical component
+    r0 = EarthMagneticMachine(0.0, vla, ep)(up)
+    @test hypot(r0.subpoint.x - vla.x, r0.subpoint.y - vla.y, r0.subpoint.z - vla.z) < 1e-6
+    bf = earthfield(vla, ep)
+    @test r0.losfield ≈ bf.x * cos(lat) * cos(lon) + bf.y * cos(lat) * sin(lon) +
+                        bf.z * sin(lat) rtol = 1e-12
+
+    # a direction given in a celestial frame is rotated to ITRF first
+    rj = m(MDirection{J2000}(2.0, 0.5))
+    @test rj.field isa MEarthMagnetic{ITRF}
+    @test abs(rj.losfield) < hypot(rj.field.x, rj.field.y, rj.field.z)
+end
+
 if _HAVE_MEAS_CASA
     @testset "measures — casatools oracle cross-check" begin
         ref_jl = joinpath(mktempdir(), "measref.jl")
@@ -538,6 +577,22 @@ if _HAVE_MEAS_CASA
               hypot(em_itrf.x, em_itrf.y, em_itrf.z) rtol = 1e-9
         @test all(abs.((em_itrf.x, em_itrf.y, em_itrf.z) .- wi) .< 0.03 * magw + 200)
         @test all(abs.((em_j2000.x, em_j2000.y, em_j2000.z) .- wj) .< 0.03 * magw + 200)
+
+        # EarthMagneticMachine: the pierce-point geometry matches the
+        # fixture's numpy re-derivation to a few metres (the residual is
+        # the J2000->ITRF direction transform's EOP / aberration model
+        # differences, ~1" ~ a metre at 350 km); the field is loose
+        # (IGRF-12 vs -14).
+        em = ref.emm
+        mm = EarthMagneticMachine(em.height,
+                                  MPosition{ITRF}(ref.obs_xyz...),
+                                  MEpoch{UTC}(ref.epochs_mjd[1]))
+        gr = mm(MDirection{J2000}(ref.src_ra, ref.src_dec))
+        @test all(abs.((gr.subpoint.x, gr.subpoint.y, gr.subpoint.z) .-
+                       em.subpoint) .< 50.0)
+        emmag = hypot(em.field...)
+        @test hypot(gr.field.x, gr.field.y, gr.field.z) ≈ emmag rtol = 0.03
+        @test gr.losfield ≈ em.losfield atol = 0.03 * emmag + 200
 
         obsf = MFrequency{LSRK}(ref.obs_freq_hz)
         d = doppler(obsf, ref.rest_hz)

@@ -525,4 +525,27 @@ function MS._mconv(::MEarthMagnetic{IGRF}, ::Type{B}, frame::MeasFrame) where {B
     B === ITRF ? bf : MS._mconv(bf, B, frame)
 end
 
+# casacore `EarthMagneticMachine::calculate` -- intersect the line of
+# sight with a shell `height` above the observer, sample the IGRF field
+# at the pierce point, project onto the line of sight.
+function MS.emm_lineofsight(dir::MDirection, height::Real, pos::MPosition, epoch::MEpoch)
+    fr = MeasFrame(epoch = epoch, position = pos)
+    u = _dir_xyz(MS.measconvert(dir, ITRF; frame = fr))     # unit line of sight, ITRF
+    px, py, pz = pos.x, pos.y, pos.z
+    posl = hypot(px, py, pz)
+    subl = height * (height + 2 * posl)                     # = (posl+h)^2 - posl^2
+    an = px * u[1] + py * u[2] + pz * u[3]
+    x = sqrt(an * an + subl)
+    x = min(abs(-an + x), abs(-an - x))                     # near shell crossing
+    sx, sy, sz = px + x * u[1], py + x * u[2], pz + x * u[3]
+    sr = hypot(sx, sy, sz)
+    slon = atan(sy, sx)
+    slat = asin(clamp(sz / sr, -1.0, 1.0))
+    bx, by, bz = MS._earthfield_itrf(MS._igrf_gh(epoch.mjd), sr, slon, slat)
+    (; losfield = bx * u[1] + by * u[2] + bz * u[3],
+       field = MEarthMagnetic{ITRF}(bx, by, bz),
+       subpoint = MPosition{ITRF}(sx, sy, sz),
+       sublon = slon, sublat = slat)
+end
+
 end # module

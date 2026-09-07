@@ -193,6 +193,10 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
   `measconvert(MEarthMagnetic{IGRF}(...), R; frame)` evaluates the model
   at `frame.position` / `frame.epoch` and rotates to `R`. casacore ships
   IGRF-12, so a cross-check differs by ~100–200 nT (model generation).
+  [`EarthMagneticMachine`](@ref)`(height, pos, epoch)` (or
+  [`emm_lineofsight`](@ref)) gives the field where the line of sight to a
+  source pierces a shell `height` metres up — the parallel-field input to
+  ionospheric Faraday-rotation / RM corrections.
 
 - **Solar-system body** (`SUN` / `MOON` / `MERCURY` / `VENUS` / `MARS`
   / `JUPITER` / `SATURN` / `URANUS` / `NEPTUNE`): a `FIELD.PHASE_DIR`

@@ -62,6 +62,7 @@ include("measures/types.jl")
 include("measures/observatories.jl")
 include("measures/igrf14_data.jl")
 include("measures/earthfield.jl")
+include("measures/emmachine.jl")
 include("measures/measinfo.jl")
 include("measures/read.jl")
 include("measures/ephemeris.jl")
@@ -86,6 +87,7 @@ export columnunit, qcolumn, UNITS_NO_JULIA_COUNTERPART   # real methods via Unit
 export measure, measinfo, measconvert, MeasFrame, MeasInfo, observatory   # conversions via SOFAExt
 export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, reftype
 export MBaseline, MuvW, MEarthMagnetic, IGRF, earthfield
+export EarthMagneticMachine, emm_lineofsight
 export Ephemeris, open_ephemeris, field_ephemeris, ephemeris_direction,
     ephemeris_radvel, ephemeris_distance
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,

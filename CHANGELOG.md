@@ -1583,6 +1583,27 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 92 — `EarthMagneticMachine` (line-of-sight field)
+
+```julia
+m = EarthMagneticMachine(350e3, observatory("VLA"), MEpoch{UTC}(mjd))
+r = m(MDirection{J2000}(ra, dec))
+r.losfield        # nT parallel to the line of sight (× slant TEC × 2.63e-13 → RM)
+r.field, r.subpoint, r.sublon, r.sublat
+```
+
+- `emm_lineofsight(dir, height, pos, epoch)` / `EarthMagneticMachine` —
+  port of casacore `measures/Measures/EarthMagneticMachine`. Intersects
+  the line of sight to `dir` with a sphere `height` m above the
+  observer's geocentric radius, samples the bundled IGRF-14 field there
+  (`_earthfield_itrf`), and projects onto the line of sight. `dir` may be
+  in any direction frame (rotated to ITRF via `epoch` + `pos`).
+  Real method in `ext/SOFAExt.jl`; exported `EarthMagneticMachine`,
+  `emm_lineofsight`.
+- CASA cross-check: `test/measures_fixture.py` re-derives the same
+  geometry with `me` + numpy and `me.earthmagnetic` at the pierce point
+  — the geometry matches exactly, the field to ~3% (IGRF-12 vs -14).
+
 ### Phase 91 — `MEarthMagnetic` measure + IGRF-14 model
 
 ```julia

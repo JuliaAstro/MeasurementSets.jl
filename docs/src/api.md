@@ -79,6 +79,8 @@ MBaseline
 MuvW
 MEarthMagnetic
 earthfield
+EarthMagneticMachine
+emm_lineofsight
 Ephemeris
 open_ephemeris
 field_ephemeris
