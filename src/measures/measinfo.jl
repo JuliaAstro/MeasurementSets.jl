@@ -16,19 +16,25 @@
 
 # name-string (casacore enum spelling, incl. synonyms) -> RefFrame type,
 # per measure kind.  Unknown strings become `OtherRef{Symbol(s)}`.
+# direction-frame name -> type; shared by :direction, :uvw and :baseline
+# (casacore `MBaseline::Types` / `Muvw::Types` mirror `MDirection::Types`).
+const _DIRECTION_FRAMES = Dict{String,DataType}(
+    "J2000" => J2000, "ICRS" => ICRS, "B1950" => B1950,
+    "B1950_VLA" => B1950, "APP" => APP,
+    "GALACTIC" => GALACTIC, "ECLIPTIC" => ECLIPTIC,
+    "HADEC" => HADEC,
+    "AZEL" => AZEL, "AZELNE" => AZEL,
+    "AZELGEO" => AZELGEO, "AZELNEGEO" => AZELGEO,
+    "ITRF" => ITRF, "TOPO" => TOPO)
+
 const _MEAS_FRAMES = Dict{Symbol,Dict{String,DataType}}(
     :epoch => Dict(
         "UTC" => UTC, "TAI" => TAI, "IAT" => TAI,
         "TDT" => TT, "TT" => TT, "ET" => TT,
         "TDB" => TDB, "UT1" => UT1, "UT" => UT1),
-    :direction => Dict(
-        "J2000" => J2000, "ICRS" => ICRS, "B1950" => B1950,
-        "B1950_VLA" => B1950, "APP" => APP,
-        "GALACTIC" => GALACTIC, "ECLIPTIC" => ECLIPTIC,
-        "HADEC" => HADEC,
-        "AZEL" => AZEL, "AZELNE" => AZEL,
-        "AZELGEO" => AZELGEO, "AZELNEGEO" => AZELGEO,
-        "ITRF" => ITRF, "TOPO" => TOPO),
+    :direction => _DIRECTION_FRAMES,
+    :uvw => _DIRECTION_FRAMES,
+    :baseline => _DIRECTION_FRAMES,
     :position => Dict("ITRF" => ITRF, "WGS84" => WGS84),
     :frequency => Dict(
         "REST" => REST, "LSRK" => LSRK, "LSR" => LSRK, "LSRD" => LSRD,
@@ -40,17 +46,20 @@ const _MEAS_FRAMES = Dict{Symbol,Dict{String,DataType}}(
         "RADIO" => RADIO, "OPTICAL" => OPTICAL, "Z" => OPTICAL,
         "RATIO" => RATIO, "BETA" => BETA, "TRUE" => BETA,
         "RELATIVISTIC" => BETA, "GAMMA" => GAMMA),
-    :uvw => Dict("J2000" => J2000, "ITRF" => ITRF, "APP" => APP),
 )
 
 # fixed casacore refcode enum order for the kinds that use VarRefCol
 # without an explicit TabRefCodes/TabRefTypes map (rare -- the fixture
 # always supplies the map).  Index 0-based, matching the C++ enum.
+const _DIRECTION_ENUM = ["J2000", "JMEAN", "JTRUE", "APP", "B1950", "B1950_VLA",
+                         "BMEAN", "BTRUE", "GALACTIC", "HADEC", "AZEL", "AZELSW",
+                         "AZELGEO", "AZELSWGEO", "JNAT", "ECLIPTIC", "MECLIPTIC",
+                         "TECLIPTIC", "SUPERGAL", "ITRF", "TOPO", "ICRS"]
+
 const _MEAS_ENUM = Dict{Symbol,Vector{String}}(
-    :direction => ["J2000", "JMEAN", "JTRUE", "APP", "B1950", "B1950_VLA",
-                   "BMEAN", "BTRUE", "GALACTIC", "HADEC", "AZEL", "AZELSW",
-                   "AZELGEO", "AZELSWGEO", "JNAT", "ECLIPTIC", "MECLIPTIC",
-                   "TECLIPTIC", "SUPERGAL", "ITRF", "TOPO", "ICRS"],
+    :direction => _DIRECTION_ENUM,
+    :uvw => _DIRECTION_ENUM,
+    :baseline => _DIRECTION_ENUM,
     :frequency => ["REST", "LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO",
                    "LGROUP", "CMB"],
     :radialvelocity => ["LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO",

@@ -14,8 +14,9 @@ module SOFAExt
 
 import SOFA
 import MeasurementSets as MS
-using StaticArrays: SVector
+using StaticArrays: SVector, SMatrix
 using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity,
+    MBaseline, MuvW,
     RefFrame, MeasFrame, reftype,
     UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
@@ -343,6 +344,56 @@ end
 function MS._mconv(m::MRadialVelocity, ::Type{B}, frame::MeasFrame) where {B<:RefFrame}
     n = _n_hat(frame)
     _bary_to_rv(_rv_to_bary(m, n, frame), B, n, frame)
+end
+
+# ======================================================================
+# baseline / uvw  (3-vectors in a direction frame)
+# ======================================================================
+
+# casacore `MCBaseline`: every route applies the same rotations as
+# `MCDirection` to the whole vector; a pure rotation preserves the
+# length, and the aberration routes bracket the call with
+# `adjust`/`readjust` (normalise to unit, restore length).  So a
+# baseline conversion is: convert the unit direction with the existing
+# `MDirection` code, then rescale by the original length.
+function MS._mconv(b::MBaseline{A}, ::Type{B}, frame::MeasFrame) where {A<:RefFrame,B<:RefFrame}
+    r = hypot(b.x, b.y, b.z)
+    r == 0 && return MBaseline{B}(0.0, 0.0, 0.0)
+    d2 = MS.measconvert(_xyz_dir(A, b.x, b.y, b.z), B; frame)
+    ux, uy, uz = _dir_xyz(d2)
+    MBaseline{B}(r * ux, r * uy, r * uz)
+end
+
+# casacore `MCuvw::toPole` / `fromPole` --
+#   R = RotMatrix(Euler(-π/2 + lat, 2u, -lon, 3u))
+#     = T₂(-π/2+lat) · T₃(-lon)   (RotMatrix applies Euler angles in
+#       forward order with right-multiplication; the header doc's
+#       reverse order is stale -- see casa/Quanta/RotMatrix.cc).
+# `MVPosition::operator*=(R)` (toPole) computes  Rᵀ·v ;
+# `R * MVPosition`           (fromPole) computes  R·v .
+function _uvw_pole_R(d::MDirection)
+    a = -pi/2 + d.lat
+    b = -d.lon
+    ca, sa = cos(a), sin(a)
+    cb, sb = cos(b), sin(b)
+    SMatrix{3,3,Float64}(
+        # column-major: (row1..3 of col1), (col2), (col3)
+        ca*cb,  sb,     -sa*cb,
+        -ca*sb, cb,      sa*sb,
+        sa,     0.0,     ca)
+end
+_topole(xyz, d::MDirection)   = _uvw_pole_R(d)' * SVector{3,Float64}(xyz)
+_frompole(xyz, d::MDirection) = _uvw_pole_R(d)  * SVector{3,Float64}(xyz)
+
+function MS._mconv(u::MuvW{A}, ::Type{B}, frame::MeasFrame) where {A<:RefFrame,B<:RefFrame}
+    frame.direction === nothing && error(
+        "MeasurementSets: a uvw conversion needs `frame.direction` (the phase centre)")
+    dA = MS.measconvert(frame.direction, A; frame)
+    plain = _topole((u.u, u.v, u.w), dA)                    # uvw -> plain baseline in A
+    bB = MS._mconv(MBaseline{A}(plain...), B, frame)        # rotate A -> B
+    dB = MS.measconvert(frame.direction, B; frame)
+    w = _frompole((bB.x, bB.y, bB.z), dB)                   # plain baseline -> uvw in B
+    MuvW{B}(w...)
 end
 
 end # module

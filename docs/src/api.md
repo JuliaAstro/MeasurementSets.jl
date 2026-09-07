@@ -74,6 +74,8 @@ MPosition
 MFrequency
 MRadialVelocity
 MDoppler
+MBaseline
+MuvW
 doppler
 frequency
 radialvelocity

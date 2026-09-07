@@ -116,15 +116,15 @@ explicitly (and overrides the auto-detection for that column).
 
 A measure-valued column declares its physical quantity and reference
 frame in a `MEASINFO` keyword — `TIME` is an epoch in `UTC`, `UVW` a
-baseline in `ITRF`, `ANTENNA.POSITION` a position in `ITRF`,
+`uvw` coordinate in `ITRF`, `ANTENNA.POSITION` a position in `ITRF`,
 `FIELD.PHASE_DIR` a direction whose frame is a per-row code
 (`VarRefCol`), `SPECTRAL_WINDOW.CHAN_FREQ` a frequency likewise.
 
 `measinfo(t, col)` parses that keyword; `measure(t, col[, row])` reads a
 cell as a typed value — [`MEpoch`](@ref) (MJD days), [`MDirection`](@ref)
-(radians), [`MPosition`](@ref) (metres), [`MFrequency`](@ref) (Hz) —
-carrying its frame as a type parameter (`MEpoch{UTC}`,
-`MDirection{J2000}`).
+(radians), [`MPosition`](@ref) (metres), [`MFrequency`](@ref) (Hz),
+[`MuvW`](@ref) / [`MBaseline`](@ref) (metres) — carrying its frame as a
+type parameter (`MEpoch{UTC}`, `MDirection{J2000}`, `MuvW{ITRF}`).
 
 Writing is symmetric: a `write_table` column of `Measure` values
 (`[MEpoch{UTC}(...) for ...]`) is stored as plain numbers in the
@@ -146,6 +146,7 @@ measconvert(measure(main, "TIME", 1), TAI)            # UTC → TAI
 measconvert(MDirection{J2000}(2.0, 0.5), AZEL; frame = fr)
 measconvert(MFrequency{TOPO}(100e9), LSRK; frame = fr)
 measconvert(MRadialVelocity{LSRK}(2e4), BARY; frame = fr)
+measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.direction
 ```
 
 - **Epoch**: `UTC` / `TAI` / `TT` / `TDB` / `UT1`.
@@ -153,6 +154,9 @@ measconvert(MRadialVelocity{LSRK}(2e4), BARY; frame = fr)
   `ECLIPTIC` / `AZEL` / `AZELGEO` / `HADEC` / `ITRF`.
 - **Frequency** and **radial velocity**: `TOPO` / `GEO` / `BARY` /
   `LSRK` / `LSRD` / `GALACTO`.
+- **Baseline** ([`MBaseline`](@ref)) and **uvw** ([`MuvW`](@ref), the
+  `UVW` column): rotated between any direction frame; a `uvw` conversion
+  also needs `frame.direction` (the phase centre) for the pole rotation.
 
 Backed by the pure-Julia [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl)
 (v2, IAU SOFA port). Without `EarthOrientation.jl` the conversions run at

@@ -45,3 +45,15 @@ function _measure_column_spec(vals::AbstractVector{<:MDoppler})
     (; data = Float64[m.d for m in vals],
        kind = :doppler, ref = _frame_string(reftype(first(vals))), units = String[])
 end
+function _measure_column_spec(vals::AbstractVector{<:MBaseline})
+    isempty(vals) && return nothing
+    (; data = [Float64[m.x, m.y, m.z] for m in vals],
+       kind = :baseline, ref = _frame_string(reftype(first(vals))),
+       units = ["m", "m", "m"])
+end
+function _measure_column_spec(vals::AbstractVector{<:MuvW})
+    isempty(vals) && return nothing
+    (; data = [Float64[m.u, m.v, m.w] for m in vals],
+       kind = :uvw, ref = _frame_string(reftype(first(vals))),
+       units = ["m", "m", "m"])
+end

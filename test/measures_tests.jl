@@ -265,6 +265,72 @@ end
     @test pd isa MDirection{J2000} && pd.lon ≈ 0.1 && pd.lat ≈ 0.5
 end
 
+# Phase 75: MBaseline / MuvW vector measures.
+@testset "measures — MBaseline / MuvW" begin
+    main = readtable(SAMPLE_MS)
+
+    # read: UVW is a `type = "uvw"` column
+    u1 = measure(main, "UVW", 1)
+    @test u1 isa MuvW{ITRF}
+    @test (u1.u, u1.v, u1.w) == Tuple(column(main, "UVW")[1])
+    @test measinfo(main, "UVW").kind === :uvw
+    @test measure(main, "UVW") isa Vector{<:MuvW}
+
+    # a hand-built `type = "baseline"` column round-trips
+    dir = mktempdir()
+    btab = joinpath(dir, "BL")
+    B = [MBaseline{ITRF}(1e3 + i, 2e3 - i, 3e3 + 2i) for i in 1:3]
+    W = [MuvW{J2000}(10.0i, 20.0 - i, 30.0 + i) for i in 1:3]
+    write_table(btab, "BL", Pair{String,Any}["B" => B, "W" => W]; nrow = 3)
+    r = readtable(btab)
+    @test measinfo(r, "B").kind === :baseline && measinfo(r, "B").fixedref == "ITRF"
+    @test measinfo(r, "W").kind === :uvw && measinfo(r, "W").fixedref == "J2000"
+    @test columndesc(r, "B").keywords["QuantumUnits"] == ["m", "m", "m"]
+    mb2 = measure(r, "B")[2]
+    @test mb2 isa MBaseline{ITRF} && (mb2.x, mb2.y, mb2.z) == (1e3 + 2, 2e3 - 2, 3e3 + 4)
+    mw3 = measure(r, "W")[3]
+    @test mw3 isa MuvW{J2000} && (mw3.u, mw3.v, mw3.w) == (30.0, 17.0, 33.0)
+    if _HAVE_CASACORE
+        @test size(CCT.Table(btab)[:B][:, :]) == (3, 3)
+    end
+
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    fr = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
+                   position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150),
+                   direction = MDirection{J2000}(2.0, 0.5))
+
+    # MBaseline: pure rotation preserves length, round-trips
+    b = MBaseline{ITRF}(120.0, -340.0, 55.0)
+    r_in = hypot(b.x, b.y, b.z)
+    for T in (J2000, GALACTIC, APP)
+        c = measconvert(b, T; frame = fr)
+        @test c isa MBaseline{T}
+        @test hypot(c.x, c.y, c.z) ≈ r_in rtol = 1e-12
+        back = measconvert(c, ITRF; frame = fr)
+        @test (back.x, back.y, back.z) .- (b.x, b.y, b.z) |> v -> all(abs.(v) .< 1e-6)
+    end
+    @test measconvert(MBaseline{ITRF}(0.0, 0.0, 0.0), J2000; frame = fr) ===
+          MBaseline{J2000}(0.0, 0.0, 0.0)
+
+    # MuvW: round-trips; the w component (delay) is frame-invariant
+    u = MuvW{ITRF}(120.0, -340.0, 55.0)
+    for T in (J2000, GALACTIC)
+        c = measconvert(u, T; frame = fr)
+        @test c isa MuvW{T}
+        @test c.w ≈ u.w rtol = 1e-9
+        back = measconvert(c, ITRF; frame = fr)
+        @test all(abs.((back.u, back.v, back.w) .- (u.u, u.v, u.w)) .< 1e-6)
+    end
+    @test_throws ErrorException measconvert(u, J2000; frame = MeasFrame())
+
+    # _topole / _frompole are inverse; hand-derived origin case
+    d0 = MDirection{J2000}(0.0, 0.0)
+    v = (7.0, -3.0, 11.0)
+    @test all(abs.(ext._frompole(ext._topole(v, d0), d0) .- v) .< 1e-12)
+    R0 = ext._uvw_pole_R(d0)
+    @test all(abs.(collect(ext._frompole((1.0, 2.0, 3.0), d0)) .- [-3.0, 2.0, 1.0]) .< 1e-9)
+end
+
 if _HAVE_MEAS_CASA
     @testset "measures — casatools oracle cross-check" begin
         ref_jl = joinpath(mktempdir(), "measref.jl")

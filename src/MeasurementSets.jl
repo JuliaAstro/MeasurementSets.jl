@@ -81,6 +81,7 @@ export Column, column, getcolumn, getcell
 export columnunit, qcolumn, UNITS_NO_JULIA_COUNTERPART   # real methods via UnitfulExt
 export measure, measinfo, measconvert, MeasFrame, MeasInfo   # conversions via SOFAExt
 export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, reftype
+export MBaseline, MuvW
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO
 export MDoppler, DopplerType, RADIO, OPTICAL, RATIO, BETA, GAMMA, Z, RELATIVISTIC
