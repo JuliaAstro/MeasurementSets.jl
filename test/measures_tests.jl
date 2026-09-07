@@ -140,6 +140,55 @@ end
     @test measure(r, "D", 1) isa MDirection{J2000}
 end
 
+# Phase 70: a column whose Julia eltype is a Measure is flattened to
+# plain numbers + a MEASINFO/QuantumUnits keyword automatically.
+@testset "measures — write from Measure-typed columns" begin
+    dir = mktempdir()
+    tab = joinpath(dir, "MT")
+    T = [MEpoch{UTC}(58000.0 + i) for i in 1:4]
+    D = [MDirection{J2000}(0.1i, 0.2i) for i in 1:4]
+    P = [MPosition{ITRF}(1e6 + i, 2e6 + i, -3e6 + i) for i in 1:4]
+    F = [MFrequency{TOPO}(1.4e9 + 1e6i) for i in 1:4]
+    write_table(tab, "MT", Pair{String,Any}["T" => T, "D" => D, "P" => P, "F" => F]; nrow = 4)
+    r = readtable(tab)
+
+    @test measinfo(r, "T").kind === :epoch && measinfo(r, "T").fixedref == "UTC"
+    @test column(r, "T")[:] ≈ (58000.0 .+ (1:4)) .* 86400.0        # stored as seconds
+    @test [m.mjd for m in measure(r, "T")] ≈ 58000.0 .+ (1:4)
+
+    @test columndesc(r, "D").keywords["QuantumUnits"] == ["rad", "rad"]
+    md3 = measure(r, "D")[3]
+    @test md3 isa MDirection{J2000} && md3.lon ≈ 0.3 && md3.lat ≈ 0.6
+    mp2 = measure(r, "P")[2]
+    @test mp2 isa MPosition{ITRF} && mp2.x ≈ 1e6 + 2 && mp2.z ≈ -3e6 + 2
+    @test measure(r, "F")[1].hz ≈ 1.4e9 + 1e6
+    @test measinfo(r, "F").fixedref == "TOPO"
+
+    # an explicit `measures=` entry for the same column wins (no error)
+    tab2 = joinpath(dir, "MT2")
+    write_table(tab2, "MT2", Pair{String,Any}["T" => T]; nrow = 4,
+                measures = Dict("T" => (; kind = :epoch, ref = "TAI", units = ["s"])))
+    @test measinfo(readtable(tab2), "T").fixedref == "TAI"
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(tab)
+        @test size(ct[:T][:]) == (4,)                              # opens + reads
+    end
+end
+
+@testset "measures — addcolumn! from a Measure-typed column" begin
+    dir = mktempdir()
+    tab = joinpath(dir, "AC")
+    write_table(tab, "AC", Pair{String,Any}["A" => collect(1.0:5.0)]; nrow = 5)
+    edit(tab) do t
+        addcolumn!(t, "PDIR", [MDirection{J2000}(0.1, 0.5) for _ in 1:5])
+    end
+    r = readtable(tab)
+    @test measinfo(r, "PDIR").kind === :direction
+    pd = measure(r, "PDIR")[2]
+    @test pd isa MDirection{J2000} && pd.lon ≈ 0.1 && pd.lat ≈ 0.5
+end
+
 if _HAVE_MEAS_CASA
     @testset "measures — casatools oracle cross-check" begin
         ref_jl = joinpath(mktempdir(), "measref.jl")

@@ -14,6 +14,11 @@ _casatype_of(::Type{ComplexF32}) = TpComplex
 _casatype_of(::Type{ComplexF64}) = TpDComplex
 _casatype_of(::Type{<:AbstractString}) = TpString
 _casatype_of(::Type{T}) where {T<:AbstractArray} = _casatype_of(eltype(T))
+_casatype_of(::Type{T}) where {T} = error(
+    "write_table: cannot store a column of element type $T. A Unitful " *
+    "quantity column needs `import Unitful, UnitfulAngles, UnitfulAstro`; " *
+    "a Measure column (MEpoch / MDirection / …) is stored automatically — " *
+    "check the column actually holds those.")
 
 # infer a CellShape from a column of values
 function _infer_shape(vals)
@@ -127,6 +132,13 @@ function _stamp_measinfo(c::ColumnDesc, spec)
                c.shape, c.option, c.maxlength, kw, c.default, c.sequ)
 end
 
+# stamp only a `QuantumUnits` keyword (no MEASINFO) -- the `units=` kwarg
+# path, and what an auto-detected `Unitful.Quantity` column gets.
+_stamp_quantum_units(c::ColumnDesc, ustrs::Vector{String}) = ColumnDesc(
+    c.name, c.comment, c.manager, c.group, c.type, c.classname, c.shape,
+    c.option, c.maxlength, _set_kw(c.keywords, "QuantumUnits", TpArrayString, ustrs),
+    c.default, c.sequ)
+
 _stored_casatype(::Type{UInt8}) = TpUChar
 _stored_casatype(::Type{Int16}) = TpShort
 _stored_casatype(::Type{Int32}) = TpInt
@@ -168,6 +180,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            dysco=Vector{String}[],
                            dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
                            measures::AbstractDict=Dict{String,Any}(),
+                           units::AbstractDict=Dict{String,Any}(),
                            storage::Symbol=:sepfile,
                            blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                            tablename::AbstractString="",
@@ -181,6 +194,14 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         mi = findfirst(c -> c.name == mcol, descs)
         mi === nothing && error("measures: no column \"$mcol\"")
         descs[mi] = _stamp_measinfo(descs[mi], spec)
+    end
+
+    # --- units: stamp a QuantumUnits keyword (no MEASINFO)
+    for (ucol, u) in units
+        ui = findfirst(c -> c.name == ucol, descs)
+        ui === nothing && error("units: no column \"$ucol\"")
+        descs[ui] = _stamp_quantum_units(descs[ui],
+            u isa AbstractString ? String[u] : collect(String, u))
     end
 
     # --- virtual column engines: synthesise the stored / scale / offset
@@ -367,7 +388,7 @@ end
 """
     write_table(dir, name, columns; nrow, endian=:little,
                tsm, tcm, tcell, ism, engines, virtualtaql, dysco, dysco_spec,
-               storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE,
+               measures, units, storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE,
                type="", subtype="", readme="")
 
 Write a CTDS table at `dir`.  `columns` is an iterable of `name => vector`
@@ -379,6 +400,15 @@ name to a TaQL-lite CALC expression (a `VirtualTaQLColumn` -- the passed
 values for that column are ignored, only the expression is stored).
 `storage`/`blocksize` pack every StandardStMan/IncrementalStMan/TiledStMan
 private file into one `table.mf`/`table.mfh5` -- see `_write_table_core`.
+
+A column whose Julia element type is a `Unitful` quantity or a `Measure`
+(`MEpoch{UTC}`, `MDirection{J2000}`, `MPosition{ITRF}`, `MFrequency`,
+`MRadialVelocity`) is stored as plain numbers with its `QuantumUnits`
+(and, for a `Measure`, `MEASINFO`) column keyword stamped automatically --
+so `write_table` -> `readtable` -> `qcolumn` / `measure` round-trips.
+`measures = Dict(col => (; kind, ref[, varrefcol, units]))` and
+`units = Dict(col => "Hz" | ["rad","rad"])` stamp those keywords
+explicitly and override the auto-detection for that column.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Integer, endian::Symbol=:little,
@@ -387,6 +417,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      virtualtaql::AbstractDict=Dict{String,String}(),
                      dysco=Vector{String}[], dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
                      measures::AbstractDict=Dict{String,Any}(),
+                     units::AbstractDict=Dict{String,Any}(),
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
@@ -406,6 +437,23 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
     for (nm, vals) in pairs
         cn = String(nm)
         vals = collect(vals)
+        # typed columns: a `Measure` / `Unitful.Quantity` eltype is always
+        # flattened to plain numbers here; the auto-derived unit / frame is
+        # recorded for `_write_table_core` to stamp UNLESS an explicit
+        # `measures=` / `units=` entry already covers the column (it wins).
+        explicit = haskey(measures, cn) || haskey(units, cn)
+        msp = _measure_column_spec(vals)
+        if msp !== nothing
+            vals = msp.data
+            explicit || (measures = merge(measures, Dict{String,Any}(
+                cn => (; kind = msp.kind, ref = msp.ref, units = msp.units))))
+        else
+            qsp = _quantity_column_spec(vals)
+            if qsp !== nothing
+                vals = qsp.data
+                explicit || (units = merge(units, Dict{String,Any}(cn => qsp.units)))
+            end
+        end
         length(vals) == nrow || error("column $cn: $(length(vals)) values, expected $nrow")
         et = _casatype_of(eltype(vals))
         shp = _infer_shape(vals)
@@ -420,7 +468,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
 
     _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,
                       ism = Set(String.(ism)), engines, virtualtaql, dysco, dysco_spec,
-                      measures, storage, blocksize,
+                      measures, units, storage, blocksize,
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
 

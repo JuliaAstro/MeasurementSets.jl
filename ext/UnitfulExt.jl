@@ -107,4 +107,49 @@ MS._tql_write_strip(x::Unitful.AbstractQuantity, u) =
         error("update!: SET expression yields $(x) but the target column has no unit") :
         Unitful.ustrip(Unitful.uconvert(u, x))
 
+# --- write side: Unitful.Units -> a casacore QuantumUnits string (Phase 70) ---
+
+# casacore-canonical spellings for the compound / non-atomic units the
+# `string(u)` heuristic below can't reconstruct (Unitful prints them with
+# a space + Unicode superscript). Measures only ever need `m/s` here.
+const _MS_USTRING_KNOWN = Dict{Unitful.Units,String}(
+    Unitful.u"m/s" => "m/s", Unitful.u"km/s" => "km/s",
+    Unitful.u"rad/s" => "rad/s", Unitful.u"m/s^2" => "m/s2")
+
+function MS._ms_ustring(u::Unitful.Units)
+    u === Unitful.NoUnits && return ""
+    haskey(_MS_USTRING_KNOWN, u) && return _MS_USTRING_KNOWN[u]
+    s = string(u)
+    if !occursin(' ', s)                                    # atomic unit
+        cand = get(MS._UNIT_ALIASES_INV, s, s)
+        try
+            _ms_uparse(cand) == u && return cand            # verified round-trip
+        catch
+        end
+    end
+    error("MeasurementSets: Unitful unit `$u` has no known casacore " *
+          "`QuantumUnits` spelling — stamp it explicitly with " *
+          "`write_table(...; units = Dict(col => \"...\"))`, or see " *
+          "`MeasurementSets.UNITS_NO_JULIA_COUNTERPART`")
+end
+
+# a column of `Unitful.Quantity` (scalar or array-cell) -> plain numbers
+# in the first element's unit + the `QuantumUnits` string; `nothing` if
+# the eltype is not a quantity.
+function MS._quantity_column_spec(vals::AbstractVector)
+    E = eltype(vals)
+    if E <: Unitful.AbstractQuantity
+        isempty(vals) && return nothing
+        u = Unitful.unit(first(vals))
+        return (; data = [Unitful.ustrip(u, v) for v in vals],
+                  units = String[MS._ms_ustring(u)])
+    elseif E <: AbstractArray && eltype(E) <: Unitful.AbstractQuantity
+        (isempty(vals) || isempty(first(vals))) && return nothing
+        u = Unitful.unit(first(first(vals)))
+        return (; data = [Unitful.ustrip.(u, cell) for cell in vals],
+                  units = String[MS._ms_ustring(u)])
+    end
+    return nothing
+end
+
 end # module

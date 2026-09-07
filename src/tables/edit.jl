@@ -331,10 +331,29 @@ function addcolumn!(t::EditTable, name::AbstractString, data::AbstractVector;
     vals = collect(data)
     length(vals) == length(t.rowmap) ||
         error("addcolumn!: expected $(length(t.rowmap)) values, got $(length(vals))")
+    # typed column (a `Measure` / `Unitful.Quantity` eltype) -> plain
+    # numbers + a MEASINFO / QuantumUnits keyword record, unless the
+    # caller pinned `type`.
+    mkw = Record()
+    if type === nothing
+        msp = _measure_column_spec(vals)
+        if msp !== nothing
+            vals = msp.data
+            mkw = _set_kw(_set_kw(Record(), "MEASINFO", TpRecord,
+                                  _measinfo_record(msp.kind; ref = msp.ref)),
+                          "QuantumUnits", TpArrayString, msp.units)
+        else
+            qsp = _quantity_column_spec(vals)
+            if qsp !== nothing
+                vals = qsp.data
+                mkw = _set_kw(Record(), "QuantumUnits", TpArrayString, qsp.units)
+            end
+        end
+    end
     ct = type === nothing ? _casatype_of(eltype(vals)) : type
     shp = shape === nothing ? _infer_shape(vals) :
           (shape isa VariableShape || shape isa VariableDims ? shape : Tuple(shape))
-    desc = _mkdesc(name, ct, shp)
+    desc = _mkdesc(name, ct, shp; keywords = mkw)
     push!(t.addcols, (desc, kind, Any[v for v in vals]))
     return t
 end

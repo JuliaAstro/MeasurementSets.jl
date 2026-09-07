@@ -103,7 +103,14 @@ base dimensions — angle↔angle and angle↔scalar conversions still work;
 use `DimensionfulAngles.jl` for strict casacore-style dimensional
 angles. `MeasurementSets.UNITS_NO_JULIA_COUNTERPART` lists every
 casacore unit without a third-party Julia implementation and how it is
-handled. TaQL unit *literals* (`3km`, `10arcsec`) are a follow-up.
+handled. TaQL unit *literals* (`1.4GHz`) landed in the query engine.
+
+The write side is symmetric: a `write_table` column whose Julia element
+type is a `Unitful` quantity (or a `Measure` — see below) is stored as
+plain numbers with the right `QuantumUnits` / `MEASINFO` keyword stamped
+automatically, so `qcolumn` / `measure` read it straight back.
+`write_table(...; units = Dict("CHAN_FREQ" => "Hz"))` stamps the keyword
+explicitly (and overrides the auto-detection for that column).
 
 ## Reference frames (measures)
 
@@ -118,6 +125,13 @@ cell as a typed value — [`MEpoch`](@ref) (MJD days), [`MDirection`](@ref)
 (radians), [`MPosition`](@ref) (metres), [`MFrequency`](@ref) (Hz) —
 carrying its frame as a type parameter (`MEpoch{UTC}`,
 `MDirection{J2000}`).
+
+Writing is symmetric: a `write_table` column of `Measure` values
+(`[MEpoch{UTC}(...) for ...]`) is stored as plain numbers in the
+canonical unit (epoch → seconds, direction → radians, …) with the
+`MEASINFO` + `QuantumUnits` keyword stamped — no `measures=` kwarg
+needed. The auto path is fixed-`Ref` only (from the first row's frame);
+a per-row `VarRefCol` still needs an explicit `measures=` entry.
 
 `import SOFA` loads an extension that converts between frames:
 
