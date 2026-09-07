@@ -122,11 +122,13 @@ function _tql_cols(t::AbstractTable, names, asts...)
     end
     plain, mscal = _mscal_split(names)
     plain, stokes = _stokes_split(plain)
+    plain, mssel = _mssel_split(plain)
     d = Dict{String,AbstractVector}(
         n => (c = _load_col(column(t, n)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
         for n in plain)
     isempty(mscal) || merge!(d, _mscal_columns(t, mscal))
     isempty(stokes) || merge!(d, _stokes_setups(t, stokes))
+    isempty(mssel) || merge!(d, _mssel_columns(t, mssel))
     return d
 end
 
@@ -288,8 +290,14 @@ fallback).
 comma-list (`'I'`, `'I,V'`, `'XX,YY'`); the input basis comes from
 `POLARIZATION.CORR_TYPE` row 1. The result is a `(nOut, nchan)` matrix.
 
-Not the CASA-MSSelection `mscal.baseline` / `mscal.spw` selection
-functions.
+`mscal.<sel>('spec')` (Phase 80) — MSSelection-lite row selection,
+returning a per-row `Bool`. `<sel>` ∈ `baseline` / `field` / `spw` /
+`scan` / `state` / `array` / `obs`. `spec` is a comma-list of terms
+(`N`, `N~M`, `>N` / `<N`, an exact / glob / `/regex/` name match
+against the type's NAME column); a `!`-term is subtracted.
+`mscal.baseline` also takes `L & R` / `L && R` (baseline between two
+antenna sets; `&` drops autocorrelations) and a whole-spec `!`. Not
+`mscal.time` / `mscal.uvdist`, and no channel sub-selection on `spw`.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 boolean-mask array subscripts.
