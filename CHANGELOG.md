@@ -1583,6 +1583,27 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 94 — full MSSelection time grammar + uvdist `:P%`
+
+```julia
+query(main, "mscal.time('2024/05/24/09:00:00~11:00:00')")   # t1 inherits t0's date
+query(main, "mscal.time('[09:00:00~11:00:00]')")            # edge-inclusive
+query(main, "mscal.time('09:00:00 + 02:00:00')")            # t0 .. t0+2h
+query(main, "mscal.time('2024/05/24/10:08:00')")            # ± EXPOSURE/2
+query(main, "mscal.uvdist('100klambda:10%')")               # 90–110 klambda
+```
+
+- `mscal.time` now implements casacore's `MSTimeParse` grammar: a single
+  time (`|TIME − t0| ≤ EXPOSURE/2`), `t0~t1`, edge-inclusive `[t0~t1]`,
+  buffered `N[t0~t1]`, `t0+dur`, `>t0` / `<t1`. Each time is
+  `Y/[M/[D/]][h:[m:[s]]]` with `*` wildcards; a missing component
+  defaults to the **first MAIN-row TIME** (a `~` range's upper bound
+  inherits from the lower). ISO / `d U y` datetimes still parse.
+- `mscal.uvdist('<expr>:P%')` widens the range by ±P percent
+  (casacore `uvwdistexpr COLON FNUMBER PERCENT`); a bare value now needs
+  a `:P%` to be a range.
+- Hand-computed (no `derivedmscal` UDF for the exotic time forms).
+
 ### Phase 93 — polynomial `PHASE_DIR` + ephemeris sub-Earth point
 
 - `measure(fld, "PHASE_DIR", row; epoch)` now evaluates a FIELD

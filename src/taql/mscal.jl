@@ -758,13 +758,109 @@ end
 
 _mssel_inany(x, ranges) = any(r -> r[1] <= x <= r[2], ranges)
 
+# --- MSSelection time grammar (casacore ms/MSSel/MSTimeParse) -----------
+# A comma-list of:
+#   t0            single time  -> |TIME - t0| <= dT   (dT = EXPOSURE/2, or 1 s)
+#   t0~t1         range, exclusive edges
+#   [t0~t1]       range, edge-inclusive (|TIME-edge| < dT counts)
+#   N[t0~t1]      range, edge buffer N seconds
+#   t0+dur        range t0 .. t0+dur   (dur = a time string past the MJD epoch)
+#   >t0  <t1      open bounds
+# Each time is `[Y/[M/[D/]]][h:[m:[s]]]` with any component `*` (wildcard);
+# a missing / `*` component defaults to the first MAIN-row TIME (t1 of a
+# `~` range instead inherits from t0).  Bare number = MJD days.
+
+# parse one time token -> 6 fields (y,mo,d,h,mi,s), -1 = wildcard/missing;
+# or a bare Float64 (already MJD days) wrapped as `(:mjd, val)`.
+function _mstime_fields(tok::AbstractString)
+    s = strip(String(tok))
+    v = tryparse(Float64, s)
+    v !== nothing && return (:mjd, v)
+    # the `Y/M/D[/h:m:s]` MSSelection form; fall back to ISO / `d U y`
+    # (`_tql_parse_datetime`) for anything else (e.g. `2024-05-24T…`).
+    if !occursin('/', s) && occursin('-', s)
+        return (:mjd, _tql_parse_datetime(s))
+    end
+    datepart, timepart = if occursin(':', s)
+        i = findlast('/', s)
+        j = something(i, 0)
+        (j > 0 ? s[1:j-1] : "", j > 0 ? s[j+1:end] : s)
+    else
+        (s, "")
+    end
+    _f(x) = (x == "*" || isempty(x)) ? -1.0 : parse(Float64, x)
+    dp = isempty(datepart) ? String[] : split(datepart, '/')
+    tp = isempty(timepart) ? String[] : split(timepart, ':')
+    g(a, k) = k <= length(a) ? _f(a[k]) : -1.0
+    try
+        return (:cal, (g(dp, 1), g(dp, 2), g(dp, 3), g(tp, 1), g(tp, 2), g(tp, 3)))
+    catch
+        return (:mjd, _tql_parse_datetime(s))
+    end
+end
+
+# fill -1 fields from `def` (a 6-tuple), then -> seconds since MJD 0.
+function _mstime_secs(fields, def)
+    f = ntuple(k -> fields[k] < 0 ? def[k] : fields[k], 6)
+    dt = Dates.DateTime(Int(f[1]), Int(f[2]), Int(f[3]), Int(f[4]), Int(f[5]),
+                        Int(floor(f[6])), Int(round((f[6] - floor(f[6])) * 1000)))
+    ((dt - MJD_EPOCH) / Dates.Millisecond(1)) / 1000
+end
+
 function _mssel_time(t::AbstractTable, spec::AbstractString, cn::AbstractSet, n::Integer)
     "TIME" in cn || error("mscal.time: MAIN table has no TIME column")
-    _p(s) = (v = tryparse(Float64, s); v !== nothing ? v * SEC_PER_DAY :
-             _tql_parse_datetime(s) * SEC_PER_DAY)
-    ranges = _mssel_ranges(spec, _p)
     tm = Float64.(column(t, "TIME")[:])
-    return Bool[_mssel_inany(tm[i], ranges) for i in 1:n]
+    n == 0 && return Bool[]
+    d0 = MJD_EPOCH + Dates.Millisecond(round(Int, tm[1] * 1000))   # first-row time
+    def = (Dates.year(d0), Dates.month(d0), Dates.day(d0),
+           Dates.hour(d0), Dates.minute(d0), Dates.second(d0))
+    epdef = (1858, 11, 17, 0, 0, 0.0)
+    dT = "EXPOSURE" in cn ?
+         (e = Float64.(column(t, "EXPOSURE")[:]); (isempty(e) ? 2.0 : sum(e) / length(e)) / 2) :
+         1.0
+
+    _sec(tok, dfl) = begin
+        k, v = _mstime_fields(tok)
+        k === :mjd ? v * SEC_PER_DAY : _mstime_secs(v, dfl)
+    end
+
+    preds = Vector{Function}()
+    for raw in _mssel_commas(spec)
+        term = strip(raw)
+        isempty(term) && continue
+        if startswith(term, ">")
+            lo = _sec(term[2:end], def);  push!(preds, x -> x >= lo)
+        elseif startswith(term, "<")
+            hi = _sec(term[2:end], def);  push!(preds, x -> x <= hi)
+        elseif (m = match(r"^(?:(\d+(?:\.\d+)?)\s*)?\[\s*(.+?)\s*~\s*(.+?)\s*\]$", term)) !== nothing
+            buf = m[1] === nothing ? dT : parse(Float64, m[1])
+            lo = _sec(m[2], def)
+            hi = _mstime_incl_hi(m[3], lo)
+            push!(preds, x -> (x > lo || abs(x - lo) < buf) && (x < hi || abs(x - hi) < buf))
+        elseif (m = match(r"^(.+?)\s*~\s*(.+)$", term)) !== nothing
+            lo = _sec(m[1], def)
+            hi = _mstime_incl_hi(m[2], lo)
+            push!(preds, x -> lo <= x <= hi)
+        elseif (m = match(r"^(.+?)\s*\+\s*(.+)$", term)) !== nothing
+            lo = _sec(m[1], def)
+            dur = _sec(m[2], epdef)          # seconds since MJD 0 == the interval
+            push!(preds, x -> lo <= x <= lo + dur)
+        else
+            c = _sec(term, def);  push!(preds, x -> abs(x - c) <= dT)
+        end
+    end
+    isempty(preds) && return falses(n)
+    return Bool[any(p -> p(tm[i]), preds) for i in 1:n]
+end
+
+# t1 of a `~` range: its wildcard/missing fields inherit from t0's
+# resolved calendar (casacore `copyDefaults`), not the MS default.
+function _mstime_incl_hi(tok::AbstractString, lo_secs::Float64)
+    k, v = _mstime_fields(tok)
+    k === :mjd && return v * SEC_PER_DAY
+    d = MJD_EPOCH + Dates.Millisecond(round(Int, lo_secs * 1000))
+    _mstime_secs(v, (Dates.year(d), Dates.month(d), Dates.day(d),
+                     Dates.hour(d), Dates.minute(d), Dates.second(d)))
 end
 
 const _MSSEL_UV_UNIT = Dict("m" => (1.0, :dist), "km" => (1e3, :dist),
@@ -778,6 +874,13 @@ function _mssel_uvdist(t::AbstractTable, spec::AbstractString, cn::AbstractSet,
     for raw in _mssel_commas(spec)
         term = strip(raw)
         isempty(term) && continue
+        # an optional trailing `:P%` widens the range by ±P percent
+        # (casacore `uvwdistexpr COLON FNUMBER PERCENT`).
+        pct = 0.0
+        pm = match(r"^(.*?)\s*:\s*(\d+(?:\.\d+)?)\s*%\s*$", term)
+        if pm !== nothing
+            term = strip(pm[1]); pct = parse(Float64, pm[2]) * 0.01
+        end
         # a term's unit is the trailing letters; it applies to every
         # number in the term (matching casacore's global-unit behaviour).
         um = match(r"[a-zA-Z]+\s*$", term)
@@ -788,15 +891,17 @@ function _mssel_uvdist(t::AbstractTable, spec::AbstractString, cn::AbstractSet,
         push!(kinds, k)
         body = strip(um === nothing ? term : term[1:prevind(term, um.offset)])
         num(s) = parse(Float64, strip(s)) * scale
+        wide(lo, hi) = push!(ranges, (lo * (1 - pct), hi * (1 + pct)))
         if startswith(body, ">")
-            push!(ranges, (num(body[2:end]), Inf))
+            wide(num(body[2:end]), Inf)
         elseif startswith(body, "<")
-            push!(ranges, (-Inf, num(body[2:end])))
+            push!(ranges, (-Inf, num(body[2:end]) * (1 + pct)))
+        elseif (m = match(r"^(.+?)\s*(?:~|(?<![eE])-)\s*(.+)$", body)) !== nothing
+            wide(num(m[1]), num(m[2]))
+        elseif tryparse(Float64, strip(body)) !== nothing   # bare value (needs :P%)
+            v = num(body); wide(v, v)
         else
-            m = match(r"^(.+?)\s*(?:~|(?<![eE])-)\s*(.+)$", body)
-            m === nothing && throw(ArgumentError(
-                "mscal.uvdist: \"$term\" — give `a~b`, `>a`, or `<b`"))
-            push!(ranges, (num(m[1]), num(m[2])))
+            throw(ArgumentError("mscal.uvdist: \"$term\" — give `a~b`, `>a`, `<b`, or `V:P%`"))
         end
     end
     length(kinds) <= 1 || throw(ArgumentError(
