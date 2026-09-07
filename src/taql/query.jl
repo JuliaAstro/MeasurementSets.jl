@@ -252,7 +252,10 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   (`marray(d, m)`, `arraydata`, `arraymask`; `V[boolexpr]` yields a
   masked array whose reductions skip the excluded elements),
   `iif(cond, a, b)`, `rownumber()` (1-based),
-  `observatory('VLA')` (a telescope's ITRF `[x,y,z]`), `pi`, `e`;
+  `observatory('VLA')` (a telescope's ITRF `[x,y,z]`),
+  `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` /
+  `meas.epoch('TAI', mjd)` / `meas.last(mjd, x, y, z)` (measure
+  conversions -- needs `import SOFA`), `pi`, `e`;
 * an optional trailing `ORDER BY col [ASC|DESC], ...` (bare columns).
 
 Column names are case-sensitive and must name a column of `t`; keywords

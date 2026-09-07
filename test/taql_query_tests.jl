@@ -2129,6 +2129,45 @@ end
     @test !MSv2._tql_known_unit("zork")
 end
 
+@testset "Phase 97 — meas.* measure conversions" begin
+    # parser (no SOFA needed)
+    p(s) = MSv2._taqllite_parse(s, Set(["RA", "DEC", "T"]))
+    @test p("meas.j2000(RA, DEC)") isa MSv2.TQLFunc
+    @test p("meas.b1950('J2000', RA, DEC)") isa MSv2.TQLFunc
+    @test_throws ArgumentError p("meas.azel(RA, DEC)")            # needs mjd, x, y, z
+    @test_throws ArgumentError p("meas.wombat(RA, DEC)")          # unknown frame
+    @test_throws ArgumentError p("meas.epoch('BOGUS', T)")
+
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    ext === nothing && return
+    d = mktempdir()
+    write_table(joinpath(d, "T"), "T", Pair{String,Any}[
+        "RA" => [2.0, 2.1], "DEC" => [0.5, 0.4],
+        "TIME" => [60454.42 * 86400, 60454.43 * 86400]]; nrow = 2)
+    t = readtable(joinpath(d, "T"))
+
+    # meas.galactic matches measconvert exactly
+    ref = measconvert(MDirection{J2000}(2.0, 0.5), GALACTIC)
+    gt = query(t, "TIME > 0"; select = ["l" => "meas.galactic(RA, DEC)[1]",
+                                        "b" => "meas.galactic(RA, DEC)[2]"])
+    @test collect(gt.l)[1] ≈ ref.lon
+    @test collect(gt.b)[1] ≈ ref.lat
+
+    # meas.azel with epoch + position; elevation in [-π/2, π/2]
+    az = query(t, "TIME > 0"; select = ["el" =>
+        "meas.azel(RA, DEC, TIME/86400.0, -1601185.0, -5041977.0, 3554876.0)[2]"])
+    @test all(x -> -pi/2 <= x <= pi/2, collect(az.el))
+
+    # meas.epoch: TAI − UTC ≈ 37 s
+    e = query(t, "TIME > 0"; select = ["tai" => "meas.epoch('TAI', TIME/86400.0)"])
+    @test collect(e.tai)[1] - 60454.42 ≈ 37 / 86400 atol = 1e-6
+
+    # meas.last returns a sidereal angle in [0, 2π)
+    l = query(t, "TIME > 0"; select = ["last" =>
+        "meas.last(TIME/86400.0, -1601185.0, -5041977.0, 3554876.0)"])
+    @test all(x -> 0 <= x < 2pi, collect(l.last))
+end
+
 @testset "Phase 69 — date/time functions" begin
     f(n) = MSv2._TQL_FUNCS[n][1]
     @test MSv2._tql_datetime("2020-02-12") ≈ 58891.0

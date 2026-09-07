@@ -1583,6 +1583,26 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 97 — `meas.*` measure conversions in TaQL-lite
+
+```julia
+query(t, "meas.galactic(RA, DEC)[2] > 0")                       # b > 0
+query(t, "meas.azel(RA, DEC, TIME/86400, X, Y, Z)[2] > 0.3")    # elevation
+query(t, "meas.epoch('TAI', TIME/86400)")                       # UTC → TAI MJD
+query(t, "meas.last(TIME/86400, X, Y, Z)")                      # local apparent sidereal time
+```
+
+- A subset of casacore's `libmeas` UDF library:
+  `meas.<frame>(['SRC', ]lon, lat[, mjd[, x, y, z]])` converts a
+  direction (`<frame>` = `j2000`/`b1950`/`app`/`galactic`/`ecliptic`/
+  `azel`/`hadec`/`itrf`/`icrs`; optional string-literal source frame,
+  default J2000; `mjd` MJD days for app/azel/hadec/itrf, `x,y,z` ITRF m
+  also for azel/hadec/itrf) → `[lon, lat]` rad. `meas.epoch(scale, mjd)`
+  converts an epoch's time scale; `meas.last`/`meas.lst(mjd, x, y, z)`
+  gives the local apparent sidereal time (rad).
+- Plain `TQLFunc`s wrapping `measconvert` / `_lst`; args are ordinary
+  expressions (columns, arithmetic). Needs `import SOFA`.
+
 ### Phase 96 — ionospheric Faraday rotation
 
 ```julia

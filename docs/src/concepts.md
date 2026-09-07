@@ -113,7 +113,12 @@ index ranges `a~b`/`a~b^step` or `CHAN_FREQ` ranges `f1~f2GHz`);
 `mscal.chan('0:5~20')` returns the per-row selected-channel `BitVector`.
 `mscal.corr('RR,LL')` (polarization-setup match) and `mscal.feed('0 & 1')`
 (the `mscal.baseline` form on `FEED1`/`FEED2`) round out the selection
-set.
+set.  **`meas.*`** (a subset of casacore's `libmeas` UDFs) does measure
+conversions on ordinary expressions:
+`meas.<frame>(['SRC', ]lon, lat[, mjd[, x, y, z]])` →
+`[lon, lat]` in `j2000` / `b1950` / `app` / `galactic` / `ecliptic` /
+`azel` / `hadec` / `itrf`; `meas.epoch('TAI', mjd)` converts a time
+scale; `meas.last(mjd, x, y, z)` is the local apparent sidereal time.
 
 ## Physical units
 
