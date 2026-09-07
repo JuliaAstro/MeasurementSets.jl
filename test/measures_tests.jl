@@ -468,3 +468,43 @@ if _HAVE_MEAS_CASA
 else
     @info "CASA python3 not found; skipping measures oracle cross-check" _MEAS_CASA
 end
+
+@testset "measures — ephemeris (MeasComet) tables" begin
+    tmp = mktempdir()
+    epdir = joinpath(tmp, "EPHEM0_Mars_J2000.tab")
+    mjds = collect(60000.0:1.0:60004.0)
+    write_table(epdir, "EPHEM", Pair{String,Any}[
+        "MJD" => mjds, "RA" => [100.0 + 0.5k for k in 0:4],
+        "DEC" => [20.0 + 0.1k for k in 0:4], "Rho" => fill(1.5, 5),
+        "RadVel" => fill(0.01, 5)]; nrow = 5,
+        keywords = Dict("MJD0" => 59999.0, "dMJD" => 1.0, "NAME" => "Mars",
+                        "posrefsys" => "J2000"))
+    e = open_ephemeris(epdir)
+    @test e.frame === J2000
+    @test e.name == "Mars"
+    d = ephemeris_direction(e, 60002.5)
+    @test rad2deg(d.lon) ≈ 101.25 atol = 1e-3
+    @test rad2deg(d.lat) ≈ 20.25 atol = 1e-3
+    @test ephemeris_distance(e, 60002.5) ≈ 1.5 * MSv2.AU_METRES rtol = 1e-4
+    @test ephemeris_radvel(e, 60002.5) ≈ 0.01 * MSv2.AU_METRES / MSv2.SEC_PER_DAY rtol = 1e-9
+    @test_throws ErrorException ephemeris_direction(e, 59000.0)   # out of range
+
+    # via a FIELD subtable
+    flddir = joinpath(tmp, "FIELD")
+    write_table(flddir, "FIELD", Pair{String,Any}[
+        "NAME" => ["Mars"], "EPHEMERIS_ID" => Int32[0], "PHASE_DIR" => [[0.0, 0.0]]];
+        nrow = 1, measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
+    mv(epdir, joinpath(flddir, "EPHEM0_Mars_J2000.tab"))
+    fld = readtable(flddir)
+    @test field_ephemeris(fld, 0) !== nothing
+    md = measure(fld, "PHASE_DIR", 1; epoch = MEpoch{UTC}(60002.5))
+    @test md isa MDirection{J2000}
+    @test rad2deg(md.lon) ≈ 101.25 atol = 1e-3
+    @test measure(fld, "PHASE_DIR", 1) == MDirection{J2000}(0.0, 0.0)   # no epoch -> static
+
+    # a non-ephemeris field
+    write_table(joinpath(tmp, "F2"), "FIELD", Pair{String,Any}[
+        "NAME" => ["3C286"], "EPHEMERIS_ID" => Int32[-1], "PHASE_DIR" => [[1.0, 0.5]]];
+        nrow = 1, measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
+    @test field_ephemeris(readtable(joinpath(tmp, "F2")), 0) === nothing
+end

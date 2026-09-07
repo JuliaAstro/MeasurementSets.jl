@@ -61,6 +61,7 @@ include("tables/units.jl")
 include("measures/types.jl")
 include("measures/measinfo.jl")
 include("measures/read.jl")
+include("measures/ephemeris.jl")
 include("measures/doppler.jl")
 include("measures/write.jl")
 include("taql/taql.jl")
@@ -82,6 +83,8 @@ export columnunit, qcolumn, UNITS_NO_JULIA_COUNTERPART   # real methods via Unit
 export measure, measinfo, measconvert, MeasFrame, MeasInfo   # conversions via SOFAExt
 export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, reftype
 export MBaseline, MuvW
+export Ephemeris, open_ephemeris, field_ephemeris, ephemeris_direction,
+    ephemeris_radvel, ephemeris_distance
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO
 export MERCURY, VENUS, MARS, JUPITER, SATURN, URANUS, NEPTUNE, SUN, MOON

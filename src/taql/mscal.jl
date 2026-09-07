@@ -91,13 +91,26 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     ant = readtable(subs["ANTENNA"])
     antpos = measure(ant, "POSITION")                 # Vector{MPosition{ITRF}}
     fld = readtable(subs["FIELD"])
-    fdir = Dict{Int,Any}()                            # field id -> J2000 direction
+    fdir = Dict{Int,Any}()                            # static field id -> J2000 direction
+    fdir_t = Dict{Tuple{Int,Float64},Any}()           # (ephemeris field, TIME) -> J2000
+    feph = Dict{Int,Any}()                            # field id -> Ephemeris | nothing
 
     _antid(f, i) = endswith(f, "2") ? a2[i] : endswith(f, "1") ? a1[i] : 0
 
-    _fielddir(fi, i) = get!(fdir, fi) do
-        measconvert(measure(fld, "PHASE_DIR", fi + 1), J2000;
-                    frame = MeasFrame(epoch = epochs[i]))
+    _fe(fi) = get!(() -> field_ephemeris(fld, fi), feph, fi)
+
+    function _fielddir(fi, i)
+        e = _fe(fi)
+        e === nothing && return get!(fdir, fi) do
+            measconvert(measure(fld, "PHASE_DIR", fi + 1), J2000;
+                        frame = MeasFrame(epoch = epochs[i]))
+        end
+        get!(fdir_t, (fi, tsec[i])) do
+            tdb = measconvert(epochs[i], TDB; frame = MeasFrame(epoch = epochs[i])).mjd
+            d = ephemeris_direction(e, tdb)
+            measconvert(d, J2000;
+                        frame = MeasFrame(epoch = epochs[i], position = antpos[1]))
+        end
     end
 
     # memo: (antenna id, field id, TIME seconds) -> frame-converted values
