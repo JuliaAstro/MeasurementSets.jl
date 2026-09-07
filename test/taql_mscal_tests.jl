@@ -2,7 +2,7 @@
 # subset). Runs against SAMPLE_MS; needs SOFA.
 import SOFA
 import Statistics
-using MeasurementSets: measure, measconvert, MeasFrame, MDirection, J2000,
+using MeasurementSets: measure, measconvert, MeasFrame, MDirection, MuvW, J2000,
     AZEL, HADEC, ITRF
 
 @testset "TaQL-lite parser — mscal unit" begin
@@ -55,6 +55,14 @@ end
         @test -pi <= column(q, "pa")[i] <= pi
         # uvw_j2000 is a pure rotation of the stored UVW -> length preserved
         @test hypot(column(q, "uj")[i]...) ≈ hypot(column(main, "UVW")[i]...) rtol = 1e-9
+        # ... and the (ant, field, TIME)-memo'd 3x3 matches a direct convert
+        let a1 = column(main, "ANTENNA1")[i], fi = column(main, "FIELD_ID")[i],
+            ep = measure(main, "TIME", i)
+            dj = measconvert(measure(fld, "PHASE_DIR", fi + 1), J2000; frame = MeasFrame(epoch = ep))
+            fr = MeasFrame(epoch = ep, position = measure(ant, "POSITION", a1 + 1), direction = dj)
+            w = measconvert(MuvW{ITRF}(column(main, "UVW")[i]...), J2000; frame = fr)
+            @test column(q, "uj")[i] ≈ [w.u, w.v, w.w] rtol = 1e-9
+        end
         # delay magnitude bounded by (max baseline)/c
         @test abs(column(q, "d")[i]) < 1e-4
     end

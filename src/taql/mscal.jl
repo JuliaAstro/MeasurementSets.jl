@@ -128,12 +128,27 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
             end
             out[_mscal_key(f)] = v
         elseif f == "uvw_j2000"
+            # The ITRF->J2000 uvw transform is a linear map (pole rotation
+            # + baseline rotation, all rotations) that depends only on the
+            # frame -- i.e. on (antenna, field, TIME). Memo the 3x3 as its
+            # three result columns (one measconvert per basis vector per
+            # key) and apply it to each row's stored UVW.
+            umemo = Dict{Tuple{Int,Int,Float64},NTuple{3,NTuple{3,Float64}}}()
             v = Vector{Vector{Float64}}(undef, n)
             for i in 1:n
-                dj = _fielddir(fid[i], i)
-                fr = MeasFrame(epoch = epochs[i], position = antpos[a1[i] + 1], direction = dj)
-                w = measconvert(MuvW{ITRF}(uvw[i]...), J2000; frame = fr)
-                v[i] = [w.u, w.v, w.w]
+                cols3 = get!(umemo, (a1[i], fid[i], tsec[i])) do
+                    dj = _fielddir(fid[i], i)
+                    fr = MeasFrame(epoch = epochs[i],
+                                   position = antpos[a1[i] + 1], direction = dj)
+                    map(((x, y, z),) -> begin
+                            w = measconvert(MuvW{ITRF}(x, y, z), J2000; frame = fr)
+                            (w.u, w.v, w.w)
+                        end,
+                        ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+                end
+                u = uvw[i]
+                v[i] = [cols3[1][k] * u[1] + cols3[2][k] * u[2] + cols3[3][k] * u[3]
+                        for k in 1:3]
             end
             out[_mscal_key(f)] = v
         elseif startswith(f, "hadec")

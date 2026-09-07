@@ -1467,8 +1467,8 @@ query(main, ""; select = ["w" => "mscal.uvw_j2000()", "d" => "mscal.delay()"])
   `mscal.last1()` (local apparent sidereal time, rad — casacore returns
   a raw MVEpoch day count here; we return the angle);
   `mscal.itrf()` (`PHASE_DIR` in ITRF, `[lon, lat]`);
-  `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000,
-  O(nrow)); `mscal.delay()` (geometric delay, s). `1` / `2` picks
+  `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000);
+  `mscal.delay()` (geometric delay, s). `1` / `2` picks
   `ANTENNA1` / `ANTENNA2`; no suffix uses antenna 0.
 - The tokenizer already lexed `mscal.ha1` as one identifier (Phase 63);
   a `TQLMScal` AST node + a precompute hook in `_tql_cols` (covers
@@ -1512,3 +1512,14 @@ groupby(main, "FIELD_ID"; select = ["p" => "gmean(mean(abs(mscal.stokes(DATA, 'I
 - Non-goals: `RX..YL` input frames; the `Ptotal` / `Plinear` / … pseudo
   outputs; per-`DATA_DESC_ID` `CORR_TYPE`; `mscal.stokes` in a `query`
   closure / `join` `on` string.
+
+### Phase 79 — `mscal.uvw_j2000()` rotation memo
+
+The ITRF→J2000 `uvw` transform is a linear map (pole rotation + baseline
+rotation) that depends only on the frame — i.e. on `(antenna, field,
+TIME)`. Phase 77 evaluated it with one `measconvert(::MuvW)` per MAIN
+row; Phase 79 memoizes the 3×3 (as its three result columns, three
+`measconvert`s per distinct key) and applies it to each row's stored
+`UVW`. On a real MAIN this is one matrix per integration-baseline pair
+instead of one per row. No behaviour change — cross-checked against a
+direct per-row `measconvert` to `rtol = 1e-9`.
