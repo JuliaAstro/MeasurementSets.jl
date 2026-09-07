@@ -181,8 +181,11 @@ function _join_pairs_qexpr(left::AbstractTable, right::AbstractTable, onstr::Abs
     rref = String[r for r in refs if startswith(r, "R.")]
     (isempty(lref) || isempty(rref)) && throw(ArgumentError(
         "join: `on` string must reference at least one L.<col> and one R.<col>"))
-    lcols = Dict(r => column(left, r[3:end]) for r in lref)
-    rcols = Dict(r => column(right, r[3:end]) for r in rref)
+    att = _has_qty(ast)
+    _col(tab, r) = (c = column(tab, r[3:end]);
+                    att ? _tql_unit_attach(c, columnunit(tab, r[3:end])) : c)
+    lcols = Dict(r => _col(left, r) for r in lref)
+    rcols = Dict(r => _col(right, r) for r in rref)
     qcd = Dict{String,Vector{Any}}(r => Vector{Any}(undef, 1) for r in refs)
     lrows = Int[]; rrows = Int[]
     matched_r = falses(nrow(right))

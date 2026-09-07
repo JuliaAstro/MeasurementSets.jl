@@ -54,7 +54,10 @@ session or a live `casa` / python-casacore process.  `is_stale` /
 `resync` / `is_multiused`.
 
 **Query** — a small TaQL-like engine: `query` (WHERE with arithmetic,
-`LIKE` / regex, `BETWEEN`, bitwise `& | ^ ~`, `~=` (approx-equal), a function library, 1-based array indexing /
+`LIKE` / regex, `BETWEEN`, bitwise `& | ^ ~`, `~=` (approx-equal), a
+function library — incl. date/time (`datetime`, `mjd`, `year`, …) and
+angle (`angdist`, `hms`, `normangle`) functions — quantity literals
+(`CHAN_FREQ > 1.4GHz`, via the Unitful extension), 1-based array indexing /
 slicing (`DATA[1,1]`, `UVW[3]`, `V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`),
 `ORDER BY`, column projection or computed `select` expressions → a
 `RefTable` / `GroupedTable`), `groupby` (GROUP BY +

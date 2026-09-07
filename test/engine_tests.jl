@@ -340,13 +340,13 @@ end
     dir = joinpath(mktempdir(), "vtq2.tab")
     A = collect(1.0:5.0)
     write_table(dir, "T", ["A" => A, "BAD" => zeros(5), "OK" => zeros(5)]; nrow=5,
-        virtualtaql = Dict("BAD" => "mjd(A) + 1", "OK" => "A + 10.0"))   # mjd: unsupported fn
+        virtualtaql = Dict("BAD" => "substr(A, 1, 2)", "OK" => "A + 10.0"))  # substr: unsupported fn
     r = readtable(dir)
     @test column(r, "A")[:] == A                              # rest of the table is fine
     @test column(r, "OK")[:] == A .+ 10
     err = try column(r, "BAD")[1]; nothing catch e; e end
     @test err isa ArgumentError
-    @test occursin("BAD", err.msg) && occursin("mjd(A) + 1", err.msg)
+    @test occursin("BAD", err.msg) && occursin("substr(A, 1, 2)", err.msg)
 
     dst = joinpath(mktempdir(), "vtq_copy.tab")
     copytable(dst, readtable(dir))            # BAD is dropped (unreadable); OK is preserved

@@ -78,8 +78,15 @@ briefly: 1-based array element/slice indexing (`DATA[1,1]`, `V[1:4,1]`,
 computed `query` `select` columns (`"amp" => "sqrt(abs(V))"`), and
 masked arrays (`V[boolexpr]`, `marray` / `arraydata` / `arraymask`,
 `SELECT expr AS (val, mask)`, masked `g*` / `gs*` aggregates;
-reductions skip masked elements) *are* supported. Date/time and measures
-(reference-frame) functions in TaQL expressions are deferred.
+reductions skip masked elements) *are* supported. So are array literals
+(`[a, b, c]`), scientific-notation numbers (`1.4e9`), **quantity
+literals** (`1.4GHz`, `10arcsec` — compared against a column that
+carries a `QuantumUnits` keyword; needs the Unitful extension), and
+**date/time + angle functions** (`datetime`, `mjd`, `mjdtodate`,
+`date`, `time`, `year`/`month`/`day`/`weekday`, `cdate`/`ctime`/…,
+`hms`/`dms`, `normangle`, `angdist`/`angdistx` — dates are an MJD
+`Float64`). Measures-frame functions (`mscal.azel()` etc.) are still
+deferred.
 
 ## Physical units
 
@@ -137,7 +144,8 @@ Backed by the pure-Julia [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl)
 is treated as `ICRS` (a ~0.02″ frame-bias simplification). Solar-system
 bodies as direction frames, `MeasComet` / ephemeris tables, and
 pulsar-timing-grade precision are out of scope. TaQL date/time and
-measures *functions* remain deferred.
+angle functions landed in the query engine (see above); measures
+*frame-conversion* functions (`mscal.azel()`) remain deferred.
 
 The write path takes a `measures =` keyword on
 [`write_table`](@ref) — `Dict("D" => (; kind = :direction, ref =

@@ -44,12 +44,21 @@
 # median, stddev, variance, rms, min/max, any, all, ntrue, nelements),
 # string ops (strlength/len, upper, lower, trim), and specials
 # (rownumber(), pi, e, iif, GROUPING(k) in a groupby select/having).
-# Not supported: date/time, measures/cones,
+#
+# Phase 69 adds quantity literals (`1.4GHz`, `10arcsec` -- a
+# Unitful.Quantity, needs the Unitful ext; a context with one attaches
+# each unit-bearing column's QuantumUnits so the comparison goes through
+# Unitful), array literals `[a, b, ...]`, scientific-notation number
+# literals, and date/time + angle functions (`datetime`, `mjd`, `date`,
+# `year`/`month`/`day`, `hms`/`dms`, `normangle`, `angdist` -- dates are
+# an MJD `Float64`).
+# Not supported: `mscal.*` / measures-frame functions,
 # sliding-window (`running*`/`boxed*`) ops, rand, array reshaping,
 # rowid(), substr, type conversions, UDFs, aggregates over row groups.
 
 import Statistics
 import Tables
+import Dates
 
 # ======================================================================
 # AST -- dispatch, not branching (see [[julia-dispatch-style]]): a
@@ -129,6 +138,12 @@ end
 struct TQLMaskOf <: TQLExpr          # the mask of a (possibly masked) array expr;
     e::TQLExpr                       # `update!`'s `(D, M) = expr` mask side
 end
+struct TQLQuantityLit <: TQLExpr     # `1.4GHz` / `10arcsec` -- a Unitful.Quantity
+    value::Any                       # built at parse time by the Unitful ext
+end
+struct TQLArrayLit <: TQLExpr        # `[a, b, ...]` -- a plain vector of the elements
+    elems::Vector{TQLExpr}
+end
 
 # Arithmetic and comparison broadcast over an array-cell operand (TaQL
 # semantics: `DATA * 2`, `FLAG == True` are elementwise). A top-level
@@ -171,6 +186,8 @@ _bcast(f, x::TQLMArray, y::TQLMArray) =
 
 _tqleval(e::TQLCol, cols, i) = cols[e.name][i]
 _tqleval(e::TQLLit, cols, i) = e.value
+_tqleval(e::TQLQuantityLit, cols, i) = e.value
+_tqleval(e::TQLArrayLit, cols, i) = [_tqleval(x, cols, i) for x in e.elems]
 _tqleval(e::TQLCmp, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLAnd, cols, i) = _tqleval(e.a, cols, i) && _tqleval(e.b, cols, i)
 _tqleval(e::TQLOr, cols, i) = _tqleval(e.a, cols, i) || _tqleval(e.b, cols, i)
@@ -348,6 +365,8 @@ _gb_rolled(keys::Vector{String}, active) =
 # string-based path over the closure one, which can't be introspected.
 _tqlrefs!(seen, e::TQLCol) = push!(seen, e.name)
 _tqlrefs!(seen, e::TQLLit) = nothing
+_tqlrefs!(seen, e::TQLQuantityLit) = nothing
+_tqlrefs!(seen, e::TQLArrayLit) = foreach(x -> _tqlrefs!(seen, x), e.elems)
 _tqlrefs!(seen, e::TQLCmp) = (_tqlrefs!(seen, e.lhs); _tqlrefs!(seen, e.rhs))
 _tqlrefs!(seen, e::TQLAnd) = (_tqlrefs!(seen, e.a); _tqlrefs!(seen, e.b))
 _tqlrefs!(seen, e::TQLOr) = (_tqlrefs!(seen, e.a); _tqlrefs!(seen, e.b))
@@ -401,4 +420,31 @@ _has_aggr(e::TQLIndex) = _has_aggr(e.base) || any(e.axes) do ax
     _has_aggr(ax)
 end
 _has_aggr(e::TQLBetween) = _has_aggr(e.lhs) || _has_aggr(e.lo) || _has_aggr(e.hi)
+_has_aggr(::TQLQuantityLit) = false
+_has_aggr(e::TQLArrayLit) = any(_has_aggr, e.elems)
+
+# true if a quantity literal (`1.4GHz`) appears anywhere in the tree --
+# the signal for an expression context to unit-attach its columns
+# (structural, no Unitful needed). A generic `false` fallback covers the
+# leaf/no-subexpr nodes; the recursive nodes are listed explicitly.
+_has_qty(::TQLExpr) = false
+_has_qty(::TQLQuantityLit) = true
+_has_qty(e::TQLArrayLit) = any(_has_qty, e.elems)
+_has_qty(e::TQLCmp) = _has_qty(e.lhs) || _has_qty(e.rhs)
+_has_qty(e::TQLArith) = _has_qty(e.lhs) || _has_qty(e.rhs)
+_has_qty(e::TQLAnd) = _has_qty(e.a) || _has_qty(e.b)
+_has_qty(e::TQLOr) = _has_qty(e.a) || _has_qty(e.b)
+_has_qty(e::TQLNot) = _has_qty(e.a)
+_has_qty(e::TQLNeg) = _has_qty(e.a)
+_has_qty(e::TQLBitNot) = _has_qty(e.a)
+_has_qty(e::TQLMaskOf) = _has_qty(e.e)
+_has_qty(e::TQLIn) = _has_qty(e.lhs)
+_has_qty(e::TQLMatch) = _has_qty(e.lhs)
+_has_qty(e::TQLFunc) = any(_has_qty, e.args)
+_has_qty(e::TQLAggr) = e.arg !== nothing && _has_qty(e.arg)
+_has_qty(e::TQLBetween) = _has_qty(e.lhs) || _has_qty(e.lo) || _has_qty(e.hi)
+_has_qty(e::TQLIndex) = _has_qty(e.base) || any(e.axes) do ax
+    ax isa NamedTuple ? any(v -> v !== nothing && _has_qty(v), (ax.lo, ax.hi, ax.step)) :
+    _has_qty(ax)
+end
 

@@ -2036,3 +2036,143 @@ if _HAVE_TAQL
         @test collect(oj2.FREQ) ≈ column(tj2, "FREQ")[:]
     end
 end
+
+# ======================================================================
+# Phase 69: quantity literals + date/time & angle functions
+# ======================================================================
+
+import Unitful, UnitfulAngles, UnitfulAstro
+const _U69 = Unitful
+const _HAVE_UNITFUL = Base.get_extension(MSv2, :UnitfulExt) !== nothing
+
+@testset "Phase 69 — parser: quantity literals + array literals" begin
+    vn = Set(["CHAN_FREQ", "A", "V"])
+    p(s) = MSv2._taqllite_parse(s, vn)
+
+    # `1.4GHz` tokenizes as one :qty token
+    toks = MSv2._taqllite_tokenize("1.4GHz")
+    @test toks[1].kind === :qty && toks[1].value == (1.4, "GHz")
+    @test MSv2._taqllite_tokenize("10arcsec")[1].value == (10, "arcsec")
+    @test MSv2._taqllite_tokenize("30deg")[1].value == (30, "deg")
+
+    if _HAVE_UNITFUL
+        e = p("CHAN_FREQ > 1.4GHz")
+        @test e isa MSv2.TQLCmp
+        @test e.rhs isa MSv2.TQLQuantityLit
+        @test e.rhs.value == 1.4 * _U69.u"GHz"
+        @test MSv2._has_qty(e)
+        @test !MSv2._has_qty(p("CHAN_FREQ > 1.4e9"))
+        # an unknown unit errors at parse
+        @test_throws Exception p("A > 5wombat")
+    end
+
+    # array literal
+    al = p("[1.0, 2.0, 3.0]")
+    @test al isa MSv2.TQLArrayLit && length(al.elems) == 3
+    @test MSv2._tqleval(al, Dict{String,AbstractVector}(), 1) == [1.0, 2.0, 3.0]
+    @test p("A IN [1, 2, 3]") isa MSv2.TQLIn         # IN list unchanged
+end
+
+@testset "Phase 69 — quantity comparison against unit-bearing columns" begin
+    _HAVE_UNITFUL || return
+    d = mktempdir()
+    F = Float64[1.30e9, 1.40e9, 1.55e9, 2.10e9]
+    W = Float64[0.2, 0.4, 0.6, 0.8]
+    K = Int32[0, 1, 0, 1]
+    dir = joinpath(d, "spw.tab")
+    write_table(dir, "SPW", Pair{String,Any}["CHAN_FREQ" => F, "W" => W, "K" => K];
+                nrow=4, measures = Dict("CHAN_FREQ" => (; kind=:frequency, ref="TOPO", units=["Hz"])))
+    t = readtable(dir)
+    @test columnunit(t, "CHAN_FREQ") == _U69.u"Hz"
+
+    r_plain = query(t, "CHAN_FREQ > 1.4e9")
+    r_unit  = query(t, "CHAN_FREQ > 1.4GHz")
+    @test r_unit.rows == r_plain.rows == [3, 4]
+    @test query(t, "CHAN_FREQ > 200MHz AND CHAN_FREQ < 2GHz").rows == [1, 2, 3]
+    @test query(t, "CHAN_FREQ BETWEEN 1.35GHz AND 1.6GHz").rows == [2, 3]
+
+    # a unitless column vs a dimensional unit literal -> DimensionError
+    @test_throws _U69.DimensionError query(t, "W > 1Hz")
+
+    # computed select: dimensionless result is stripped to a plain number
+    gt = query(t, "CHAN_FREQ > 0"; select = ["fghz" => "CHAN_FREQ / 1GHz"])
+    @test gt isa MSv2.GroupedTable
+    @test collect(gt.fghz) ≈ F ./ 1e9
+    # a dimensional select result errors
+    @test_throws Exception query(t, "CHAN_FREQ > 0"; select = ["x" => "CHAN_FREQ + 1MHz"])
+
+    # groupby HAVING with a unit literal
+    g = groupby(t, "K"; select = ["K" => :K, "n" => "gcount()"], having = "gmax(CHAN_FREQ) > 2.0GHz")
+    @test collect(g.K) == Int32[1]                       # K=1 max 2.10e9; K=0 max 1.55e9
+end
+
+@testset "Phase 69 — date/time functions" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    @test MSv2._tql_datetime("2020-02-12") ≈ 58891.0
+    @test MSv2._tql_datetime("2020-02-12T06:00:00") ≈ 58891.25
+    @test f("mjdtodate")(MSv2._tql_datetime("2020-02-12T06:00:00")) ≈ 58891.25
+    @test f("year")(58891.0) == 2020
+    @test f("month")(58891.0) == 2
+    @test f("day")(58891.0) == 12
+    @test f("date")(58891.7) == 58891.0
+    @test f("time")(58891.25) ≈ pi / 2
+    @test MSv2._tql_hms(pi / 2) == "06:00:00.000"
+    @test startswith(MSv2._tql_dms(-pi / 6), "-30.00.00")
+    @test f("normangle")(3pi) ≈ pi
+    @test f("cmonth")(58891.0) == "Feb"
+
+    # in a query
+    d = mktempdir()
+    T = Float64[58000, 58891, 59500, 60000] .* 86400.0
+    dir = joinpath(d, "m.tab")
+    write_table(dir, "M", Pair{String,Any}["T" => T]; nrow=4)
+    t = readtable(dir)
+    @test query(t, "T > datetime('2020-02-12') * 86400.0").rows == [3, 4]
+end
+
+@testset "Phase 69 — angdist / array literal" begin
+    @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
+    @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi
+    d = mktempdir()
+    RA = Float64[0.0, 1.0, 2.0]
+    DEC = Float64[0.0, 0.5, -0.3]
+    PD = [Float64[RA[i], DEC[i]] for i in 1:3]
+    dir = joinpath(d, "f.tab")
+    write_table(dir, "F", Pair{String,Any}["RA" => RA, "DEC" => DEC, "PD" => PD];
+                nrow=3, tsm=[["PD"]])
+    t = readtable(dir)
+    # 4-scalar form
+    r = query(t, "angdist(RA, DEC, 0.0, 0.0) < 0.1")
+    @test r.rows == [1]
+    # 2-array form (array literal + array-cell column)
+    r2 = query(t, "angdist(PD, [0.0, 0.0]) < 0.1")
+    @test r2.rows == [1]
+end
+
+@testset "Phase 69 — quantity literal / sci-notation self-consistency" begin
+    _HAVE_UNITFUL || return
+    d = mktempdir()
+    F = Float64[1.30e9, 1.42e9, 1.55e9, 2.05e9]
+    write_table(joinpath(d, "T"), "T", Pair{String,Any}["F" => F]; nrow=4,
+                measures = Dict("F" => (; kind=:frequency, ref="TOPO", units=["Hz"])))
+    t = readtable(joinpath(d, "T"))
+    # F = [1.30e9, 1.42e9, 1.55e9, 2.05e9]; the unit literal and the
+    # equivalent bare number pick the same rows
+    @test query(t, "F > 1.4GHz").rows == query(t, "F > 1.4e9").rows == [2, 3, 4]
+    @test query(t, "F > 1400MHz").rows == [2, 3, 4]
+    @test query(t, "F < 1.5e9 OR F > 2.0e9").rows == [1, 2, 4]
+end
+
+@testset "Phase 69 — real-TaQL cross-check (functions, sci-notation)" begin
+    _HAVE_TAQL || return
+    d = mktempdir(); pdir = joinpath(d, "T")
+    B = collect(0.0:1.0:19.0)
+    write_table(pdir, "T", Pair{String,Any}["B" => B]; nrow=20)
+    t = readtable(pdir)
+    for w in ("sin(B) > 0", "normangle(B) < 3", "B > 1.5e1", "B >= 3e0 AND B < 1.2e1",
+              "floor(B / 3) == 2")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT FROM \$1 WHERE $w GIVING '$rdir'", pdir)
+        @test query(t, w).rows == readtable(rdir).rows
+    end
+end
