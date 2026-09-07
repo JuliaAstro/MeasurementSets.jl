@@ -101,8 +101,10 @@ ids / `N~M` ranges / name globs, `!` to subtract, `L & R` baselines
 (`query(main, "mscal.baseline('ea01 & *') AND mscal.field('3C*')")`).
 `mscal.time('t0~t1')` (ISO / `YYYY/MM/DD` endpoints) and
 `mscal.uvdist('a~b[m|km|klambda|…]')` select `TIME` / 2-D uv-distance
-ranges. `spw` channel sub-selection and `mscal.corr` / `mscal.feed` are
-not included.
+ranges. `mscal.spw('0:5~20')` takes an optional `:chanlist` (channel
+index ranges `a~b`/`a~b^step` or `CHAN_FREQ` ranges `f1~f2GHz`);
+`mscal.chan('0:5~20')` returns the per-row selected-channel `BitVector`.
+`mscal.corr` / `mscal.feed` are not included.
 
 ## Physical units
 

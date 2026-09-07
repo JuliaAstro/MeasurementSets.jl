@@ -301,8 +301,16 @@ antenna sets; `&` drops autocorrelations) and a whole-spec `!`.
 `YYYY/MM/DD[/HH:MM:SS]` datetimes or a bare MJD-days number);
 `mscal.uvdist('a~b[unit]')` selects a 2-D uv-distance range, `unit` ∈
 `m` (default) / `km` / `lambda` / `klambda` / `mlambda` (wavelength
-units scale per row by `SPECTRAL_WINDOW.REF_FREQUENCY`). No channel
-sub-selection on `spw`; no `mscal.corr` / `mscal.feed`.
+units scale per row by `SPECTRAL_WINDOW.REF_FREQUENCY`). No
+`mscal.corr` / `mscal.feed`.
+
+`mscal.spw('0:5~20')` — the spw selection takes an optional `:chanlist`
+(a `;`-list of `a~b`, `a~b^step` channel-index ranges, single indices,
+or `f1~f2GHz` / `<f` / `>f` `CHAN_FREQ` ranges); a channelled spw
+selects the row only if at least one of the row's channels is selected.
+`mscal.chan('0:5~20')` returns a per-row `BitVector` (the spw's
+channel count) — the selected-channel mask, for use with `any(...)` /
+`count(...)` / a masked array.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 boolean-mask array subscripts.
