@@ -2121,6 +2121,15 @@ end
     @test f("normangle")(3pi) ≈ pi
     @test f("cmonth")(58891.0) == "Feb"
 
+    # Phase 86: sexagesimal parsing
+    @test MSv2._parse_sexagesimal("10h42m31.3", :ra) ≈ deg2rad(10.7087 * 15) rtol = 1e-4
+    @test MSv2._parse_sexagesimal("10:42:31.3", :ra) ≈ deg2rad(10.7087 * 15) rtol = 1e-4
+    @test MSv2._parse_sexagesimal("45d51m16", :dec) ≈ deg2rad(45.85444) rtol = 1e-5
+    @test MSv2._parse_sexagesimal("-45 51 16", :dec) ≈ -deg2rad(45.85444) rtol = 1e-5
+    @test MSv2._parse_sexagesimal("41.5", :dec) ≈ deg2rad(41.5)
+    @test f("angle")("10h30m") ≈ deg2rad(157.5)
+    @test f("angle")("-12.5") ≈ deg2rad(-12.5)
+
     # in a query
     d = mktempdir()
     T = Float64[58000, 58891, 59500, 60000] .* 86400.0

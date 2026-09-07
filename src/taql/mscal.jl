@@ -908,17 +908,28 @@ end
 # be a solar-system body name, a FIELD direction-column name, or a
 # `[ra, dec]` J2000 pair (radians here).  No arg -> `FIELD.PHASE_DIR`.
 
+_dir_pair_key(ra::Real, dec::Real) = "[" * string(Float64(ra)) * "," * string(Float64(dec)) * "]"
+
 function _mscal_dir_arg(a::TQLExpr, src::AbstractString)
     if a isa TQLLit && a.value isa AbstractString
-        return String(a.value)
+        s = String(a.value)
+        if occursin(',', s)                       # an "RA, DEC" sexagesimal pair
+            ra, dec = strip.(split(s, ','; limit = 2))
+            return _dir_pair_key(_parse_sexagesimal(ra, :ra),
+                                 _parse_sexagesimal(dec, :dec))
+        end
+        return s                                  # a body / FIELD-column name
     elseif a isa TQLArrayLit && length(a.elems) == 2 &&
-           all(e -> e isa TQLLit && e.value isa Real, a.elems)
-        return "[" * string(Float64(a.elems[1].value)) * "," *
-                     string(Float64(a.elems[2].value)) * "]"
+           all(e -> e isa TQLLit, a.elems)
+        e1, e2 = a.elems[1].value, a.elems[2].value
+        ra  = e1 isa Real ? Float64(e1) : _parse_sexagesimal(String(e1), :ra)
+        dec = e2 isa Real ? Float64(e2) : _parse_sexagesimal(String(e2), :dec)
+        return _dir_pair_key(ra, dec)
     end
     throw(ArgumentError("TaQL-lite: mscal direction argument must be a " *
-        "body name ('SUN'), a FIELD column name ('DELAY_DIR'), or a " *
-        "`[ra, dec]` pair in \"$src\""))
+        "body name ('SUN'), a FIELD column name ('DELAY_DIR'), a " *
+        "`[ra, dec]` pair (radians), or a sexagesimal `'RA, DEC'` string " *
+        "in \"$src\""))
 end
 
 # `"ha1"` -> `("ha1", "")`; `"ha1::SUN"` -> `("ha1", "SUN")`

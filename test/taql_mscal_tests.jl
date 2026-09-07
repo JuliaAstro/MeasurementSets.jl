@@ -24,6 +24,13 @@ using MeasurementSets: measure, measconvert, MeasFrame, MDirection, MuvW, J2000,
     @test p("mscal.el1('SUN') > 0").lhs.dir == "SUN"
     @test p("mscal.hadec1([2.0, 0.5]) > 0").lhs.dir == "[2.0,0.5]"
     @test p("mscal.itrf('DELAY_DIR') > 0").lhs.dir == "DELAY_DIR"
+    # Phase 86: sexagesimal 'RA, DEC' string arg
+    let d = p("mscal.el1('10:42:31, 45:51:16') > 0").lhs.dir
+        @test startswith(d, "[") && count(==(','), d) == 1
+        ra, dec = parse.(Float64, split(d[2:end-1], ','))
+        @test ra ≈ deg2rad(10.70861 * 15) rtol = 1e-4
+        @test dec ≈ deg2rad(45.85444) rtol = 1e-4
+    end
     @test MSv2._mscal_key(p("mscal.el1('SUN') > 0").lhs) == "mscal.el1::SUN"
     s2 = Set{String}(); MSv2._tqlrefs!(s2, p("mscal.el1('SUN') > 0"))
     @test s2 == Set(["mscal.el1::SUN"])
