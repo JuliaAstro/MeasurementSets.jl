@@ -1279,3 +1279,32 @@ with the right keyword stamped, so `write_table` → `readtable` →
 `qcolumn` / `measure`).
 
 2677 tests.
+
+### Phase 71 — `MRadialVelocity` reference-frame conversion
+
+Phase 66 shipped `measconvert` for epoch / direction / frequency and
+left `MRadialVelocity` (m/s, `SOURCE.SYSVEL`) as a clear-error stub.
+Phase 71 implements it, reusing the frequency path's velocity machinery
+in `ext/SOFAExt.jl` (`_v_earth_bary` / `_v_obs_geo` / `_n_hat` / the
+`_VEL_LSRK`/`_VEL_LSRD`/`_VEL_LSRGAL` constants):
+
+```julia
+measconvert(MRadialVelocity{LSRK}(2e4), BARY; frame = fr)   # needs frame.direction
+```
+
+- Frames `LSRK` / `LSRD` / `BARY` / `GEO` / `TOPO` / `GALACTO`, hub =
+  BARY, **relativistic velocity addition** (`β_out = (β_in ∓ g)/(1 ∓
+  β_in·g)`, `g = V·n̂/c`) — matches casacore `MCRadialVelocity`.
+- Verified against `casatools.measures()`: BARY / LSRD / GALACTO to
+  < 1 mm/s; GEO / TOPO to ~0.25 m/s (the SOFA `epv00` vs
+  casacore-ephemeris residual, the same one the frequency test carries
+  as `rtol = 2e-9`). SOFA-only `LSRK → R → LSRK` round-trips to 1e-12.
+- `_MEAS_ENUM[:radialvelocity]` added so a bare-code `VarRefCol` column
+  decodes.
+
+**Non-goals:** `LGROUP` / `CMB` velocity frames (no singletons — a
+`measconvert` targeting one errors clearly; no real MS `SYSVEL` uses
+them); a standalone `MDoppler` measure or an `MFrequency` ↔
+`MRadialVelocity` bridge given a rest frequency (a distinct feature).
+
+2699 tests.
