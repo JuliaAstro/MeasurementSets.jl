@@ -1583,6 +1583,63 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 97 — `meas.*` measure conversions in TaQL-lite
+
+```julia
+query(t, "meas.galactic(RA, DEC)[2] > 0")                       # b > 0
+query(t, "meas.azel(RA, DEC, TIME/86400, X, Y, Z)[2] > 0.3")    # elevation
+query(t, "meas.epoch('TAI', TIME/86400)")                       # UTC → TAI MJD
+query(t, "meas.last(TIME/86400, X, Y, Z)")                      # local apparent sidereal time
+```
+
+- A subset of casacore's `libmeas` UDF library:
+  `meas.<frame>(['SRC', ]lon, lat[, mjd[, x, y, z]])` converts a
+  direction (`<frame>` = `j2000`/`b1950`/`app`/`galactic`/`ecliptic`/
+  `azel`/`hadec`/`itrf`/`icrs`; optional string-literal source frame,
+  default J2000; `mjd` MJD days for app/azel/hadec/itrf, `x,y,z` ITRF m
+  also for azel/hadec/itrf) → `[lon, lat]` rad. `meas.epoch(scale, mjd)`
+  converts an epoch's time scale; `meas.last`/`meas.lst(mjd, x, y, z)`
+  gives the local apparent sidereal time (rad).
+- Plain `TQLFunc`s wrapping `measconvert` / `_lst`; args are ordinary
+  expressions (columns, arithmetic). Needs `import SOFA`.
+
+### Phase 96 — ionospheric Faraday rotation
+
+```julia
+m = EarthMagneticMachine(350e3, observatory("VLA"), MEpoch{UTC}(mjd))
+rm = rotation_measure(m, MDirection{J2000}(ra, dec); stec = 12.0)   # rad/m², STEC in TECU
+Δχ = faraday_rotation(rm, 1.4e9)                                     # RM·λ²
+χ_true = derotate_angle(χ_obs, rm, MFrequency{TOPO}(1.4e9))
+```
+
+- `rotation_measure(dir, epoch, pos; stec, height=350e3)` /
+  `rotation_measure(m::EarthMagneticMachine, dir; stec)` — thin-shell
+  ionospheric RM (rad/m²): `RM_IONOSPHERE · stec · B∥`, `B∥` the
+  line-of-sight field along the propagation direction at the shell
+  pierce point ([`emm_lineofsight`](@ref)), `stec` in TECU. Positive RM
+  ⇔ field toward the observer.
+- `faraday_rotation(rm, freq)` = `rm · (c/freq)²` (`freq` a number or
+  `MFrequency`); `derotate_angle(χ, rm, freq)` = `χ − Δχ`.
+- `const RM_IONOSPHERE = 2.631e-6`. All exported. Pure helpers are core;
+  `rotation_measure` defers the SOFA requirement to `emm_lineofsight`.
+
+### Phase 95 — spaced unit literals + `observatory()` in TaQL-lite
+
+```julia
+query(spw, "CHAN_FREQ > 1.4 GHz")                        # spaced postfix unit
+query(ant, "sqrt(sum((POSITION - observatory('VLA'))**2)) < 1e5")
+```
+
+- A number followed by a **space** then a bare identifier that is not a
+  column and is a known unit (`_tql_known_unit` — a common-unit set in
+  core, a full `_ms_uparse` try in `UnitfulExt`) now lexes as a quantity
+  literal (casacore `simexpr unit`), so `col > 3 km` / `BETWEEN 1.4 GHz
+  AND 1.5 GHz` work alongside the adjacent `1.4GHz` form. A trailing
+  non-unit ident stays an unknown-column error.
+- `observatory('NAME')` — a TaQL-lite function returning a telescope's
+  ITRF `[x, y, z]` (m) from the bundled Observatories table; unknown
+  name errors. Composes with array arithmetic / indexing.
+
 ### Phase 94 — full MSSelection time grammar + uvdist `:P%`
 
 ```julia

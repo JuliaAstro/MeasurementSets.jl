@@ -88,6 +88,7 @@ export measure, measinfo, measconvert, MeasFrame, MeasInfo, observatory   # conv
 export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, reftype
 export MBaseline, MuvW, MEarthMagnetic, IGRF, earthfield
 export EarthMagneticMachine, emm_lineofsight
+export rotation_measure, faraday_rotation, derotate_angle, RM_IONOSPHERE
 export Ephemeris, open_ephemeris, field_ephemeris, ephemeris_direction,
     ephemeris_radvel, ephemeris_distance, ephemeris_diskpos
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,

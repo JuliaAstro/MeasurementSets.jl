@@ -535,6 +535,15 @@ function _parse_atom_base!(p::TQLParser)
     end
     t = _advance!(p)
     if t.kind === :num
+        # a spaced postfix unit: `1.4 GHz`, `3 km` -- the next token is a
+        # bare ident that is not a column and is a known unit string
+        # (casacore's `simexpr unit`).
+        nx = _peek(p)
+        if nx.kind === :ident && !(nx.text in p.validnames) &&
+           _sexagesimal_unit(nx.text) === nothing && _tql_known_unit(nx.text)
+            _advance!(p)
+            return TQLQuantityLit(_tql_quantity(t.value, nx.text))
+        end
         return TQLLit(t.value)
     elseif t.kind === :qty
         return TQLQuantityLit(_tql_quantity(t.value[1], t.value[2]))

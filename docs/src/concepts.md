@@ -113,7 +113,12 @@ index ranges `a~b`/`a~b^step` or `CHAN_FREQ` ranges `f1~f2GHz`);
 `mscal.chan('0:5~20')` returns the per-row selected-channel `BitVector`.
 `mscal.corr('RR,LL')` (polarization-setup match) and `mscal.feed('0 & 1')`
 (the `mscal.baseline` form on `FEED1`/`FEED2`) round out the selection
-set.
+set.  **`meas.*`** (a subset of casacore's `libmeas` UDFs) does measure
+conversions on ordinary expressions:
+`meas.<frame>(['SRC', ]lon, lat[, mjd[, x, y, z]])` →
+`[lon, lat]` in `j2000` / `b1950` / `app` / `galactic` / `ecliptic` /
+`azel` / `hadec` / `itrf`; `meas.epoch('TAI', mjd)` converts a time
+scale; `meas.last(mjd, x, y, z)` is the local apparent sidereal time.
 
 ## Physical units
 
@@ -195,8 +200,12 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
   IGRF-12, so a cross-check differs by ~100–200 nT (model generation).
   [`EarthMagneticMachine`](@ref)`(height, pos, epoch)` (or
   [`emm_lineofsight`](@ref)) gives the field where the line of sight to a
-  source pierces a shell `height` metres up — the parallel-field input to
-  ionospheric Faraday-rotation / RM corrections.
+  source pierces a shell `height` metres up.
+  [`rotation_measure`](@ref)`(dir, epoch, pos; stec)` folds that with a
+  slant TEC into an ionospheric RM (rad/m²) — thin-shell
+  `RM_IONOSPHERE · STEC · B∥`; [`faraday_rotation`](@ref)`(rm, freq)` is
+  the resulting `RM·λ²` polarization-angle rotation and
+  [`derotate_angle`](@ref) removes it.
 
 - **Solar-system body** (`SUN` / `MOON` / `MERCURY` / `VENUS` / `MARS`
   / `JUPITER` / `SATURN` / `URANUS` / `NEPTUNE`): a `FIELD.PHASE_DIR`

@@ -2104,6 +2104,68 @@ end
     # groupby HAVING with a unit literal
     g = groupby(t, "K"; select = ["K" => :K, "n" => "gcount()"], having = "gmax(CHAN_FREQ) > 2.0GHz")
     @test collect(g.K) == Int32[1]                       # K=1 max 2.10e9; K=0 max 1.55e9
+
+    # Phase 95: spaced postfix units
+    @test query(t, "CHAN_FREQ > 1.4 GHz").rows == [3, 4]
+    @test query(t, "CHAN_FREQ BETWEEN 1.35 GHz AND 1.6 GHz").rows == [2, 3]
+    toks = MSv2._taqllite_tokenize("1.4 GHz")            # still two tokens
+    @test toks[1].kind === :num && toks[2].kind === :ident
+end
+
+@testset "Phase 95 — observatory() + spaced-unit parsing" begin
+    d = mktempdir()
+    write_table(joinpath(d, "A"), "T", Pair{String,Any}[
+        "P" => [Float64[-1601185.0, -5041977.0, 3554876.0], Float64[0.0, 0.0, 0.0]],
+        "X" => [1.0, 2.0]]; nrow = 2)
+    t = readtable(joinpath(d, "A"))
+    # observatory('VLA') -> [x,y,z]; distance of P from the array centre
+    r = query(t, "sqrt(sum((P - observatory('VLA'))**2)) < 1e5")
+    @test r.rows == [1]                                  # row 1 is near VLA, row 2 far
+    @test_throws ArgumentError query(t, "observatory('NOWHERE')[1] > 0")
+    # a trailing non-unit ident is still an unknown-column parse error
+    @test_throws ArgumentError MSv2._taqllite_parse("X + 1 zork", Set(["X"]))
+    # `_tql_known_unit`
+    @test MSv2._tql_known_unit("GHz") && MSv2._tql_known_unit("km/s")
+    @test !MSv2._tql_known_unit("zork")
+end
+
+@testset "Phase 97 — meas.* measure conversions" begin
+    # parser (no SOFA needed)
+    p(s) = MSv2._taqllite_parse(s, Set(["RA", "DEC", "T"]))
+    @test p("meas.j2000(RA, DEC)") isa MSv2.TQLFunc
+    @test p("meas.b1950('J2000', RA, DEC)") isa MSv2.TQLFunc
+    @test_throws ArgumentError p("meas.azel(RA, DEC)")            # needs mjd, x, y, z
+    @test_throws ArgumentError p("meas.wombat(RA, DEC)")          # unknown frame
+    @test_throws ArgumentError p("meas.epoch('BOGUS', T)")
+
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    ext === nothing && return
+    d = mktempdir()
+    write_table(joinpath(d, "T"), "T", Pair{String,Any}[
+        "RA" => [2.0, 2.1], "DEC" => [0.5, 0.4],
+        "TIME" => [60454.42 * 86400, 60454.43 * 86400]]; nrow = 2)
+    t = readtable(joinpath(d, "T"))
+
+    # meas.galactic matches measconvert exactly
+    ref = measconvert(MDirection{J2000}(2.0, 0.5), GALACTIC)
+    gt = query(t, "TIME > 0"; select = ["l" => "meas.galactic(RA, DEC)[1]",
+                                        "b" => "meas.galactic(RA, DEC)[2]"])
+    @test collect(gt.l)[1] ≈ ref.lon
+    @test collect(gt.b)[1] ≈ ref.lat
+
+    # meas.azel with epoch + position; elevation in [-π/2, π/2]
+    az = query(t, "TIME > 0"; select = ["el" =>
+        "meas.azel(RA, DEC, TIME/86400.0, -1601185.0, -5041977.0, 3554876.0)[2]"])
+    @test all(x -> -pi/2 <= x <= pi/2, collect(az.el))
+
+    # meas.epoch: TAI − UTC ≈ 37 s
+    e = query(t, "TIME > 0"; select = ["tai" => "meas.epoch('TAI', TIME/86400.0)"])
+    @test collect(e.tai)[1] - 60454.42 ≈ 37 / 86400 atol = 1e-6
+
+    # meas.last returns a sidereal angle in [0, 2π)
+    l = query(t, "TIME > 0"; select = ["last" =>
+        "meas.last(TIME/86400.0, -1601185.0, -5041977.0, 3554876.0)"])
+    @test all(x -> 0 <= x < 2pi, collect(l.last))
 end
 
 @testset "Phase 69 — date/time functions" begin

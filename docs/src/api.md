@@ -81,6 +81,10 @@ MEarthMagnetic
 earthfield
 EarthMagneticMachine
 emm_lineofsight
+rotation_measure
+faraday_rotation
+derotate_angle
+RM_IONOSPHERE
 Ephemeris
 open_ephemeris
 field_ephemeris

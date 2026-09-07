@@ -193,6 +193,14 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # sexagesimal string -> radians (`h` in the string => hour angle)
     "angle" => (s -> _parse_sexagesimal(String(s),
                      occursin(r"[hH]", String(s)) ? :ra : :dec), 1:1),
+    # observatory name -> its ITRF position [x, y, z] (m), from the
+    # bundled Observatories table -- e.g. distance of an antenna from the
+    # array centre: `sqrt(sum((POSITION - observatory('VLA'))**2))`
+    "observatory" => (s -> begin
+        p = observatory(String(s))
+        p === nothing && throw(ArgumentError("TaQL-lite: unknown observatory \"$s\""))
+        Float64[p.x, p.y, p.z]
+    end, 1:1),
 )
 
 # g-prefixed aggregate functions.  `_geval(::TQLAggr)` collects the
@@ -229,6 +237,80 @@ const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
     "gntrues" => (_ntrue, :perelem), "gnfalses" => (_nfalse, :perelem),
 )
 
+# --- meas.* : measure conversions in a TaQL-lite expression (Phase 97),
+#     a subset of casacore's `libmeas` UDF library.
+#
+#   meas.<frame>(['SRC',] lon, lat [, mjd [, x, y, z]])  -> [lon, lat] rad
+#       <frame> = j2000 / b1950 / app / galactic / ecliptic / azel /
+#                 hadec / itrf / icrs;  SRC (a string literal, default
+#                 J2000) is the source frame;  mjd (MJD days) is needed
+#                 for app/azel/hadec/itrf, x,y,z (ITRF m) also for
+#                 azel/hadec/itrf.
+#   meas.epoch('TAI'|'TT'|'TDB'|'UT1'|'UTC', mjd)         -> MJD days
+#   meas.last(mjd, x, y, z)  /  meas.lst(...)             -> LAST rad
+
+const _MEAS_DIR_FRAMES = Dict{String,DataType}(
+    "j2000" => J2000, "b1950" => B1950, "app" => APP, "apparent" => APP,
+    "galactic" => GALACTIC, "gal" => GALACTIC, "ecliptic" => ECLIPTIC,
+    "ecl" => ECLIPTIC, "azel" => AZEL, "hadec" => HADEC, "itrf" => ITRF,
+    "icrs" => ICRS)
+const _MEAS_EPOCH_FRAMES = Dict{String,DataType}(
+    "utc" => UTC, "tai" => TAI, "tt" => TT, "tdt" => TT, "tdb" => TDB, "ut1" => UT1)
+
+_meas_dir_needs_epoch(R) = R === APP || R === AZEL || R === HADEC || R === ITRF
+_meas_dir_needs_pos(R) = R === AZEL || R === HADEC || R === ITRF
+
+function _meas_frame(mjd, xyz)
+    fr = MeasFrame()
+    mjd === nothing || (fr.epoch = MEpoch{UTC}(float(mjd)))
+    xyz === nothing || (fr.position = MPosition{ITRF}(float.(xyz)...))
+    fr
+end
+
+function _meas_dir_convert(target::DataType, sref::AbstractString, lon, lat, mjd, xyz)
+    S = get(_DIRECTION_FRAMES, uppercase(strip(String(sref))), nothing)
+    S === nothing && throw(ArgumentError("meas: unknown source frame \"$sref\""))
+    d = measconvert(MDirection{S}(float(lon), float(lat)), target;
+                    frame = _meas_frame(mjd, xyz))
+    Float64[d.lon, d.lat]
+end
+
+function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
+    R = get(_MEAS_DIR_FRAMES, fn, nothing)
+    if R !== nothing
+        has_sref = !isempty(args) && args[1] isa TQLLit && args[1].value isa AbstractString
+        sref = has_sref ? String(args[1].value) : "J2000"
+        rest = has_sref ? args[2:end] : args
+        need_ep = _meas_dir_needs_epoch(R); need_p = _meas_dir_needs_pos(R)
+        want = 2 + (need_ep ? 1 : 0) + (need_p ? 3 : 0)
+        length(rest) == want || throw(ArgumentError(
+            "TaQL-lite: meas.$fn(['SRC', ]lon, lat" *
+            (need_ep ? ", mjd" : "") * (need_p ? ", x, y, z" : "") *
+            ") in \"$src\""))
+        cb = if need_p
+            (a, b, e, x, y, z) -> _meas_dir_convert(R, sref, a, b, e, (x, y, z))
+        elseif need_ep
+            (a, b, e) -> _meas_dir_convert(R, sref, a, b, e, nothing)
+        else
+            (a, b) -> _meas_dir_convert(R, sref, a, b, nothing, nothing)
+        end
+        return TQLFunc(cb, rest)
+    end
+    if fn == "epoch"
+        (length(args) == 2 && args[1] isa TQLLit && args[1].value isa AbstractString) ||
+            throw(ArgumentError("TaQL-lite: meas.epoch('TAI'|'TT'|'TDB'|'UT1'|'UTC', mjd) in \"$src\""))
+        T = get(_MEAS_EPOCH_FRAMES, lowercase(String(args[1].value)), nothing)
+        T === nothing && throw(ArgumentError("meas.epoch: unknown scale \"$(args[1].value)\""))
+        return TQLFunc(m -> measconvert(MEpoch{UTC}(float(m)), T).mjd, args[2:end])
+    end
+    if fn == "last" || fn == "lst"
+        length(args) == 4 || throw(ArgumentError(
+            "TaQL-lite: meas.last(mjd, x, y, z) in \"$src\""))
+        return TQLFunc((m, x, y, z) -> _lst(_meas_frame(m, (x, y, z))), args)
+    end
+    throw(ArgumentError("TaQL-lite: meas.$fn is not supported in \"$src\""))
+end
+
 function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     n = length(args)
     if startswith(name, "mscal.")
@@ -253,6 +335,9 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
             (fn in _MSCAL_DIR_FUNCS ? " or one direction argument" : "") *
             " in \"$src\""))
         return TQLMScal(fn, _mscal_dir_arg(args[1], src))
+    end
+    if startswith(name, "meas.")
+        return _make_meas_func(name[6:end], args, src)
     end
     if haskey(_TQL_AGGRS, name)
         if name == "gcount"

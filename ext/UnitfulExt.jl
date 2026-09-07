@@ -80,6 +80,10 @@ end
 # `1.4GHz` -> a Unitful.Quantity (parse-time; errors on an unknown unit)
 MS._tql_quantity(num::Real, unit::AbstractString) = num * _ms_uparse(unit)
 
+# a spaced postfix unit (`col > 3 km`) is a unit iff it actually parses
+MS._tql_known_unit(s::AbstractString) =
+    (try _ms_uparse(s); true catch; false end)
+
 # attach a column's QuantumUnits so a `col > 1.4GHz` comparison goes
 # through Unitful; a unitless column (`u === nothing`) stays plain, so
 # `col > 1.4GHz` then raises Unitful's DimensionError (casacore: "units

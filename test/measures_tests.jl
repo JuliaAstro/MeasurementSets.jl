@@ -481,6 +481,32 @@ end
     @test abs(rj.losfield) < hypot(rj.field.x, rj.field.y, rj.field.z)
 end
 
+# Phase 96: ionospheric Faraday rotation / rotation measure.
+@testset "measures — ionospheric Faraday rotation" begin
+    # pure helpers (no SOFA)
+    @test faraday_rotation(1.0, 1.4e9) ≈ (MSv2.C_LIGHT / 1.4e9)^2
+    @test faraday_rotation(2.0, MFrequency{TOPO}(1.0e9)) ≈ 2 * (MSv2.C_LIGHT / 1.0e9)^2
+    @test derotate_angle(0.7, 3.0, 1.0e9) ≈ 0.7 - faraday_rotation(3.0, 1.0e9)
+    @test RM_IONOSPHERE ≈ 2.631e-6
+
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    ext === nothing && return
+    vla = MPosition{ITRF}(-1601185.365, -5041977.547, 3554875.870)
+    ep = MEpoch{UTC}(60454.4225)
+    posl = hypot(vla.x, vla.y, vla.z)
+    up = MDirection{ITRF}(atan(vla.y, vla.x), asin(vla.z / posl))
+
+    m = EarthMagneticMachine(350e3, vla, ep)
+    rm = rotation_measure(m, up; stec = 10.0)
+    @test rm ≈ -RM_IONOSPHERE * 10.0 * m(up).losfield
+    @test abs(rm) < 5.0                         # a plausible ionospheric RM (rad/m²)
+    # scales linearly with STEC; the free-function form agrees
+    @test rotation_measure(m, up; stec = 20.0) ≈ 2 * rm
+    @test rotation_measure(up, ep, vla; stec = 10.0) ≈ rm
+    # Δχ at 150 MHz is ~ (10 / 1.5)² larger than at 1.5 GHz
+    @test faraday_rotation(rm, 150e6) ≈ 100 * faraday_rotation(rm, 1.5e9) rtol = 1e-12
+end
+
 if _HAVE_MEAS_CASA
     @testset "measures — casatools oracle cross-check" begin
         ref_jl = joinpath(mktempdir(), "measref.jl")
