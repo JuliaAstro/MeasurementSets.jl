@@ -81,7 +81,9 @@ masked arrays (`V[boolexpr]`, `marray` / `arraydata` / `arraymask`,
 reductions skip masked elements) *are* supported. So are array literals
 (`[a, b, c]`), scientific-notation numbers (`1.4e9`), **quantity
 literals** (`1.4GHz`, `10arcsec` — compared against a column that
-carries a `QuantumUnits` keyword; needs the Unitful extension), and
+carries a `QuantumUnits` keyword; needs the Unitful extension),
+**sexagesimal literals** (`10h30m`, `45d51m16s`, `12h`, `45d` → radians;
+`h` = hour angle ×15, `d` = degrees), and
 **date/time + angle functions** (`datetime`, `mjd`, `mjdtodate`,
 `date`, `time`, `year`/`month`/`day`/`weekday`, `cdate`/`ctime`/…,
 `hms`/`dms`, `angle` (sexagesimal `'10h30m'` → radians), `normangle`,

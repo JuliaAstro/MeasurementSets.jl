@@ -328,7 +328,10 @@ use `**` for exponentiation), `~=` / `!~=` approximate equality
 (casacore's `near`, relative tolerance `1e-5`), scientific-notation
 number literals (`1.4e9`), **quantity literals** (`1.4GHz`, `10arcsec`,
 `30deg` -- compared against a column carrying a `QuantumUnits` keyword;
-needs the Unitful extension), and **date/time + angle functions**:
+needs the Unitful extension), **sexagesimal literals** (`10h30m`,
+`45d51m16s`, `12h`, `45d` -- an `h`-prefix is an hour angle ×15, a
+`d`-prefix is degrees; the value is radians), and **date/time + angle
+functions**:
 `datetime`/`mjd`/`mjdtodate`/`date`/`time` (all MJD-day `Float64`),
 `year`/`month`/`day`/`week`/`weekday`, `cdate`/`ctime`/`cmonth`/`cdow`/
 `ctod`, `hms`/`dms` (radians → sexagesimal string), `angle('10h30m')`

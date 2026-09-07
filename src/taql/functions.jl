@@ -46,6 +46,14 @@ const _TQL_DT_FORMATS = (
 # degrees), `:dec` / `:angle` (d/m/s degrees). Accepts `10h42m31.3s`,
 # `10:42:31.3`, `10 42 31.3`, a leading sign, or a bare decimal (degrees).
 # Returns radians.
+# classify a `<num><unit>` literal's unit run as a sexagesimal token:
+# `h` / `h30m` / `h30m15s` -> :ra, `d` / `d51m` / `d51m16` -> :dec, else
+# `nothing` (a plain quantity literal like `30deg` / `1.4GHz`).
+function _sexagesimal_unit(u::AbstractString)
+    m = match(r"^([hd])(?:\d+(?:\.\d+)?m(?:\d+(?:\.\d+)?s?)?|\d+(?:\.\d+)?s)?$", u)
+    m === nothing ? nothing : (m[1] == "h" ? :ra : :dec)
+end
+
 function _parse_sexagesimal(s::AbstractString, kind::Symbol)
     t = strip(String(s))
     neg = startswith(t, "-")

@@ -91,7 +91,13 @@ function _taqllite_tokenize(s::AbstractString)
                     j += 1
                 end
                 unit = join(cs[u0:j-1])
-                push!(toks, TQLToken(:qty, string(text, unit), (val, unit)))
+                sx = _sexagesimal_unit(unit)          # :ra | :dec | nothing
+                if sx !== nothing                     # `10h30m`, `45d51m16s`, `12h`, `45d`
+                    full = string(text, unit)
+                    push!(toks, TQLToken(:num, full, _parse_sexagesimal(full, sx)))
+                else
+                    push!(toks, TQLToken(:qty, string(text, unit), (val, unit)))
+                end
             else
                 push!(toks, TQLToken(:num, text, val))
             end
