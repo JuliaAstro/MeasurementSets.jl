@@ -1478,6 +1478,37 @@ query(main, ""; select = ["w" => "mscal.uvw_j2000()", "d" => "mscal.delay()"])
   `last1` to < 1″ (`pa1` uses casacore's HADEC-pole, not the J2000
   pole).
 - Non-goals: the CASA-MSSelection selection functions (`mscal.baseline`
-  / `mscal.spw` / …), `mscal.stokes`, the Observatories-table array
-  centre, `mscal.*` in a `query` closure / a `join` `on` string / on a
-  `GroupedTable`.
+  / `mscal.spw` / …), the Observatories-table array centre, `mscal.*`
+  in a `query` closure / a `join` `on` string / on a `GroupedTable`.
+
+### Phase 78 — `mscal.stokes()` polarization conversion
+
+`mscal.stokes(col [, 'types'] [, rescale])` — a TaQL-lite function that
+converts a `DATA` / `FLAG` / `WEIGHT` array cell between correlation
+bases, a port of casacore's `StokesConverter`.
+
+```julia
+query(main, "any(abs(mscal.stokes(DATA, 'I')) > 5.0)")
+groupby(main, "FIELD_ID"; select = ["p" => "gmean(mean(abs(mscal.stokes(DATA, 'I'))))"])
+```
+
+- `types` (default `'IQUV'`) is an alias (`IQUV` / `STOKES`,
+  `CIRC` / `CIRCULAR`, `LIN` / `LINEAR`) or a comma-list of Stokes /
+  circular / linear names (`'I'`, `'I,V'`, `'XX,YY'`). Mixed-hand
+  `RX..YL` outputs are not supported.
+- Input basis comes from `POLARIZATION.CORR_TYPE` row 1 (one setup per
+  MS, as casacore's UDF does). The result is a `(nOut, nchan)` matrix;
+  a `(ncorr,)` `WEIGHT` / `SIGMA` cell yields a `(nOut,)` vector.
+- Per-cell: a matrix multiply for Complex data
+  (`out[o,ch] = Σⱼ conv[o,j]·in[j,ch]`), an any-of-contributing test
+  for Bool flags, the weight-propagation formula for Float weights.
+  The 6 basis-change 4×4 matrices are hardcoded (no `LinearAlgebra`);
+  `rescale` applies casacore's 0.5 fudge factor to codes 5–12.
+- Threading mirrors `mscal.*`: a `TQLStokes` node, a `"::stokes::…"`
+  sentinel ref split by `_stokes_split` in `_tql_cols` (covers `query` +
+  `groupby`) and `_vtq_prepare!`.
+- Cross-checked against real `derivedmscal` `mscal.stokes` to
+  `rtol = 1e-5`.
+- Non-goals: `RX..YL` input frames; the `Ptotal` / `Plinear` / … pseudo
+  outputs; per-`DATA_DESC_ID` `CORR_TYPE`; `mscal.stokes` in a `query`
+  closure / `join` `on` string.
