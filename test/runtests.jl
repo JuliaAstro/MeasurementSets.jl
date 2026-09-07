@@ -12,6 +12,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
     joinpath(@__DIR__, "data", "sample.ms"))
 
 @testset "MeasurementSets" begin
+    include("aqua_tests.jl")
     include("aipsio_tests.jl")
     include("casacore_crosscheck.jl")       # defines _HAVE_CASACORE / CCT
 
