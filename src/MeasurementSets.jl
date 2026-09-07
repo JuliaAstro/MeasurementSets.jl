@@ -29,6 +29,9 @@ See the README and `CHANGELOG.md` for the full picture.
 """
 module MeasurementSets
 
+# --- shared physical / calendar constants ---
+include("constants.jl")
+
 # --- wire-format codecs + the CTDS type system ---
 include("io/aips.jl")
 include("tables/typeenum.jl")

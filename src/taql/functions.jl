@@ -26,9 +26,8 @@ _tql_arraymask(_) = false
 # Every TaQL-lite date value is an MJD `Float64` (days) -- so `_bcast`,
 # `isless`, ORDER BY all keep working. casacore's `datetime`/`mjd`/... are
 # built-in (`casa/Quanta` only). `Dates` (stdlib) does the parsing.
-const _TQL_MJD0 = Dates.DateTime(1858, 11, 17)
-_tql_mjd_of(dt::Dates.DateTime) = (dt - _TQL_MJD0) / Dates.Millisecond(86_400_000)
-_tql_dt_of(m::Real) = _TQL_MJD0 + Dates.Millisecond(round(Int, float(m) * 86_400_000))
+_tql_mjd_of(dt::Dates.DateTime) = (dt - MJD_EPOCH) / Dates.Millisecond(MSEC_PER_DAY)
+_tql_dt_of(m::Real) = MJD_EPOCH + Dates.Millisecond(round(Int, float(m) * MSEC_PER_DAY))
 
 const _TQL_DT_FORMATS = (
     Dates.DateFormat("yyyy-mm-ddTHH:MM:SS.s"),

@@ -94,6 +94,9 @@ L.append(f"  radialvelocity = ({', '.join(rvparts)}),")
 # doppler: RADIO -> {OPTICAL, RATIO, TRUE, GAMMA}, and the bridges.
 # NB casatools reports every doppler `m0` as <raw value> * c in "m/s"
 # (MVDoppler::get), so divide by c to recover the dimensionless value.
+# `_C` is the exact SI speed of light -- matches `MeasurementSets.C_LIGHT`
+# and casacore's `casa::C::c` (this is a separate process; the value
+# cannot be imported).
 _C = 2.99792458e8
 dop = me.doppler("RADIO", qa.quantity(DOP_RADIO, ""))
 dparts = [f"{c} = {me.measure(dop, c)['m0']['value'] / _C!r}"

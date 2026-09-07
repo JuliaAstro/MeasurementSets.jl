@@ -158,10 +158,10 @@ end
     @test frequency(d, ν0).hz ≈ 1.4e9
     @test restfrequency(f, d).hz ≈ ν0
     @test frequency(d, MFrequency{REST}(ν0)).hz ≈ 1.4e9        # accepts an MFrequency rest
-    @test radialvelocity(d).mps ≈ 2.99792458e8 * d.d
+    @test radialvelocity(d).mps ≈ MSv2.C_LIGHT * d.d
 
     # MRadialVelocity <-> MDoppler
-    @test doppler(MRadialVelocity{LSRK}(3e5)).d ≈ 3e5 / 2.99792458e8
+    @test doppler(MRadialVelocity{LSRK}(3e5)).d ≈ 3e5 / MSv2.C_LIGHT
     @test radialvelocity(doppler(MRadialVelocity{BARY}(-1.2e5))).mps ≈ -1.2e5
 
     # MEASINFO round-trip
@@ -267,7 +267,7 @@ if _HAVE_MEAS_CASA
 
         # direction (arcsec tolerance; APP/AZEL depend on EOP)
         d = MDirection{J2000}(ref.src_ra, ref.src_dec)
-        as = deg2rad(1 / 3600)
+        as = MSv2.ARCSEC
         for (frame, T) in (("B1950", B1950), ("GALACTIC", GALACTIC),
                            ("APP", APP), ("AZEL", AZEL), ("AZELGEO", AZELGEO),
                            ("HADEC", HADEC))

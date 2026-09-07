@@ -1,8 +1,6 @@
 # Read a measure-valued column cell as a typed `Measure` (or a vector of
 # them, for an array-valued measure column such as `SPECTRAL_WINDOW.CHAN_FREQ`).
 
-const _SEC_PER_DAY = 86_400.0
-
 """
     measure(t, col, row) -> Measure | Vector{Measure}
     measure(t, col)      -> Vector
@@ -42,7 +40,7 @@ end
 # MJD in the QuantumUnits, almost always "s").
 _epoch_mjd(v::Real, units) =
     (isempty(units) || lowercase(strip(units[1])) in ("s", "sec", "second", "seconds")) ?
-    float(v) / _SEC_PER_DAY : float(v)
+    float(v) / SEC_PER_DAY : float(v)
 
 function _wrap_measure(kind::Symbol, R::Type, v, mi::MeasInfo)
     if kind === :epoch
