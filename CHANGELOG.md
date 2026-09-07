@@ -1583,7 +1583,23 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
-### Phase 86 — sexagesimal angle parsing
+### Phase 87 — bare sexagesimal literals in the grammar
+
+```julia
+query(main, "PHASE_DIR[1] > 10h30m AND PHASE_DIR[2] BETWEEN 40d AND 50d")
+```
+
+- The tokenizer recognises a `<number><unit>` run whose unit is a
+  sexagesimal token (`h` / `h30m` / `h30m15s` → hour angle, `d` /
+  `d51m` / `d51m16` → degrees) and emits a `:num` token with the value
+  in radians (via the Phase-86 `_parse_sexagesimal`). `_sexagesimal_unit`
+  does the classification.
+- A unit that isn't a sexagesimal token (`30deg`, `1.4GHz`, `10m`) stays
+  a Phase-69 quantity literal — no regression.
+- `10h` now means "10 hours of hour angle = 150°", not a 10-hour
+  duration (matches casacore TaQL); use arithmetic on seconds for a
+  duration.
+
 
 ```julia
 query(main, "mscal.el1('10h42m31.3, 45d51m16')")     # a J2000 direction

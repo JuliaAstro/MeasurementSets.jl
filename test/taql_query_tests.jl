@@ -2130,6 +2130,18 @@ end
     @test f("angle")("10h30m") ≈ deg2rad(157.5)
     @test f("angle")("-12.5") ≈ deg2rad(-12.5)
 
+    # Phase 87: bare sexagesimal literals in the tokenizer
+    @test MSv2._sexagesimal_unit("h30m") === :ra
+    @test MSv2._sexagesimal_unit("d51m16s") === :dec
+    @test MSv2._sexagesimal_unit("h") === :ra
+    @test MSv2._sexagesimal_unit("deg") === nothing        # a plain quantity
+    @test MSv2._sexagesimal_unit("m") === nothing
+    tk(s) = MSv2._taqllite_tokenize(s)[1]
+    @test tk("10h30m").kind === :num && tk("10h30m").value ≈ deg2rad(157.5)
+    @test tk("45d51m16s").value ≈ deg2rad(45.854444)
+    @test tk("12h").value ≈ pi
+    @test tk("30deg").kind === :qty                          # unchanged
+
     # in a query
     d = mktempdir()
     T = Float64[58000, 58891, 59500, 60000] .* 86400.0
@@ -2137,6 +2149,12 @@ end
     write_table(dir, "M", Pair{String,Any}["T" => T]; nrow=4)
     t = readtable(dir)
     @test query(t, "T > datetime('2020-02-12') * 86400.0").rows == [3, 4]
+
+    dir2 = joinpath(d, "ra.tab")
+    write_table(dir2, "R", Pair{String,Any}["RA" => [2.5, 2.8, 3.1]]; nrow=3)
+    tr = readtable(dir2)
+    @test query(tr, "RA > 10h30m").rows == [2, 3]            # 157.5 deg = 2.749 rad
+    @test query(tr, "RA BETWEEN 8h AND 12h").rows == [1, 2, 3]
 end
 
 @testset "Phase 69 — angdist / array literal" begin
