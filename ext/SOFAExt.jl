@@ -16,7 +16,7 @@ import SOFA
 import MeasurementSets as MS
 using StaticArrays: SVector, SMatrix
 using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity,
-    MBaseline, MuvW,
+    MBaseline, MuvW, MEarthMagnetic, IGRF,
     RefFrame, MeasFrame, reftype,
     UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
@@ -498,6 +498,31 @@ function MS._mconv(u::MuvW{A}, ::Type{B}, frame::MeasFrame) where {A<:RefFrame,B
     dB = MS.measconvert(frame.direction, B; frame)
     w = _frompole((bB.x, bB.y, bB.z), dB)                   # plain baseline -> uvw in B
     MuvW{B}(w...)
+end
+
+# ======================================================================
+# Earth magnetic field  (nano-tesla, direction-family frames + IGRF model)
+# ======================================================================
+
+# A field vector rotates like a plain vector -- same as `MCBaseline`:
+# rotate the unit direction with the `MDirection` code, keep the length.
+function MS._mconv(m::MEarthMagnetic{A}, ::Type{B}, frame::MeasFrame) where {A<:RefFrame,B<:RefFrame}
+    r = hypot(m.x, m.y, m.z)
+    r == 0 && return MEarthMagnetic{B}(0.0, 0.0, 0.0)
+    d2 = MS.measconvert(_xyz_dir(A, m.x, m.y, m.z), B; frame)
+    ux, uy, uz = _dir_xyz(d2)
+    MEarthMagnetic{B}(r * ux, r * uy, r * uz)
+end
+
+# The IGRF model frame: evaluate the field at `frame.position` /
+# `frame.epoch` (giving an ITRF vector), then rotate to `B`.
+function MS._mconv(::MEarthMagnetic{IGRF}, ::Type{B}, frame::MeasFrame) where {B<:RefFrame}
+    frame.position === nothing && error(
+        "MeasurementSets: an IGRF earth-magnetic conversion needs `frame.position`")
+    frame.epoch === nothing && error(
+        "MeasurementSets: an IGRF earth-magnetic conversion needs `frame.epoch`")
+    bf = MS.earthfield(frame.position, frame.epoch)
+    B === ITRF ? bf : MS._mconv(bf, B, frame)
 end
 
 end # module

@@ -88,6 +88,11 @@ for (T, doc) in [
     @eval @doc $doc $T
 end
 
+"""IGRF-14 geomagnetic field model as an [`MEarthMagnetic`](@ref) source
+frame — `measconvert(MEarthMagnetic{IGRF}(...), ITRF; frame)` evaluates
+the field at `frame.position` and `frame.epoch`."""
+struct IGRF <: RefFrame end
+
 "A reference-frame name string casacore uses that this package parses but does not convert."
 struct OtherRef{S} <: RefFrame end
 
@@ -211,8 +216,23 @@ struct MuvW{R<:RefFrame}
     w::Float64
 end
 
+"""
+    MEarthMagnetic{R}(x, y, z)
+
+The Earth's magnetic field as a 3-vector in **nano-tesla**, in direction
+frame `R`. `MEarthMagnetic{IGRF}` is a model frame:
+`measconvert(MEarthMagnetic{IGRF}(...), R; frame)` evaluates the IGRF-14
+field at `frame.position` / `frame.epoch` and rotates it to `R`. See
+[`earthfield`](@ref).
+"""
+struct MEarthMagnetic{R<:RefFrame}
+    x::Float64
+    y::Float64
+    z::Float64
+end
+
 const Measure = Union{MEpoch,MDirection,MPosition,MFrequency,MRadialVelocity,
-                      MDoppler,MBaseline,MuvW}
+                      MDoppler,MBaseline,MuvW,MEarthMagnetic}
 
 """
     reftype(m::Measure) -> Type{<:RefFrame}
@@ -227,6 +247,7 @@ reftype(::MRadialVelocity{R}) where {R} = R
 reftype(::MDoppler{C}) where {C}        = C
 reftype(::MBaseline{R}) where {R}       = R
 reftype(::MuvW{R}) where {R}            = R
+reftype(::MEarthMagnetic{R}) where {R}  = R
 
 # --- direction <-> unit vector (radians <-> xyz) ---------------------
 _dir_xyz(d::MDirection) = (cos(d.lat) * cos(d.lon), cos(d.lat) * sin(d.lon), sin(d.lat))
@@ -243,6 +264,7 @@ Base.show(io::IO, m::MRadialVelocity{R}) where {R} = print(io, "MRadialVelocity{
 Base.show(io::IO, m::MDoppler{C}) where {C}     = print(io, "MDoppler{$(nameof(C))}(", m.d, ")")
 Base.show(io::IO, m::MBaseline{R}) where {R}    = print(io, "MBaseline{$(nameof(R))}(", m.x, ", ", m.y, ", ", m.z, " m)")
 Base.show(io::IO, m::MuvW{R}) where {R}         = print(io, "MuvW{$(nameof(R))}(", m.u, ", ", m.v, ", ", m.w, " m)")
+Base.show(io::IO, m::MEarthMagnetic{R}) where {R} = print(io, "MEarthMagnetic{$(nameof(R))}(", m.x, ", ", m.y, ", ", m.z, " nT)")
 
 # ======================================================================
 # conversion frame  -- supplies epoch / position / direction as needed

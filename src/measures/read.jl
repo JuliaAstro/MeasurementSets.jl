@@ -71,6 +71,9 @@ function _wrap_measure(kind::Symbol, R::Type, v, mi::MeasInfo)
     elseif kind === :baseline
         return MBaseline{R}(_vec3(v)...)
 
+    elseif kind === :earthmagnetic
+        return MEarthMagnetic{R}(_vec3(v)...)
+
     elseif kind === :direction
         lo, la = _lonlat(v)
         return MDirection{R}(lo, la)

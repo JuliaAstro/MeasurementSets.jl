@@ -60,6 +60,7 @@ const _MEAS_FRAMES = Dict{Symbol,Dict{String,DataType}}(
         "RADIO" => RADIO, "OPTICAL" => OPTICAL, "Z" => OPTICAL,
         "RATIO" => RATIO, "BETA" => BETA, "TRUE" => BETA,
         "RELATIVISTIC" => BETA, "GAMMA" => GAMMA),
+    :earthmagnetic => merge(_DIRECTION_FRAMES, Dict("IGRF" => IGRF)),
 )
 
 # fixed casacore refcode enum order for the kinds that use VarRefCol
@@ -79,6 +80,7 @@ const _MEAS_ENUM = Dict{Symbol,Vector{String}}(
     :radialvelocity => ["LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO",
                         "LGROUP", "CMB"],
     :doppler => ["RADIO", "Z", "RATIO", "BETA", "GAMMA"],
+    :earthmagnetic => _DIRECTION_ENUM,
     :epoch => ["LAST", "LMST", "GMST1", "GAST", "UT1", "UT2", "UTC", "TAI",
                "TDT", "TCG", "TDB", "TCB"],
 )
@@ -175,6 +177,7 @@ const _FRAME_STRING = Dict{DataType,String}(
     MERCURY => "MERCURY", VENUS => "VENUS", MARS => "MARS",
     JUPITER => "JUPITER", SATURN => "SATURN", URANUS => "URANUS",
     NEPTUNE => "NEPTUNE", SUN => "SUN", MOON => "MOON",
+    IGRF => "IGRF",
     # Doppler conventions -- casacore `showType` spells BETA as "TRUE"
     RADIO => "RADIO", OPTICAL => "OPTICAL", RATIO => "RATIO",
     BETA => "TRUE", GAMMA => "GAMMA")

@@ -388,6 +388,60 @@ end
     @test_throws ErrorException measconvert(MDirection{SUN}(0.0, 0.0), J2000; frame = MeasFrame())
 end
 
+# Phase 91: MEarthMagnetic + the IGRF-14 model.
+@testset "measures — MEarthMagnetic / IGRF" begin
+    alma = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150)
+    ep = MEpoch{UTC}(60454.42255)
+
+    bf = earthfield(alma, ep)
+    @test bf isa MEarthMagnetic{ITRF}
+    mag = hypot(bf.x, bf.y, bf.z)
+    @test 10_000 < mag < 60_000                       # plausible field strength (nT)
+
+    # a polar site has a near-vertical, ~stronger field
+    npole = MPosition{ITRF}(0.0, 0.0, 6.35e6)
+    bp = earthfield(npole, ep)
+    @test hypot(bp.x, bp.y, bp.z) > mag
+    @test abs(bp.z) / hypot(bp.x, bp.y, bp.z) > 0.9   # mostly vertical
+
+    # epoch interpolation: 2024 field differs from 2000 by a real amount
+    b2000 = earthfield(alma, MEpoch{UTC}(51544.0))
+    @test hypot((bf.x, bf.y, bf.z) .- (b2000.x, b2000.y, b2000.z)...) > 100
+
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    if ext !== nothing
+        fr = MeasFrame(epoch = ep, position = alma)
+
+        # IGRF model -> ITRF is exactly `earthfield`
+        bi = measconvert(MEarthMagnetic{IGRF}(0.0, 0.0, 1e-6), ITRF; frame = fr)
+        @test (bi.x, bi.y, bi.z) == (bf.x, bf.y, bf.z)
+
+        # rotation to a celestial frame preserves the magnitude; round-trips
+        bj = measconvert(MEarthMagnetic{IGRF}(0.0, 0.0, 1e-6), J2000; frame = fr)
+        @test bj isa MEarthMagnetic{J2000}
+        @test hypot(bj.x, bj.y, bj.z) ≈ mag rtol = 1e-9
+        back = measconvert(bj, ITRF; frame = fr)
+        @test all(abs.((back.x, back.y, back.z) .- (bf.x, bf.y, bf.z)) .< 1e-6)
+
+        @test_throws ErrorException measconvert(MEarthMagnetic{IGRF}(0.0, 0.0, 1e-6),
+                                                ITRF; frame = MeasFrame())
+    end
+
+    # write / read round-trip of an MEarthMagnetic column
+    d = mktempdir()
+    tab = joinpath(d, "T")
+    write_table(tab, "T",
+        ["B" => [MEarthMagnetic{ITRF}(100.0i, -200.0i, 300.0i) for i in 1:3]];
+        nrow = 3)
+    t = readtable(tab)
+    @test measinfo(t, "B").kind === :earthmagnetic
+    @test measinfo(t, "B").fixedref == "ITRF"
+    @test columndesc(t, "B").keywords["QuantumUnits"] == ["nT", "nT", "nT"]
+    mb = measure(t, "B", 2)
+    @test mb isa MEarthMagnetic{ITRF}
+    @test (mb.x, mb.y, mb.z) == (200.0, -400.0, 600.0)
+end
+
 if _HAVE_MEAS_CASA
     @testset "measures — casatools oracle cross-check" begin
         ref_jl = joinpath(mktempdir(), "measref.jl")
@@ -470,6 +524,21 @@ if _HAVE_MEAS_CASA
                           ("TRUE", BETA), ("GAMMA", GAMMA))
             @test measconvert(d0, T).d ≈ getproperty(ref.doppler, Symbol(conv)) rtol = 1e-12
         end
+        # earth magnetic field: casacore ships IGRF-12, MeasurementSets
+        # bundles IGRF-14 -> a model-generation difference of ~100-200 nT
+        # is expected. Check the frame rotation is right (magnitude equal
+        # ITRF vs J2000) and the field agrees to ~2%.
+        em_itrf = measconvert(MEarthMagnetic{IGRF}(0.0, 0.0, 1e-6), ITRF; frame = fr)
+        em_j2000 = measconvert(MEarthMagnetic{IGRF}(0.0, 0.0, 1e-6), J2000; frame = fr)
+        wi = ref.earthmagnetic.ITRF
+        wj = ref.earthmagnetic.J2000
+        magw = hypot(wi...)
+        @test hypot(em_itrf.x, em_itrf.y, em_itrf.z) ≈ magw rtol = 0.03
+        @test hypot(em_j2000.x, em_j2000.y, em_j2000.z) ≈
+              hypot(em_itrf.x, em_itrf.y, em_itrf.z) rtol = 1e-9
+        @test all(abs.((em_itrf.x, em_itrf.y, em_itrf.z) .- wi) .< 0.03 * magw + 200)
+        @test all(abs.((em_j2000.x, em_j2000.y, em_j2000.z) .- wj) .< 0.03 * magw + 200)
+
         obsf = MFrequency{LSRK}(ref.obs_freq_hz)
         d = doppler(obsf, ref.rest_hz)
         @test d.d ≈ ref.dop_from_freq rtol = 1e-12

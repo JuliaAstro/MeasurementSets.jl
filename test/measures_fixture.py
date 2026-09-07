@@ -121,6 +121,19 @@ L.append(f"  dop_from_freq = {d_from_f['m0']['value'] / _C!r},")
 L.append(f"  rv_from_dop = {me.toradialvelocity('LSRK', d_from_f)['m0']['value']!r},")
 L.append(f"  freq_from_dop = {me.tofrequency('LSRK', d_from_f, qa.quantity(REST_HZ, 'Hz'))['m0']['value']!r},")
 L.append(f"  rest_from_freq = {me.torestfrequency(obsf, d_from_f)['m0']['value']!r},")
+# earth magnetic field: IGRF model -> {ITRF, J2000}.  casacore ships
+# IGRF-12; MeasurementSets bundles IGRF-14 -> a ~100-150 nT (model
+# generation) difference is expected, so the Julia test uses a loose
+# tolerance and mainly checks the frame rotation + magnitude.
+me.doframe(e0)
+me.doframe(pos)
+bfield = me.earthmagnetic("IGRF")
+emparts = []
+for fr in ("ITRF", "J2000"):
+    mm = me.measure(bfield, fr)
+    emparts.append(f"{fr} = ({mm['m0']['value']!r}, {mm['m1']['value']!r}, {mm['m2']['value']!r})")
+L.append(f"  earthmagnetic = ({', '.join(emparts)}),")
+
 L.append(")")
 
 with open(sys.argv[1], "w") as fh:

@@ -77,6 +77,8 @@ MRadialVelocity
 MDoppler
 MBaseline
 MuvW
+MEarthMagnetic
+earthfield
 Ephemeris
 open_ephemeris
 field_ephemeris
@@ -128,6 +130,7 @@ URANUS
 NEPTUNE
 SUN
 MOON
+IGRF
 RADIO
 OPTICAL
 RATIO
