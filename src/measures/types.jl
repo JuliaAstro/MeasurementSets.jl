@@ -160,7 +160,36 @@ struct MDoppler{C<:DopplerType}
     d::Float64
 end
 
-const Measure = Union{MEpoch,MDirection,MPosition,MFrequency,MRadialVelocity,MDoppler}
+"""
+    MBaseline{R}(x, y, z)
+
+A baseline vector (antenna → antenna) in **metres**, in direction frame
+`R` (`ITRF` / `J2000` / `APP` / `AZEL` / `HADEC` / `GALACTIC` / …).
+`measconvert` rotates it between frames (needs `import SOFA`), preserving
+its length — equivalent to converting the unit direction and rescaling.
+"""
+struct MBaseline{R<:RefFrame}
+    x::Float64
+    y::Float64
+    z::Float64
+end
+
+"""
+    MuvW{R}(u, v, w)
+
+A `uvw` baseline coordinate in **metres**, in direction frame `R` — the
+`UVW` column of an MS. Differs from an [`MBaseline`](@ref) by the
+rotation onto the frame whose w-axis points at the phase centre, so
+`measconvert` also needs `frame.direction` (the phase centre).
+"""
+struct MuvW{R<:RefFrame}
+    u::Float64
+    v::Float64
+    w::Float64
+end
+
+const Measure = Union{MEpoch,MDirection,MPosition,MFrequency,MRadialVelocity,
+                      MDoppler,MBaseline,MuvW}
 
 """
     reftype(m::Measure) -> Type{<:RefFrame}
@@ -173,6 +202,8 @@ reftype(::MPosition{R}) where {R}       = R
 reftype(::MFrequency{R}) where {R}      = R
 reftype(::MRadialVelocity{R}) where {R} = R
 reftype(::MDoppler{C}) where {C}        = C
+reftype(::MBaseline{R}) where {R}       = R
+reftype(::MuvW{R}) where {R}            = R
 
 # --- direction <-> unit vector (radians <-> xyz) ---------------------
 _dir_xyz(d::MDirection) = (cos(d.lat) * cos(d.lon), cos(d.lat) * sin(d.lon), sin(d.lat))
@@ -187,6 +218,8 @@ Base.show(io::IO, m::MPosition{R}) where {R}    = print(io, "MPosition{$(nameof(
 Base.show(io::IO, m::MFrequency{R}) where {R}   = print(io, "MFrequency{$(nameof(R))}(", m.hz, " Hz)")
 Base.show(io::IO, m::MRadialVelocity{R}) where {R} = print(io, "MRadialVelocity{$(nameof(R))}(", m.mps, " m/s)")
 Base.show(io::IO, m::MDoppler{C}) where {C}     = print(io, "MDoppler{$(nameof(C))}(", m.d, ")")
+Base.show(io::IO, m::MBaseline{R}) where {R}    = print(io, "MBaseline{$(nameof(R))}(", m.x, ", ", m.y, ", ", m.z, " m)")
+Base.show(io::IO, m::MuvW{R}) where {R}         = print(io, "MuvW{$(nameof(R))}(", m.u, ", ", m.v, ", ", m.w, " m)")
 
 # ======================================================================
 # conversion frame  -- supplies epoch / position / direction as needed

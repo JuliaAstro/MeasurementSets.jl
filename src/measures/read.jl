@@ -46,9 +46,14 @@ function _wrap_measure(kind::Symbol, R::Type, v, mi::MeasInfo)
     if kind === :epoch
         return MEpoch{R}(_epoch_mjd(_scalar(v), mi.units))
 
-    elseif kind === :position || kind === :uvw
-        xyz = _vec3(v)
-        return MPosition{R}(xyz...)
+    elseif kind === :position
+        return MPosition{R}(_vec3(v)...)
+
+    elseif kind === :uvw
+        return MuvW{R}(_vec3(v)...)
+
+    elseif kind === :baseline
+        return MBaseline{R}(_vec3(v)...)
 
     elseif kind === :direction
         lo, la = _lonlat(v)

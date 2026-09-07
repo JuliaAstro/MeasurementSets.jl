@@ -1389,3 +1389,34 @@ radialvelocity.(measure(spw, "CHAN_FREQ", 1), ν₀)   # a whole velocity axis
 - `_beta_factor` extracted and reused by `frequency` / `restfrequency`.
 
 2735 tests.
+
+### Phase 75 — `MBaseline` + `MuvW` vector measures
+
+The `UVW` column and antenna-to-antenna baselines as typed measures.
+Both are 3-vectors (metres) in a *direction* frame (`ITRF` default);
+`measconvert` rotates them.
+
+```julia
+measure(main, "UVW", 1)                        # -> MuvW{ITRF}(u, v, w m)
+measconvert(MBaseline{ITRF}(x, y, z), J2000; frame = fr)
+measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # needs fr.direction
+
+write_table(dir, "T", ["W" => [MuvW{J2000}(10.0, 20.0, 30.0)]]; nrow = 1)
+```
+
+- `measure` now reads a `type = "uvw"` column as [`MuvW`](@ref) (was
+  `MPosition`) and a `type = "baseline"` column as [`MBaseline`](@ref)
+  (was an error). Both frame sets mirror `MDirection::Types`.
+- `MBaseline` conversion = convert the unit direction via the existing
+  `MDirection` code, rescale by the original length — matches casacore
+  `MCBaseline` for every route (pure rotation, or its
+  `adjust`/`readjust` for the aberration routes).
+- `MuvW` conversion adds the phase-centre pole rotation
+  (`MCuvw::toPole` / `fromPole`, `R = RotMatrix(Euler(-π/2+lat, 2,
+  -lon, 3))`), so it also needs `frame.direction`.
+- Writing is automatic for an `MBaseline` / `MuvW` column (`kind`
+  `:baseline` / `:uvw`, `["m","m","m"]`); `copyms` round-trips the
+  keyword.
+- Non-goal (unchanged): `MEarthMagnetic`, the IGRF field model,
+  `MVuvw(baseline, direction)` construction, a `VarRefCol` uvw/baseline
+  write path.
