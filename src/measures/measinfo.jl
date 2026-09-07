@@ -49,6 +49,8 @@ const _MEAS_ENUM = Dict{Symbol,Vector{String}}(
                    "TECLIPTIC", "SUPERGAL", "ITRF", "TOPO", "ICRS"],
     :frequency => ["REST", "LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO",
                    "LGROUP", "CMB"],
+    :radialvelocity => ["LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO",
+                        "LGROUP", "CMB"],
     :epoch => ["LAST", "LMST", "GMST1", "GAST", "UT1", "UT2", "UTC", "TAI",
                "TDT", "TCG", "TDB", "TCB"],
 )

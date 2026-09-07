@@ -117,7 +117,9 @@ end
 """
     MRadialVelocity{R}(mps)
 
-A radial velocity in **m/s**, referenced to velocity frame `R`.
+A radial velocity in **m/s**, referenced to velocity frame `R`
+(`LSRK`/`LSRD`/`BARY`/`GEO`/`TOPO`/`GALACTO`). `measconvert` converts
+between these frames (needs `import SOFA` and `frame.direction`).
 """
 struct MRadialVelocity{R<:RefFrame}
     mps::Float64

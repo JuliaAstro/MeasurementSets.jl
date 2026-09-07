@@ -145,12 +145,14 @@ fr = MeasFrame(epoch    = measure(main, "TIME", 1),
 measconvert(measure(main, "TIME", 1), TAI)            # UTC → TAI
 measconvert(MDirection{J2000}(2.0, 0.5), AZEL; frame = fr)
 measconvert(MFrequency{TOPO}(100e9), LSRK; frame = fr)
+measconvert(MRadialVelocity{LSRK}(2e4), BARY; frame = fr)
 ```
 
 - **Epoch**: `UTC` / `TAI` / `TT` / `TDB` / `UT1`.
 - **Direction**: `J2000` / `ICRS` / `B1950` / `APP` / `GALACTIC` /
   `ECLIPTIC` / `AZEL` / `AZELGEO` / `HADEC` / `ITRF`.
-- **Frequency**: `TOPO` / `GEO` / `BARY` / `LSRK` / `LSRD` / `GALACTO`.
+- **Frequency** and **radial velocity**: `TOPO` / `GEO` / `BARY` /
+  `LSRK` / `LSRD` / `GALACTO`.
 
 Backed by the pure-Julia [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl)
 (v2, IAU SOFA port). Without `EarthOrientation.jl` the conversions run at

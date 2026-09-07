@@ -34,6 +34,7 @@ EPOCHS_MJD = [60454.42255, 58849.0, 55555.25]
 SRC_RA, SRC_DEC = 2.0, 0.5
 OBS_XYZ = [2225061.164, -5440057.370, -2481681.150]
 FREQ_HZ = 100.0e9
+RV_MPS = 20000.0
 
 L = []
 L.append("(")
@@ -41,6 +42,7 @@ L.append(f"  epochs_mjd = {tuple(EPOCHS_MJD)},")
 L.append(f"  src_ra = {SRC_RA!r}, src_dec = {SRC_DEC!r},")
 L.append(f"  obs_xyz = {tuple(OBS_XYZ)},")
 L.append(f"  freq_hz = {FREQ_HZ!r},")
+L.append(f"  rv_mps = {RV_MPS!r},")
 
 # epoch: UTC -> {TAI, TT, TDB, UT1}
 erows = []
@@ -75,6 +77,15 @@ me.doframe(d)
 fparts = [f"{fr} = {me.measure(f, fr)['m0']['value']!r}"
           for fr in ("GEO", "BARY", "LSRK", "LSRD", "GALACTO")]
 L.append(f"  frequency = ({', '.join(fparts)}),")
+
+# radial velocity: LSRK -> {...}
+rv = me.radialvelocity("LSRK", qa.quantity(RV_MPS, "m/s"))
+me.doframe(e0)
+me.doframe(pos)
+me.doframe(d)
+rvparts = [f"{fr} = {me.measure(rv, fr)['m0']['value']!r}"
+           for fr in ("BARY", "LSRD", "GEO", "TOPO", "GALACTO")]
+L.append(f"  radialvelocity = ({', '.join(rvparts)}),")
 L.append(")")
 
 with open(sys.argv[1], "w") as fh:

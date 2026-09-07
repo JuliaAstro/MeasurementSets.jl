@@ -119,6 +119,25 @@ end
     end
 end
 
+@testset "measures — radial-velocity conversions (SOFA)" begin
+    fr = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
+                   position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150),
+                   direction = MDirection{J2000}(2.0, 0.5))
+    v = MRadialVelocity{LSRK}(20_000.0)
+    for R in (BARY, LSRD, GEO, TOPO, GALACTO)
+        g = measconvert(v, R; frame = fr)
+        @test g isa MRadialVelocity{R}
+        @test abs(g.mps - v.mps) < 60_000.0              # bounded by the frame speed
+        back = measconvert(g, LSRK; frame = fr)
+        @test back.mps ≈ v.mps atol = 1e-6
+    end
+    # BARY identity via the reftype short-circuit
+    @test measconvert(MRadialVelocity{BARY}(1234.0), BARY; frame = fr) ===
+          MRadialVelocity{BARY}(1234.0)
+    # no direction in the frame -> a clear error
+    @test_throws ErrorException measconvert(v, BARY; frame = MeasFrame())
+end
+
 @testset "measures — write MEASINFO round-trip" begin
     dir = mktempdir()
     tab = joinpath(dir, "T")
@@ -230,6 +249,21 @@ if _HAVE_MEAS_CASA
                            ("LSRD", LSRD), ("GALACTO", GALACTO))
             got = measconvert(f, T; frame = fr)
             @test got.hz ≈ getproperty(ref.frequency, Symbol(frame)) rtol = 2e-9
+        end
+
+        # radial velocity: same physics as frequency. BARY/LSRD/GALACTO
+        # (constant `_VEL_*` only) match to < 1 mm/s; GEO/TOPO carry the
+        # SOFA `epv00` + `pvtob`-diurnal-aberration vs casacore-ephemeris
+        # residual (~0.25 m/s LOS, the same as the frequency test's
+        # `rtol=2e-9` == ~0.6 m/s at 100 GHz).
+        v = MRadialVelocity{LSRK}(ref.rv_mps)
+        for (frame, T) in (("BARY", BARY), ("LSRD", LSRD), ("GALACTO", GALACTO))
+            got = measconvert(v, T; frame = fr)
+            @test got.mps ≈ getproperty(ref.radialvelocity, Symbol(frame)) atol = 1e-3
+        end
+        for (frame, T) in (("GEO", GEO), ("TOPO", TOPO))
+            got = measconvert(v, T; frame = fr)
+            @test got.mps ≈ getproperty(ref.radialvelocity, Symbol(frame)) atol = 0.5
         end
     end
 else

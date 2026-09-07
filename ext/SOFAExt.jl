@@ -248,7 +248,8 @@ _dopp(f, beta, sign) = sign > 0 ? f * sqrt((1 + beta) / (1 - beta)) :
 
 function _n_hat(frame::MeasFrame)
     d = frame.direction
-    d === nothing && error("MeasurementSets: a frequency conversion needs `frame.direction`")
+    d === nothing && error(
+        "MeasurementSets: a frequency / radial-velocity conversion needs `frame.direction`")
     _dir_xyz(MS.measconvert(d, J2000; frame))
 end
 
@@ -293,8 +294,56 @@ function MS._mconv(f::MFrequency, ::Type{B}, frame::MeasFrame) where {B<:RefFram
     _bary_to_freq(_freq_to_bary(f, n, frame), B, n, frame)
 end
 
-MS._mconv(::MRadialVelocity, ::Type{<:RefFrame}, ::MeasFrame) = error(
-    "MeasurementSets: radial-velocity frame conversion is not implemented — " *
-    "convert the equivalent `MFrequency` instead")
+# --- radial velocity (m/s) --------------------------------------------
+# casacore `MCRadialVelocity`: relativistic velocity addition of the
+# projected frame velocity along the source direction, hub = BARY. Same
+# machinery as the frequency path -- the RV `_radd` sign per hop is the
+# negative of the frequency `_dopp` sign (Doppler-factor composition and
+# relativistic β-addition are algebraically equivalent).
+
+_radd(a, b) = (a + b) / (1 + a * b)          # relativistic β addition
+
+function _rv_to_bary(m::MRadialVelocity{A}, n, frame::MeasFrame) where {A}
+    A === BARY && return m.mps
+    b = m.mps / C_LIGHT
+    if A === LSRK
+        return _radd(b, -_dot(_VEL_LSRK, n) / C_LIGHT) * C_LIGHT
+    elseif A === LSRD
+        return _radd(b, -_dot(_VEL_LSRD, n) / C_LIGHT) * C_LIGHT
+    elseif A === GALACTO
+        b = _radd(b, -_dot(_VEL_LSRGAL, n) / C_LIGHT)          # GALACTO->LSRD
+        return _radd(b, -_dot(_VEL_LSRD, n) / C_LIGHT) * C_LIGHT
+    elseif A === GEO
+        return _radd(b, _dot(_v_earth_bary(frame), n) / C_LIGHT) * C_LIGHT
+    elseif A === TOPO
+        b = _radd(b, _dot(_v_obs_geo(frame), n) / C_LIGHT)     # TOPO->GEO
+        return _radd(b, _dot(_v_earth_bary(frame), n) / C_LIGHT) * C_LIGHT
+    end
+    error("MeasurementSets: radial-velocity frame $(nameof(A)) is not supported")
+end
+
+function _bary_to_rv(mps::Float64, ::Type{B}, n, frame::MeasFrame) where {B}
+    B === BARY && return MRadialVelocity{B}(mps)
+    b = mps / C_LIGHT
+    if B === LSRK
+        return MRadialVelocity{B}(_radd(b, _dot(_VEL_LSRK, n) / C_LIGHT) * C_LIGHT)
+    elseif B === LSRD
+        return MRadialVelocity{B}(_radd(b, _dot(_VEL_LSRD, n) / C_LIGHT) * C_LIGHT)
+    elseif B === GALACTO
+        b = _radd(b, _dot(_VEL_LSRD, n) / C_LIGHT)             # BARY->LSRD
+        return MRadialVelocity{B}(_radd(b, _dot(_VEL_LSRGAL, n) / C_LIGHT) * C_LIGHT)
+    elseif B === GEO
+        return MRadialVelocity{B}(_radd(b, -_dot(_v_earth_bary(frame), n) / C_LIGHT) * C_LIGHT)
+    elseif B === TOPO
+        b = _radd(b, -_dot(_v_earth_bary(frame), n) / C_LIGHT) # BARY->GEO
+        return MRadialVelocity{B}(_radd(b, -_dot(_v_obs_geo(frame), n) / C_LIGHT) * C_LIGHT)
+    end
+    error("MeasurementSets: radial-velocity frame $(nameof(B)) is not supported")
+end
+
+function MS._mconv(m::MRadialVelocity, ::Type{B}, frame::MeasFrame) where {B<:RefFrame}
+    n = _n_hat(frame)
+    _bary_to_rv(_rv_to_bary(m, n, frame), B, n, frame)
+end
 
 end # module
