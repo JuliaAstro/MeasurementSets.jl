@@ -1551,5 +1551,34 @@ query(main, "mscal.spw('0~3') AND NOT mscal.scan('1,2')")
   `"::mssel::<fn>::<spec>"` sentinel split by `_mssel_split` in
   `_tql_cols` / `_vtq_prepare!`.
 - Cross-checked against real `derivedmscal` (row counts match).
-- Non-goals: `mscal.time` (date grammar) / `mscal.uvdist` (units);
-  channel sub-selection on `spw` (`0:5~20`); `mscal.corr` / `mscal.feed`.
+- Non-goals: `mscal.time` / `mscal.uvdist`; channel sub-selection on
+  `spw` (`0:5~20`); `mscal.corr` / `mscal.feed`.
+
+### Phase 81 — `mscal.time()` / `mscal.uvdist()` selection
+
+The last two `derivedmscal` selection UDFs.
+
+```julia
+query(main, "mscal.time('2024/05/24/10:00:00~2024/05/24/11:00:00')")
+query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
+```
+
+- `mscal.time('spec')` — a comma-list of `t0~t1` ranges (or `>t0` /
+  `<t1`). Each endpoint is an ISO (`2024-05-24T10:00:00`) or
+  `YYYY/MM/DD[/HH:MM:SS]` datetime (parsed by the Phase-69
+  `_tql_parse_datetime`), or a bare number = MJD days. Compared against
+  the MAIN `TIME` column (UTC seconds).
+- `mscal.uvdist('spec')` — a comma-list of `a~b` ranges (or `>a` /
+  `<b`) with a trailing unit: `m` (default) / `km` / `lambda` /
+  `klambda` / `mlambda`. Uses the 2-D uv-distance `√(u²+v²)` (casacore's
+  fast path); wavelength units scale per row by the row's spw
+  `SPECTRAL_WINDOW.REF_FREQUENCY`. A spec must not mix distance and
+  wavelength units; a bare single value (no range/bound) is an error.
+- Both extend `_mssel_one` in `src/taql/mscal.jl`; threading unchanged
+  (the `"::mssel::<fn>::<spec>"` sentinel from Phase 80).
+- `uvdist` row counts cross-checked against real `derivedmscal`;
+  `mscal.time` is hand-computed only (casacore's time-string defaults
+  make an exact edge match fiddly).
+- Non-goals: casacore's full time grammar (`*` wildcards, `+` durations,
+  `[...]` edge buffers, MS-derived field defaults); the `:P%`
+  percent-tolerance on a uvdist value.

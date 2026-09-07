@@ -99,8 +99,10 @@ carries a `QuantumUnits` keyword; needs the Unitful extension), and
 `array` / `obs`) is MSSelection-lite row selection — a comma-list of
 ids / `N~M` ranges / name globs, `!` to subtract, `L & R` baselines
 (`query(main, "mscal.baseline('ea01 & *') AND mscal.field('3C*')")`).
-`mscal.time` / `mscal.uvdist` and `spw` channel sub-selection are not
-included.
+`mscal.time('t0~t1')` (ISO / `YYYY/MM/DD` endpoints) and
+`mscal.uvdist('a~b[m|km|klambda|…]')` select `TIME` / 2-D uv-distance
+ranges. `spw` channel sub-selection and `mscal.corr` / `mscal.feed` are
+not included.
 
 ## Physical units
 

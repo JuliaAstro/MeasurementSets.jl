@@ -296,8 +296,13 @@ returning a per-row `Bool`. `<sel>` ∈ `baseline` / `field` / `spw` /
 (`N`, `N~M`, `>N` / `<N`, an exact / glob / `/regex/` name match
 against the type's NAME column); a `!`-term is subtracted.
 `mscal.baseline` also takes `L & R` / `L && R` (baseline between two
-antenna sets; `&` drops autocorrelations) and a whole-spec `!`. Not
-`mscal.time` / `mscal.uvdist`, and no channel sub-selection on `spw`.
+antenna sets; `&` drops autocorrelations) and a whole-spec `!`.
+`mscal.time('t0~t1')` selects a `TIME` range (endpoints are ISO /
+`YYYY/MM/DD[/HH:MM:SS]` datetimes or a bare MJD-days number);
+`mscal.uvdist('a~b[unit]')` selects a 2-D uv-distance range, `unit` ∈
+`m` (default) / `km` / `lambda` / `klambda` / `mlambda` (wavelength
+units scale per row by `SPECTRAL_WINDOW.REF_FREQUENCY`). No channel
+sub-selection on `spw`; no `mscal.corr` / `mscal.feed`.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 boolean-mask array subscripts.
