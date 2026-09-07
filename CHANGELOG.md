@@ -1420,3 +1420,31 @@ write_table(dir, "T", ["W" => [MuvW{J2000}(10.0, 20.0, 30.0)]]; nrow = 1)
 - Non-goal (unchanged): `MEarthMagnetic`, the IGRF field model,
   `MVuvw(baseline, direction)` construction, a `VarRefCol` uvw/baseline
   write path.
+
+### Phase 76 — solar-system-body direction reference frames
+
+A `FIELD.PHASE_DIR` column can name a solar-system body as its frame
+(a moving target). Nine body singleton frames — `SUN` `MOON` `MERCURY`
+`VENUS` `MARS` `JUPITER` `SATURN` `URANUS` `NEPTUNE` — resolved via
+`SOFA.plan94` / `moon98` (no new dependency).
+
+```julia
+measure(fld, "PHASE_DIR", 1)                          # -> MDirection{SUN}(0.0, 0.0)
+measconvert(MDirection{SUN}(0, 0), AZEL; frame = fr)  # the Sun's az/el
+measconvert(MDirection{JUPITER}(0, 0), J2000; frame = fr)
+```
+
+- `measure()` reads a body-frame column as `MDirection{SUN}` (the stored
+  `(lon, lat)` is a placeholder); a per-row `VarRefCol` code ≥ 32
+  decodes through `_BODY_ENUM` (`40 => SUN`, `41 => MOON`, …).
+- `measconvert` computes the body's geocentric astrometric direction
+  (light-time iterated), routed through the existing `_icrs_to_dir`
+  chain for the target frame. The Moon's topocentric parallax is applied
+  when `frame.position` is set (~1° for the Moon, ≲30″ planets).
+- Accuracy is the `plan94` / `moon98` floor: ~arcsec for Sun / Moon /
+  Venus / Mercury, ~20-40″ for Mars, ~arcmin for Jupiter / Saturn —
+  fine for a pointing / scheduling reference, not astrometry.
+- Body frames are **source-only**: `measconvert(d, SUN)` errors.
+- Non-goals: `PLUTO` (no `plan94`), `COMET` / `MeasComet` ephemeris
+  tables, a stored pointing offset in a body-frame cell, solar light
+  deflection (< 2″, below the ephemeris floor).

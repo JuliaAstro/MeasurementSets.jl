@@ -84,6 +84,7 @@ export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, ref
 export MBaseline, MuvW
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO
+export MERCURY, VENUS, MARS, JUPITER, SATURN, URANUS, NEPTUNE, SUN, MOON
 export MDoppler, DopplerType, RADIO, OPTICAL, RATIO, BETA, GAMMA, Z, RELATIVISTIC
 export doppler, frequency, radialvelocity, restfrequency, shiftfreq
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate

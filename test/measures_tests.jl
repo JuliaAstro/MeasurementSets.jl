@@ -331,6 +331,51 @@ end
     @test all(abs.(collect(ext._frompole((1.0, 2.0, 3.0), d0)) .- [-3.0, 2.0, 1.0]) .< 1e-9)
 end
 
+# Phase 76: solar-system-body direction reference frames.
+@testset "measures — solar-system body directions" begin
+    # read: a fixed `Ref` body-frame column
+    dir = mktempdir()
+    tab = joinpath(dir, "SD")
+    D = [MDirection{SUN}(0.0, 0.0) for _ in 1:3]
+    write_table(tab, "SD", Pair{String,Any}["D" => D]; nrow = 3)
+    r = readtable(tab)
+    @test measinfo(r, "D").fixedref == "SUN"
+    @test measure(r, "D", 1) isa MDirection{SUN}
+
+    # VarRefCol with a bare-enum code (SUN = 40, MOON = 41)
+    tab2 = joinpath(dir, "SV")
+    dv = [reshape([0.0, 0.0], 2, 1) for _ in 1:2]
+    write_table(tab2, "SV",
+        ["D" => dv, "D_REF" => Int32[40, 41]]; nrow = 2,
+        measures = Dict("D" => (; kind = :direction, varrefcol = "D_REF")))
+    r2 = readtable(tab2)
+    @test measure(r2, "D", 1) isa MDirection{SUN}
+    @test measure(r2, "D", 2) isa MDirection{MOON}
+
+    @test MSv2._frame_type(:direction, "SUN") === SUN
+    @test MSv2._frame_type(:direction, "PLUTO") <: MSv2.OtherRef   # still parses
+
+    # convert (SOFA)
+    fr = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
+                   position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150),
+                   direction = MDirection{J2000}(2.0, 0.5))
+    for B in (MERCURY, VENUS, MARS, JUPITER, SATURN, URANUS, NEPTUNE, SUN, MOON)
+        j = measconvert(MDirection{B}(0.0, 0.0), J2000; frame = fr)
+        @test j isa MDirection{J2000}
+        @test -pi <= j.lon <= 2pi && -pi/2 <= j.lat <= pi/2
+        a = measconvert(MDirection{B}(0.0, 0.0), AZEL; frame = fr)
+        @test -pi/2 <= a.lat <= pi/2
+    end
+    # a body direction round-trips J2000 -> GALACTIC -> J2000 (pure rotation)
+    dj = measconvert(MDirection{JUPITER}(0.0, 0.0), J2000; frame = fr)
+    dj2 = measconvert(measconvert(dj, GALACTIC; frame = fr), J2000; frame = fr)
+    @test dj.lon ≈ dj2.lon atol = 1e-9
+    @test dj.lat ≈ dj2.lat atol = 1e-9
+
+    @test_throws ErrorException measconvert(MDirection{J2000}(1.0, 0.5), SUN; frame = fr)
+    @test_throws ErrorException measconvert(MDirection{SUN}(0.0, 0.0), J2000; frame = MeasFrame())
+end
+
 if _HAVE_MEAS_CASA
     @testset "measures — casatools oracle cross-check" begin
         ref_jl = joinpath(mktempdir(), "measref.jl")
@@ -363,6 +408,24 @@ if _HAVE_MEAS_CASA
             want = getproperty(ref.direction, Symbol(frame))
             @test rem2pi(got.lon - want[1], RoundNearest) ≈ 0 atol = 5as
             @test got.lat ≈ want[2] atol = 5as
+        end
+
+        # solar-system-body directions: SOFA plan94 / moon98 vs casacore's
+        # own ephemeris. Per-body tolerance = the plan94 accuracy floor.
+        bodytol = Dict("SUN" => 20as, "MOON" => 30as, "MERCURY" => 20as,
+                       "VENUS" => 20as, "MARS" => 40as, "JUPITER" => 120as)
+        for (name, T) in (("SUN", SUN), ("MOON", MOON), ("MERCURY", MERCURY),
+                          ("VENUS", VENUS), ("MARS", MARS), ("JUPITER", JUPITER))
+            tol = bodytol[name]
+            want = getproperty(ref.planet, Symbol(name))
+            gj = measconvert(MDirection{T}(0.0, 0.0), J2000; frame = fr)
+            @test rem2pi(gj.lon - want.j2000[1], RoundNearest) * cos(gj.lat) ≈ 0 atol = tol
+            @test gj.lat ≈ want.j2000[2] atol = tol
+            ga = measconvert(MDirection{T}(0.0, 0.0), AZEL; frame = fr)
+            # AZEL adds the Moon topocentric term; residual = diurnal
+            # aberration + refraction differences -> loosen to ~2'
+            atol_azel = name == "MOON" ? 120as : tol + 60as
+            @test ga.lat ≈ want.azel[2] atol = atol_azel
         end
 
         # frequency: agrees to ~1e-9 relative (< 0.3 m/s line-of-sight) —
