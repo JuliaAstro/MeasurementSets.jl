@@ -138,6 +138,41 @@ end
     @test_throws ErrorException measconvert(v, BARY; frame = MeasFrame())
 end
 
+@testset "measures — Doppler conventions + rest-frequency bridge" begin
+    # convention round-trips (pure algebra, no SOFA)
+    d0 = MDoppler{RADIO}(0.01)
+    @test measconvert(d0, RADIO) === d0
+    for C in (OPTICAL, RATIO, BETA, GAMMA)
+        @test measconvert(measconvert(d0, C), RADIO).d ≈ 0.01 rtol = 1e-12
+    end
+    @test measconvert(d0, RATIO).d ≈ 0.99
+    @test measconvert(d0, OPTICAL).d ≈ 1 / 0.99 - 1
+    @test Z === OPTICAL && RELATIVISTIC === BETA
+    @test_throws ErrorException measconvert(MDoppler{RADIO}(0.1), MeasurementSets.OtherDoppler{:X})
+
+    # MFrequency <-> rest frequency
+    ν0 = 1.42040575e9
+    f = MFrequency{LSRK}(1.4e9)
+    d = doppler(f, ν0)
+    @test d isa MDoppler{BETA}
+    @test frequency(d, ν0).hz ≈ 1.4e9
+    @test restfrequency(f, d).hz ≈ ν0
+    @test frequency(d, MFrequency{REST}(ν0)).hz ≈ 1.4e9        # accepts an MFrequency rest
+    @test radialvelocity(d).mps ≈ 2.99792458e8 * d.d
+
+    # MRadialVelocity <-> MDoppler
+    @test doppler(MRadialVelocity{LSRK}(3e5)).d ≈ 3e5 / 2.99792458e8
+    @test radialvelocity(doppler(MRadialVelocity{BARY}(-1.2e5))).mps ≈ -1.2e5
+
+    # MEASINFO round-trip
+    dir = mktempdir()
+    write_table(joinpath(dir, "T"), "T",
+                Pair{String,Any}["DOP" => [MDoppler{RADIO}(0.01i) for i in 1:3]]; nrow = 3)
+    t = readtable(joinpath(dir, "T"))
+    @test measinfo(t, "DOP").kind === :doppler && measinfo(t, "DOP").fixedref == "RADIO"
+    @test measure(t, "DOP")[2] === MDoppler{RADIO}(0.02)
+end
+
 @testset "measures — write MEASINFO round-trip" begin
     dir = mktempdir()
     tab = joinpath(dir, "T")
@@ -265,6 +300,19 @@ if _HAVE_MEAS_CASA
             got = measconvert(v, T; frame = fr)
             @test got.mps ≈ getproperty(ref.radialvelocity, Symbol(frame)) atol = 0.5
         end
+
+        # Doppler conventions + bridge -- pure algebra, near-exact
+        d0 = MDoppler{RADIO}(ref.dop_radio)
+        for (conv, T) in (("OPTICAL", OPTICAL), ("RATIO", RATIO),
+                          ("TRUE", BETA), ("GAMMA", GAMMA))
+            @test measconvert(d0, T).d ≈ getproperty(ref.doppler, Symbol(conv)) rtol = 1e-12
+        end
+        obsf = MFrequency{LSRK}(ref.obs_freq_hz)
+        d = doppler(obsf, ref.rest_hz)
+        @test d.d ≈ ref.dop_from_freq rtol = 1e-12
+        @test radialvelocity(d).mps ≈ ref.rv_from_dop rtol = 1e-10
+        @test frequency(d, ref.rest_hz).hz ≈ ref.freq_from_dop rtol = 1e-12
+        @test restfrequency(obsf, d).hz ≈ ref.rest_from_freq rtol = 1e-12
     end
 else
     @info "CASA python3 not found; skipping measures oracle cross-check" _MEAS_CASA

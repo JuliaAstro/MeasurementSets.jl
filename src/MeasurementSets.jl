@@ -58,6 +58,7 @@ include("tables/units.jl")
 include("measures/types.jl")
 include("measures/measinfo.jl")
 include("measures/read.jl")
+include("measures/doppler.jl")
 include("measures/write.jl")
 include("taql/taql.jl")
 include("schema.jl")
@@ -79,6 +80,8 @@ export measure, measinfo, measconvert, MeasFrame, MeasInfo   # conversions via S
 export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, reftype
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
     HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO
+export MDoppler, DopplerType, RADIO, OPTICAL, RATIO, BETA, GAMMA, Z, RELATIVISTIC
+export doppler, frequency, radialvelocity, restfrequency
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 export write_table, write_ms, copyms, create_ms
 export write_reftable, write_concattable, copytable, reference_copy

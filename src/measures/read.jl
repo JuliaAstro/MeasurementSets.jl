@@ -44,7 +44,7 @@ _epoch_mjd(v::Real, units) =
     (isempty(units) || lowercase(strip(units[1])) in ("s", "sec", "second", "seconds")) ?
     float(v) / _SEC_PER_DAY : float(v)
 
-function _wrap_measure(kind::Symbol, R::Type{<:RefFrame}, v, mi::MeasInfo)
+function _wrap_measure(kind::Symbol, R::Type, v, mi::MeasInfo)
     if kind === :epoch
         return MEpoch{R}(_epoch_mjd(_scalar(v), mi.units))
 
@@ -65,6 +65,13 @@ function _wrap_measure(kind::Symbol, R::Type{<:RefFrame}, v, mi::MeasInfo)
         return v isa AbstractArray && length(v) != 1 ?
                [MRadialVelocity{R}(float(x)) for x in vec(v)] :
                MRadialVelocity{R}(float(_scalar(v)))
+
+    elseif kind === :doppler
+        R <: DopplerType || throw(ArgumentError(
+            "measure: unknown Doppler convention in the MEASINFO of a :doppler column"))
+        return v isa AbstractArray && length(v) != 1 ?
+               [MDoppler{R}(float(x)) for x in vec(v)] :
+               MDoppler{R}(float(_scalar(v)))
     end
     throw(ArgumentError("measure: unsupported MEASINFO type \"$kind\""))
 end

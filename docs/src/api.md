@@ -73,8 +73,14 @@ MDirection
 MPosition
 MFrequency
 MRadialVelocity
+MDoppler
+doppler
+frequency
+radialvelocity
+restfrequency
 reftype
 RefFrame
+DopplerType
 ```
 
 ```@docs
@@ -101,6 +107,13 @@ LSRD
 BARY
 GEO
 GALACTO
+RADIO
+OPTICAL
+RATIO
+BETA
+GAMMA
+Z
+RELATIVISTIC
 ```
 
 ## Schema and metadata

@@ -35,6 +35,9 @@ SRC_RA, SRC_DEC = 2.0, 0.5
 OBS_XYZ = [2225061.164, -5440057.370, -2481681.150]
 FREQ_HZ = 100.0e9
 RV_MPS = 20000.0
+DOP_RADIO = 0.01
+REST_HZ = 1.42040575e9
+OBS_FREQ_HZ = 1.4e9
 
 L = []
 L.append("(")
@@ -43,6 +46,7 @@ L.append(f"  src_ra = {SRC_RA!r}, src_dec = {SRC_DEC!r},")
 L.append(f"  obs_xyz = {tuple(OBS_XYZ)},")
 L.append(f"  freq_hz = {FREQ_HZ!r},")
 L.append(f"  rv_mps = {RV_MPS!r},")
+L.append(f"  dop_radio = {DOP_RADIO!r}, rest_hz = {REST_HZ!r}, obs_freq_hz = {OBS_FREQ_HZ!r},")
 
 # epoch: UTC -> {TAI, TT, TDB, UT1}
 erows = []
@@ -86,6 +90,22 @@ me.doframe(d)
 rvparts = [f"{fr} = {me.measure(rv, fr)['m0']['value']!r}"
            for fr in ("BARY", "LSRD", "GEO", "TOPO", "GALACTO")]
 L.append(f"  radialvelocity = ({', '.join(rvparts)}),")
+
+# doppler: RADIO -> {OPTICAL, RATIO, TRUE, GAMMA}, and the bridges.
+# NB casatools reports every doppler `m0` as <raw value> * c in "m/s"
+# (MVDoppler::get), so divide by c to recover the dimensionless value.
+_C = 2.99792458e8
+dop = me.doppler("RADIO", qa.quantity(DOP_RADIO, ""))
+dparts = [f"{c} = {me.measure(dop, c)['m0']['value'] / _C!r}"
+          for c in ("OPTICAL", "RATIO", "TRUE", "GAMMA")]
+L.append(f"  doppler = ({', '.join(dparts)}),")
+
+obsf = me.frequency("LSRK", qa.quantity(OBS_FREQ_HZ, "Hz"))
+d_from_f = me.todoppler("TRUE", obsf, qa.quantity(REST_HZ, "Hz"))
+L.append(f"  dop_from_freq = {d_from_f['m0']['value'] / _C!r},")
+L.append(f"  rv_from_dop = {me.toradialvelocity('LSRK', d_from_f)['m0']['value']!r},")
+L.append(f"  freq_from_dop = {me.tofrequency('LSRK', d_from_f, qa.quantity(REST_HZ, 'Hz'))['m0']['value']!r},")
+L.append(f"  rest_from_freq = {me.torestfrequency(obsf, d_from_f)['m0']['value']!r},")
 L.append(")")
 
 with open(sys.argv[1], "w") as fh:

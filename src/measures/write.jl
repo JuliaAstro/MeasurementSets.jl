@@ -40,3 +40,8 @@ function _measure_column_spec(vals::AbstractVector{<:MRadialVelocity})
     (; data = Float64[m.mps for m in vals],
        kind = :radialvelocity, ref = _frame_string(reftype(first(vals))), units = ["m/s"])
 end
+function _measure_column_spec(vals::AbstractVector{<:MDoppler})
+    isempty(vals) && return nothing
+    (; data = Float64[m.d for m in vals],
+       kind = :doppler, ref = _frame_string(reftype(first(vals))), units = String[])
+end
