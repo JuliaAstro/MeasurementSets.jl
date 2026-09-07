@@ -60,7 +60,8 @@ end
     @test string(up("pc")) == "pc"
     # dimensionless pseudo-units registered by the extension
     @test U.dimension(up("beam")) == U.NoDims
-    @test string(up("Jy/beam")) == "Jy beam⁻¹"
+    @test up("Jy/beam") == up("Jy") / up("beam")          # `Jy·beam⁻¹`
+    @test U.dimension(up("Jy/beam")) == U.dimension(U.u"Jy")   # beam is dimensionless
     @test U.dimension(up("Jy/pixel")) == U.dimension(U.u"Jy")
     # dimensionless markers
     @test up("_") == U.NoUnits && up("") == U.NoUnits
