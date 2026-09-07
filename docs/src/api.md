@@ -78,6 +78,7 @@ doppler
 frequency
 radialvelocity
 restfrequency
+shiftfreq
 reftype
 RefFrame
 DopplerType

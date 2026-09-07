@@ -37,6 +37,9 @@ measconvert(m::MDoppler{C}, ::Type{D}) where {C<:DopplerType,D<:DopplerType} =
 _hz(x::Real) = float(x)
 _hz(f::MFrequency) = f.hz
 
+# the Doppler frequency-shift factor √((1−β)/(1+β)); β from the BETA form
+_beta_factor(d::MDoppler) = (β = measconvert(d, BETA).d; sqrt((1 - β) / (1 + β)))
+
 """
     doppler(f::MFrequency, restfreq) -> MDoppler{BETA}
     doppler(v::MRadialVelocity)      -> MDoppler{BETA}
@@ -53,24 +56,28 @@ end
 doppler(v::MRadialVelocity) = MDoppler{BETA}(v.mps / C_LIGHT)
 
 """
-    radialvelocity(d::MDoppler) -> MRadialVelocity{LSRK}
+    radialvelocity(d::MDoppler)              -> MRadialVelocity{LSRK}
+    radialvelocity(f::MFrequency, restfreq)  -> MRadialVelocity{LSRK}
 
-The true radial velocity `c·β` of a Doppler shift (casacore
-`fromDoppler`; the result frame defaults to `LSRK`).
+The true radial velocity of a Doppler shift (`c·β`, casacore
+`fromDoppler`), or of a frequency `f` relative to `restfreq`
+(`= radialvelocity(doppler(f, restfreq))`).  The two-argument form
+broadcasts — `radialvelocity.(measure(spw, "CHAN_FREQ"), ν₀)` is a
+velocity axis.  The result frame defaults to `LSRK`.
 """
 radialvelocity(d::MDoppler) = MRadialVelocity{LSRK}(C_LIGHT * measconvert(d, BETA).d)
+radialvelocity(f::MFrequency, restfreq) = radialvelocity(doppler(f, restfreq))
 
 """
-    frequency(d::MDoppler, restfreq) -> MFrequency{LSRK}
+    frequency(d::MDoppler, restfreq)         -> MFrequency{LSRK}
+    frequency(v::MRadialVelocity, restfreq)  -> MFrequency{LSRK}
 
-The frequency `√((1−β)/(1+β)) · ν₀` implied by a Doppler shift and a
-rest frequency (casacore `fromDoppler`; the result frame defaults to
-`LSRK`).
+The frequency `√((1−β)/(1+β)) · ν₀` implied by a Doppler shift (casacore
+`fromDoppler`) or a radial velocity `v` and a line rest frequency
+`restfreq`.  The result frame defaults to `LSRK`.
 """
-function frequency(d::MDoppler, restfreq)
-    β = measconvert(d, BETA).d
-    MFrequency{LSRK}(sqrt((1 - β) / (1 + β)) * _hz(restfreq))
-end
+frequency(d::MDoppler, restfreq) = MFrequency{LSRK}(_beta_factor(d) * _hz(restfreq))
+frequency(v::MRadialVelocity, restfreq) = frequency(doppler(v), restfreq)
 
 """
     restfrequency(f::MFrequency, d::MDoppler) -> MFrequency{REST}
@@ -78,7 +85,22 @@ end
 The rest frequency `ν / √((1−β)/(1+β))` given an observed frequency and
 its Doppler shift (casacore `toRest`).
 """
-function restfrequency(f::MFrequency, d::MDoppler)
-    β = measconvert(d, BETA).d
-    MFrequency{REST}(f.hz / sqrt((1 - β) / (1 + β)))
+restfrequency(f::MFrequency, d::MDoppler) = MFrequency{REST}(f.hz / _beta_factor(d))
+
+"""
+    shiftfreq(d::MDoppler, ν) -> same shape as ν
+
+Multiply frequency(ies) `ν` by the Doppler factor `√((1−β)/(1+β))` (β
+from `d` in the `BETA` convention) — the vectorised form of casacore
+`MDoppler::shiftFrequency`.  `ν` is a frequency in Hz, an
+[`MFrequency`](@ref) (the frame label is kept), or a vector of either
+(the factor is computed once).
+
+Unlike casacore, a non-`BETA` `d` is converted to `BETA` first.
+"""
+shiftfreq(d::MDoppler, hz::Real) = hz * _beta_factor(d)
+shiftfreq(d::MDoppler, f::MFrequency{R}) where {R} = MFrequency{R}(f.hz * _beta_factor(d))
+function shiftfreq(d::MDoppler, νs::AbstractVector)
+    k = _beta_factor(d)
+    map(x -> x isa MFrequency ? typeof(x)(x.hz * k) : x * k, νs)
 end
