@@ -76,6 +76,12 @@ MRadialVelocity
 MDoppler
 MBaseline
 MuvW
+Ephemeris
+open_ephemeris
+field_ephemeris
+ephemeris_direction
+ephemeris_radvel
+ephemeris_distance
 doppler
 frequency
 radialvelocity

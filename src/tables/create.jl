@@ -418,6 +418,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      dysco=Vector{String}[], dysco_spec::AbstractDict=Dict{String,NamedTuple}(),
                      measures::AbstractDict=Dict{String,Any}(),
                      units::AbstractDict=Dict{String,Any}(),
+                     keywords::AbstractDict=Dict{String,Any}(),
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
@@ -466,9 +467,17 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         push!(data, vals)
     end
 
+    public = Record()
+    for (k, v) in keywords
+        ct = v isa AbstractArray{<:AbstractString} ? TpArrayString :
+             v isa AbstractArray ? error("write_table: numeric-array table keywords are not supported") :
+             _casatype_of(typeof(v))
+        public = _set_kw(public, String(k), ct, v)
+    end
+
     _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,
                       ism = Set(String.(ism)), engines, virtualtaql, dysco, dysco_spec,
-                      measures, units, storage, blocksize,
+                      measures, units, public, storage, blocksize,
                       tablename = String(name) * "Desc", type, subtype, readme)
 end
 

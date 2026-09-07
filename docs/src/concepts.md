@@ -182,8 +182,18 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
   `moon98` — accuracy ~arcsec (Sun / Moon / Venus / Mercury) to ~arcmin
   (Jupiter / Saturn). The Moon's topocentric parallax is applied when
   `frame.position` is set. Body frames are source-only (you cannot
-  convert a direction *to* one). `PLUTO`, `COMET` and `MeasComet`
-  ephemeris tables are out of scope.
+  convert a direction *to* one). `PLUTO` has no `plan94` entry.
+
+- **Ephemeris (`MeasComet`) tables**: a `FIELD` row with a non-negative
+  `EPHEMERIS_ID` points at an `EPHEM<id>_*.tab` polynomial position
+  table in the FIELD subtable directory. [`field_ephemeris`](@ref)
+  opens it; [`ephemeris_direction`](@ref) / `_radvel` / `_distance`
+  evaluate it (linear interpolation of the bracketing rows, matching
+  casacore's `MeasComet::get`); `measure(fld, "PHASE_DIR", row; epoch)`
+  and the `mscal.*` functions use it automatically for a moving-target
+  field. Sub-arcmin, so it supersedes `plan94` when a real ephemeris is
+  present. Polynomial (`numpoly > 0`) `PHASE_DIR` and the
+  `DiskLong`/`DiskLat` sub-Earth point are out of scope.
 
 Backed by the pure-Julia [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl)
 (v2, IAU SOFA port). Without `EarthOrientation.jl` the conversions run at

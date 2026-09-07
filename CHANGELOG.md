@@ -1582,3 +1582,40 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
 - Non-goals: casacore's full time grammar (`*` wildcards, `+` durations,
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
+
+### Phase 82 — solar-system ephemeris (`MeasComet`) tables
+
+A moving-target `FIELD` row — a non-negative `EPHEMERIS_ID` with a
+matching `EPHEM<id>_*.tab` polynomial position table — now gets its
+time-dependent direction from that table, closing the Phase-76
+`plan94`-accuracy gap for comets and planets.
+
+```julia
+e = field_ephemeris(subtable(ms, "FIELD"), 0)          # nothing if not a moving target
+d = ephemeris_direction(e, 60454.4)                    # MDirection at that MJD
+measure(fld, "PHASE_DIR", 1; epoch = MEpoch{UTC}(60454.4))
+query(main, "mscal.hadec1()")                          # uses the ephemeris automatically
+```
+
+- New `src/measures/ephemeris.jl`: `Ephemeris` struct + `open_ephemeris`
+  (reads the `MJD0` / `dMJD` / `NAME` / `posrefsys` keywords + `MJD` /
+  `RA` / `DEC` / `Rho` / `RadVel` columns), `ephemeris_direction` /
+  `_radvel` / `_distance` (linear interpolation of the (ρ,RA,Dec)
+  Cartesian vector between bracketing rows — casacore's
+  `MeasComet::get`), and `field_ephemeris(fld, field_id)` (globs
+  `EPHEM<id>_*.tab` in the FIELD directory).
+- `measure(t, col, row; epoch)` — new kwarg; for a direction cell of a
+  FIELD table with an ephemeris it returns the ephemeris position
+  (shifted by the stored `PHASE_DIR` offset).
+- `_mscal_columns` (`mscal.*`) `_fielddir` — an ephemeris field is
+  evaluated per `(field, TIME)` (converted to TDB), then to J2000.
+- `write_table` gains a `keywords::AbstractDict` kwarg for scalar /
+  string-array table-level keywords (used to build ephemeris fixtures).
+- Verified by an `open_ephemeris` / `ephemeris_direction` round-trip and
+  an end-to-end `mscal.hadec1()` on a copied MS with a patched
+  moving-target FIELD. No `casatools` oracle (needs a real ephemeris
+  table + `me.framecomet` — documented gap).
+- Non-goals: polynomial (`numpoly > 0`) `PHASE_DIR` interpolation; the
+  `DiskLong` / `DiskLat` sub-Earth point; the aipsrc
+  `measures.comet.directory` lookup; `MeasComet` as a `MeasFrame` for a
+  `COMET`-coded direction column outside FIELD.

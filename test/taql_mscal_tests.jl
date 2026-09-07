@@ -198,6 +198,45 @@ end
     @test_throws ErrorException query(readtable(dir), "mscal.field('0')")
 end
 
+@testset "TaQL-lite — mscal.* with an ephemeris FIELD" begin
+    ms = MeasurementSet(SAMPLE_MS)
+    main0 = readtable(SAMPLE_MS)
+    tm = Float64.(column(main0, "TIME")[:]) ./ 86400          # MJD days
+    lo, hi = extrema(tm)
+
+    tmp = joinpath(mktempdir(), "eph.ms")
+    copyms(SAMPLE_MS, tmp)
+
+    # replace FIELD with a moving-target field whose ephemeris straddles
+    # the MS time range (dMJD 0.01 day, RA/DEC ramp of ~3 deg over the run)
+    grid = collect((lo - 0.05):0.01:(hi + 0.05))
+    ng = length(grid)
+    eppath = joinpath(mktempdir(), "EPHEM0_Comet_J2000.tab")
+    write_table(eppath, "EPHEM", Pair{String,Any}[
+        "MJD" => grid, "RA" => [80.0 + 3.0 * (g - lo) for g in grid],
+        "DEC" => [33.0 + 1.0 * (g - lo) for g in grid], "Rho" => fill(1.2, ng),
+        "RadVel" => fill(0.0, ng)]; nrow = ng,
+        keywords = Dict("MJD0" => grid[1] - 0.01, "dMJD" => 0.01,
+                        "NAME" => "Comet", "posrefsys" => "J2000"))
+    rm(joinpath(tmp, "FIELD"); recursive = true)
+    write_table(joinpath(tmp, "FIELD"), "FIELD", Pair{String,Any}[
+        "NAME" => ["Comet"], "EPHEMERIS_ID" => Int32[0], "PHASE_DIR" => [[0.0, 0.0]]];
+        nrow = 1, measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
+    mv(eppath, joinpath(tmp, "FIELD", "EPHEM0_Comet_J2000.tab"))
+
+    main = readtable(tmp)
+    q = query(main, "rownumber() >= 1"; select = [
+        "hd" => "mscal.hadec1()", "uj" => "mscal.uvw_j2000()"])
+    # the ephemeris target (RA ~80 deg) is nowhere near the sample MS's
+    # own field, so the hour angle must differ a lot from the static case
+    qs = query(main0, "rownumber() >= 1"; select = ["hd" => "mscal.hadec1()"])
+    @test abs(column(q, "hd")[1][1] - column(qs, "hd")[1][1]) > deg2rad(5)
+    # uvw_j2000 still a pure rotation -> length preserved
+    for i in (10, 300, 590)
+        @test hypot(column(q, "uj")[i]...) ≈ hypot(column(main, "UVW")[i]...) rtol = 1e-9
+    end
+end
+
 @testset "TaQL-lite — mscal.time() / mscal.uvdist()" begin
     main = readtable(SAMPLE_MS)
     tm = Float64.(column(main, "TIME")[:])

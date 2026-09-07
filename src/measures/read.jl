@@ -2,8 +2,8 @@
 # them, for an array-valued measure column such as `SPECTRAL_WINDOW.CHAN_FREQ`).
 
 """
-    measure(t, col, row) -> Measure | Vector{Measure}
-    measure(t, col)      -> Vector
+    measure(t, col, row; epoch=nothing) -> Measure | Vector{Measure}
+    measure(t, col)                      -> Vector
 
 Read column `col` of `t` as a physical measure, taking its reference
 frame from the `MEASINFO` keyword (a fixed `Ref`, or a per-row
@@ -12,10 +12,26 @@ a direction column [`MDirection`](@ref) (radians), a position column
 [`MPosition`](@ref) (metres), a frequency column [`MFrequency`](@ref)
 (Hz) -- an array-valued frequency/direction cell yields a `Vector` of
 them.
+
+Passing `epoch` (an [`MEpoch`](@ref)) to a direction cell of a FIELD
+subtable evaluates a moving target: if that field row is a comet /
+planet ([`field_ephemeris`](@ref) finds one), the returned direction is
+the ephemeris position at `epoch` (in the ephemeris table's own
+`posrefsys` frame), shifted by the stored `PHASE_DIR` offset.
 """
-function measure(t::AbstractTable, col::AbstractString, row::Integer)
+function measure(t::AbstractTable, col::AbstractString, row::Integer;
+                 epoch::Union{Nothing,MEpoch} = nothing)
     mi = measinfo(t, col)
     mi === nothing && throw(ArgumentError("column \"$col\" has no MEASINFO keyword"))
+    if epoch !== nothing && mi.kind === :direction && t isa Table
+        e = field_ephemeris(t, row - 1)
+        if e !== nothing
+            d = ephemeris_direction(e, epoch.mjd)      # UTC ~ TDB (coarse table)
+            off = _lonlat(getcell(t, col, row))
+            lo, la = _ephem_shift(d.lon, d.lat, off[1], off[2])
+            return MDirection{e.frame}(lo, la)
+        end
+    end
     R = _frame_type(mi.kind, _ref_string(mi, t, col, row))
     _wrap_measure(mi.kind, R, getcell(t, col, row), mi)
 end
