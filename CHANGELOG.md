@@ -1583,6 +1583,33 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 91 — `MEarthMagnetic` measure + IGRF-14 model
+
+```julia
+earthfield(MPosition{ITRF}(x, y, z), MEpoch{UTC}(mjd))   # -> MEarthMagnetic{ITRF}, nT
+measconvert(MEarthMagnetic{IGRF}(0, 0, 1e-6), J2000; frame)
+```
+
+- New `MEarthMagnetic{R}` measure (a 3-vector in nano-tesla, in a
+  direction-family frame) and the `IGRF` model frame. `Measure` union,
+  `reftype`, `show`, exported.
+- New `src/measures/earthfield.jl` — `earthfield(pos, epoch)` evaluates
+  the IGRF-14 geomagnetic field. `_earthfield_itrf` is a direct port of
+  casacore's `EarthField::calcField` spherical-harmonic synthesis;
+  `_igrf_gh` linearly interpolates the bundled 5-year Gauss coefficients
+  (`src/measures/igrf14_data.jl` — IAGA / NOAA IGRF-14, degree 13,
+  epochs 1900.0–2025.0 plus the 2025–2030 secular variation). Pure
+  arithmetic — no `SOFA`.
+- `measconvert` (via `ext/SOFAExt.jl`): `MEarthMagnetic{A}` rotates
+  between direction frames like an `MBaseline` (rotate the unit
+  direction, keep the length); `MEarthMagnetic{IGRF}` evaluates the
+  model at `frame.position` / `frame.epoch` then rotates to the target.
+- Read (`measure(t, col)`) + write (`write_table` auto-stamps `MEASINFO`
+  `type=earthmagnetic`, `QuantumUnits=["nT","nT","nT"]`) round-trip.
+- CASA `me.earthmagnetic('igrf')` cross-check (`test/measures_fixture.py`):
+  casacore ships IGRF-12, so components agree to ~100–200 nT (model
+  generation) — the frame rotation is exact (magnitude ITRF ≡ J2000).
+
 ### Phase 90 — bundled Observatories table
 
 ```julia

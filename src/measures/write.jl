@@ -57,3 +57,9 @@ function _measure_column_spec(vals::AbstractVector{<:MuvW})
        kind = :uvw, ref = _frame_string(reftype(first(vals))),
        units = ["m", "m", "m"])
 end
+function _measure_column_spec(vals::AbstractVector{<:MEarthMagnetic})
+    isempty(vals) && return nothing
+    (; data = [Float64[m.x, m.y, m.z] for m in vals],
+       kind = :earthmagnetic, ref = _frame_string(reftype(first(vals))),
+       units = ["nT", "nT", "nT"])
+end

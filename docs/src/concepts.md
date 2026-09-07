@@ -185,6 +185,15 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
 - **Baseline** ([`MBaseline`](@ref)) and **uvw** ([`MuvW`](@ref), the
   `UVW` column): rotated between any direction frame; a `uvw` conversion
   also needs `frame.direction` (the phase centre) for the pole rotation.
+- **Earth magnetic field** ([`MEarthMagnetic`](@ref), nano-tesla):
+  [`earthfield(pos, epoch)`](@ref) evaluates the bundled IGRF-14 model
+  (a direct port of casacore's `EarthField::calcField` spherical-harmonic
+  synthesis, coefficients 1900–2030) at an ITRF position; a field vector
+  rotates between direction frames like a plain vector.
+  `measconvert(MEarthMagnetic{IGRF}(...), R; frame)` evaluates the model
+  at `frame.position` / `frame.epoch` and rotates to `R`. casacore ships
+  IGRF-12, so a cross-check differs by ~100–200 nT (model generation).
+
 - **Solar-system body** (`SUN` / `MOON` / `MERCURY` / `VENUS` / `MARS`
   / `JUPITER` / `SATURN` / `URANUS` / `NEPTUNE`): a `FIELD.PHASE_DIR`
   column can name a body as its frame (a moving target). `measure()`
