@@ -91,6 +91,25 @@ _tql_result_strip(x) = x
 target column's unit `u`. Identity for a plain value."""
 _tql_write_strip(x, u) = x
 
+# --- write side: typed columns -> plain numbers + a unit string (Phase 70).
+# `_ms_ustring` is the inverse of `_ms_uparse` -- Unitful.Units -> a
+# casacore `QuantumUnits` token; real method in `UnitfulExt`.
+# `_UNIT_ALIASES_INV` picks the canonical casacore spelling where
+# `_UNIT_ALIASES` collapsed several onto one Unitful name.
+const _UNIT_ALIASES_INV = Dict{String,String}(
+    "arcsecond" => "arcsec", "arcminute" => "arcmin",
+    "″" => "arcsec", "′" => "arcmin",        # how UnitfulAngles prints them
+    "°" => "deg", "angstrom" => "Angstrom",
+    "percent" => "%", "permille" => "%%", "Msun" => "M0")
+
+_ms_ustring(args...) = _unitful_load_hint()
+
+# a column of `Unitful.Quantity` -> (; data = plain numbers, units =
+# ["<casacore unit>"]) or `nothing` (not a quantity column). Real method
+# in `UnitfulExt`; the core stub (varargs, so the ext's `::AbstractVector`
+# method wins) means the writer works with no Unitful.
+_quantity_column_spec(args...) = nothing
+
 """
     UNITS_NO_JULIA_COUNTERPART
 

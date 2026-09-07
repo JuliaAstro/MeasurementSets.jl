@@ -1239,3 +1239,43 @@ high-precision MJD variant (considered, deferred); the spaced postfix
 as a value — only the `hms(rad)` *function*).
 
 2638 tests.
+
+### Phase 70 — write `QuantumUnits` / `MEASINFO` from typed columns
+
+The write side of Phases 65-66/69, previously asymmetric: a `write_table`
+column could only get a `QuantumUnits` / `MEASINFO` keyword from an
+explicit `measures = Dict(...)` kwarg with hand-written unit strings; a
+column whose Julia element type was *already* a `Unitful.Quantity` or a
+`Measure` hit a bare `MethodError`.
+
+Now such a column is **automatically** stored as plain numbers on disk
+with the right keyword stamped, so `write_table` → `readtable` →
+`qcolumn` / `measure` round-trips:
+
+- A `Unitful.Quantity` column (scalar or array-cell) is `ustrip`ped to
+  its first element's unit and gets `QuantumUnits` stamped. A new
+  `_ms_ustring` (in `UnitfulExt`) is the inverse of `_ms_uparse` — a
+  curated reverse-alias map + a round-trip check; a unit with no
+  casacore spelling **errors** clearly (symmetric with the read side).
+- A `Measure` column — `MEpoch{R}` → `mjd*86400` s, `MDirection{R}` →
+  `[lon,lat]` rad, `MPosition{R}` → `[x,y,z]` m, `MFrequency{R}` → Hz,
+  `MRadialVelocity{R}` → m/s — gets `MEASINFO` (`type` + fixed `Ref` from
+  the first row's frame) + `QuantumUnits`.
+- New `units = Dict(col => "Hz" | ["rad","rad"])` kwarg on `write_table`
+  stamps `QuantumUnits` without a `MEASINFO`. An explicit `measures=` /
+  `units=` entry for a column **overrides** the auto-detection (wins
+  silently).
+- `_casatype_of` gains an `Any` fallback with an actionable message
+  (`import Unitful` / check the eltype) instead of a `MethodError`.
+- `edit`'s `addcolumn!(t, name, data)` does the same detection.
+- `copyms` / `write_ms` unchanged — keyword records are already copied
+  verbatim.
+
+**Non-goals:** deriving a per-row `VarRefCol` from a mixed-frame
+`Measure` column (fixed `Ref` only); non-canonical stored units for a
+`Measure`; `_ms_ustring` for the full casacore unit vocabulary (curated
++ verified, else a clear error); reading a plain column back *as* a
+`Quantity` automatically (`column` still returns plain numbers — use
+`qcolumn` / `measure`).
+
+2677 tests.

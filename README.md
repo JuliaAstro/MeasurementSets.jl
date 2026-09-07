@@ -39,9 +39,12 @@ the working set halves); `readtable(ms; precision=:full)` for
 **Write** — `write_table` / `create_ms` / `copyms` / `copytable` create
 conformant tables, preserving each column's storage-manager / engine /
 compression kind (or choosing one via `tsm=` / `ism=` / `engines=` /
-`dysco=` / `storage=` kwargs).  `reference_copy` makes a
-`ForwardColumnEngine` reference copy (casacore's `referenceCopy`).
-Verified byte-for-byte against casacore.
+`dysco=` / `storage=` kwargs).  A column whose eltype is a `Unitful`
+quantity or a `Measure` (`MEpoch{UTC}`, `MDirection{J2000}`, …) is
+stored as plain numbers with its `QuantumUnits` / `MEASINFO` keyword
+stamped automatically.  `reference_copy` makes a `ForwardColumnEngine`
+reference copy (casacore's `referenceCopy`).  Verified byte-for-byte
+against casacore.
 
 **Edit in place** — `edit(path) do t … end`: overwrite cells / whole
 columns, `addrows!`, `removerows!`, `addcolumn!`, `removecolumn!`.  Tiled

@@ -83,3 +83,49 @@ end
         @test ext._ms_uparse(name) isa Union{U.Units,typeof(U.NoUnits)}
     end
 end
+
+# Phase 70: write side -- Unitful.Units -> casacore QuantumUnits string,
+# and a Quantity-typed column stamps QuantumUnits automatically.
+@testset "units — _ms_ustring" begin
+    ext = Base.get_extension(MSv2, :UnitfulExt)
+    us = MSv2._ms_ustring
+    @test us(U.u"Hz") == "Hz"
+    @test us(U.u"m") == "m"
+    @test us(U.u"s") == "s"
+    @test us(U.u"rad") == "rad"
+    @test us(U.u"K") == "K"
+    @test us(U.u"Jy") == "Jy"
+    @test us(U.u"m/s") == "m/s"
+    @test us(U.u"°") == "deg"
+    @test us(U.u"arcsecond") == "arcsec"
+    @test us(U.NoUnits) == ""
+    # every emitted string re-parses to the same unit
+    for u in (U.u"Hz", U.u"GHz", U.u"m", U.u"m/s", U.u"rad", U.u"°", U.u"arcsecond", U.u"Jy")
+        @test MSv2._ms_ustring(u) |> ext._ms_uparse == u
+    end
+    # a compound unit with no casacore spelling errors clearly
+    @test_throws ErrorException us(U.u"N*m")
+end
+
+@testset "units — write from Unitful-typed columns" begin
+    dir = mktempdir()
+    tab = joinpath(dir, "T")
+    F = [1.30, 1.42, 1.55] .* U.u"GHz"
+    W = [10.0, 20.0, 30.0] .* U.u"km/s"
+    CF = [collect(1.0:4.0) .* U.u"MHz" .+ i * U.u"MHz" for i in 1:3]   # array cells
+    write_table(tab, "T", Pair{String,Any}["F" => F, "W" => W, "CF" => CF]; nrow = 3)
+    t = readtable(tab)
+
+    @test columnunit(t, "F") == U.u"GHz"                  # stored in its own unit
+    @test column(t, "F")[:] == [1.30, 1.42, 1.55]
+    @test qcolumn(t, "F")[2] == 1.42U.u"GHz"
+    @test columnunit(t, "W") == U.u"km/s"
+    @test columndesc(t, "W").keywords["QuantumUnits"] == ["km/s"]
+    @test columnunit(t, "CF") == U.u"MHz"
+    @test column(t, "CF")[1] == collect(2.0:5.0)
+
+    # explicit `units=` wins
+    tab2 = joinpath(dir, "T2")
+    write_table(tab2, "T2", Pair{String,Any}["F" => F]; nrow = 3, units = Dict("F" => "Hz"))
+    @test columndesc(readtable(tab2), "F").keywords["QuantumUnits"] == ["Hz"]
+end
