@@ -92,6 +92,9 @@ carries a `QuantumUnits` keyword; needs the Unitful extension), and
 `mscal.delay()` — computed per MAIN row from `TIME` + the `ANTENNA` /
 `FIELD` subtables (`query(main, "mscal.el1() > 0.3")`,
 `groupby(main, "FIELD_ID"; select = ["az" => "gmean(mscal.az1())"])`).
+The direction functions take an optional direction argument — a body
+name (`mscal.el1('SUN')`), a FIELD direction column
+(`mscal.az1('DELAY_DIR')`), or a `[ra, dec]` J2000 pair.
 `mscal.stokes(col [, 'types'] [, rescale])` converts a `DATA` / `FLAG` /
 `WEIGHT` array cell between correlation bases (`'IQUV'` / `'CIRC'` /
 `'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`.

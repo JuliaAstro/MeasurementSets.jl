@@ -213,8 +213,12 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
-        n == 0 || throw(ArgumentError("TaQL-lite: $name() takes no arguments in \"$src\""))
-        return TQLMScal(fn)
+        n == 0 && return TQLMScal(fn)
+        (n == 1 && fn in _MSCAL_DIR_FUNCS) || throw(ArgumentError(
+            "TaQL-lite: $name() takes no arguments" *
+            (fn in _MSCAL_DIR_FUNCS ? " or one direction argument" : "") *
+            " in \"$src\""))
+        return TQLMScal(fn, _mscal_dir_arg(args[1], src))
     end
     if haskey(_TQL_AGGRS, name)
         if name == "gcount"

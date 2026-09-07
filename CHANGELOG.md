@@ -1583,6 +1583,29 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 85 — optional direction argument for `mscal.*`
+
+The Phase-77 direction functions (`ha` / `hadec` / `azel` / `az` /
+`el` / `pa` / `itrf` / `delay`) take an optional direction argument
+instead of `FIELD.PHASE_DIR`, mirroring casacore's `derivedmscal` help
+text.
+
+```julia
+query(main, "mscal.el1('SUN') > 0.35")               # elevation of the Sun
+query(main; select = ["az" => "mscal.az1('DELAY_DIR')"])
+query(main, "mscal.hadec1([2.0, 0.5])")              # a fixed J2000 direction
+```
+
+- The argument is a solar-system body name (`'SUN'` … `'NEPTUNE'`,
+  `'MOON'`), a FIELD direction column (`'PHASE_DIR'` / `'DELAY_DIR'` /
+  `'REFERENCE_DIR'` — ephemeris-aware via Phase 82), or a `[ra, dec]`
+  J2000 pair in radians. No argument → `FIELD.PHASE_DIR` (unchanged).
+- `mscal.last` (sidereal time) and `mscal.uvw_j2000` are
+  direction-intrinsic and stay 0-argument.
+- `TQLMScal` gains a `dir` field; the sentinel is `"mscal.<fn>::<dir>"`.
+  `_mscal_columns` resolves the per-row J2000 direction (`_djfor`) and
+  keys its frame-conversion memo by `(antenna, direction, TIME)`.
+
 ### Phase 84 — `mscal.corr()` / `mscal.feed()` selection
 
 The two remaining `derivedmscal` selection UDFs, completing the

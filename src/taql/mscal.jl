@@ -16,9 +16,19 @@
 struct TQLMScal <: TQLExpr
     fn::String        # "ha"/"ha1"/"ha2" "hadec*" "azel*" "az*"/"el*"
                       # "pa*" "last*" "itrf" "uvw_j2000" "delay"
+    dir::String       # "" (use FIELD.PHASE_DIR) | a body name ("SUN") |
+                      # a FIELD direction column ("DELAY_DIR") | "[ra,dec]"
 end
+TQLMScal(fn::AbstractString) = TQLMScal(String(fn), "")
 
 _mscal_key(fn::AbstractString) = "mscal." * fn
+_mscal_key(e::TQLMScal) = "mscal." * e.fn * (isempty(e.dir) ? "" : "::" * e.dir)
+
+# direction functions that accept an optional direction argument
+const _MSCAL_DIR_FUNCS = Set([
+    "ha", "ha1", "ha2", "hadec", "hadec1", "hadec2",
+    "azel", "azel1", "azel2", "az1", "az2", "el1", "el2",
+    "pa", "pa1", "pa2", "itrf", "delay"])
 
 const _MSCAL_FUNCS = Set([
     "ha", "ha1", "ha2", "hadec", "hadec1", "hadec2",
@@ -26,9 +36,9 @@ const _MSCAL_FUNCS = Set([
     "pa", "pa1", "pa2", "last", "last1", "last2",
     "itrf", "uvw_j2000", "delay"])
 
-_tqleval(e::TQLMScal, cols, i) = cols[_mscal_key(e.fn)][i]
-_geval(e::TQLMScal, cols, g)   = cols[_mscal_key(e.fn)][g[1]]
-_tqlrefs!(seen, e::TQLMScal)   = push!(seen, _mscal_key(e.fn))
+_tqleval(e::TQLMScal, cols, i) = cols[_mscal_key(e)][i]
+_geval(e::TQLMScal, cols, g)   = cols[_mscal_key(e)][g[1]]
+_tqlrefs!(seen, e::TQLMScal)   = push!(seen, _mscal_key(e))
 _has_aggr(::TQLMScal)          = false
 
 # split a name set into plain column names and mscal function names
@@ -75,7 +85,8 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     cn = Set(columnnames(t))
     all(c -> c in cn, ("ANTENNA1", "FIELD_ID", "TIME")) || error(
         "mscal.* needs a MAIN table with ANTENNA1, FIELD_ID and TIME columns")
-    need2 = any(f -> endswith(f, "2") || f == "delay", fns)
+    bases = [first(_mscal_split_dir(f)) for f in fns]
+    need2 = any(f -> endswith(f, "2") || f == "delay", bases)
     (need2 && !("ANTENNA2" in cn)) && error(
         "mscal.* needs an ANTENNA2 column for a `*2` / delay function")
 
@@ -113,11 +124,38 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         end
     end
 
-    # memo: (antenna id, field id, TIME seconds) -> frame-converted values
-    memo = Dict{Tuple{Int,Int,Float64},NamedTuple}()
-    function _cache(antid::Int, fi::Int, i::Int)
-        get!(memo, (antid, fi, tsec[i])) do
-            dj = _fielddir(fi, i)
+    # resolve a `mscal.<fn>` direction argument to a per-row J2000
+    # direction + a memo-distinguishing key.  "" -> FIELD.PHASE_DIR (or
+    # its ephemeris); a body name -> geocentric apparent place; a FIELD
+    # direction column; a `[ra,dec]` J2000 pair.
+    djcache = Dict{Any,Any}()
+    function _djfor(dir::AbstractString, i::Int)
+        isempty(dir) && return (_fielddir(fid[i], i), fid[i])
+        if startswith(dir, "[")
+            m = match(r"^\[([^,]+),([^\]]+)\]$", dir)
+            return (MDirection{J2000}(parse(Float64, m[1]), parse(Float64, m[2])), :fixed)
+        elseif dir in _MSCAL_DIR_COLS
+            d = get!(() -> measconvert(measure(fld, dir, fid[i] + 1; epoch = epochs[i]),
+                                       J2000; frame = MeasFrame(epoch = epochs[i])),
+                     djcache, (dir, fid[i], tsec[i]))
+            return (d, (dir, fid[i]))
+        else
+            R = get(_DIRECTION_FRAMES, uppercase(dir), nothing)
+            R === nothing && error("mscal: unknown direction \"$dir\" — give a " *
+                "body name ('SUN'), a FIELD direction column ('DELAY_DIR'), or " *
+                "a `[ra, dec]` pair")
+            d = get!(() -> measconvert(MDirection{R}(0.0, 0.0), J2000;
+                                       frame = MeasFrame(epoch = epochs[i])),
+                     djcache, (dir, tsec[i]))
+            return (d, (dir,))
+        end
+    end
+
+    # memo: (antenna id, direction key, TIME seconds) -> frame-converted values
+    memo = Dict{Tuple{Int,Any,Float64},NamedTuple}()
+    function _cache(antid::Int, dir::AbstractString, i::Int)
+        dj, dkey = _djfor(dir, i)
+        get!(memo, (antid, dkey, tsec[i])) do
             fr = MeasFrame(epoch = epochs[i], position = antpos[antid + 1], direction = dj)
             hd = measconvert(dj, HADEC; frame = fr)
             ae = measconvert(dj, AZEL; frame = fr)
@@ -131,15 +169,16 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     end
 
     out = Dict{String,AbstractVector}()
-    for f in fns
+    for spec in fns
+        f, dir = _mscal_split_dir(spec)
         if f == "delay"
             v = Vector{Float64}(undef, n)
             for i in 1:n
-                x = _cache(0, fid[i], i).itrf_xyz
+                x = _cache(0, dir, i).itrf_xyz
                 d = _pvec(antpos[a1[i] + 1]) .- _pvec(antpos[a2[i] + 1])
                 v[i] = (x[1]*d[1] + x[2]*d[2] + x[3]*d[3]) / C_LIGHT
             end
-            out[_mscal_key(f)] = v
+            out[_mscal_key(spec)] = v
         elseif f == "uvw_j2000"
             # The ITRF->J2000 uvw transform is a linear map (pole rotation
             # + baseline rotation, all rotations) that depends only on the
@@ -163,24 +202,24 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
                 v[i] = [cols3[1][k] * u[1] + cols3[2][k] * u[2] + cols3[3][k] * u[3]
                         for k in 1:3]
             end
-            out[_mscal_key(f)] = v
+            out[_mscal_key(spec)] = v
         elseif startswith(f, "hadec")
-            out[_mscal_key(f)] = [collect(_cache(_antid(f, i), fid[i], i).hadec) for i in 1:n]
+            out[_mscal_key(spec)] = [collect(_cache(_antid(f, i), dir, i).hadec) for i in 1:n]
         elseif startswith(f, "azel")
-            out[_mscal_key(f)] = [collect(_cache(_antid(f, i), fid[i], i).azel) for i in 1:n]
+            out[_mscal_key(spec)] = [collect(_cache(_antid(f, i), dir, i).azel) for i in 1:n]
         elseif f == "itrf"
-            out[_mscal_key(f)] = [collect(_cache(0, fid[i], i).itrf_ll) for i in 1:n]
+            out[_mscal_key(spec)] = [collect(_cache(0, dir, i).itrf_ll) for i in 1:n]
         elseif startswith(f, "ha")
-            out[_mscal_key(f)] = Float64[_cache(_antid(f, i), fid[i], i).hadec[1] for i in 1:n]
+            out[_mscal_key(spec)] = Float64[_cache(_antid(f, i), dir, i).hadec[1] for i in 1:n]
         elseif startswith(f, "az")
-            out[_mscal_key(f)] = Float64[_cache(_antid(f, i), fid[i], i).azel[1] for i in 1:n]
+            out[_mscal_key(spec)] = Float64[_cache(_antid(f, i), dir, i).azel[1] for i in 1:n]
         elseif startswith(f, "el")
-            out[_mscal_key(f)] = Float64[_cache(_antid(f, i), fid[i], i).azel[2] for i in 1:n]
+            out[_mscal_key(spec)] = Float64[_cache(_antid(f, i), dir, i).azel[2] for i in 1:n]
         elseif startswith(f, "last")
-            out[_mscal_key(f)] = Float64[mod2pi(_cache(_antid(f, i), fid[i], i).last) for i in 1:n]
+            out[_mscal_key(spec)] = Float64[mod2pi(_cache(_antid(f, i), dir, i).last) for i in 1:n]
         elseif startswith(f, "pa")
-            out[_mscal_key(f)] = Float64[
-                (c = _cache(_antid(f, i), fid[i], i); _position_angle(c.azel, c.pole))
+            out[_mscal_key(spec)] = Float64[
+                (c = _cache(_antid(f, i), dir, i); _position_angle(c.azel, c.pole))
                 for i in 1:n]
         else
             error("mscal.* internal: unhandled function \"$f\"")
@@ -861,3 +900,32 @@ function _parse_corr_types(spec::AbstractString)
     isempty(out) && throw(ArgumentError("mscal.corr: empty correlation list"))
     return out
 end
+
+# ---------------------------------------------------------------------------
+# Phase 85: an optional direction argument for the `mscal.*` direction
+# functions (`mscal.ha1('SUN')`, `mscal.azel1('DELAY_DIR')`,
+# `mscal.hadec1([2.0, 0.5])`).  Mirrors casacore's help text: the arg may
+# be a solar-system body name, a FIELD direction-column name, or a
+# `[ra, dec]` J2000 pair (radians here).  No arg -> `FIELD.PHASE_DIR`.
+
+function _mscal_dir_arg(a::TQLExpr, src::AbstractString)
+    if a isa TQLLit && a.value isa AbstractString
+        return String(a.value)
+    elseif a isa TQLArrayLit && length(a.elems) == 2 &&
+           all(e -> e isa TQLLit && e.value isa Real, a.elems)
+        return "[" * string(Float64(a.elems[1].value)) * "," *
+                     string(Float64(a.elems[2].value)) * "]"
+    end
+    throw(ArgumentError("TaQL-lite: mscal direction argument must be a " *
+        "body name ('SUN'), a FIELD column name ('DELAY_DIR'), or a " *
+        "`[ra, dec]` pair in \"$src\""))
+end
+
+# `"ha1"` -> `("ha1", "")`; `"ha1::SUN"` -> `("ha1", "SUN")`
+function _mscal_split_dir(spec::AbstractString)
+    i = findfirst("::", spec)
+    i === nothing ? (String(spec), "") :
+        (String(spec[1:prevind(spec, first(i))]), String(spec[nextind(spec, last(i)):end]))
+end
+
+const _MSCAL_DIR_COLS = Set(["PHASE_DIR", "DELAY_DIR", "REFERENCE_DIR"])

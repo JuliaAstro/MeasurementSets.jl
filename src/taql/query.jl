@@ -282,7 +282,11 @@ sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
 ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000),
 `mscal.delay()` (geometric delay, s). The `1` / `2` suffix
 picks `ANTENNA1` / `ANTENNA2`; no suffix uses antenna 0 (array-centre
-fallback).
+fallback). The direction functions (`ha` / `hadec` / `azel` / `az` /
+`el` / `pa` / `itrf` / `delay`) take an optional direction argument
+instead of `FIELD.PHASE_DIR` — a body name (`mscal.el1('SUN')`), a
+FIELD direction column (`mscal.az1('DELAY_DIR')`), or a `[ra, dec]`
+J2000 pair in radians (`mscal.hadec1([2.0, 0.5])`).
 
 `mscal.stokes(col [, 'types'] [, rescale])` (Phase 78) converts a
 `DATA` / `FLAG` / `WEIGHT` array cell between correlation bases. `types`

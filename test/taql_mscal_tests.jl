@@ -19,6 +19,17 @@ using MeasurementSets: measure, measconvert, MeasFrame, MDirection, MuvW, J2000,
     @test s == Set(["mscal.el1", "mscal.el2"])
     @test MSv2._mscal_split(["A", "mscal.el1", "B", "mscal.ha2"]) ==
           (["A", "B"], ["el1", "ha2"])
+
+    # Phase 85: optional direction argument
+    @test p("mscal.el1('SUN') > 0").lhs.dir == "SUN"
+    @test p("mscal.hadec1([2.0, 0.5]) > 0").lhs.dir == "[2.0,0.5]"
+    @test p("mscal.itrf('DELAY_DIR') > 0").lhs.dir == "DELAY_DIR"
+    @test MSv2._mscal_key(p("mscal.el1('SUN') > 0").lhs) == "mscal.el1::SUN"
+    s2 = Set{String}(); MSv2._tqlrefs!(s2, p("mscal.el1('SUN') > 0"))
+    @test s2 == Set(["mscal.el1::SUN"])
+    @test MSv2._mscal_split_dir("ha2::SUN") == ("ha2", "SUN")
+    @test_throws ArgumentError p("mscal.last1('SUN') > 0")      # not a dir function
+    @test_throws ArgumentError p("mscal.uvw_j2000('SUN') > 0")
 end
 
 @testset "TaQL-lite query — mscal.* functions" begin
@@ -88,6 +99,23 @@ end
 
     # taql string dispatcher
     @test nrow(taql(main, "SELECT TIME WHERE mscal.el1() > 0.3")) == nrow(r)
+
+    # Phase 85: direction argument
+    qd = query(main, "rownumber() >= 1"; select = [
+        "e0" => "mscal.el1()", "edd" => "mscal.el1('DELAY_DIR')",
+        "esun" => "mscal.el1('SUN')", "efix" => "mscal.el1([2.0, 0.5])",
+        "hdsun" => "mscal.hadec1('SUN')"])
+    for i in (3, 250, 599)
+        # the sample field's PHASE_DIR == DELAY_DIR
+        @test column(qd, "e0")[i] ≈ column(qd, "edd")[i]
+        @test -pi/2 <= column(qd, "esun")[i] <= pi/2
+        # Sun's declination in late May 2024 is ~ +21 deg
+        @test rad2deg(column(qd, "hdsun")[i][2]) ≈ 20.9 atol = 0.5
+    end
+    # a fixed [ra, dec] direction is not the field -> el differs from el1()
+    @test column(qd, "efix")[3] != column(qd, "e0")[3]
+    @test nrow(query(main, "mscal.el1('SUN') > -10.0")) == nrow(main)
+    @test_throws ErrorException query(main, "mscal.el1('NOSUCH') > 0")
 end
 
 @testset "TaQL-lite — mscal.* error cases" begin
