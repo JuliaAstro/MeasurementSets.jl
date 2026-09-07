@@ -1365,3 +1365,27 @@ numbers (Dysco bit widths, CTDS type codes, container header offsets)
 stay with their subsystems.
 
 2725 tests.
+
+### Phase 74 — `shiftfreq` + one-step frequency ↔ velocity bridges
+
+The Phase 72 non-goals — casacore `MDoppler::shiftFrequency` and the
+spectral-axis array forms:
+
+```julia
+shiftfreq(d, νs)                              # νs .* √((1−β)/(1+β))
+radialvelocity(f::MFrequency, ν₀)            # = radialvelocity(doppler(f, ν₀))
+frequency(v::MRadialVelocity, ν₀)            # = frequency(doppler(v), ν₀)
+
+radialvelocity.(measure(spw, "CHAN_FREQ", 1), ν₀)   # a whole velocity axis
+```
+
+- `shiftfreq(d, ν)` — `ν` a Hz number, an `MFrequency` (frame label
+  kept), or a vector of either (the Doppler factor is computed once).
+  Unlike casacore it converts a non-`BETA` `d` to `BETA` first.
+- The two new `radialvelocity` / `frequency` methods compose the Phase
+  72 pieces so the common `MFrequency` ↔ `MRadialVelocity` step is one
+  call; they broadcast, so no dedicated `Vector` method is needed for
+  the bridges (only `shiftfreq` has one, for the factor-once path).
+- `_beta_factor` extracted and reused by `frequency` / `restfrequency`.
+
+2735 tests.

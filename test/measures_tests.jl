@@ -164,6 +164,28 @@ end
     @test doppler(MRadialVelocity{LSRK}(3e5)).d ≈ 3e5 / MSv2.C_LIGHT
     @test radialvelocity(doppler(MRadialVelocity{BARY}(-1.2e5))).mps ≈ -1.2e5
 
+    # Phase 74: shiftfreq + one-step bridges
+    @test shiftfreq(d, ν0) ≈ frequency(d, ν0).hz                  # scalar == fromDoppler
+    @test shiftfreq(measconvert(d, RADIO), ν0) ≈ shiftfreq(d, ν0) # non-BETA converted first
+    sf = shiftfreq(d, MFrequency{TOPO}(ν0))
+    @test sf isa MFrequency{TOPO} && sf.hz ≈ 1.4e9                # frame kept
+    grid = [1.40e9, 1.42e9, 1.44e9]
+    @test shiftfreq(d, grid) ≈ grid .* MSv2._beta_factor(d)
+    @test eltype(shiftfreq(d, [MFrequency{LSRK}(x) for x in grid])) === MFrequency{LSRK}
+
+    @test radialvelocity(f, ν0) === radialvelocity(doppler(f, ν0))
+    @test frequency(MRadialVelocity{LSRK}(3e5), ν0).hz ≈ frequency(doppler(MRadialVelocity{LSRK}(3e5)), ν0).hz
+    fs = [MFrequency{LSRK}(1.4e9 + 1e7i) for i in 0:3]
+    vs = radialvelocity.(fs, ν0)                                  # broadcast -> a velocity axis
+    @test vs isa Vector{MRadialVelocity{LSRK}} && issorted(getfield.(vs, :mps); rev = true)
+
+    # one SPW's CHAN_FREQ -> a velocity axis (broadcast over the channels)
+    spw = subtable(MeasurementSet(SAMPLE_MS), "SPECTRAL_WINDOW")
+    cf1 = measure(spw, "CHAN_FREQ", 1)                             # Vector{MFrequency{...}}
+    axis = radialvelocity.(cf1, ν0)
+    @test length(axis) == length(cf1) && eltype(axis) <: MRadialVelocity
+    @test shiftfreq(MDoppler{BETA}(0.001), cf1) isa Vector{eltype(cf1)}
+
     # MEASINFO round-trip
     dir = mktempdir()
     write_table(joinpath(dir, "T"), "T",

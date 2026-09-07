@@ -177,3 +177,9 @@ frequency, `doppler(f, ν₀)` / `frequency(d, ν₀)` / `restfrequency(f, d)`
 bridge to/from [`MFrequency`](@ref), `doppler(v)` / `radialvelocity(d)`
 to/from [`MRadialVelocity`](@ref). A Doppler value is frame-agnostic —
 `measconvert` the frequency to the frame you want *first*, then bridge.
+
+The bridge functions broadcast, so a whole spectral axis is one call —
+`radialvelocity.(measure(spw, "CHAN_FREQ", 1), ν₀)` is the velocity of
+each channel of a spectral window relative to a line rest frequency.
+`shiftfreq(d, νs)` multiplies a frequency grid by the Doppler factor
+`√((1−β)/(1+β))` (casacore `MDoppler::shiftFrequency`).
