@@ -85,8 +85,15 @@ carries a `QuantumUnits` keyword; needs the Unitful extension), and
 **date/time + angle functions** (`datetime`, `mjd`, `mjdtodate`,
 `date`, `time`, `year`/`month`/`day`/`weekday`, `cdate`/`ctime`/…,
 `hms`/`dms`, `normangle`, `angdist`/`angdistx` — dates are an MJD
-`Float64`). Measures-frame functions (`mscal.azel()` etc.) are still
-deferred.
+`Float64`). With `import SOFA`, **`mscal.*` derived-MS functions** —
+`mscal.ha1()` / `mscal.hadec1()` / `mscal.azel1()` / `mscal.az1()` /
+`mscal.el1()` / `mscal.pa1()` (parallactic angle) / `mscal.last1()`
+(local sidereal time) / `mscal.itrf()` / `mscal.uvw_j2000()` /
+`mscal.delay()` — computed per MAIN row from `TIME` + the `ANTENNA` /
+`FIELD` subtables (`query(main, "mscal.el1() > 0.3")`,
+`groupby(main, "FIELD_ID"; select = ["az" => "gmean(mscal.az1())"])`).
+The CASA-MSSelection `mscal.baseline` / `mscal.spw` selection functions
+and `mscal.stokes` are not included.
 
 ## Physical units
 
@@ -174,9 +181,8 @@ Backed by the pure-Julia [`SOFA.jl`](https://github.com/JuliaAstro/SOFA.jl)
 ~1 arcsecond (ΔUT1 = 0, no polar motion) with a one-time warning. `J2000`
 is treated as `ICRS` (a ~0.02″ frame-bias simplification). `MeasComet` /
 ephemeris tables and pulsar-timing-grade precision are out of scope.
-TaQL date/time and
-angle functions landed in the query engine (see above); measures
-*frame-conversion* functions (`mscal.azel()`) remain deferred.
+TaQL date/time / angle functions and the `mscal.*` derived-MS functions
+landed in the query engine (see above).
 
 The write path takes a `measures =` keyword on
 [`write_table`](@ref) — `Dict("D" => (; kind = :direction, ref =

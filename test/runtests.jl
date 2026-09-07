@@ -44,5 +44,6 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
     include("units_tests.jl")
     if isdir(SAMPLE_MS)
         include("measures_tests.jl")
+        include("taql_mscal_tests.jl")
     end
 end

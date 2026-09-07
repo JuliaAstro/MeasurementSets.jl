@@ -1448,3 +1448,36 @@ measconvert(MDirection{JUPITER}(0, 0), J2000; frame = fr)
 - Non-goals: `PLUTO` (no `plan94`), `COMET` / `MeasComet` ephemeris
   tables, a stored pointing offset in a body-frame cell, solar light
   deflection (< 2″, below the ephemeris floor).
+
+### Phase 77 — `mscal.*` derived-MS TaQL functions
+
+The astronomy-value subset of casacore's `derivedmscal` UDFs in the
+TaQL-lite grammar — per-MAIN-row values from `TIME` + the `ANTENNA` /
+`FIELD` subtables via the Measures engine (needs `import SOFA`).
+
+```julia
+query(main, "mscal.el1() > 0.35")                       # elevation cut
+groupby(main, "FIELD_ID"; select = ["az" => "gmean(mscal.az1())"])
+query(main, ""; select = ["w" => "mscal.uvw_j2000()", "d" => "mscal.delay()"])
+```
+
+- Functions: `mscal.ha1()` / `ha2()` / `ha()` (hour angle, rad);
+  `mscal.hadec1()` (`[ha, dec]`); `mscal.azel1()` (`[az, el]`);
+  `mscal.az1()` / `el1()` (scalar); `mscal.pa1()` (parallactic angle);
+  `mscal.last1()` (local apparent sidereal time, rad — casacore returns
+  a raw MVEpoch day count here; we return the angle);
+  `mscal.itrf()` (`PHASE_DIR` in ITRF, `[lon, lat]`);
+  `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000,
+  O(nrow)); `mscal.delay()` (geometric delay, s). `1` / `2` picks
+  `ANTENNA1` / `ANTENNA2`; no suffix uses antenna 0.
+- The tokenizer already lexed `mscal.ha1` as one identifier (Phase 63);
+  a `TQLMScal` AST node + a precompute hook in `_tql_cols` (covers
+  `query` + `groupby`) and `_vtq_prepare!` (VirtualTaQLColumn). Angle
+  functions memo by `(antenna, field, TIME)`.
+- Cross-checked against real `derivedmscal`: `ha1` to < 1″, `pa1` /
+  `last1` to < 1″ (`pa1` uses casacore's HADEC-pole, not the J2000
+  pole).
+- Non-goals: the CASA-MSSelection selection functions (`mscal.baseline`
+  / `mscal.spw` / …), `mscal.stokes`, the Observatories-table array
+  centre, `mscal.*` in a `query` closure / a `join` `on` string / on a
+  `GroupedTable`.

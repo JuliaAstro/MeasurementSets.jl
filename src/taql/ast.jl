@@ -15,11 +15,12 @@
 # (approximate equality), `AND`/`&&`, `OR`/`||`, `NOT`/`!`, `IN [...]`,
 # arithmetic `+ - * / % // **`, bitwise `& | ^` + unary `~`,
 # `LIKE`/`ILIKE`, the `~`/`!~` glob/regex operator, and a trailing
-# `ORDER BY`, all case-insensitive keyword forms). Not supported (see
-# the Phase 22/24 plan non-goals): units, date/time or measures
-# functions, computed output columns. (A boolean-mask array subscript
-# `V[V > 5]` is valid as an `update!` SET target -- Phase 55 -- but a
-# read of `V[boolmask]` in a WHERE/SELECT expression is not.)
+# `ORDER BY`, all case-insensitive keyword forms). Supports quantity
+# literals + date/time/angle functions (Phase 69), computed output
+# columns (Phase 57), and -- with `import SOFA` -- `mscal.*` derived-MS
+# functions (Phase 77). Not supported: a read of `V[boolmask]` in a
+# WHERE/SELECT expression (it is valid only as an `update!` SET
+# target -- Phase 55).
 # (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
 # 1-based, with negative-from-end and `end` -- landed in Phase 42/44;
 # `BETWEEN` / `NOT BETWEEN` in Phase 43; bitwise ops -- `^` is xor, use
