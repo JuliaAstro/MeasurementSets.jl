@@ -482,3 +482,41 @@ end
         @test cct2[:V][:] == [40.0, 50.0, 60.0]
     end
 end
+
+# Phase 130: addcolumn! through a ConcatTable view -- matches
+# ConcatTable::addColumn: every PART gets the column, schema-only per
+# casacore's own API; the data-carrying form (a MeasurementSets
+# convenience) slices `data` by `t.offsets` across parts.
+@testset "edit — addcolumn! through a ConcatTable view (Phase 130)" begin
+    dir1 = joinpath(mktempdir(), "cac1.tab")
+    dir2 = joinpath(mktempdir(), "cac2.tab")
+    write_table(dir1, "T", ["K" => collect(Int32, 1:3)]; nrow = 3)
+    write_table(dir2, "T", ["K" => collect(Int32, 4:6)]; nrow = 3)
+    ccdir = joinpath(mktempdir(), "cac.tab")
+    write_concattable(ccdir, [readtable(dir1), readtable(dir2)])
+
+    edit(readtable(ccdir)) do cv
+        addcolumn!(cv, "W", collect(10.0:10.0:60.0))
+    end
+    @test column(readtable(dir1), "W")[:] == [10.0, 20.0, 30.0]
+    @test column(readtable(dir2), "W")[:] == [40.0, 50.0, 60.0]
+
+    # standard-schema no-data form -> every part gets it, default cells
+    edit(readtable(ccdir)) do cv
+        addcolumn!(cv, "SCAN_NUMBER")
+        cv[:SCAN_NUMBER][1] = Int32(7)
+        cv[:SCAN_NUMBER][4] = Int32(9)
+    end
+    @test column(readtable(dir1), "SCAN_NUMBER")[:] == Int32[7, 0, 0]
+    @test column(readtable(dir2), "SCAN_NUMBER")[:] == Int32[9, 0, 0]
+
+    # wrong length errors
+    @test_throws ErrorException edit(readtable(ccdir)) do cv
+        addcolumn!(cv, "X", [1.0, 2.0])
+    end
+
+    if _HAVE_CASACORE
+        @test CCT.Table(dir1)[:W][:] == [10.0, 20.0, 30.0]
+        @test CCT.Table(dir2)[:W][:] == [40.0, 50.0, 60.0]
+    end
+end

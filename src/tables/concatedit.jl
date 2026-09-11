@@ -12,14 +12,30 @@
 # does). `isWritable()` requires every part writable.
 #
 # `ConcatTable::canRemoveRow()`/`canRemoveColumn()`/`canRenameColumn()`
-# are all hard-coded `false` in casacore, and `removeRow` throws
-# outright ("ConcatTable cannot remove rows") — no `addRow` override
-# exists either. `removerows!`/`addrows!`/`removecolumn!` are therefore
-# deliberate non-goals here, same as for `RefEditTable`.
-# `ConcatTable::addColumn` genuinely IS supported by casacore (adds the
-# column identically to every part, `ConcatTable.cc:530-560`) — real,
-# but left for a future phase (mirrors how Phase 125 shipped cell/
-# column write-through alone before Phase 126 added `addcolumn!`).
+# are all hard-coded `false` in casacore, and `removeRow`/`removeColumn`/
+# `renameColumn` all THROW outright ("ConcatTable cannot remove rows" /
+# "... remove columns" / "... rename columns", `ConcatTable.cc:563-583`)
+# — unlike `RefTable::removeColumn` (Phase 127's genuinely different
+# "pure view-level hide" case), `ConcatTable` really has no analogue at
+# all here. `removerows!`/`addrows!`/`removecolumn!` stay deliberate
+# non-goals.
+#
+# Phase 130 — `addcolumn!`, verified against `ConcatTable::addColumn`
+# (`ConcatTable.cc:530-560`): both overloads simply call `tables_p[i].
+# addColumn(...)` on EVERY part in turn (schema-only, like
+# `Table::addColumn` in general — casacore's own API never carries
+# values, a later `put` fills them in), then registers the column on
+# the `ConcatTable`'s own descriptor. `addcolumn!(::ConcatEditTable,
+# name; kind)` mirrors this directly: `addcolumn!` on every part.
+# `addcolumn!(::ConcatEditTable, name, data; ...)` is a MeasurementSets
+# convenience beyond casacore's own schema-only API (matching the same
+# choice Phase 126 made for `RefEditTable`): `data` covers every row of
+# the WHOLE concatenated view (there is no "selection" concept here,
+# unlike RefTable), sliced by `offsets` into one `addcolumn!(part, name,
+# slice; ...)` call per part — each part independently infers its own
+# type/shape from its own slice, matching how `ConcatTable` itself only
+# ever consults `parts[1]`'s schema for anything table-desc-level
+# (Phase 15's own finding) rather than enforcing cross-part consistency.
 
 """
     ConcatEditTable
@@ -49,12 +65,12 @@ mapping — `t[name][i] = v` writes to whichever part row `i` actually
 belongs to. Every part must be a plain `Table` (a part that is itself a
 RefTable/ConcatTable/etc. is not supported).
 
-Row/column *count* changes have no `ConcatTable` analogue in casacore
+Row-*count* changes have no `ConcatTable` analogue in casacore
 (`canRemoveRow`/`canRemoveColumn`/`canRenameColumn` are all `false`,
-and `removeRow` throws outright) — `addrows!`/`removerows!`/
-`removecolumn!` are not supported on a `ConcatEditTable`. `addcolumn!`
-is a real casacore capability (adds to every part) but not yet
-implemented here — a future phase.
+and `removeRow`/`removeColumn`/`renameColumn` all throw outright) —
+`addrows!`/`removerows!`/`removecolumn!` are not supported. `addcolumn!`
+IS supported — it adds the column to every part, matching
+`ConcatTable::addColumn`.
 """
 function edit(ct::ConcatTable)
     all(p -> p isa Table, ct.parts) || error(
@@ -113,3 +129,34 @@ setcell!(t::ConcatEditTable, name, i::Integer, v) = (t[name][Int(i)] = v; t)
     setcolumn!(t::ConcatEditTable, name, vals) -> t
 """
 setcolumn!(t::ConcatEditTable, name, vals) = (t[name][:] = vals; t)
+
+"""
+    addcolumn!(t::ConcatEditTable, name; kind=:ssm)
+    addcolumn!(t::ConcatEditTable, name, data; kind=:ssm, type=nothing, shape=nothing)
+
+Add a column, matching `ConcatTable::addColumn`: the column is added to
+EVERY part in turn. With no `data`, every part gets the standard-schema
+column with its own default cells (identical to `addcolumn!(::EditTable,
+name)` on each part). With `data` (length `length(t)`, one value per
+row of the whole concatenated view), it's sliced by `t.offsets` and
+each part gets its own slice — each part independently infers its own
+column type/shape from that slice.
+"""
+function addcolumn!(t::ConcatEditTable, name::AbstractString; kind::Symbol=:ssm)
+    for p in t.parts
+        addcolumn!(p, name; kind)
+    end
+    return t
+end
+
+function addcolumn!(t::ConcatEditTable, name::AbstractString, data::AbstractVector;
+                    kind::Symbol=:ssm, type::Union{CasaType,Nothing}=nothing, shape=nothing)
+    n = t.offsets[end]
+    length(data) == n ||
+        error("addcolumn!: expected $n values (one per ConcatTable row), got $(length(data))")
+    for (i, p) in enumerate(t.parts)
+        lo, hi = t.offsets[i] + 1, t.offsets[i + 1]
+        addcolumn!(p, name, data[lo:hi]; kind, type, shape)
+    end
+    return t
+end

@@ -3174,3 +3174,39 @@ view"): single-cell writes landing in the correct part, a whole-view-
 column write spanning both parts, a non-plain-Table-part guard, and a
 `_HAVE_CASACORE` cross-check. No new storage-format code, no new
 exports.
+
+### Phase 130 — `addcolumn!` through a ConcatTable view
+
+Natural continuation of Phase 129, mirroring how Phase 126 followed
+Phase 125 for `RefEditTable`. Read `ConcatTable::addColumn`
+(`ConcatTable.cc:530-560`): both overloads simply call `tables_p[i].
+addColumn(...)` on every part in turn (schema-only, like `addColumn`
+in general — casacore's API never carries values, a later `put` fills
+them in), then registers the column on the `ConcatTable`'s own
+descriptor.
+
+`addcolumn!(t::ConcatEditTable, name; kind)` mirrors this directly —
+`addcolumn!` on every part. `addcolumn!(t::ConcatEditTable, name,
+data; kind, type, shape)` is a MeasurementSets convenience beyond
+casacore's own schema-only API (the same choice Phase 126 made for
+`RefEditTable`): `data` covers every row of the whole concatenated
+view (no "selection" concept here, unlike RefTable), sliced by
+`t.offsets` into one `addcolumn!(part, name, slice; ...)` call per
+part — each part independently infers its own type/shape from its own
+slice, matching how `ConcatTable` itself only ever consults `parts[1]`'s
+schema for anything table-desc-level (a Phase 15 finding) rather than
+enforcing cross-part consistency.
+
+Also confirmed, while re-reading the source for symmetry with Phase
+127's RefTable investigation, that `ConcatTable::removeColumn` and
+`renameColumn` genuinely just THROW unconditionally
+(`ConcatTable.cc:563-583`) — unlike `RefTable::removeColumn`'s
+distinct "pure view-level hide" semantic, `ConcatTable` has no
+removecolumn! analogue at all, so it stays a hard non-goal here (no
+Phase-127-style follow-up needed).
+
+7 new tests in `test/edit_tests.jl` ("edit — addcolumn! through a
+ConcatTable view"): data split correctly across both parts, the
+no-data standard-schema form, a wrong-length error, and a
+`_HAVE_CASACORE` cross-check. 261 edit tests standalone, all green. No
+new storage-format code, no new exports.
