@@ -116,7 +116,14 @@ index ranges `a~b`/`a~b^step` or `CHAN_FREQ` ranges `f1~f2GHz`);
 `mscal.chan('0:5~20')` returns the per-row selected-channel `BitVector`.
 `mscal.corr('RR,LL')` (polarization-setup match) and `mscal.feed('0 & 1')`
 (the `mscal.baseline` form on `FEED1`/`FEED2`) round out the selection
-set.  **`meas.*`** (a subset of casacore's `libmeas` UDFs) does measure
+set.  **`mscal.pbresponse('gaussian:HPBW' | 'airy:D:FREQ[:BLK]' [, dir])`**
+(a MeasurementSets extension, not a real `derivedmscal` UDF) is the
+[`GaussianBeam`](@ref) / [`AiryBeam`](@ref) power response toward `dir`
+(default `FIELD.PHASE_DIR`) as seen through ANTENNA1's *actual* pointing
+(`POINTING.DIRECTION`) — the attenuation from a pointing/tracking error,
+computed automatically from the row's `TIME`/`ANTENNA1`/`FIELD_ID`
+geometry, matching how `mscal.azel1()` etc. work.  **`meas.*`** (a
+subset of casacore's `libmeas` UDFs) does measure
 conversions on ordinary expressions:
 `meas.<frame>(['SRC', ]lon, lat[, mjd[, x, y, z]])` →
 `[lon, lat]` in `j2000` / `b1950` / `app` / `galactic` / `ecliptic` /
@@ -308,4 +315,6 @@ pure-numeric wrappers for filtering/computing on beam response directly:
 `pbgaussian(θ, hpbw)`, `pbairy(θ, diameter, freq[, blockage])`,
 `pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` — e.g.
 `query(cat, "pbairy(OFFSET, 25.0, 1.4e9) > 0.5")` on a source-catalogue
-table carrying a per-row pointing-centre offset.
+table carrying a per-row pointing-centre offset. **`mscal.pbresponse`**
+wires the geometry in automatically instead — see the `mscal.*` section
+above.

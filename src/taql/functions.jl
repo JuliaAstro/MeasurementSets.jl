@@ -331,6 +331,17 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
                 "TaQL-lite: mscal.$fn takes one selection-string argument in \"$src\""))
             return TQLMSSel(fn, _mssel_str_arg(args[1], src))
         end
+        if fn == "pbresponse"
+            1 <= n <= 2 || throw(ArgumentError(
+                "TaQL-lite: mscal.pbresponse('beamspec' [, dir]) in \"$src\""))
+            (args[1] isa TQLLit && args[1].value isa AbstractString) || throw(ArgumentError(
+                "TaQL-lite: mscal.pbresponse's first argument must be a string " *
+                "literal beam spec (\"gaussian:HPBW\" / \"airy:D:FREQ[:BLK]\") in \"$src\""))
+            beamspec = String(args[1].value)
+            _pb_response_fn(beamspec)      # validate now; the closure is rebuilt per-column
+            dir = n == 2 ? _mscal_dir_arg(args[2], src) : ""
+            return TQLMScal("pbresponse:" * beamspec, dir)
+        end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
         n == 0 && return TQLMScal(fn)

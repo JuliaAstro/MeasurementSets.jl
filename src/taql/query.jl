@@ -326,6 +326,13 @@ selects the row only if at least one of the row's channels is selected.
 channel count) — the selected-channel mask, for use with `any(...)` /
 `count(...)` / a masked array.
 
+`mscal.pbresponse('gaussian:HPBW' | 'airy:D:FREQ[:BLK]' [, dir])`
+(Phase 101, a MeasurementSets extension — not a real `derivedmscal`
+UDF) — the [`GaussianBeam`](@ref) / [`AiryBeam`](@ref) power response
+toward `dir` (default `FIELD.PHASE_DIR`) as seen through ANTENNA1's
+*actual* pointing (`POINTING.DIRECTION`), i.e. the attenuation from a
+pointing/tracking error, needs a `POINTING` subtable.
+
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 boolean-mask array subscripts.
 Supported: 1-based array element/slice indexing (`DATA[1,1]`,

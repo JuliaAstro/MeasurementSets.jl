@@ -4,7 +4,7 @@ import SOFA
 import Statistics
 import Dates
 using MeasurementSets: measure, measconvert, MeasFrame, MDirection, MuvW, J2000,
-    AZEL, HADEC, ITRF
+    AZEL, AZELGEO, HADEC, ITRF
 
 @testset "TaQL-lite parser — mscal unit" begin
     p(s) = MSv2._taqllite_parse(s, Set(["A"]))
@@ -375,6 +375,89 @@ end
     for i in (10, 300, 590)
         @test hypot(column(q, "uj")[i]...) ≈ hypot(column(main, "UVW")[i]...) rtol = 1e-9
     end
+end
+
+# Phase 101: `mscal.pbresponse()` -- primary-beam attenuation from the
+# offset between ANTENNA1's *actual* POINTING.DIRECTION and the nominal
+# AZEL of FIELD.PHASE_DIR. The sample MS's own POINTING rows predate its
+# MAIN rows (a fixture-generation artifact -- see Phase 45 memory), so
+# the response there is not physically meaningful; this test replaces
+# POINTING with a controlled, time-aligned fixture instead.
+@testset "TaQL-lite — mscal.pbresponse()" begin
+    main = readtable(SAMPLE_MS)
+    ms = MeasurementSet(SAMPLE_MS)
+    fld = subtable(ms, "FIELD")
+    ant = subtable(ms, "ANTENNA")
+
+    a1 = column(main, "ANTENNA1")[:]
+    row0 = findfirst(==(0), a1)                    # a row observed by antenna 0
+    ep0 = measure(main, "TIME", row0)
+    t0sec = column(main, "TIME")[row0]
+    fi0 = column(main, "FIELD_ID")[row0]
+
+    # the nominal AZELGEO of FIELD.PHASE_DIR as seen by antenna 0 -- the
+    # same computation `mscal.azel1()` / `_cache` performs internally,
+    # just carried one step further to AZELGEO so it round-trips through
+    # the POINTING fixture's own frame with no AZEL/AZELGEO discrepancy.
+    dj = measconvert(measure(fld, "PHASE_DIR", fi0 + 1), J2000; frame = MeasFrame(epoch = ep0))
+    fr0 = MeasFrame(epoch = ep0, position = measure(ant, "POSITION", 1))
+    ageo0 = measconvert(dj, AZELGEO; frame = fr0)
+
+    # `mscal.*` computes every row's value regardless of the WHERE clause,
+    # so POINTING needs *some* entry for every antenna that appears as
+    # ANTENNA1 (irrelevant off-antenna-0 values are fine — only antenna
+    # 0's rows are checked below).
+    allants = sort(unique(a1))
+    _write_pointing(dir, dlon) = begin
+        isdir(joinpath(dir, "POINTING")) && rm(joinpath(dir, "POINTING"); recursive = true)
+        write_table(joinpath(dir, "POINTING"), "POINTING", Pair{String,Any}[
+            "ANTENNA_ID" => Int32.(allants), "TIME" => fill(t0sec, length(allants)),
+            "DIRECTION" => [id == 0 ? [ageo0.lon + dlon, ageo0.lat] : [0.0, 0.0]
+                            for id in allants]]; nrow = length(allants),
+            measures = Dict("DIRECTION" => (; kind = :direction, ref = "AZELGEO")))
+    end
+
+    tmp = mktempdir(); ms2dir = joinpath(tmp, "pb.ms")
+    copyms(SAMPLE_MS, ms2dir)
+
+    # case 1: pointing == nominal -> response ≈ 1
+    _write_pointing(ms2dir, 0.0)
+    q1 = query(readtable(ms2dir), "ANTENNA1 == 0 AND TIME == $t0sec";
+              select = ["r" => "mscal.pbresponse('gaussian:0.008727')"])
+    @test all(x -> isapprox(x, 1.0; atol = 1e-6), collect(q1.r))
+
+    # case 2: pointing offset by a known great-circle distance Δ (a pure
+    # AZELGEO longitude shift dlon = Δ/cos(lat) ≈ Δ great-circle, since
+    # AZELGEO<->AZEL is a rigid rotation at this scale)
+    Δ = 0.005
+    _write_pointing(ms2dir, Δ / cos(ageo0.lat))
+    q2 = query(readtable(ms2dir), "ANTENNA1 == 0 AND TIME == $t0sec";
+              select = ["r" => "mscal.pbresponse('gaussian:0.008727')"])
+    expected2 = exp(-4 * log(2) * (Δ / 0.008727)^2)
+    @test all(x -> isapprox(x, expected2; atol = 1e-4), collect(q2.r))
+
+    # airy beam: same geometry, different response function
+    q3 = query(readtable(ms2dir), "ANTENNA1 == 0 AND TIME == $t0sec";
+              select = ["r" => "mscal.pbresponse('airy:25.0:8.0e9')"])
+    expected3 = MSv2.power_response(MSv2.AiryBeam(25.0), Δ, 8.0e9)
+    @test all(x -> isapprox(x, expected3; atol = 1e-5), collect(q3.r))
+
+    # a direction argument overrides FIELD.PHASE_DIR
+    q4 = query(readtable(ms2dir), "ANTENNA1 == 0 AND TIME == $t0sec";
+              select = ["r" => "mscal.pbresponse('gaussian:0.008727', 'DELAY_DIR')"])
+    @test collect(q4.r)[1] ≈ collect(q2.r)[1]   # DELAY_DIR == PHASE_DIR in the sample
+
+    # errors
+    @test_throws ArgumentError query(readtable(ms2dir), "mscal.pbresponse('bogus:1.0')")
+    @test_throws ArgumentError query(readtable(ms2dir), "mscal.pbresponse('gaussian:1:2')")
+    @test_throws ArgumentError MSv2._taqllite_parse("mscal.pbresponse(A)", Set(["A"]))
+    @test_throws ArgumentError MSv2._taqllite_parse("mscal.pbresponse()", Set{String}())
+
+    # missing POINTING subtable -> clear error
+    tmp3dir = joinpath(mktempdir(), "nopt.ms")
+    copyms(SAMPLE_MS, tmp3dir;
+          subtables = filter(!=("POINTING"), first.(subtables(readtable(SAMPLE_MS)))))
+    @test_throws ErrorException query(readtable(tmp3dir), "mscal.pbresponse('gaussian:0.01')")
 end
 
 @testset "TaQL-lite — mscal.time() / mscal.uvdist()" begin

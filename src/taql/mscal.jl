@@ -68,6 +68,40 @@ end
 
 _pvec(p) = (p.x, p.y, p.z)
 
+# Phase 101: parse a `mscal.pbresponse` beam spec ("gaussian:HPBW" or
+# "airy:DIAMETER:FREQ[:BLOCKAGE]", radians/metres/Hz) into a
+# `θ::Real -> power::Float64` closure. Called both at parse time
+# (`_make_meas_func`-style early validation in `functions.jl`, closure
+# discarded) and at column-build time (the closure is used).
+function _pb_response_fn(spec::AbstractString)
+    parts = split(spec, ':')
+    isempty(parts) && throw(ArgumentError("mscal.pbresponse: empty beam spec"))
+    kind = lowercase(strip(parts[1]))
+    nums = Float64[]
+    for p in parts[2:end]
+        v = tryparse(Float64, strip(p))
+        v === nothing && throw(ArgumentError(
+            "mscal.pbresponse: bad numeric parameter \"$p\" in \"$spec\""))
+        push!(nums, v)
+    end
+    if kind == "gaussian"
+        length(nums) == 1 || throw(ArgumentError(
+            "mscal.pbresponse: \"gaussian:HPBW\" takes 1 parameter, got $(length(nums))"))
+        hpbw = nums[1]
+        return θ -> exp(-4 * log(2) * (θ / hpbw)^2)
+    elseif kind == "airy"
+        length(nums) in (2, 3) || throw(ArgumentError(
+            "mscal.pbresponse: \"airy:diameter:freq[:blockage]\" takes 2 or 3 " *
+            "parameters, got $(length(nums))"))
+        beam = AiryBeam(nums[1]; blockage = length(nums) == 3 ? nums[3] : 0.0)
+        freq = nums[2]
+        return θ -> power_response(beam, θ, freq)
+    else
+        throw(ArgumentError(
+            "mscal.pbresponse: unknown beam kind \"$kind\" (gaussian / airy) in \"$spec\""))
+    end
+end
+
 """
     _mscal_columns(t, fns) -> Dict{String,AbstractVector}
 
@@ -183,6 +217,45 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         end
     end
 
+    # Phase 101: `mscal.pbresponse('gaussian:HPBW' | 'airy:D:FREQ[:BLK]'
+    # [, dir])` -- primary-beam response toward `dir` (default
+    # FIELD.PHASE_DIR) as seen through ANTENNA1's *actual* pointing
+    # (POINTING.DIRECTION) rather than its nominal position -- the
+    # attenuation from a pointing/tracking error. Both directions are
+    # brought to AZEL and compared with the great-circle offset.
+    need_pb = any(b -> startswith(b, "pbresponse"), bases)
+    pointing_lut = Dict{Int,Vector{Tuple{Float64,Int}}}()  # antenna -> sorted [(TIME, row)]
+    pt = nothing
+    if need_pb
+        haskey(subs, "POINTING") || error("mscal.pbresponse: needs a POINTING subtable")
+        pt = readtable(subs["POINTING"])
+        pt_ant = Int.(column(pt, "ANTENNA_ID")[:])
+        pt_time = Float64.(column(pt, "TIME")[:])
+        for r in 1:nrow(pt)
+            push!(get!(() -> Tuple{Float64,Int}[], pointing_lut, pt_ant[r]), (pt_time[r], r))
+        end
+        for v in values(pointing_lut)
+            sort!(v; by = first)
+        end
+    end
+    function _pointing_row(antid::Int, t::Float64)
+        v = get(pointing_lut, antid, nothing)
+        (v === nothing || isempty(v)) && error(
+            "mscal.pbresponse: no POINTING rows for antenna $antid")
+        k = searchsortedlast(v, (t, typemax(Int)); by = first)
+        v[max(k, 1)][2]
+    end
+    pbmemo = Dict{Tuple{Int,Float64},NTuple{2,Float64}}()   # (antenna, TIME) -> actual azel
+    function _pointing_azel(antid::Int, i::Int)
+        get!(pbmemo, (antid, tsec[i])) do
+            r = _pointing_row(antid, tsec[i])
+            d = measure(pt, "DIRECTION", r; epoch = epochs[i])
+            a = measconvert(d, AZEL;
+                            frame = MeasFrame(epoch = epochs[i], position = antpos[antid + 1]))
+            (a.lon, a.lat)
+        end
+    end
+
     # memo: (position key, direction key, TIME seconds) -> frame-converted values.
     # antid >= 0 is an antenna; antid < 0 means the array centre for
     # OBSERVATION_ID `-antid-1`.
@@ -207,7 +280,12 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     out = Dict{String,AbstractVector}()
     for spec in fns
         f, dir = _mscal_split_dir(spec)
-        if f == "delay"
+        if startswith(f, "pbresponse:")
+            respfn = _pb_response_fn(f[(length("pbresponse:") + 1):end])
+            out[_mscal_key(spec)] = Float64[
+                respfn(_tql_angdist(_pointing_azel(a1[i], i)..., _cache(a1[i], dir, i).azel...))
+                for i in 1:n]
+        elseif f == "delay"
             v = Vector{Float64}(undef, n)
             for i in 1:n
                 x = _cache(-1, dir, i).itrf_xyz

@@ -1583,6 +1583,30 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 101 — `mscal.pbresponse()`: primary beam ↔ `mscal.*` integration
+
+```julia
+query(main, "mscal.pbresponse('gaussian:0.008727') < 0.5")   # tracking-error cut
+groupby(main, "ANTENNA1"; select = ["a"=>:ANTENNA1, "m"=>"gmean(mscal.pbresponse('airy:25.0:8e9'))"])
+```
+
+- `mscal.pbresponse('gaussian:HPBW' | 'airy:D:FREQ[:BLOCKAGE]' [, dir])`
+  — a MeasurementSets extension to the `mscal.*` family (not a real
+  `derivedmscal` UDF): the [`GaussianBeam`](@ref) / [`AiryBeam`](@ref)
+  power response toward `dir` (default `FIELD.PHASE_DIR`, same
+  direction-argument mini-language as `mscal.azel1()` etc.) as seen
+  through ANTENNA1's **actual** pointing (`POINTING.DIRECTION`, matched
+  by antenna + nearest-past `TIME`) rather than its nominal position —
+  the attenuation from a pointing/tracking error, computed automatically
+  from the row's `TIME`/`ANTENNA1`/`FIELD_ID` geometry (needs a
+  `POINTING` subtable + `import SOFA`).
+- Both directions are compared in `AZEL` (matching `_cache`'s existing
+  frame), so no extra conversion beyond `POINTING.DIRECTION`'s own
+  `AZELGEO` → `AZEL` step.
+- No cross-check oracle (a MeasurementSets-only extension); verified by
+  a controlled, time-aligned synthetic `POINTING` fixture (offset 0 →
+  response ≈ 1; a known offset → the closed-form Gaussian/Airy value).
+
 ### Phase 100 — elliptical / squinted primary beams + TaQL-lite
 
 ```julia
