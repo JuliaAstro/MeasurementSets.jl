@@ -3346,3 +3346,44 @@ directly).
 5 new tests in `test/edit_tests.jl` ("edit — clear errors for
 unsupported row/column ops"). 266 tests standalone, all green. No
 behaviour change beyond the error message quality.
+
+### Phase 134 — verified `MCuvw`'s pole-rotation matrix + the AZEL/AZELGEO latitude choice against casacore source
+
+Investigated two formulas flagged (but not fully closed) by earlier
+phases as the riskiest un-cross-checked ports.
+
+**`MCuvw::toPole`/`fromPole`'s pole-rotation matrix** — Phase 75's own
+risk note called this "the one thing not fully nailed by the
+exploration," verified only by a round-trip test and a hand-derived
+origin case, not an independent source re-derivation. Read
+`RotMatrix::RotMatrix(const Euler&)` and `RotMatrix::applySingle`
+(`casa/Quanta/RotMatrix.cc`) directly: `applySingle(angle, which=2)`
+builds the standard `R_y(angle) = [[c,0,s],[0,1,0],[-s,0,c]]`, `which=3`
+builds `R_z(angle) = [[c,-s,0],[s,c,0],[0,0,1]]`, and the two-angle
+constructor (confirmed `operator*=` is `this = this * other` by reading
+its loop body directly) computes `R = R_y(a) · R_z(b)`. With `a =
+-π/2+lat, b = -lon` — `MCuvw`'s actual call — this matches
+`ext/SOFAExt.jl`'s existing `_uvw_pole_R` **exactly**, element for
+element. Phase 75's construction was already correct; this closes the
+documented uncertainty with a real source-derivation instead of only a
+round-trip tautology. Added a permanent regression test
+(`test/measures_tests.jl`, "MBaseline / MuvW") that builds `R_y`/`R_z`
+from scratch inline (not copied from the file under test) and compares
+to `_uvw_pole_R` over a lon/lat sweep.
+
+**AZEL vs AZELGEO's latitude choice** — read `MeasMath::
+applyHADECtoAZEL`/`applyHADECtoAZELGEO` (`measures/Measures/
+MeasMath.cc`) down to `MCFrame::getLat`/`getLatGeo` (`measures/
+Measures/MCFrame.cc`) and confirmed the *only* difference between the
+two conversions is `getLat` (geocentric spherical latitude of the ITRF
+Cartesian position, `asin(z/r)`) vs `getLatGeo` (true WGS84 geodetic
+latitude via `MPosition::Convert(..., WGS84)`). `ext/SOFAExt.jl`'s
+`_frame_site(frame; geodetic)` already implements exactly this split
+(`geodetic=false` → `asin(clamp(z/r,...))`; `geodetic=true` →
+`SOFA.gc2gd`), selected via `geodetic = A !== AZEL` at both call sites
+— matches casacore exactly. No bug found, no code change needed here.
+
+No production code changed — test-only addition (9 new assertions). A
+third candidate, the pseudo-Stokes `Ptotal`/`Plinear` formulas fixed in
+Phase 122, was also re-checked against the current source and
+confirmed still correct.

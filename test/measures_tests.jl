@@ -341,6 +341,26 @@ end
     @test all(abs.(ext._frompole(ext._topole(v, d0), d0) .- v) .< 1e-12)
     R0 = ext._uvw_pole_R(d0)
     @test all(abs.(collect(ext._frompole((1.0, 2.0, 3.0), d0)) .- [-3.0, 2.0, 1.0]) .< 1e-9)
+
+    # Phase 134: `_uvw_pole_R` independently re-derived here from
+    # casacore's own `RotMatrix::RotMatrix(const Euler&)` +
+    # `RotMatrix::applySingle` (casa/Quanta/RotMatrix.cc) -- NOT copied
+    # from ext/SOFAExt.jl's own construction, so this is a genuine check
+    # against source, not a tautology. `applySingle(angle, which)` with
+    # which=2 builds the standard R_y(angle) = [[c,0,s],[0,1,0],[-s,0,c]]
+    # and which=3 builds R_z(angle) = [[c,-s,0],[s,c,0],[0,0,1]]; the two-
+    # angle ctor `RotMatrix(Euler(a,2u,b,3u))` starts from the identity
+    # and does `this *= R_y(a)` then `this *= R_z(b)`, i.e. `R = Ry(a)*Rz(b)`
+    # (`operator*=` is `this = this * other`, confirmed by reading the
+    # `for j; a[j]=rotat[i][j]; for j; rotat[i][j] = sum_k a[k]*other[k][j]`
+    # loop directly). `MCuvw::toPole/fromPole` use `a = -π/2+lat, b = -lon`.
+    Ry(a) = [cos(a) 0 sin(a); 0 1 0; -sin(a) 0 cos(a)]
+    Rz(b) = [cos(b) -sin(b) 0; sin(b) cos(b) 0; 0 0 1]
+    for lon in (0.3, -1.1, 2.7), lat in (-0.6, 0.0, 0.9)
+        d = MDirection{J2000}(lon, lat)
+        Rref = Ry(-pi/2 + lat) * Rz(-lon)
+        @test collect(ext._uvw_pole_R(d)) ≈ Rref atol = 1e-12
+    end
 end
 
 # Phase 76: solar-system-body direction reference frames.
