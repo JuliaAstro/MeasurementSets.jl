@@ -2379,3 +2379,45 @@ taql(t, "DELETE FROM t WHERE A > 3 ORDER BY TIME DESC LIMIT 2")
   positive/negative limit, the Julia and `taql` string forms agreeing)
   and a real-TaQL cross-check of both `update!` and `delete!` against
   `tableCommand`.
+
+### Phase 112 — `Hypercolumn_*` keyword preservation on copy
+
+```julia
+copytable(dst, readtable(src))     # src's Hypercolumn_* private keywords now survive
+```
+
+- `copytable`/`copyms`/`write_ms` (the `Table` source path) now
+  preserve a source table's `Hypercolumn_<name>` private-keyword
+  declarations (casacore `TableDesc::defineHypercolumn`) — closing the
+  fidelity gap documented since Phase 11.
+- **Found and fixed a real bug, not just a missing feature**:
+  `_copy_table_cols` was unconditionally passing `private=Record()`
+  to `_write_table_core`, discarding the **entire** table-level private
+  keyword set on every copy — even though the outer `_copy_table`
+  methods already correctly defaulted `private` to the source's own
+  (`t.desc.private`) and threaded it all the way down as a parameter
+  that was then silently dropped at the very last call site.
+- New `_filter_hypercolumns(private, keptnames)` (`src/tables/create.jl`):
+  passes every non-`Hypercolumn_*` private keyword through
+  unconditionally, and preserves a `Hypercolumn_<name>` entry only when
+  every column it names (`HCdatanames`/`HCcoordnames`/`HCidnames`) is
+  still present, under the same name, in the copy's actual output
+  column set — a renamed or dropped column silently drops just that
+  one stale declaration rather than writing a reference to a column
+  that no longer exists.
+- Our own reader never needed this keyword at all (Phase 11 — a
+  hypercube's layout comes entirely from the storage manager's own
+  on-disk header); this only matters for an external tool that
+  inspects the `TableDesc` directly (e.g. `tb.getdminfo()`).
+- A `RefTable`/`ConcatTable` source still drops the private keyword set
+  (`_copy_table`'s `RefTable`/`ConcatTable` methods keep their own
+  deliberate `private=Record()` default — a selection/projection may
+  rename or drop the very columns a declaration names) — only the
+  plain-`Table` source path (`copyms`/`write_ms`'s common case) changed.
+- Verified: a hand-built `Hypercolumn_TestCube` keyword (via
+  `_write_table_core`'s `private=` kwarg directly) survives a full
+  `copytable` round-trip intact; `_filter_hypercolumns` unit-tested for
+  both the "all referenced columns kept" and "one is missing" cases,
+  plus an unrelated private key passing through either way. No
+  casacore/CASA oracle needed (pure keyword passthrough, not a new
+  binary format).
