@@ -185,6 +185,32 @@ function MS._riseset(ra::Real, dec::Real, mjd::Real, x::Real, y::Real, z::Real,
 end
 
 # ======================================================================
+# position  (ITRF <-> WGS84: casacore stores the SAME geocentric
+# Cartesian vector under both refs -- they only differ in which
+# ellipsoid a *geodetic* (lon,lat,height) view of that vector uses, so
+# the position-frame "conversion" is an identity on x,y,z; the real
+# conversion is Cartesian <-> geodetic, `_itrf_to_geodetic`/
+# `_geodetic_to_itrf` below, exposed to TaQL-lite as `meas.wgs` /
+# `meas.itrfxyz`, Phase 106).
+# ======================================================================
+
+function MS._mconv(m::MPosition{A}, ::Type{B}, ::MeasFrame) where {A<:RefFrame,B<:RefFrame}
+    (A === ITRF || A === WGS84) && (B === ITRF || B === WGS84) ||
+        error("MeasurementSets: position frame $(nameof(A)) -> $(nameof(B)) is not supported")
+    MPosition{B}(m.x, m.y, m.z)
+end
+
+# see the docstrings on the core stubs, `src/measures/types.jl`.
+function MS._geodetic_to_itrf(lon::Real, lat::Real, height::Real)
+    p = SOFA.gd2gc(:WGS84, float(lon), float(lat), float(height))
+    (p[1], p[2], p[3])
+end
+function MS._itrf_to_geodetic(x::Real, y::Real, z::Real)
+    g = SOFA.gc2gd(:WGS84, SVector(float(x), float(y), float(z)))
+    (g.ϵ, g.ϕ, g.r)
+end
+
+# ======================================================================
 # direction  (hub = ICRS; J2000 ≈ ICRS)
 # ======================================================================
 

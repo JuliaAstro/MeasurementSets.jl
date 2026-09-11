@@ -2235,6 +2235,39 @@ end
     @test (isnan(r3) && isnan(s3)) || (isfinite(r3) && isfinite(s3) && s3 - r3 ≈ 1.0)
 end
 
+@testset "Phase 106 — meas.pos() / meas.itrfxyz() / meas.wgs()" begin
+    # parser (no SOFA needed)
+    p(s) = MSv2._taqllite_parse(s, Set(["X", "Y", "Z"]))
+    @test p("meas.pos('ITRF', 'WGS84', X, Y, Z)") isa MSv2.TQLFunc
+    @test p("meas.itrfxyz(X, Y, Z)") isa MSv2.TQLFunc
+    @test p("meas.wgs(X, Y, Z)") isa MSv2.TQLFunc
+    @test_throws ArgumentError p("meas.pos('ITRF', 'BOGUS', X, Y, Z)")
+    @test_throws ArgumentError p("meas.pos('ITRF', 'WGS84', X, Y)")   # wrong arity
+    @test_throws ArgumentError p("meas.itrfxyz(X, Y)")                # wrong arity
+    @test_throws ArgumentError p("meas.wgs(X, Y, Z, X)")              # wrong arity
+
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    ext === nothing && return
+    d = mktempdir()
+    write_table(joinpath(d, "T"), "T", Pair{String,Any}[
+        "X" => [-1601185.0], "Y" => [-5041977.0], "Z" => [3554876.0]]; nrow = 1)
+    t = readtable(joinpath(d, "T"))
+
+    # meas.pos matches measconvert exactly (and ITRF<->WGS84 is a Cartesian identity)
+    q1 = query(t, "X < 0"; select = ["p" => "meas.pos('ITRF', 'WGS84', X, Y, Z)"])
+    @test collect(q1.p)[1] == [-1601185.0, -5041977.0, 3554876.0]
+    ref = measconvert(MPosition{ITRF}(-1601185.0, -5041977.0, 3554876.0), WGS84)
+    @test collect(q1.p)[1] == [ref.x, ref.y, ref.z]
+
+    # meas.wgs / meas.itrfxyz round-trip
+    q2 = query(t, "X < 0"; select = ["g" => "meas.wgs(X, Y, Z)"])
+    lon, lat, h = collect(q2.g)[1]
+    @test -π <= lon <= π && -π/2 <= lat <= π/2 && h > 0    # VLA is well above sea level
+    q3 = query(t, "X < 0"; select = ["xyz" =>
+        "meas.itrfxyz($lon, $lat, $h)"])
+    @test collect(q3.xyz)[1] ≈ [-1601185.0, -5041977.0, 3554876.0] atol = 1e-6
+end
+
 @testset "Phase 69 — date/time functions" begin
     f(n) = MSv2._TQL_FUNCS[n][1]
     @test MSv2._tql_datetime("2020-02-12") ≈ 58891.0

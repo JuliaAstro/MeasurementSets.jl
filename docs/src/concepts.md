@@ -151,7 +151,11 @@ conventions (pure algebra — the only `meas.*` function that needs no
 `import SOFA`); `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` gives
 `[rise_mjd, set_mjd]` for the UTC day containing `mjd` (a standard-
 formula computation, not a byte-exact port of casacore's own rise/set
-search).
+search). `meas.pos('ITRF', 'WGS84', x, y, z)` converts an `MPosition`
+between `itrf`/`wgs84` (an identity — casacore stores one Cartesian
+vector under both refs); `meas.itrfxyz(lon, lat, height)` /
+`meas.wgs(x, y, z)` are the real geodetic ↔ Cartesian conversion (WGS84
+ellipsoid), each other's inverse.
 
 ## Physical units
 

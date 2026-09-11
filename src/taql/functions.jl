@@ -266,6 +266,16 @@ const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
 #       (Phase 104) rise/set UTC MJD of a J2000 direction for the day
 #       containing `mjd`; NaN,NaN if it never reaches `elev0` (rad,
 #       default 0), floor(mjd),floor(mjd)+1 if circumpolar.
+#   meas.pos('SSCALE', 'TSCALE', x, y, z)             -> [x, y, z] m
+#       (Phase 106) position frame conversion, SSCALE/TSCALE ∈ itrf/
+#       wgs84 -- casacore stores the same Cartesian vector under both,
+#       so this is an identity; included for API symmetry.
+#   meas.itrfxyz(lon, lat, height)                    -> [x, y, z] m
+#       (Phase 106) WGS84 geodetic (lon/lat rad, height m) -> geocentric
+#       Cartesian ITRF.
+#   meas.wgs(x, y, z)                                 -> [lon, lat, height]
+#       (Phase 106) the inverse of meas.itrfxyz -- Cartesian -> WGS84
+#       geodetic (rad, rad, m).
 
 const _MEAS_DIR_FRAMES = Dict{String,DataType}(
     "j2000" => J2000, "b1950" => B1950, "app" => APP, "apparent" => APP,
@@ -280,6 +290,8 @@ const _MEAS_FREQ_FRAMES = Dict{String,DataType}(
 const _MEAS_DOPPLER_CONV = Dict{String,DataType}(
     "radio" => RADIO, "optical" => OPTICAL, "z" => OPTICAL, "ratio" => RATIO,
     "beta" => BETA, "true" => BETA, "relativistic" => BETA, "gamma" => GAMMA)
+const _MEAS_POS_FRAMES = Dict{String,DataType}(
+    "itrf" => ITRF, "wgs84" => WGS84, "wgs" => WGS84)
 
 _meas_dir_needs_epoch(R) = R === APP || R === AZEL || R === HADEC || R === ITRF
 _meas_dir_needs_pos(R) = R === AZEL || R === HADEC || R === ITRF
@@ -301,6 +313,11 @@ _meas_freq_convert(S::DataType, T::DataType, freq, mjd, x, y, z, ra, dec) =
 
 _meas_rv_convert(S::DataType, T::DataType, v, mjd, x, y, z, ra, dec) =
     measconvert(MRadialVelocity{S}(float(v)), T; frame = _meas_full_frame(mjd, x, y, z, ra, dec)).mps
+
+function _meas_pos_convert(S::DataType, T::DataType, x, y, z)
+    m = measconvert(MPosition{S}(float(x), float(y), float(z)), T)
+    Float64[m.x, m.y, m.z]
+end
 
 function _meas_two_scale_args(kind::AbstractString, dict, args::Vector{TQLExpr}, src::AbstractString)
     (length(args) >= 2 && args[1] isa TQLLit && args[1].value isa AbstractString &&
@@ -379,6 +396,22 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
         length(args) in (6, 7) || throw(ArgumentError(
             "TaQL-lite: meas.riseset(ra, dec, mjd, x, y, z[, elev0]) in \"$src\""))
         return TQLFunc((rargs...) -> collect(Float64, _riseset(rargs...)), args)
+    end
+    if fn == "pos" || fn == "position"
+        (S, T) = _meas_two_scale_args("pos", _MEAS_POS_FRAMES, args, src)
+        length(args) == 5 || throw(ArgumentError(
+            "TaQL-lite: meas.pos('SSCALE', 'TSCALE', x, y, z) in \"$src\""))
+        return TQLFunc((x, y, z) -> _meas_pos_convert(S, T, x, y, z), args[3:end])
+    end
+    if fn == "itrfxyz"
+        length(args) == 3 || throw(ArgumentError(
+            "TaQL-lite: meas.itrfxyz(lon, lat, height) in \"$src\""))
+        return TQLFunc((lon, lat, h) -> collect(Float64, _geodetic_to_itrf(lon, lat, h)), args)
+    end
+    if fn == "wgs"
+        length(args) == 3 || throw(ArgumentError(
+            "TaQL-lite: meas.wgs(x, y, z) in \"$src\""))
+        return TQLFunc((x, y, z) -> collect(Float64, _itrf_to_geodetic(x, y, z)), args)
     end
     throw(ArgumentError("TaQL-lite: meas.$fn is not supported in \"$src\""))
 end

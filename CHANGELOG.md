@@ -2170,3 +2170,35 @@ groupby(main, "FIELD_ID"; select = ["s" => "gmean(mscal.riseset1(0.2)[2])"])
   tighter elevation cutoff never widens the window (`rise2 >= rise`,
   `set2 <= set` at every sampled row) — this is exactly the assertion
   that caught the memo-key bug above.
+
+### Phase 106 — `meas.pos()` / `meas.itrfxyz()` / `meas.wgs()`: position UDFs
+
+```julia
+query(ant, "meas.wgs(X, Y, Z)[3] > 2000")                     # height > 2 km
+query(cat, "meas.itrfxyz(LON, LAT, 0.0) == meas.pos('WGS84', 'ITRF', X, Y, Z)")
+```
+
+- `meas.pos('SSCALE', 'TSCALE', x, y, z)` — `MPosition` frame conversion
+  (`itrf`/`wgs84`). **This closed a real, previously-undiscovered gap**:
+  `MPosition` had **no** `measconvert` method at all before this phase —
+  `measconvert(::MPosition, ...)` always hit the generic core stub's
+  "needs SOFA.jl" error, even with SOFA loaded, since no `_mconv`
+  method existed for it. The fix (`ext/SOFAExt.jl`) is an identity on
+  `(x,y,z)`: casacore stores the *same* geocentric Cartesian vector
+  under both `ITRF` and `WGS84` — the refs only differ in which
+  ellipsoid a geodetic (lon/lat/height) *view* of that vector uses, so
+  there is nothing to rotate.
+- `meas.itrfxyz(lon, lat, height)` / `meas.wgs(x, y, z)` — the real
+  conversion: WGS84 geodetic ↔ geocentric Cartesian ITRF, via
+  `SOFA.gd2gc` / `SOFA.gc2gd` (the same pair `_frame_site` already uses
+  internally for AZELGEO). New core stubs `_geodetic_to_itrf` /
+  `_itrf_to_geodetic` (`src/measures/types.jl`, mirror the `_lst` /
+  `_riseset` stub/ext split) + real implementations in `ext/SOFAExt.jl`.
+- Closes the very last item in Phase 97's `meas.*` non-goals list
+  (the column-MEASINFO-driven direction-argument form remains a
+  non-goal — every `meas.*` argument is still an explicit expression,
+  not inferred from a column's own `MEASINFO`).
+- Verified: `meas.pos` against `measconvert(MPosition{ITRF}(...),
+  WGS84)` directly (exact — no arithmetic, an identity); `meas.wgs` ∘
+  `meas.itrfxyz` round-trips a real VLA-antenna ITRF position to
+  `atol = 1e-6` m.

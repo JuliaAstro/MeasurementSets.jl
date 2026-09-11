@@ -261,7 +261,11 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   lsrk/lsrd/galacto/lgroup/cmb) /
   `meas.doppler('SCONV', 'TCONV', value)` (Doppler-convention algebra,
   SCONV/TCONV ∈ radio/optical/ratio/beta/gamma -- no frame needed) /
-  `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` → `[rise_mjd, set_mjd]`
+  `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` → `[rise_mjd, set_mjd]` /
+  `meas.pos('SSCALE', 'TSCALE', x, y, z)` (position frame conversion,
+  SSCALE/TSCALE ∈ itrf/wgs84 -- an identity, both share one Cartesian
+  vector in casacore) / `meas.itrfxyz(lon, lat, height)` (WGS84 geodetic
+  → ITRF Cartesian) / `meas.wgs(x, y, z)` (the inverse)
   (measure conversions -- all but `meas.doppler` need `import SOFA`),
   `pbgaussian(θ, hpbw)` / `pbairy(θ, diameter, freq[, blockage])` /
   `pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` (primary-beam

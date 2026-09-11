@@ -332,3 +332,23 @@ it never sets (circumpolar). Real method in `ext/SOFAExt.jl`.
 """
 _riseset(args...) = error(
     "MeasurementSets: rise/set times need SOFA.jl — run `import SOFA`")
+
+"""
+    _geodetic_to_itrf(lon, lat, height) -> (x, y, z)
+
+WGS84 geodetic `(lon, lat)` (rad, east/north-positive) + ellipsoidal
+`height` (m) → geocentric Cartesian ITRF `(x, y, z)` (m). Real method in
+`ext/SOFAExt.jl`.
+"""
+_geodetic_to_itrf(args...) = error(
+    "MeasurementSets: geodetic↔ITRF conversion needs SOFA.jl — run `import SOFA`")
+
+"""
+    _itrf_to_geodetic(x, y, z) -> (lon, lat, height)
+
+The inverse of [`_geodetic_to_itrf`](@ref) — geocentric Cartesian ITRF
+`(x, y, z)` (m) → WGS84 geodetic `(lon, lat, height)` (rad, rad, m).
+Real method in `ext/SOFAExt.jl`.
+"""
+_itrf_to_geodetic(args...) = error(
+    "MeasurementSets: geodetic↔ITRF conversion needs SOFA.jl — run `import SOFA`")
