@@ -254,8 +254,19 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `iif(cond, a, b)`, `rownumber()` (1-based),
   `observatory('VLA')` (a telescope's ITRF `[x,y,z]`),
   `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` /
-  `meas.epoch('TAI', mjd)` / `meas.last(mjd, x, y, z)` (measure
-  conversions -- needs `import SOFA`),
+  `meas.epoch('TAI', mjd)` / `meas.last(mjd, x, y, z)` /
+  `meas.freq('SSCALE', 'TSCALE', freq, mjd, x, y, z, ra, dec)` /
+  `meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec)` (frequency /
+  radial-velocity frame conversion, SSCALE/TSCALE ∈ topo/geo/bary/
+  lsrk/lsrd/galacto/lgroup/cmb) /
+  `meas.doppler('SCONV', 'TCONV', value)` (Doppler-convention algebra,
+  SCONV/TCONV ∈ radio/optical/ratio/beta/gamma -- no frame needed) /
+  `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` → `[rise_mjd, set_mjd]` /
+  `meas.pos('SSCALE', 'TSCALE', x, y, z)` (position frame conversion,
+  SSCALE/TSCALE ∈ itrf/wgs84 -- an identity, both share one Cartesian
+  vector in casacore) / `meas.itrfxyz(lon, lat, height)` (WGS84 geodetic
+  → ITRF Cartesian) / `meas.wgs(x, y, z)` (the inverse)
+  (measure conversions -- all but `meas.doppler` need `import SOFA`),
   `pbgaussian(θ, hpbw)` / `pbairy(θ, diameter, freq[, blockage])` /
   `pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` (primary-beam
   power response, see `src/beam/beam.jl`), `pi`, `e`;
@@ -286,7 +297,13 @@ MAIN table with `ANTENNA` / `FIELD` subtables): `mscal.ha1()` /
 `mscal.pa1()` (parallactic angle), `mscal.last1()` (local apparent
 sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
 ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000),
-`mscal.delay()` (geometric delay, s). The `1` / `2` suffix
+`mscal.delay()` (geometric delay, s),
+`mscal.riseset[1|2]([elev0][, dir])` (Phase 105) → `[rise_mjd, set_mjd]`
+for that antenna's own ITRF position and `dir` (default
+`FIELD.PHASE_DIR`), for the UTC day of the row's `TIME` — the same
+rise/set machinery `meas.riseset()` exposes, wired into the automatic
+per-row geometry the way `mscal.pbresponse` wires in the beam models;
+memoized per day, not per row. The `1` / `2` suffix
 picks `ANTENNA1` / `ANTENNA2`; no suffix uses the array centre —
 `OBSERVATION.TELESCOPE_NAME` looked up in the bundled Observatories
 table, falling back to antenna 0. The direction functions (`ha` / `hadec` / `azel` / `az` /

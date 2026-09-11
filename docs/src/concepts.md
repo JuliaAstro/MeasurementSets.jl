@@ -92,8 +92,10 @@ carries a `QuantumUnits` keyword; needs the Unitful extension),
 `mscal.ha1()` / `mscal.hadec1()` / `mscal.azel1()` / `mscal.az1()` /
 `mscal.el1()` / `mscal.pa1()` (parallactic angle) / `mscal.last1()`
 (local sidereal time) / `mscal.itrf()` / `mscal.uvw_j2000()` /
-`mscal.delay()` — computed per MAIN row from `TIME` + the `ANTENNA` /
-`FIELD` subtables (`query(main, "mscal.el1() > 0.3")`,
+`mscal.delay()` / `mscal.riseset[1|2]([elev0][, dir])` (rise/set MJD for
+that antenna's own position and `dir`, the `meas.riseset` machinery
+wired in automatically) — computed per MAIN row from `TIME` + the
+`ANTENNA` / `FIELD` subtables (`query(main, "mscal.el1() > 0.3")`,
 `groupby(main, "FIELD_ID"; select = ["az" => "gmean(mscal.az1())"])`).
 The direction functions take an optional direction argument — a body
 name (`mscal.el1('SUN')`), a FIELD direction column
@@ -140,6 +142,20 @@ conversions on ordinary expressions:
 `[lon, lat]` in `j2000` / `b1950` / `app` / `galactic` / `ecliptic` /
 `azel` / `hadec` / `itrf`; `meas.epoch('TAI', mjd)` converts a time
 scale; `meas.last(mjd, x, y, z)` is the local apparent sidereal time.
+`meas.freq('TOPO', 'LSRK', freq, mjd, x, y, z, ra, dec)` /
+`meas.rv('TOPO', 'LSRK', v, mjd, x, y, z, ra, dec)` convert a
+frequency / radial velocity between spectral frames
+(`topo`/`geo`/`bary`/`lsrk`/`lsrd`/`galacto`/`lgroup`/`cmb`);
+`meas.doppler('RADIO', 'BETA', value)` converts between Doppler
+conventions (pure algebra — the only `meas.*` function that needs no
+`import SOFA`); `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` gives
+`[rise_mjd, set_mjd]` for the UTC day containing `mjd` (a standard-
+formula computation, not a byte-exact port of casacore's own rise/set
+search). `meas.pos('ITRF', 'WGS84', x, y, z)` converts an `MPosition`
+between `itrf`/`wgs84` (an identity — casacore stores one Cartesian
+vector under both refs); `meas.itrfxyz(lon, lat, height)` /
+`meas.wgs(x, y, z)` are the real geodetic ↔ Cartesian conversion (WGS84
+ellipsoid), each other's inverse.
 
 ## Physical units
 

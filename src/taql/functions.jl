@@ -252,6 +252,30 @@ const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
 #                 azel/hadec/itrf.
 #   meas.epoch('TAI'|'TT'|'TDB'|'UT1'|'UTC', mjd)         -> MJD days
 #   meas.last(mjd, x, y, z)  /  meas.lst(...)             -> LAST rad
+#   meas.freq('SSCALE', 'TSCALE', freq, mjd, x, y, z, ra, dec)     -> Hz
+#       (Phase 104) SSCALE/TSCALE ∈ topo/geo/bary/lsrk/lsrd/galacto/
+#       lgroup/cmb; ra/dec (J2000, rad) is the source direction the
+#       frequency frame is measured toward.
+#   meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec)          -> m/s
+#       (Phase 104) same frames/args as meas.freq, for a radial velocity.
+#   meas.doppler('SCONV', 'TCONV', value)                          -> value
+#       (Phase 104) SCONV/TCONV ∈ radio/optical(z)/ratio/beta(true,
+#       relativistic)/gamma -- pure Doppler-convention algebra, no
+#       frame/epoch needed.
+#   meas.riseset(ra, dec, mjd, x, y, z [, elev0])   -> [rise_mjd, set_mjd]
+#       (Phase 104) rise/set UTC MJD of a J2000 direction for the day
+#       containing `mjd`; NaN,NaN if it never reaches `elev0` (rad,
+#       default 0), floor(mjd),floor(mjd)+1 if circumpolar.
+#   meas.pos('SSCALE', 'TSCALE', x, y, z)             -> [x, y, z] m
+#       (Phase 106) position frame conversion, SSCALE/TSCALE ∈ itrf/
+#       wgs84 -- casacore stores the same Cartesian vector under both,
+#       so this is an identity; included for API symmetry.
+#   meas.itrfxyz(lon, lat, height)                    -> [x, y, z] m
+#       (Phase 106) WGS84 geodetic (lon/lat rad, height m) -> geocentric
+#       Cartesian ITRF.
+#   meas.wgs(x, y, z)                                 -> [lon, lat, height]
+#       (Phase 106) the inverse of meas.itrfxyz -- Cartesian -> WGS84
+#       geodetic (rad, rad, m).
 
 const _MEAS_DIR_FRAMES = Dict{String,DataType}(
     "j2000" => J2000, "b1950" => B1950, "app" => APP, "apparent" => APP,
@@ -260,6 +284,14 @@ const _MEAS_DIR_FRAMES = Dict{String,DataType}(
     "icrs" => ICRS)
 const _MEAS_EPOCH_FRAMES = Dict{String,DataType}(
     "utc" => UTC, "tai" => TAI, "tt" => TT, "tdt" => TT, "tdb" => TDB, "ut1" => UT1)
+const _MEAS_FREQ_FRAMES = Dict{String,DataType}(
+    "topo" => TOPO, "geo" => GEO, "bary" => BARY, "lsrk" => LSRK,
+    "lsrd" => LSRD, "galacto" => GALACTO, "lgroup" => LGROUP, "cmb" => CMB)
+const _MEAS_DOPPLER_CONV = Dict{String,DataType}(
+    "radio" => RADIO, "optical" => OPTICAL, "z" => OPTICAL, "ratio" => RATIO,
+    "beta" => BETA, "true" => BETA, "relativistic" => BETA, "gamma" => GAMMA)
+const _MEAS_POS_FRAMES = Dict{String,DataType}(
+    "itrf" => ITRF, "wgs84" => WGS84, "wgs" => WGS84)
 
 _meas_dir_needs_epoch(R) = R === APP || R === AZEL || R === HADEC || R === ITRF
 _meas_dir_needs_pos(R) = R === AZEL || R === HADEC || R === ITRF
@@ -269,6 +301,34 @@ function _meas_frame(mjd, xyz)
     mjd === nothing || (fr.epoch = MEpoch{UTC}(float(mjd)))
     xyz === nothing || (fr.position = MPosition{ITRF}(float.(xyz)...))
     fr
+end
+
+function _meas_full_frame(mjd, x, y, z, ra, dec)
+    MeasFrame(epoch = MEpoch{UTC}(float(mjd)), position = MPosition{ITRF}(float(x), float(y), float(z)),
+              direction = MDirection{J2000}(float(ra), float(dec)))
+end
+
+_meas_freq_convert(S::DataType, T::DataType, freq, mjd, x, y, z, ra, dec) =
+    measconvert(MFrequency{S}(float(freq)), T; frame = _meas_full_frame(mjd, x, y, z, ra, dec)).hz
+
+_meas_rv_convert(S::DataType, T::DataType, v, mjd, x, y, z, ra, dec) =
+    measconvert(MRadialVelocity{S}(float(v)), T; frame = _meas_full_frame(mjd, x, y, z, ra, dec)).mps
+
+function _meas_pos_convert(S::DataType, T::DataType, x, y, z)
+    m = measconvert(MPosition{S}(float(x), float(y), float(z)), T)
+    Float64[m.x, m.y, m.z]
+end
+
+function _meas_two_scale_args(kind::AbstractString, dict, args::Vector{TQLExpr}, src::AbstractString)
+    (length(args) >= 2 && args[1] isa TQLLit && args[1].value isa AbstractString &&
+     args[2] isa TQLLit && args[2].value isa AbstractString) || throw(ArgumentError(
+        "TaQL-lite: meas.$kind's first two arguments must be string literal frame names " *
+        "in \"$src\""))
+    S = get(dict, lowercase(String(args[1].value)), nothing)
+    T = get(dict, lowercase(String(args[2].value)), nothing)
+    (S === nothing || T === nothing) && throw(ArgumentError(
+        "TaQL-lite: meas.$kind: unknown frame name in \"$src\""))
+    (S, T)
 end
 
 function _meas_dir_convert(target::DataType, sref::AbstractString, lon, lat, mjd, xyz)
@@ -311,6 +371,47 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
         length(args) == 4 || throw(ArgumentError(
             "TaQL-lite: meas.last(mjd, x, y, z) in \"$src\""))
         return TQLFunc((m, x, y, z) -> _lst(_meas_frame(m, (x, y, z))), args)
+    end
+    if fn == "freq" || fn == "frequency"
+        (S, T) = _meas_two_scale_args("freq", _MEAS_FREQ_FRAMES, args, src)
+        length(args) == 9 || throw(ArgumentError(
+            "TaQL-lite: meas.freq('SSCALE', 'TSCALE', freq, mjd, x, y, z, ra, dec) in \"$src\""))
+        return TQLFunc((v, m, x, y, z, ra, dec) -> _meas_freq_convert(S, T, v, m, x, y, z, ra, dec),
+                       args[3:end])
+    end
+    if fn == "rv" || fn == "radialvelocity"
+        (S, T) = _meas_two_scale_args("rv", _MEAS_FREQ_FRAMES, args, src)
+        length(args) == 9 || throw(ArgumentError(
+            "TaQL-lite: meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec) in \"$src\""))
+        return TQLFunc((v, m, x, y, z, ra, dec) -> _meas_rv_convert(S, T, v, m, x, y, z, ra, dec),
+                       args[3:end])
+    end
+    if fn == "doppler"
+        (S, T) = _meas_two_scale_args("doppler", _MEAS_DOPPLER_CONV, args, src)
+        length(args) == 3 || throw(ArgumentError(
+            "TaQL-lite: meas.doppler('SCONV', 'TCONV', value) in \"$src\""))
+        return TQLFunc(v -> measconvert(MDoppler{S}(float(v)), T).d, args[3:end])
+    end
+    if fn == "riseset"
+        length(args) in (6, 7) || throw(ArgumentError(
+            "TaQL-lite: meas.riseset(ra, dec, mjd, x, y, z[, elev0]) in \"$src\""))
+        return TQLFunc((rargs...) -> collect(Float64, _riseset(rargs...)), args)
+    end
+    if fn == "pos" || fn == "position"
+        (S, T) = _meas_two_scale_args("pos", _MEAS_POS_FRAMES, args, src)
+        length(args) == 5 || throw(ArgumentError(
+            "TaQL-lite: meas.pos('SSCALE', 'TSCALE', x, y, z) in \"$src\""))
+        return TQLFunc((x, y, z) -> _meas_pos_convert(S, T, x, y, z), args[3:end])
+    end
+    if fn == "itrfxyz"
+        length(args) == 3 || throw(ArgumentError(
+            "TaQL-lite: meas.itrfxyz(lon, lat, height) in \"$src\""))
+        return TQLFunc((lon, lat, h) -> collect(Float64, _geodetic_to_itrf(lon, lat, h)), args)
+    end
+    if fn == "wgs"
+        length(args) == 3 || throw(ArgumentError(
+            "TaQL-lite: meas.wgs(x, y, z) in \"$src\""))
+        return TQLFunc((x, y, z) -> collect(Float64, _itrf_to_geodetic(x, y, z)), args)
     end
     throw(ArgumentError("TaQL-lite: meas.$fn is not supported in \"$src\""))
 end
@@ -358,6 +459,19 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
             # pbcorr(bl): valexpr / response (true flux from an apparent one);
             # pbatten(bl): valexpr * response (simulate the beam's attenuation)
             return TQLArith(startswith(fn, "pbcorr") ? (/) : (*), args[1], resp)
+        end
+        if fn in ("riseset", "riseset1", "riseset2")
+            0 <= n <= 2 || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn([elev0][, dir]) in \"$src\""))
+            elev0 = 0.0
+            if n >= 1
+                (args[1] isa TQLLit && args[1].value isa Real) || throw(ArgumentError(
+                    "TaQL-lite: mscal.$fn's elevation-cutoff argument must be a " *
+                    "numeric literal (radians) in \"$src\""))
+                elev0 = Float64(args[1].value)
+            end
+            dir = n == 2 ? _mscal_dir_arg(args[2], src) : ""
+            return TQLMScal(fn * ":" * string(elev0), dir)
         end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))

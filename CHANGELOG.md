@@ -2086,3 +2086,119 @@ update!(ms; set = ["DATA" =>
   (each antenna's own response, still direction-aware); an
   Observatories-array-centre (suffix-less) per-baseline response
   (baseline responses are inherently per-antenna-pair).
+
+### Phase 104 — complete the `meas.*` TaQL UDF subset
+
+```julia
+query(main, "meas.freq('TOPO', 'LSRK', 1.4e9, TIME/86400, X, Y, Z, RA, DEC) > 1.399e9")
+query(main, "meas.doppler('RADIO', 'BETA', 0.01) > 0.009")          # no SOFA needed
+query(fld, "meas.riseset(RA, DEC, TIME/86400, X, Y, Z)[1] < TIME/86400")
+```
+
+- `meas.freq('SSCALE', 'TSCALE', freq, mjd, x, y, z, ra, dec)` /
+  `meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec)` — frequency /
+  radial-velocity frame conversion (`topo`/`geo`/`bary`/`lsrk`/`lsrd`/
+  `galacto`/`lgroup`/`cmb`), built on the existing `MFrequency`/
+  `MRadialVelocity` `measconvert` machinery (Phases 66/71/88) via a new
+  `_meas_full_frame(mjd,x,y,z,ra,dec)` helper (epoch + ITRF position +
+  J2000 source direction — the full frame a spectral conversion needs).
+- `meas.doppler('SCONV', 'TCONV', value)` — Doppler-convention algebra
+  (`radio`/`optical`(`z`)/`ratio`/`beta`(`true`,`relativistic`)/`gamma`),
+  a thin wrapper over the Phase 72 `MDoppler` `measconvert` — pure
+  arithmetic, the only new `meas.*` function that needs **no**
+  `import SOFA`.
+- `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` → `[rise_mjd, set_mjd]`
+  — the rise/set UTC MJD of a J2000 direction for the day containing
+  `mjd`, from the standard hour-angle-at-elevation formula
+  (`cos H₀ = (sin elev₀ − sin φ·sin δ) / (cos φ·cos δ)`, apparent place
+  at local noon) plus a Newton inversion of the sidereal-time relation
+  (`_mjd_for_lst`, 3 iterations against the real SOFA `gst06a` — the
+  mean sidereal rate makes LST close enough to linear in UT1 over a day
+  that this converges to sub-second precision). `(NaN, NaN)` if the
+  source never reaches `elev0` that day; `(⌊mjd⌋, ⌊mjd⌋+1)` if
+  circumpolar. New core stub `_riseset` (`src/measures/types.jl`,
+  mirrors `_lst`'s stub/ext split) + the real implementation in
+  `ext/SOFAExt.jl`. Not a byte-exact port of casacore's own iterative
+  `Rise`/`Set` search — an independently-derived, documented
+  approximation (no casacore/CASA oracle for a MeasurementSets-only
+  convenience wrapper).
+- `_meas_two_scale_args` factors the "first two arguments are string
+  literal frame/convention names" validation shared by `meas.freq`/
+  `meas.rv`/`meas.doppler`.
+- Verified: `meas.freq`/`meas.rv` cross-checked directly against
+  `measconvert` on an equivalent `MeasFrame`; `meas.doppler` against
+  `measconvert(MDoppler{...}, ...)`; `meas.riseset` checked for
+  rise-before-set + positive elevation at the rise/set midpoint (for a
+  source below the horizon at the UTC-day boundary), a tighter
+  elevation cutoff narrowing the window, and the NaN/circumpolar
+  sentinel paths.
+- This closes the last item in Phase 97's `meas.*` non-goals list
+  (`meas.riseset`, `meas.freq`/`meas.doppler`/`meas.rv`); the
+  column-MEASINFO-driven direction-argument form and
+  `meas.pos`/`meas.itrfxyz`/`meas.wgs` position UDFs remain non-goals.
+
+### Phase 105 — `mscal.riseset()`: automatic rise/set for the row's own antenna
+
+```julia
+query(main, "mscal.riseset1()[1] < TIME/86400")             # already risen
+groupby(main, "FIELD_ID"; select = ["s" => "gmean(mscal.riseset1(0.2)[2])"])
+```
+
+- `mscal.riseset[1|2]([elev0][, dir])` → `[rise_mjd, set_mjd]` wires the
+  Phase 104 `meas.riseset` / `_riseset` machinery into the automatic
+  per-row `mscal.*` geometry — ANTENNA1's/ANTENNA2's own ITRF position
+  (`1`/`2` suffix; bare = array centre, same convention as every other
+  `mscal.*` direction function) and `dir` (default `FIELD.PHASE_DIR`,
+  same optional-direction-argument grammar as `mscal.el1('SUN')` etc.),
+  for the UTC day containing the row's `TIME`. `elev0` (rad, default 0)
+  is a numeric literal baked into the function's parsed key (like
+  `mscal.pbresponse`'s beam spec), not a per-row expression.
+- Memoized per `(antenna-or-centre, direction, UTC day)` rather than per
+  exact `TIME` — rise/set only changes once a day, so this is
+  effectively free even over a MAIN table with many integrations per day.
+- **Bug found and fixed during implementation** (only visible once a
+  query used two different `elev0` values in one call): the memo key
+  didn't include `elev0`, so `mscal.riseset1(0.2)` silently returned the
+  `elev0=0.0` result whenever both were evaluated in the same
+  `_mscal_columns` call. Fixed by keying the memo on
+  `(antenna, direction, day, elev0)`.
+- No casacore/CASA oracle (mscal.* extension over Phase 104's own
+  meas.riseset, itself independently derived). Verified: parser unit
+  tests for the encoded key + dir/elev0 threading; on the sample MS,
+  both rise and set are finite for a real antenna/field/day, the `2`
+  suffix gives ANTENNA2's own (slightly different) window, and a
+  tighter elevation cutoff never widens the window (`rise2 >= rise`,
+  `set2 <= set` at every sampled row) — this is exactly the assertion
+  that caught the memo-key bug above.
+
+### Phase 106 — `meas.pos()` / `meas.itrfxyz()` / `meas.wgs()`: position UDFs
+
+```julia
+query(ant, "meas.wgs(X, Y, Z)[3] > 2000")                     # height > 2 km
+query(cat, "meas.itrfxyz(LON, LAT, 0.0) == meas.pos('WGS84', 'ITRF', X, Y, Z)")
+```
+
+- `meas.pos('SSCALE', 'TSCALE', x, y, z)` — `MPosition` frame conversion
+  (`itrf`/`wgs84`). **This closed a real, previously-undiscovered gap**:
+  `MPosition` had **no** `measconvert` method at all before this phase —
+  `measconvert(::MPosition, ...)` always hit the generic core stub's
+  "needs SOFA.jl" error, even with SOFA loaded, since no `_mconv`
+  method existed for it. The fix (`ext/SOFAExt.jl`) is an identity on
+  `(x,y,z)`: casacore stores the *same* geocentric Cartesian vector
+  under both `ITRF` and `WGS84` — the refs only differ in which
+  ellipsoid a geodetic (lon/lat/height) *view* of that vector uses, so
+  there is nothing to rotate.
+- `meas.itrfxyz(lon, lat, height)` / `meas.wgs(x, y, z)` — the real
+  conversion: WGS84 geodetic ↔ geocentric Cartesian ITRF, via
+  `SOFA.gd2gc` / `SOFA.gc2gd` (the same pair `_frame_site` already uses
+  internally for AZELGEO). New core stubs `_geodetic_to_itrf` /
+  `_itrf_to_geodetic` (`src/measures/types.jl`, mirror the `_lst` /
+  `_riseset` stub/ext split) + real implementations in `ext/SOFAExt.jl`.
+- Closes the very last item in Phase 97's `meas.*` non-goals list
+  (the column-MEASINFO-driven direction-argument form remains a
+  non-goal — every `meas.*` argument is still an explicit expression,
+  not inferred from a column's own `MEASINFO`).
+- Verified: `meas.pos` against `measconvert(MPosition{ITRF}(...),
+  WGS84)` directly (exact — no arithmetic, an identity); `meas.wgs` ∘
+  `meas.itrfxyz` round-trips a real VLA-antenna ITRF position to
+  `atol = 1e-6` m.

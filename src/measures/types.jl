@@ -319,3 +319,36 @@ east longitude.  Real method in `ext/SOFAExt.jl`.
 """
 _lst(args...) = error(
     "MeasurementSets: local sidereal time needs SOFA.jl — run `import SOFA`")
+
+"""
+    _riseset(ra, dec, mjd, x, y, z, elev0=0.0) -> (rise_mjd, set_mjd)
+
+Rise/set UTC MJD of a J2000 `(ra, dec)` direction (rad), for the UTC day
+containing `mjd`, observed from ITRF position `(x, y, z)` (m) at
+elevation `elev0` (rad; a small negative value adds standard
+atmospheric refraction, e.g. `deg2rad(-34 / 60)`). `(NaN, NaN)` if the
+source never reaches `elev0` that day; `(floor(mjd), floor(mjd) + 1)` if
+it never sets (circumpolar). Real method in `ext/SOFAExt.jl`.
+"""
+_riseset(args...) = error(
+    "MeasurementSets: rise/set times need SOFA.jl — run `import SOFA`")
+
+"""
+    _geodetic_to_itrf(lon, lat, height) -> (x, y, z)
+
+WGS84 geodetic `(lon, lat)` (rad, east/north-positive) + ellipsoidal
+`height` (m) → geocentric Cartesian ITRF `(x, y, z)` (m). Real method in
+`ext/SOFAExt.jl`.
+"""
+_geodetic_to_itrf(args...) = error(
+    "MeasurementSets: geodetic↔ITRF conversion needs SOFA.jl — run `import SOFA`")
+
+"""
+    _itrf_to_geodetic(x, y, z) -> (lon, lat, height)
+
+The inverse of [`_geodetic_to_itrf`](@ref) — geocentric Cartesian ITRF
+`(x, y, z)` (m) → WGS84 geodetic `(lon, lat, height)` (rad, rad, m).
+Real method in `ext/SOFAExt.jl`.
+"""
+_itrf_to_geodetic(args...) = error(
+    "MeasurementSets: geodetic↔ITRF conversion needs SOFA.jl — run `import SOFA`")

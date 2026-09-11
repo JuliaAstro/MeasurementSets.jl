@@ -151,6 +151,65 @@ function MS._lst(frame::MeasFrame)
     mod2pi(SOFA.gst06a(uta, utb, tta, ttb) + elong)
 end
 
+# mean sidereal rate, rad per UT1 day (IAU 1982): LST is close enough to
+# linear in UT1 over one day that a couple of Newton steps against the
+# real (SOFA) sidereal-time relation converge to sub-second precision.
+const _SIDEREAL_RATE = 2π * 1.00273781191135448
+
+function _mjd_for_lst(lst_target::Real, mjd0::Real, pos::MPosition)
+    fr(m) = MeasFrame(epoch = MEpoch{UTC}(m), position = pos)
+    lst0 = MS._lst(fr(mjd0))
+    m = mjd0 + mod(lst_target - lst0, 2π) / _SIDEREAL_RATE
+    for _ in 1:3
+        diff = rem2pi(lst_target - MS._lst(fr(m)), RoundNearest)
+        m += diff / _SIDEREAL_RATE
+    end
+    m
+end
+
+# see the docstring on the core stub, `src/measures/types.jl`.
+function MS._riseset(ra::Real, dec::Real, mjd::Real, x::Real, y::Real, z::Real,
+                     elev0::Real = 0.0)
+    pos = MPosition{ITRF}(float(x), float(y), float(z))
+    d0 = floor(float(mjd))
+    noon = MeasFrame(epoch = MEpoch{UTC}(d0 + 0.5), position = pos)
+    dapp = MS.measconvert(MDirection{J2000}(float(ra), float(dec)), APP; frame = noon)
+    _, lat, _ = _frame_site(noon)
+    c = (sin(elev0) - sin(lat) * sin(dapp.lat)) / (cos(lat) * cos(dapp.lat))
+    c > 1 && return (NaN, NaN)                      # never reaches elev0
+    c < -1 && return (d0, d0 + 1.0)                 # circumpolar -- up all day
+    h0 = acos(c)
+    rise_lst = mod2pi(dapp.lon - h0)
+    set_lst  = mod2pi(dapp.lon + h0)
+    (_mjd_for_lst(rise_lst, d0, pos), _mjd_for_lst(set_lst, d0, pos))
+end
+
+# ======================================================================
+# position  (ITRF <-> WGS84: casacore stores the SAME geocentric
+# Cartesian vector under both refs -- they only differ in which
+# ellipsoid a *geodetic* (lon,lat,height) view of that vector uses, so
+# the position-frame "conversion" is an identity on x,y,z; the real
+# conversion is Cartesian <-> geodetic, `_itrf_to_geodetic`/
+# `_geodetic_to_itrf` below, exposed to TaQL-lite as `meas.wgs` /
+# `meas.itrfxyz`, Phase 106).
+# ======================================================================
+
+function MS._mconv(m::MPosition{A}, ::Type{B}, ::MeasFrame) where {A<:RefFrame,B<:RefFrame}
+    (A === ITRF || A === WGS84) && (B === ITRF || B === WGS84) ||
+        error("MeasurementSets: position frame $(nameof(A)) -> $(nameof(B)) is not supported")
+    MPosition{B}(m.x, m.y, m.z)
+end
+
+# see the docstrings on the core stubs, `src/measures/types.jl`.
+function MS._geodetic_to_itrf(lon::Real, lat::Real, height::Real)
+    p = SOFA.gd2gc(:WGS84, float(lon), float(lat), float(height))
+    (p[1], p[2], p[3])
+end
+function MS._itrf_to_geodetic(x::Real, y::Real, z::Real)
+    g = SOFA.gc2gd(:WGS84, SVector(float(x), float(y), float(z)))
+    (g.ϵ, g.ϕ, g.r)
+end
+
 # ======================================================================
 # direction  (hub = ICRS; J2000 ≈ ICRS)
 # ======================================================================

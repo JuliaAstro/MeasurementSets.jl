@@ -142,6 +142,40 @@ end
     @test_throws ErrorException query(readtable(dir), "mscal.el1() > 0")
 end
 
+# Phase 105: mscal.riseset[1|2]([elev0][, dir]) -- the Phase 104
+# meas.riseset() machinery wired into the automatic per-row mscal.*
+# geometry (ANTENNA1/2's own ITRF position, FIELD.PHASE_DIR by
+# default), the way Phase 101 wired mscal.pbresponse() into it.
+@testset "TaQL-lite — mscal.riseset()" begin
+    main = readtable(SAMPLE_MS)
+
+    p(s) = MSv2._taqllite_parse(s, Set(["A"]))
+    @test p("mscal.riseset1() > 0").lhs.fn == "riseset1:0.0"
+    @test p("mscal.riseset() > 0").lhs.fn == "riseset:0.0"
+    @test p("mscal.riseset2(0.2) > 0").lhs.fn == "riseset2:0.2"
+    @test p("mscal.riseset1(0.0, 'SUN') > 0").lhs.dir == "SUN"
+    @test_throws ArgumentError p("mscal.riseset1(A) > 0")           # A is not a literal
+    @test_throws ArgumentError p("mscal.riseset1(0.1, 'SUN', 1) > 0")  # too many args
+
+    q = query(main, "rownumber() >= 1"; select = [
+        "rs" => "mscal.riseset1()", "rs2" => "mscal.riseset2()",
+        "rsel" => "mscal.riseset1(0.2)"])
+    for i in (3, 250, 599)
+        rise, set = column(q, "rs")[i]
+        @test isfinite(rise) && isfinite(set)
+        @test length(column(q, "rs2")[i]) == 2
+        # a tighter elevation cutoff never widens the visible window
+        rise2, set2 = column(q, "rsel")[i]
+        (isfinite(rise2) && isfinite(rise)) && @test rise2 >= rise
+        (isfinite(set2) && isfinite(set)) && @test set2 <= set
+    end
+
+    # not an MS -- same error path as every other mscal.* function
+    dir = joinpath(mktempdir(), "notms2")
+    write_table(dir, "T", Pair{String,Any}["A" => collect(1.0:4.0)]; nrow = 4)
+    @test_throws ErrorException query(readtable(dir), "mscal.riseset1() > 0")
+end
+
 @testset "TaQL-lite — mscal.stokes() unit" begin
     p(s) = MSv2._taqllite_parse(s, Set(["A"]))
     @test p("mscal.stokes(A, 'I') > 0").lhs isa MSv2.TQLStokes
