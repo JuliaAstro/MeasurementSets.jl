@@ -2987,3 +2987,106 @@ element. Applied to both the full-copy and partial-row-range checks.
 Verified green on this machine on both Julia 1.12.7 and 1.13.0 (678
 dysco tests standalone). No production code changed — this was a test
 fragility issue, not a Dysco read/write bug.
+
+### Phase 125 — `edit(rt::RefTable)`: in-place edit through a RefTable view
+
+`edit`'s own docstring and the plan's Scope-notes had grouped "in-place
+edit of a RefTable" with container/ConcatTable/VirtualTaQL/Forward
+tables as a blanket non-goal since Phase 9, on the unexamined
+assumption it needs real new storage machinery. Reading
+`tables/Tables/RefColumn.cc` overturned that: `RefColumn::put`/
+`putArray`/`putSlice` are pure row-index translations
+(`colPtr_p->put(refTabPtr_p->rootRownr(rownr), dataPtr)`) delegating
+straight through to the *parent* column's own `put` — a RefTable has
+zero storage of its own for ordinary columns, so editing one in place
+literally IS editing the parent's mapped rows. `RefTable::removeRow`
+only shrinks casacore's own in-memory row-number list (no I/O, never
+touches the parent) and `RefTable` has no `addRow` at all (a
+selection's rows are fixed at query time) — both stay deliberate
+non-goals here; `RefTable::addColumn` genuinely can add a column (real,
+but needs parent-schema mutation — a separate, larger future item).
+
+New `src/tables/refedit.jl`: `edit(rt::RefTable)` opens
+`edit(rt.parent.path)` (`rt.parent` must be a plain `Table` — mirrors
+`copytable`'s existing RefTable-of-a-plain-Table restriction; a
+ConcatTable parent errors clearly) and returns a `RefEditTable`
+wrapping it plus `rt.rows`/`rt.namemap`. `t[name][i] = v` on the view
+translates `i -> rt.rows[i]` / `name -> rt.namemap[name]` and delegates
+straight to the parent `EditTable`'s existing machinery — the same
+fast-path/regen/tile-patch code a direct `edit(path)` already uses,
+completely unchanged. `edit(f, rt::RefTable)` runs `f` then flushes the
+parent. A chained `query` result (RefTable of a RefTable) already
+flattens to the real plain-Table ancestor at query time, so it's
+editable too, with no extra code — verified directly.
+`removerows!`/`addrows!`/`addcolumn!`/`removecolumn!` stay non-goals on
+a `RefEditTable` (no casacore analogue that touches the parent).
+
+12 new tests in `test/edit_tests.jl` ("edit — through a RefTable
+view"): single-cell + whole-column writes, composing two independent
+filters on disjoint rows, a TSM cell write, the flattened-chain case,
+the ConcatTable-parent guard, an unknown-column error, and a
+`_HAVE_CASACORE` cross-check of the final on-disk values. No production
+storage-format code touched, no new exports (`edit`/`setcell!`/
+`setcolumn!` already exported, each gains one new method).
+
+### Phase 126 — `addcolumn!` through a RefTable view
+
+Natural continuation of Phase 125. Read `RefTable::addColumn`
+(`RefTable.cc:761-802`): with `addToParent=true` (casacore's normal
+case), it delegates straight to `baseTabPtr_p->addColumn(...)` — the
+new column lands on the *parent*'s schema, sized to the parent's full
+row count (defaulted everywhere), then the name is registered in the
+RefTable's own `nameMap_p` so it's visible through the view too.
+
+`addcolumn!(t::RefEditTable, name; kind)` and `addcolumn!(t::
+RefEditTable, name, data; kind, type, shape)` mirror this: they
+delegate to the already-tested `addcolumn!(::EditTable, ...)` machinery
+(a new `_addcol_desc` helper factored out of it, shared, zero behaviour
+change to the existing method) to build the column, size it to the
+parent's full row count with default cells, then overwrite just the
+view's own mapped rows with the given data (one value per view row,
+not per parent row — matches what a real `RefTable::addColumn` +
+follow-up `put` on the selected rows does in casacore) — and extend the
+view's `namemap`/`order` so the new column reads back through it. Fixed
+a latent aliasing bug while at it: `edit(rt::RefTable)` previously
+shared `rt.namemap`/`rt.order`/`rt.rows` directly with the caller's own
+`RefTable` object — now copies them, so mutating a view's column list
+never mutates the `RefTable` the caller still holds.
+
+`RefTable::removeColumn` was also read for symmetry, and found to be a
+genuinely different shape — it only edits the RefTable's own
+descriptor, never touching the parent (a pure view-level "hide this
+column", unlike `EditTable`'s `removecolumn!`, which always drops real
+storage) — left a deliberate non-goal, not rushed in alongside
+`addcolumn!`.
+
+8 new assertions in `test/edit_tests.jl` ("edit — addcolumn! through a
+RefTable view"): data-per-view-row with the rest of the parent
+defaulted, the no-data standard-schema form, duplicate-name and
+wrong-length errors, and a `_HAVE_CASACORE` cross-check. No new
+storage-format code, no new exports.
+
+### Phase 127 — `removecolumn!` on a RefEditTable (view-level hide)
+
+Completes the distinct semantic Phase 126 identified but deliberately
+left unimplemented: `RefTable::removeColumn` only edits the RefTable's
+own descriptor/name map — it never calls `baseTabPtr_p->removeColumn`,
+so a column "removed" from a RefTable view is still there, unchanged,
+in the table it's really stored in.
+
+`removecolumn!(t::RefEditTable, name)` mirrors this exactly: deletes
+`name` from the view's own `namemap`/`order` only. The parent (its real
+storage, and anything pending in its own edit session — including a
+column just `addcolumn!`'d in the *same* session) is left completely
+untouched. A perhaps-surprising but faithful consequence, tested
+explicitly: `addcolumn!(rv, "TMP", ...); removecolumn!(rv, "TMP")` in
+one session hides "TMP" from the rest of that view's own access, but
+"TMP" is still written to the parent at flush.
+
+10 new assertions in `test/edit_tests.jl` ("edit — removecolumn! on a
+RefEditTable view"): the hide-then-error-on-access case, double-remove
+and unknown-column errors, confirming the parent's column is completely
+untouched after the view drops it, the add-then-remove-still-persists
+case, and a `_HAVE_CASACORE` cross-check. No new storage-format code,
+no new exports — completes the `RefEditTable` feature set started in
+Phase 125/126.

@@ -282,3 +282,154 @@ if isdir(SAMPLE_MS)
         end
     end
 end
+
+# Phase 125: edit(rt::RefTable) -- a thin write-through view: `rv[name][i]
+# = v` translates through rt.rows/rt.namemap and writes the *parent*
+# table's mapped row (casacore's own RefColumn::put is a pure row-index
+# translation to the parent's column -- no separate storage to edit).
+@testset "edit — through a RefTable view (Phase 125)" begin
+    dir = joinpath(mktempdir(), "re.tab")
+    n = 8
+    write_table(dir, "T",
+        ["K" => collect(Int32, 1:n), "V" => Float64.(1:n),
+         "A" => [Float64[i, i + 1, i + 2] for i in 1:n]];
+        nrow = n, tsm = [["A"]])
+
+    t0 = readtable(dir)
+    rt = query(t0, "K > 4")                      # rows 5,6,7,8
+    @test rt.rows == [5, 6, 7, 8]
+
+    edit(rt) do rv
+        rv["V"][1] = 100.0                        # -> parent row 5
+        rv[:V][4] = 400.0                          # -> parent row 8
+        rv["A"][2] = [9.0, 9.0, 9.0]               # tsm cell -> parent row 6
+    end
+
+    r2 = readtable(dir)
+    @test column(r2, "V")[:] == [1.0, 2.0, 3.0, 4.0, 100.0, 6.0, 7.0, 400.0]
+    @test column(r2, "A")[6] == [9.0, 9.0, 9.0]
+    @test column(r2, "A")[5] == [5.0, 6.0, 7.0]    # untouched sibling row
+
+    # whole-view-column assignment
+    rt2 = query(readtable(dir), "K <= 4")          # rows 1,2,3,4
+    edit(rt2) do rv
+        rv[:V][:] = [10.0, 20.0, 30.0, 40.0]
+    end
+    r3 = readtable(dir)
+    @test column(r3, "V")[1:4] == [10.0, 20.0, 30.0, 40.0]
+    @test column(r3, "V")[5:8] == [100.0, 6.0, 7.0, 400.0]   # unaffected
+
+    # errors: unknown column
+    rt3 = query(readtable(dir), "K > 4")
+    @test_throws ErrorException edit(rt3) do rv
+        rv[:NOPE]
+    end
+
+    # a RefTable of a RefTable flattens to the real (plain-Table) ancestor
+    # (Phase 22's `_flatten_query_parent`), so it's editable too -- the
+    # "only a plain Table parent" guard needs a genuinely non-Table
+    # ancestor, e.g. a ConcatTable.
+    rtnest = query(rt3, "K > 6")
+    @test rtnest.parent isa Table
+    edit(rtnest) do rv
+        rv[:V][1] = 700.0
+    end
+    @test column(readtable(dir), "V")[7] == 700.0
+
+    ccdir = joinpath(mktempdir(), "cc.tab")
+    write_concattable(ccdir, [readtable(dir), readtable(dir)])
+    rtcc = query(readtable(ccdir), "K > 4")
+    @test rtcc.parent isa MSv2.ConcatTable
+    @test_throws ErrorException edit(rtcc)
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:V][:] == [10.0, 20.0, 30.0, 40.0, 100.0, 6.0, 700.0, 400.0]
+    end
+end
+
+# Phase 126: addcolumn! through a RefTable view -- matches
+# RefTable::addColumn(addToParent=true): the column lands on the
+# PARENT's schema (every parent row gets a default), and only the
+# view's own mapped rows get the given data.
+@testset "edit — addcolumn! through a RefTable view (Phase 126)" begin
+    dir = joinpath(mktempdir(), "rac.tab")
+    n = 6
+    write_table(dir, "T", ["K" => collect(Int32, 1:n), "V" => Float64.(1:n)]; nrow = n)
+
+    rt = query(readtable(dir), "K > 3")           # rows 4,5,6
+    edit(rt) do rv
+        addcolumn!(rv, "W", [10.0, 20.0, 30.0])   # one value per view row
+    end
+    r2 = readtable(dir)
+    @test "W" in columnnames(r2)
+    @test column(r2, "W")[:] == [0.0, 0.0, 0.0, 10.0, 20.0, 30.0]   # rest defaulted
+
+    # standard-schema no-data form (every parent row gets the default)
+    rt2 = query(readtable(dir), "K <= 2")
+    edit(rt2) do rv
+        addcolumn!(rv, "SCAN_NUMBER")
+        rv[:SCAN_NUMBER][1] = Int32(99)
+    end
+    r3 = readtable(dir)
+    @test "SCAN_NUMBER" in columnnames(r3)
+    @test column(r3, "SCAN_NUMBER")[1] == 99
+    @test column(r3, "SCAN_NUMBER")[3] == 0
+
+    # errors: duplicate name, wrong length
+    rt3 = query(readtable(dir), "K > 3")
+    @test_throws ErrorException edit(rt3) do rv
+        addcolumn!(rv, "V", [1.0, 2.0, 3.0])       # "V" already exists
+    end
+    rt4 = query(readtable(dir), "K > 3")
+    @test_throws ErrorException edit(rt4) do rv
+        addcolumn!(rv, "X", [1.0, 2.0])            # wrong length (3 rows, not 2)
+    end
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:W][:] == [0.0, 0.0, 0.0, 10.0, 20.0, 30.0]
+    end
+end
+
+# Phase 127: removecolumn! on a RefEditTable -- a pure view-level hide,
+# matching RefTable::removeColumn exactly: the parent's real storage
+# (and anything pending in its own edit session) is never touched.
+@testset "edit — removecolumn! on a RefEditTable view (Phase 127)" begin
+    dir = joinpath(mktempdir(), "rrc.tab")
+    n = 5
+    write_table(dir, "T", ["K" => collect(Int32, 1:n), "V" => Float64.(1:n)]; nrow = n)
+
+    rt = query(readtable(dir), "K > 2")           # rows 3,4,5
+    edit(rt) do rv
+        removecolumn!(rv, "V")
+        @test_throws ErrorException rv[:V]        # hidden for the rest of THIS view
+        @test_throws ErrorException removecolumn!(rv, "V")   # already gone from the view
+        @test_throws ErrorException removecolumn!(rv, "NOPE")
+    end
+
+    # the parent's actual column is completely untouched -- it's still
+    # there, unchanged, exactly as casacore's RefTable::removeColumn
+    r2 = readtable(dir)
+    @test "V" in columnnames(r2)
+    @test column(r2, "V")[:] == Float64.(1:n)
+
+    # a column added THIS session and then hidden from the view is still
+    # written to the parent at flush -- removecolumn! never reaches
+    # t.parent, matching real casacore's own "still stored" semantics
+    rt2 = query(readtable(dir), "K > 2")
+    edit(rt2) do rv
+        addcolumn!(rv, "TMP", [1.0, 2.0, 3.0])
+        removecolumn!(rv, "TMP")
+        @test_throws ErrorException rv[:TMP]
+    end
+    r3 = readtable(dir)
+    @test "TMP" in columnnames(r3)
+    @test column(r3, "TMP")[:] == [0.0, 0.0, 1.0, 2.0, 3.0]
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:V][:] == Float64.(1:n)
+        @test ct[:TMP][:] == [0.0, 0.0, 1.0, 2.0, 3.0]
+    end
+end
