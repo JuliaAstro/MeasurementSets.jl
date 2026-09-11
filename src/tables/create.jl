@@ -91,6 +91,40 @@ function _merge_kw(base::Record, extra::Record)
     return r
 end
 
+# Phase 112: a source table's TableDesc private keyword set may carry
+# `Hypercolumn_<name>` declarations (casacore `TableDesc::
+# defineHypercolumn` -- a Record with `HCdatanames`/`HCcoordnames`/
+# `HCidnames` string-array fields naming the hypercube's bound
+# columns). Purely informational: our own TiledStMan reader/writer never
+# needs it (Phase 11 -- the hypercube layout comes entirely from the
+# manager's own on-disk header), but an external tool inspecting the
+# TableDesc (e.g. `tb.getdminfo()`) expects to see it. `copytable`/
+# `copyms`/`write_ms` now preserve every such entry whose named columns
+# are ALL still present (under the same name) in the copy's output
+# column set -- a renamed or dropped column silently drops just that one
+# entry (never a stale reference) rather than the whole private record.
+# Every other private keyword passes through unconditionally.
+function _filter_hypercolumns(private::Record, keptnames::AbstractSet{<:AbstractString})
+    out = Record()
+    for i in 1:length(private)
+        nm, v = private.names[i], private.values[i]
+        if startswith(nm, "Hypercolumn_") && v isa Record
+            ok = true
+            for fld in ("HCdatanames", "HCcoordnames", "HCidnames")
+                haskey(v, fld) || continue
+                ns = v[fld]
+                ns isa AbstractVector || continue
+                all(n -> String(n) in keptnames, ns) || (ok = false; break)
+            end
+            ok || continue
+        end
+        push!(out.names, nm); push!(out.types, private.types[i])
+        push!(out.values, v); push!(out.comments, private.comments[i])
+    end
+    out.rectype = private.rectype
+    return out
+end
+
 # replace-or-append a keyword `name` on a copy of `base`
 function _set_kw(base::Record, name::AbstractString, t::CasaType, v)
     r = Record(copy(base.names), copy(base.types), copy(base.values),
@@ -589,8 +623,10 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
 
     isempty(skipped) ||
         @warn "$(basename(dir)): skipped unreadable columns: $(join(skipped, ", "))"
+    keptnames = Set(d.name for d in descs)
     _write_table_core(dir, descs, data; nrow=length(rows), endian=:little,
-                      public, private=Record(), tsm=tsmg, tcm=tcmg, tcell=tcellg, ism,
+                      public, private=_filter_hypercolumns(private, keptnames),
+                      tsm=tsmg, tcm=tcmg, tcell=tcellg, ism,
                       engines, virtualtaql, dysco=dyscog, dysco_spec, storage, blocksize,
                       tablename, type, subtype, readme)
     return descs

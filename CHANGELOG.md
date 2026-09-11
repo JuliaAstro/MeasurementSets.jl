@@ -2314,3 +2314,125 @@ query(main, "mscal.stokes(DATA, 'I,Ptotal')")                    # physical + ps
   pseudo type's value against the formula computed directly from the
   same I/Q/U/V; the `I==0` edge case (fractional forms → 0, not
   NaN/Inf) checked directly on `StokesSetup`.
+
+### Phase 110 — column-`MEASINFO`-driven `meas.<frame>()` direction argument
+
+```julia
+query(fld, "meas.azel('PHASE_DIR', TIME/86400, X, Y, Z)[2] > 0")   # was: ..., 'J2000', PHASE_DIR[1], PHASE_DIR[2], ...
+```
+
+- `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` gains a second
+  form: `meas.<frame>('COLNAME', mjd[, x, y, z])` — instead of a
+  literal `'SRC'` frame name plus two explicit `lon`/`lat` expressions,
+  a single string names a **direction column**, and the source frame is
+  read from that column's own `MEASINFO` (`measinfo(t, colname)`,
+  fixed `Ref` only — a per-row `VarRefCol` column raises a clear error
+  pointing at `measure(t, col, row)` instead). Closes the one remaining
+  `meas.*` non-goal from Phase 97.
+- Disambiguated from the existing numeric form **at parse time**, not
+  by argument count: the first string literal is a column name iff it
+  is *not* a recognized frame name (`_MEAS_DIR_FRAMES` — j2000/b1950/
+  app/galactic/gal/ecliptic/ecl/azel/hadec/itrf/icrs) — so
+  `meas.b1950('J2000', RA, DEC)` (existing) and `meas.b1950('PHASE_DIR',
+  TIME/86400)` (new) both parse to the right form with no new syntax.
+- New AST node `TQLMeasColDir` (`src/taql/functions.jl`) threads
+  through the query engine the same way `mscal.*`/`mscal.stokes` do: a
+  `"::measframe::COLNAME"` sentinel resolved once per table (not per
+  row) by a new `_measframe_split`/`_measframe_cols` pair, wired into
+  both `_tql_cols` (`query`/`groupby`/`join`) and `_vtq_prepare!`
+  (`VirtualTaQLColumn` — also fixed a stale docstring there that
+  incorrectly claimed measures functions weren't supported in CALC
+  expressions at all).
+- No casacore/CASA oracle (a MeasurementSets-only convenience over the
+  existing `measconvert` machinery) — verified against `measconvert`
+  called directly on the same column value, and against the equivalent
+  explicit-`'SRC'`-plus-`lon,lat` numeric form on the same data; error
+  paths (no `MEASINFO`, a non-direction `MEASINFO`, a `VarRefCol`
+  column) each checked.
+
+### Phase 111 — `UPDATE`/`DELETE` `ORDER BY` + `LIMIT`
+
+```julia
+update!(t; set=["FLAG" => "true"], where="SNR < 3", orderby=["TIME"], limit=100)  # the 100 oldest
+delete!(t; where="SCAN_NUMBER == 5", orderby=["TIME" => :desc], limit=20)         # the 20 newest
+taql(t, "DELETE FROM t WHERE A > 3 ORDER BY TIME DESC LIMIT 2")
+```
+
+- `update!`/`delete!` gain `orderby`/`limit` kwargs — TaQL's "update/
+  delete the N oldest/newest rows matching a condition" form. `orderby`
+  is the same shape as [`query`](@ref)'s do-block form (a bare column
+  name/`Symbol`, ascending, or `name => :asc`/`name => :desc`); the
+  matched rows are sorted by it (reusing the existing `TQLOrderKey`/
+  `_apply_orderby` machinery from `ORDER BY`), then `limit` (an
+  `Integer`) keeps only the first `limit` of them — or, for `limit < 0`,
+  the *last* `|limit|` — before the mutation runs.
+- `taql()`'s `UPDATE`/`DELETE` string forms parse a trailing
+  `ORDER BY k [ASC|DESC], … [LIMIT n]` clause (new `_taql_orderby_list`
+  helper) and pass it through to `update!`/`delete!`.
+- `update!`'s whole-column fast path (`t[c][:] = [...]`, used when
+  `where === nothing`) is now also gated on `orderby`/`limit` being
+  unset — a `orderby`/`limit`-restricted update always goes through the
+  per-matched-row path, even with no `where`.
+- Closes the Phase 30 non-goal ("`DELETE`/`UPDATE` `ORDER BY`+`LIMIT`
+  … chain `query` then `delete!` by the selected condition instead").
+- **Correction, found only once the full suite ran against real
+  Casacore.jl**: real TaQL's own `UPDATE`/`DELETE` `ORDER BY ... LIMIT
+  n` does **not** sort the matched rows by the given key before `LIMIT`
+  truncates them — a live spike showed `UPDATE $1 SET A=A+100 WHERE A>3
+  ORDER BY T LIMIT 3` gives byte-identical results to the same command
+  with `ORDER BY T` deleted entirely; `T`'s actual values play no role.
+  (`LIMIT`'s own row-selection turned out direction/sign-dependent in a
+  way not worth fully reverse-engineering for this phase.) This
+  package's `orderby`/`limit` are a **deliberate MeasurementSets
+  extension** implementing the genuinely useful "N oldest/newest rows"
+  semantics the original non-goal text described — a real sort-then-
+  limit — not a port of real TaQL's own behaviour; documented plainly
+  in the `update!`/`delete!` docstrings. The planned real-TaQL
+  cross-check test was replaced with the hand-computed-selection tests
+  (already present) plus a comment recording the live-spike finding, in
+  keeping with this project's established pattern for a documented
+  MeasurementSets-only semantic choice.
+- Verified via hand-computed row selections (ascending/descending,
+  positive/negative limit, the Julia and `taql` string forms agreeing).
+
+### Phase 112 — `Hypercolumn_*` keyword preservation on copy
+
+```julia
+copytable(dst, readtable(src))     # src's Hypercolumn_* private keywords now survive
+```
+
+- `copytable`/`copyms`/`write_ms` (the `Table` source path) now
+  preserve a source table's `Hypercolumn_<name>` private-keyword
+  declarations (casacore `TableDesc::defineHypercolumn`) — closing the
+  fidelity gap documented since Phase 11.
+- **Found and fixed a real bug, not just a missing feature**:
+  `_copy_table_cols` was unconditionally passing `private=Record()`
+  to `_write_table_core`, discarding the **entire** table-level private
+  keyword set on every copy — even though the outer `_copy_table`
+  methods already correctly defaulted `private` to the source's own
+  (`t.desc.private`) and threaded it all the way down as a parameter
+  that was then silently dropped at the very last call site.
+- New `_filter_hypercolumns(private, keptnames)` (`src/tables/create.jl`):
+  passes every non-`Hypercolumn_*` private keyword through
+  unconditionally, and preserves a `Hypercolumn_<name>` entry only when
+  every column it names (`HCdatanames`/`HCcoordnames`/`HCidnames`) is
+  still present, under the same name, in the copy's actual output
+  column set — a renamed or dropped column silently drops just that
+  one stale declaration rather than writing a reference to a column
+  that no longer exists.
+- Our own reader never needed this keyword at all (Phase 11 — a
+  hypercube's layout comes entirely from the storage manager's own
+  on-disk header); this only matters for an external tool that
+  inspects the `TableDesc` directly (e.g. `tb.getdminfo()`).
+- A `RefTable`/`ConcatTable` source still drops the private keyword set
+  (`_copy_table`'s `RefTable`/`ConcatTable` methods keep their own
+  deliberate `private=Record()` default — a selection/projection may
+  rename or drop the very columns a declaration names) — only the
+  plain-`Table` source path (`copyms`/`write_ms`'s common case) changed.
+- Verified: a hand-built `Hypercolumn_TestCube` keyword (via
+  `_write_table_core`'s `private=` kwarg directly) survives a full
+  `copytable` round-trip intact; `_filter_hypercolumns` unit-tested for
+  both the "all referenced columns kept" and "one is missing" cases,
+  plus an unrelated private key passing through either way. No
+  casacore/CASA oracle needed (pure keyword passthrough, not a new
+  binary format).

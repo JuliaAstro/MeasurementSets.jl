@@ -123,12 +123,14 @@ function _tql_cols(t::AbstractTable, names, asts...)
     plain, mscal = _mscal_split(names)
     plain, stokes = _stokes_split(plain)
     plain, mssel = _mssel_split(plain)
+    plain, measframe = _measframe_split(plain)
     d = Dict{String,AbstractVector}(
         n => (c = _load_col(column(t, n)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
         for n in plain)
     isempty(mscal) || merge!(d, _mscal_columns(t, mscal))
     isempty(stokes) || merge!(d, _stokes_setups(t, stokes))
     isempty(mssel) || merge!(d, _mssel_columns(t, mssel))
+    isempty(measframe) || merge!(d, _measframe_cols(t, measframe))
     return d
 end
 
@@ -259,7 +261,12 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   masked array whose reductions skip the excluded elements),
   `iif(cond, a, b)`, `rownumber()` (1-based),
   `observatory('VLA')` (a telescope's ITRF `[x,y,z]`),
-  `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` /
+  `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` — or, in place of
+  `'SRC', lon, lat`, a single `'COLNAME'` naming a direction column
+  whose own `MEASINFO` supplies the source frame (Phase 110; a fixed
+  `Ref` only — a per-row `VarRefCol` column errors, use `measure(t,
+  col, row)` directly; disambiguated from `'SRC'` at parse time: the
+  string is a colname iff it is *not* a recognized frame name) — /
   `meas.epoch('TAI', mjd)` / `meas.last(mjd, x, y, z)` /
   `meas.freq('SSCALE', 'TSCALE', freq, mjd, x, y, z, ra, dec)` /
   `meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec)` (frequency /

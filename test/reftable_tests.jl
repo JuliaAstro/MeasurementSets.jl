@@ -360,3 +360,47 @@ end
     @test nrow(got) == 3
     @test column(got, "A")[:] == Int32[3, 5, 7]
 end
+
+# Phase 112: a source table's private-keyword-set `Hypercolumn_*`
+# declarations (casacore `TableDesc::defineHypercolumn`) are preserved
+# on `copytable`/`copyms`/`write_ms` -- previously `_copy_table_cols`
+# unconditionally discarded the ENTIRE private keyword set (a bug, not
+# a deliberate simplification: the outer `_copy_table` methods already
+# defaulted `private` to the source's own, it just never reached the
+# writer).
+@testset "copytable / copyms preserve Hypercolumn_* keywords" begin
+    hc = MSv2.Record()
+    MSv2._kwpush!(hc, "HCndim", MSv2.TpInt, Int32(2))
+    MSv2._kwpush!(hc, "HCdatanames", MSv2.TpArrayString, ["A", "B"])
+    priv = MSv2.Record()
+    MSv2._kwpush!(priv, "Hypercolumn_TestCube", MSv2.TpRecord, hc)
+
+    d = mktempdir(); srcdir = joinpath(d, "src")
+    descs = ColumnDesc[MSv2._mkdesc("A", MSv2.TpInt, ()), MSv2._mkdesc("B", MSv2.TpInt, ()),
+                       MSv2._mkdesc("C", MSv2.TpInt, ())]
+    data = Any[collect(Int32, 1:5), collect(Int32, 6:10), collect(Int32, 11:15)]
+    MSv2._write_table_core(srcdir, descs, data; nrow=5, private=priv, tablename="T")
+    src = readtable(srcdir)
+    @test haskey(src.desc.private, "Hypercolumn_TestCube")
+
+    # a full-column copy preserves the entry verbatim
+    dstdir = joinpath(d, "dst")
+    copytable(dstdir, src)
+    dst = readtable(dstdir)
+    @test haskey(dst.desc.private, "Hypercolumn_TestCube")
+    got = dst.desc.private["Hypercolumn_TestCube"]
+    @test collect(String, got["HCdatanames"]) == ["A", "B"]
+    @test Int(got["HCndim"]) == 2
+
+    # unit: a kept-name set missing a referenced column silently drops
+    # just that entry; a non-Hypercolumn_* key always passes through
+    other = MSv2.Record()
+    MSv2._kwpush!(other, "SomeOtherKey", MSv2.TpString, "x")
+    priv2 = MSv2.Record()
+    MSv2._kwpush!(priv2, "Hypercolumn_TestCube", MSv2.TpRecord, hc)
+    MSv2._kwpush!(priv2, "SomeOtherKey", MSv2.TpString, "x")
+    kept_ok = MSv2._filter_hypercolumns(priv2, Set(["A", "B", "C"]))
+    @test haskey(kept_ok, "Hypercolumn_TestCube") && haskey(kept_ok, "SomeOtherKey")
+    kept_drop = MSv2._filter_hypercolumns(priv2, Set(["A", "C"]))   # B missing
+    @test !haskey(kept_drop, "Hypercolumn_TestCube") && haskey(kept_drop, "SomeOtherKey")
+end
