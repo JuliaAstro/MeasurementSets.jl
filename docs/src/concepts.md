@@ -104,8 +104,11 @@ sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
 `'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`.
 `mscal.<sel>('spec')` (`baseline` / `field` / `spw` / `scan` / `state` /
 `array` / `obs`) is MSSelection-lite row selection — a comma-list of
-ids / `N~M` ranges / name globs, `!` to subtract, `L & R` baselines
+ids / `N~M` ranges / name globs, `!` to subtract, `L & R` (cross only) /
+`L && R` (cross + auto) / `L &&&` (auto only) baselines
 (`query(main, "mscal.baseline('ea01 & *') AND mscal.field('3C*')")`).
+`mscal.baseline` also takes a physical baseline-length range/bound with
+no `&` (`'100~500m'` / `'<200m'` / `'>1km'`, from `ANTENNA.POSITION`).
 `mscal.time('t0~t1')` (ISO / `YYYY/MM/DD` endpoints) and
 `mscal.uvdist('a~b[m|km|klambda|…]')` select `TIME` / 2-D uv-distance
 ranges. `mscal.spw('0:5~20')` takes an optional `:chanlist` (channel

@@ -1583,6 +1583,26 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 98 — `mscal.baseline` `&&&` + physical baseline-length selection
+
+```julia
+query(main, "mscal.baseline('ea01 &&&')")     # self-correlations only
+query(main, "mscal.baseline('100~500m')")     # physical antenna-pair distance
+query(main, "mscal.feed('0 &&&')")            # &&& works on mscal.feed too
+```
+
+- `mscal.baseline` / `mscal.feed`'s `L & R` grammar gains `L &&& ` —
+  casacore `MSAntennaParse::AutoCorrOnly` (self-correlations only;
+  `&`=cross-only, `&&`=cross+auto, unchanged). `_mssel_baseline_pred`
+  checks `&&&` before `&&`/`&` (a substring of both).
+- `mscal.baseline` also accepts a bare physical baseline-length
+  range/bound with no `&` (`'100~500m'` / `'<200m'` / `'>1km'`, unit `m`
+  default / `km`), computed from `ANTENNA.POSITION` — casacore's
+  `blengthlist` (distinct from `mscal.uvdist`, which is the per-row,
+  frequency-dependent `uvw`).
+- Cross-checked against real `derivedmscal`/`tableCommand` where
+  registered.
+
 ### Phase 97 — `meas.*` measure conversions in TaQL-lite
 
 ```julia

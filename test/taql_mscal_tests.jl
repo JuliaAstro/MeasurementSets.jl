@@ -244,6 +244,36 @@ end
     @test_throws ErrorException query(readtable(dir), "mscal.field('0')")
 end
 
+@testset "TaQL-lite — mscal.baseline &&& and baseline-length selection" begin
+    main = readtable(SAMPLE_MS)
+    a1 = Int.(column(main, "ANTENNA1")[:])
+    a2 = Int.(column(main, "ANTENNA2")[:])
+    nb(pred) = count(i -> pred(a1[i], a2[i]), 1:nrow(main))
+
+    # &&& = autocorrelations only (the sample is cross-correlation-only)
+    @test nrow(query(main, "mscal.baseline('0 &&&')")) == nb((x, y) -> x == y == 0)
+    @test nrow(query(main, "mscal.baseline('0 &&&')")) == 0
+    @test nrow(query(main, "mscal.baseline('&&&')")) == 0    # empty left antenna set
+
+    # `_mssel_baseline_pred` unit: `&&&` truth table
+    pred = MSv2._mssel_baseline_pred("0 &&&", Dict{String,Vector{Int}}(), 0:25)
+    @test pred(0, 0) && !pred(0, 1) && !pred(1, 1)
+
+    # physical baseline length (ANTENNA.POSITION); partitions the full set
+    pos = column(subtable(MeasurementSet(SAMPLE_MS), "ANTENNA"), "POSITION")[:]
+    blen(i, j) = hypot((Float64.(pos[i + 1]) .- Float64.(pos[j + 1]))...)
+    @test nrow(query(main, "mscal.baseline('<1000m')")) == nb((x, y) -> blen(x, y) < 1000.0)
+    @test nrow(query(main, "mscal.baseline('>1000m')")) == nb((x, y) -> blen(x, y) > 1000.0)
+    @test nrow(query(main, "mscal.baseline('0~1000m')")) ==
+          nb((x, y) -> 0.0 <= blen(x, y) <= 1000.0)
+    @test nrow(query(main, "mscal.baseline('0~1km')")) ==
+          nb((x, y) -> 0.0 <= blen(x, y) <= 1000.0)
+    @test nrow(query(main, "mscal.baseline('!<500m')")) ==
+          nb((x, y) -> !(blen(x, y) < 500.0))
+    @test MSv2._mssel_is_blength("100~500m") && MSv2._mssel_is_blength("<1km")
+    @test !MSv2._mssel_is_blength("0 & 1")     # a real antenna-id spec, not a length
+end
+
 @testset "TaQL-lite — mscal.spw channel selection + mscal.chan" begin
     main = readtable(SAMPLE_MS)
     N = nrow(main)
@@ -303,6 +333,9 @@ end
     @test nrow(query(main, "mscal.feed('0 && 0')")) == N            # && keeps it
     @test nrow(query(main, "mscal.feed('!0')")) ==
           count(i -> !(f1[i] == 0 || f2[i] == 0), 1:N)
+    # Phase 98: `&&&` = self-only (every row here is feed 0 & feed 0)
+    @test nrow(query(main, "mscal.feed('0 &&&')")) == N
+    @test nrow(query(main, "mscal.feed('1 &&&')")) == 0
 end
 
 @testset "TaQL-lite — mscal.* with an ephemeris FIELD" begin
@@ -454,7 +487,9 @@ if _HAVE_TAQL
                            ("baseline", "!0"), ("field", "0"), ("spw", "0"),
                            ("field", "0~2"), ("uvdist", "200~1000m"),
                            ("uvdist", "10~100klambda"), ("uvdist", ">1km"),
-                           ("spw", "0:5~20"), ("corr", "RR"), ("feed", "0")]
+                           ("spw", "0:5~20"), ("corr", "RR"), ("feed", "0"),
+                           ("baseline", "0 &&&"), ("baseline", "0 && 1"),
+                           ("baseline", "<1000m"), ("baseline", "0~1000m")]
             rdir = joinpath(mktempdir(), "sel")
             ok = try
                 _taqlcmd("SELECT FROM \$1 WHERE mscal.$fn('$spec') GIVING '$rdir'",
