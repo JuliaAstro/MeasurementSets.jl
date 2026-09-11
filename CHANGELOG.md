@@ -2686,3 +2686,51 @@ query(main, "mscal.baseline('/^DA01&DV01/')")            # NOT that exact ordere
 - 26 new tests (`test/taql_mscal_tests.jl`, "mscal.baseline() regex
   pair lists (BLREGEX)"), including the real-TaQL cross-check above;
   full existing mscal suite (500 tests) unchanged.
+
+### Phase 120 — `mscal.baseline()`: correct `!`+`;` semantics (revisits Phase 115)
+
+```julia
+query(main, "mscal.baseline('!DA01&DV01;DA02&DV02')")   # NOT(A) unioned with B
+query(main, "mscal.baseline('DA01&DV01;!DA02&DV02')")   # A intersected with NOT(B)
+```
+
+- Phase 115 concluded, from two probes that happened to have an
+  algebraically identical result to "the second term is silently
+  dropped," that combining `!` with a `;`-separated multi-term
+  `mscal.baseline` spec was a casacore parser limitation not worth
+  replicating, and raised a clear error instead. **Wrong conclusion,
+  right instinct to check further** (per the user's choice to revisit
+  it once Phase 119's BLREGEX investigation turned up the exact
+  grammar rule that made it worth a second look).
+- Read `MSAntennaParse::setTEN` (`MSAntennaParse.cc:80-96`) in full —
+  it maintains a running accumulator (`node_p`) across every `;`-joined
+  `gbaseline` term, evaluated left to right: each term's own condition
+  is negated first if *that term* carries a leading `!` (there is no
+  separate "whole-spec" negation apart from the first term's own —
+  casacore's grammar only ever attaches `NOT` to one `baseline`
+  nonterminal); the first term seeds the accumulator; each later term
+  **unions** into it if the term is positive, or **intersects** with it
+  if the term is negated. Genuinely well-defined — not a bug.
+- **Live-verified against real Casacore.jl with 8 combinations** (2-
+  and 3-term specs, negation in every position) before touching any
+  code, this time — every row count predicted by the formula above
+  matched exactly, including re-deriving Phase 115's own two
+  "dropped term" examples: `'!A&B;C&D'` → `NOT(A) ∪ (C&D) = NOT(A)`
+  (not "term dropped" — `C&D`'s rows happen to already be a subset of
+  `NOT(A)`, since `A` and `C&D` are disjoint sets, so the union adds
+  nothing new) and `'A&B;!C&D'` → `(A&B) ∩ NOT(C&D) = A&B` (same
+  reasoning, intersecting with a superset is a no-op) — coincidental
+  algebra from the specific disjoint test data, not term-dropping.
+- `_mssel_baseline_pred` rewritten: the `;`-split loop now applies each
+  term's own leading `!` and combines via a running accumulator
+  (`_mssel_and2`/`_mssel_or2`) instead of refusing any `!` in a
+  `;`-list; the "no separate whole-spec negation" finding also
+  simplified the non-`;` single-term path (a term's leading `!` is
+  handled uniformly). Composes with the Phase 119 BLREGEX machinery
+  unchanged (a `;`-term's own leading `!` is stripped before the
+  BLREGEX/`&&&`/`&&`/`&` dispatch, same as before).
+- The 2 `@test_throws ArgumentError` assertions Phase 115 added are
+  replaced with value assertions against the correct semantics, plus 2
+  new combinations (`!A;!B` and a 3-term mix); the real-TaQL cross-check
+  list grows by 4 negated specs, all matching exactly. 9 new/changed
+  tests; full existing mscal suite otherwise unchanged.

@@ -702,15 +702,16 @@ end
 # `AutoCorrAlso` / `AutoCorrOnly`), a physical baseline-length range
 # (`'100~500m'` / `'<200m'` / `'>1km'`, from `ANTENNA.POSITION`, no `&`
 # involved), a `;`-separated list of SEVERAL such `L & R` baseline-pair
-# terms (OR'd — `'DA01&DV01;DA02&DV02'`; a plain comma instead *extends*
-# one antenna-set list, even across `&` — `'DA01,DA02&DV01'` is ONE
-# pair-term with a 2-antenna LHS, not two terms — both verified live
-# against real casacore, see `_mssel_baseline_pred`), a whole-spec `!`
-# negation (NOT combinable with a `;`-list — see there), and casacore's
-# real "blregexlist" — `/pattern/[,/pattern/...]` where each `pattern`'s
-# body contains a literal `&`, FULL-matched against the whole
-# `"name_i&name_j"` string per ordered antenna-index pair (see
-# `_mssel_blregex_pred`).
+# terms — each independently optionally `!`-negated, combined via a
+# running accumulator (a positive term UNIONS in, a negated term
+# INTERSECTS — see `_mssel_baseline_pred`'s own comment for the exact
+# rule, read out of `MSAntennaParse::setTEN` and cross-checked live) —
+# and casacore's real "blregexlist" — `/pattern/[,/pattern/...]` where
+# each `pattern`'s body contains a literal `&`, FULL-matched against
+# the whole `"name_i&name_j"` string per ordered antenna-index pair
+# (see `_mssel_blregex_pred`). A plain comma instead *extends* one
+# antenna-set list, even across `&` — `'DA01,DA02&DV01'` is ONE
+# pair-term with a 2-antenna LHS, not two terms (verified live).
 #
 # Threading mirrors `mscal.*`: a `TQLMSSel` node, a `"::mssel::<fn>::<spec>"`
 # sentinel split by `_mssel_split` in `_tql_cols` / `_vtq_prepare!`.
@@ -892,49 +893,63 @@ function _mssel_baseline_term_pred(spec::AbstractString, n2i::AbstractDict, alla
     end
 end
 
-# the full spec: an optional whole-spec `!` negation, OR a `;`-separated
-# list of several `&`-baseline-pair terms OR'd together (casacore's own
-# baseline-pair-list separator — NOT a comma, which instead *extends*
-# one antenna-set list, even across `&`: `'DA01,DA02&DV01'` is ONE
-# pair-term with a 2-antenna LHS, confirmed live to give the same row
-# count as writing the union out by hand).
+# the full spec: a `;`-separated list of `&`-baseline-pair terms, each
+# independently optionally `!`-negated (casacore's own baseline-pair-
+# list separator — NOT a comma, which instead *extends* one antenna-set
+# list, even across `&`: `'DA01,DA02&DV01'` is ONE pair-term with a
+# 2-antenna LHS, confirmed live to give the same row count as writing
+# the union out by hand).
 #
-# VERIFIED against real casacore (`tableCommand`, this session): every
-# un-negated `;`-list combination tried (single/multi-antenna sides,
-# duplicate terms, `&&`/`&&&` terms, 2-3 terms) matches a plain OR of
-# each term's own match set exactly. A `!` negation combined with a
-# `;`-list does NOT behave as a well-defined boolean combination —
-# `'!A&B;C&D'` (leading negation) gave exactly `'!A&B'` alone's row
-# count, silently dropping the `;C&D` term entirely; `'A&B;!C&D'` gave
-# exactly `'A&B'` alone's count, silently dropping the negated term
-# instead. This looks like a genuine casacore parser limitation, not a
-# reproducible feature, so it is deliberately NOT replicated here —
-# combining `!` with `;` is a clear error instead of a silent wrong
-# answer; negate a `;`-free spec, or negate each baseline pair by
-# writing its complement out explicitly.
+# Phase 120 (revisiting the Phase 115 refusal, now correctly): read
+# `MSAntennaParse::setTEN` (`MSAntennaParse.cc:80-96`) in full — it
+# maintains a running accumulator (`node_p`) across every `;`-joined
+# term, evaluated left to right:
+#   cond = <term's own match predicate>, negated first if the TERM
+#          itself has a leading `!` (each term's `!` is entirely its
+#          own — there is no separate "whole-spec" negation distinct
+#          from the first term's own optional `!`, since casacore's
+#          grammar only ever attaches `NOT` to ONE `baseline`
+#          nonterminal, never to a `;`-chain as a whole)
+#   1st term:      accumulator := cond
+#   later term:    accumulator := negated ? (accumulator AND cond)
+#                                          : (accumulator OR cond)
+# i.e. a positive term UNIONS into the running result, a negated term
+# INTERSECTS with it — genuinely well-defined, not a parser bug as
+# Phase 115 concluded from too little evidence. VERIFIED against real
+# casacore (`tableCommand`, this session) with 8+ combinations mixing
+# negated and plain terms in every position (2 and 3 terms) — every
+# predicted row count from the formula above matched exactly, including
+# the two cases (`'!A&B;C&D'` → `NOT(A)`; `'A&B;!C&D'` → `A`) that
+# Phase 115 mis-read as "the second term gets silently dropped" (both
+# are in fact `NOT(A) ∪ C&D = NOT(A)` and `A ∩ NOT(C&D) = A`
+# respectively, since the two clauses happen to be disjoint sets in
+# every spec tested — the "same as the first term alone" appearance was
+# coincidental algebra, not term-dropping).
 function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants;
                               names::Union{Nothing,Vector{String}} = nothing)
     spec = strip(spec)
+    if occursin(';', spec)
+        terms = [t for t in strip.(split(spec, ';')) if !isempty(t)]
+        isempty(terms) && return (a1, a2) -> false
+        acc = nothing
+        for t in terms
+            tneg = startswith(t, "!")
+            tbody = tneg ? strip(t[2:end]) : t
+            raw = _mssel_baseline_term_pred(tbody, n2i, allants; names)
+            cond = tneg ? ((a1, a2) -> !raw(a1, a2)) : raw
+            acc = acc === nothing ? cond :
+                  tneg ? _mssel_and2(acc, cond) : _mssel_or2(acc, cond)
+        end
+        return acc
+    end
     neg = startswith(spec, "!")
     body = neg ? strip(spec[2:end]) : spec
-    if occursin(';', body)
-        neg && throw(ArgumentError(
-            "mscal.baseline: a leading `!` combined with a `;`-separated list " *
-            "of baseline-pair terms is not supported (real casacore's own " *
-            "behaviour there is inconsistent, not a well-defined negation) — " *
-            "negate a `;`-free spec instead"))
-        terms = [t for t in strip.(split(body, ';')) if !isempty(t)]
-        any(t -> startswith(t, "!"), terms) && throw(ArgumentError(
-            "mscal.baseline: a `!`-negated term inside a `;`-separated list " *
-            "is not supported (real casacore's own behaviour there is " *
-            "inconsistent, not a well-defined negation) — negate a `;`-free " *
-            "spec instead"))
-        preds = [_mssel_baseline_term_pred(t, n2i, allants; names) for t in terms]
-        return isempty(preds) ? ((a1, a2) -> false) : (a1, a2) -> any(p -> p(a1, a2), preds)
-    end
     pred = _mssel_baseline_term_pred(body, n2i, allants; names)
     return neg ? (a1, a2) -> !pred(a1, a2) : pred
 end
+
+_mssel_and2(p, q) = (a1, a2) -> p(a1, a2) && q(a1, a2)
+_mssel_or2(p, q) = (a1, a2) -> p(a1, a2) || q(a1, a2)
 
 # a bare baseline-length range/bound, no `&` involved (casacore's
 # `blengthlist` — `LT`/`GT`/`a-b`, unit `m`/`km`, default `m`).

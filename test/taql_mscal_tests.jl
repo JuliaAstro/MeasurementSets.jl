@@ -359,10 +359,12 @@ end
 # and `'{0,1}&2'` are both flatly rejected by `tableCommand`); a plain
 # comma already extends one antenna-set list across `&` with no code
 # change needed (`'ea01,ea02&ea03'` == `'ea01&ea03;ea02&ea03'`, verified
-# live). `;` as the genuine multi-pair-term separator, and its
-# deliberately-unsupported interaction with `!`, are both cross-checked
-# below -- see `_mssel_baseline_pred`'s docstring comment for the
-# specific probes that ruled out replicating the `!`+`;` combination.
+# live). Phase 120 REVISITS and CORRECTS the `!`+`;` handling below --
+# see `_mssel_baseline_pred`'s own comment for the accumulator formula
+# read straight out of `MSAntennaParse::setTEN` and the probes that
+# confirm it (a positive term unions into the running result, a
+# negated term intersects with it -- not a parser bug, as Phase 115
+# concluded from too little evidence).
 @testset "TaQL-lite — mscal.baseline() `;`-separated multi-term specs" begin
     n2i = Dict("ea01" => [0], "ea02" => [1], "ea03" => [2], "ea04" => [3], "ea05" => [4])
 
@@ -389,23 +391,36 @@ end
     r3 = nrow(query(main, "mscal.baseline('ea01 &&& ; ea02 &&&')"))
     @test r3 == 0   # the sample MS is cross-correlation-only
 
-    # `!` combined with `;` is refused, not silently wrong (real
-    # casacore's own behaviour there is not a well-defined negation --
-    # see the comment on `_mssel_baseline_pred`)
-    @test_throws ArgumentError query(main, "mscal.baseline('!ea01&ea02;ea01&ea03')")
-    @test_throws ArgumentError query(main, "mscal.baseline('ea01&ea02;!ea01&ea03')")
-    # a `;`-free leading `!` is unaffected
-    @test nrow(query(main, "mscal.baseline('!ea01&ea02')")) ==
-          nb((x, y) -> !((x, y) in ((0, 1), (1, 0))))
+    # Phase 120: `!` combined with `;` -- correct accumulator semantics.
+    # 1st-term negation seeds the accumulator negated; each later term
+    # unions in (positive) or intersects (negated). `A`/`B` here are the
+    # (disjoint) row sets of "ea01&ea02" / "ea01&ea03".
+    isA(x, y) = (x, y) in ((0, 1), (1, 0))
+    isB(x, y) = (x, y) in ((0, 2), (2, 0))
+    @test nrow(query(main, "mscal.baseline('!ea01&ea02;ea01&ea03')")) ==
+          nb((x, y) -> !isA(x, y) || isB(x, y))              # NOT(A) ∪ B == NOT(A), A∩B=∅
+    @test nrow(query(main, "mscal.baseline('ea01&ea02;!ea01&ea03')")) ==
+          nb((x, y) -> isA(x, y) && !isB(x, y))              # A ∩ NOT(B) == A, A∩B=∅
+    @test nrow(query(main, "mscal.baseline('!ea01&ea02;!ea01&ea03')")) ==
+          nb((x, y) -> !isA(x, y) && !isB(x, y))             # NOT(A) ∩ NOT(B) == NOT(A∪B)
+    isC(x, y) = (x, y) in ((3, 4), (4, 3))
+    @test nrow(query(main, "mscal.baseline('!ea01&ea02;ea01&ea03;!ea04&ea05')")) ==
+          nb((x, y) -> (!isA(x, y) || isB(x, y)) && !isC(x, y))
+    # a `;`-free leading `!` is unaffected (unchanged from before this phase)
+    @test nrow(query(main, "mscal.baseline('!ea01&ea02')")) == nb((x, y) -> !isA(x, y))
 
-    # `_mssel_baseline_pred` unit: the truth table directly
+    # `_mssel_baseline_pred` unit: both truth tables directly
     pred = MSv2._mssel_baseline_pred("ea01&ea02;ea01&ea03", n2i, 0:9)
     @test pred(0, 1) && pred(0, 2) && !pred(0, 3) && !pred(1, 2)
+    predn = MSv2._mssel_baseline_pred("!ea01&ea02;ea01&ea03", n2i, 0:9)
+    @test !predn(0, 1) && predn(0, 2) && predn(0, 3)         # NOT(A) everywhere except A itself
 
     @testset "vs real TaQL" begin
         for spec in ("ea01&ea02;ea01&ea03", "ea01,ea02&ea03;ea04&ea05",
                      "ea01&ea02;ea01&ea02", "ea01 &&& ; ea02 &&&",
-                     "ea01&ea02;ea03&ea04;ea05")
+                     "ea01&ea02;ea03&ea04;ea05",
+                     "!ea01&ea02;ea01&ea03", "ea01&ea02;!ea01&ea03",
+                     "!ea01&ea02;!ea01&ea03", "!ea01&ea02;ea01&ea03;!ea04&ea05")
             rdir = joinpath(mktempdir(), "sel")
             ok = try
                 _taqlcmd("SELECT FROM \$1 WHERE mscal.baseline('$spec') GIVING '$rdir'",
