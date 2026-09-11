@@ -230,10 +230,13 @@ PrimaryBeam
 GaussianBeam
 AiryBeam
 PolynomialBeam
+EllipticalGaussianBeam
+SquintBeam
 power_response
 voltage_response
 attenuate
 correct_flux
 angular_separation
+pointing_offset
 reffreq
 ```

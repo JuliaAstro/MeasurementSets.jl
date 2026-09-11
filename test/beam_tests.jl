@@ -87,3 +87,82 @@ end
     end
     @test AiryBeam(25.0) isa MSv2.PrimaryBeam
 end
+
+# Phase 100: elliptical / squinted beams + pointing_offset + TaQL funcs.
+@testset "beam — EllipticalGaussianBeam" begin
+    hmaj, hmin = deg2rad(1.0), deg2rad(0.5)
+    eb = EllipticalGaussianBeam(hmaj, hmin, 0.0, 1.4e9)
+    @test eb isa MSv2.PrimaryBeam
+    @test reffreq(eb) == 1.4e9
+    @test power_response(eb, (0.0, 0.0)) == 1.0
+    # pa = 0 -> major axis along dlat (north)
+    @test power_response(eb, (0.0, hmaj / 2)) ≈ 0.5 rtol = 1e-12
+    @test power_response(eb, (hmin / 2, 0.0)) ≈ 0.5 rtol = 1e-12
+    # a 90° rotation swaps the axes
+    eb90 = EllipticalGaussianBeam(hmaj, hmin, pi / 2, 1.4e9)
+    @test power_response(eb90, (hmaj / 2, 0.0)) ≈ 0.5 rtol = 1e-12
+    @test power_response(eb90, (0.0, hmin / 2)) ≈ 0.5 rtol = 1e-12
+    # circular case (hmaj == hmin) matches GaussianBeam at any pa
+    g = GaussianBeam(deg2rad(0.7), 1.4e9)
+    ec = EllipticalGaussianBeam(g.hpbw, g.hpbw, 0.3, 1.4e9)
+    @test power_response(ec, (0.1 * g.hpbw, -0.2 * g.hpbw)) ≈
+          power_response(g, hypot(0.1 * g.hpbw, 0.2 * g.hpbw)) rtol = 1e-10
+    # frequency scaling narrows both axes
+    @test power_response(eb, (0.0, hmaj / 2), 2 * eb.reffreq) < 0.5
+    # a scalar θ is a clear error, not silently circular
+    @test_throws ArgumentError power_response(eb, 0.1)
+    @test_throws ArgumentError voltage_response(eb, 0.1)
+end
+
+@testset "beam — SquintBeam" begin
+    base = GaussianBeam(1.4e9; diameter = 25.0)
+    squint = (deg2rad(0.05), -deg2rad(0.02))
+    sq = SquintBeam(base, squint)
+    @test sq isa MSv2.PrimaryBeam
+    @test reffreq(sq) == reffreq(base)
+    # centred on the squinted offset -> unattenuated (like the base at 0,0)
+    @test power_response(sq, squint) ≈ power_response(base, 0.0) rtol = 1e-12
+    # at the true boresight, the squint attenuates
+    @test power_response(sq, (0.0, 0.0)) < 1.0
+    @test power_response(sq, (0.0, 0.0)) ≈ power_response(base, hypot(squint...)) rtol = 1e-10
+    @test_throws ArgumentError power_response(sq, 0.1)
+    # squinting an elliptical beam composes
+    eb = EllipticalGaussianBeam(deg2rad(1.0), deg2rad(0.5), 0.0, 1.4e9)
+    sqe = SquintBeam(eb, squint)
+    @test power_response(sqe, squint) ≈ power_response(eb, (0.0, 0.0)) rtol = 1e-12
+end
+
+@testset "beam — pointing_offset" begin
+    p = MDirection{J2000}(1.0, 0.3)
+    @test pointing_offset(p, p) == (0.0, 0.0)
+    p2 = MDirection{J2000}(1.0, 0.3 + deg2rad(1.0))
+    dlon, dlat = pointing_offset(p, p2)
+    @test dlon ≈ 0.0 atol = 1e-12
+    @test rad2deg(dlat) ≈ 1.0 rtol = 1e-10
+    # composes with EllipticalGaussianBeam / attenuate
+    eb = EllipticalGaussianBeam(deg2rad(1.0), deg2rad(0.5), 0.0, 1.4e9)
+    off = pointing_offset(p, MDirection{J2000}(1.0, 0.3 + deg2rad(1.0) / 2))
+    @test attenuate(eb, 2.0, off) ≈ 1.0 rtol = 1e-10   # half-power point along the major axis
+end
+
+@testset "beam — TaQL-lite pbgaussian/pbairy/pbellipse" begin
+    d = mktempdir()
+    write_table(joinpath(d, "T"), "T", Pair{String,Any}["X" => [1.0, 2.0]]; nrow = 2)
+    t = readtable(joinpath(d, "T"))
+
+    q = query(t, "X > 0"; select = [
+        "g" => "pbgaussian(0.1, 0.5)",
+        "a" => "pbairy(0.0, 25.0, 1.4e9)",
+        "a2" => "pbairy(0.0, 25.0, 1.4e9, 2.5)",
+        "e" => "pbellipse(0.0, 0.005, 0.01, 0.005, 0.0)"])
+    @test collect(q.g)[1] ≈ exp(-4 * log(2) * (0.1 / 0.5)^2)
+    @test collect(q.a)[1] == 1.0
+    @test collect(q.a2)[1] ≈ 1.0 rtol = 1e-10
+    @test collect(q.e)[1] ≈ 0.5 rtol = 1e-12
+
+    # filter with a beam function in WHERE
+    r = query(t, "pbgaussian(0.0, 0.5) > 0.99")
+    @test nrow(r) == 2
+    @test_throws ArgumentError MSv2._taqllite_parse("pbairy(A)", Set(["A"]))
+    @test_throws ArgumentError MSv2._taqllite_parse("pbgaussian(A)", Set(["A"]))
+end

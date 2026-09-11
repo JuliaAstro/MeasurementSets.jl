@@ -1583,6 +1583,34 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 100 — elliptical / squinted primary beams + TaQL-lite
+
+```julia
+θ = pointing_offset(pointing, source)                          # (dlon, dlat), same frame
+attenuate(EllipticalGaussianBeam(hmaj, hmin, pa, freq), flux, θ)
+power_response(SquintBeam(base_beam, (dlon0, dlat0)), θ)
+query(cat, "pbairy(OFFSET, 25.0, 1.4e9) > 0.5")                 # TaQL-lite
+```
+
+- `EllipticalGaussianBeam(hpbw_major, hpbw_minor, pa, reffreq)` —
+  position-angle-rotated Gaussian power pattern (`pa` from north
+  through east, the `MDirection` convention); needs a 2-D `(dlon, dlat)`
+  offset (a scalar `θ` errors clearly — ambiguous for a non-circular
+  beam). `SquintBeam(base, squint)` offsets any `PrimaryBeam`'s centre
+  by a fixed `(dlon, dlat)` — feed/pointing squint; composes with any
+  base beam including `EllipticalGaussianBeam`.
+- `pointing_offset(pointing::MDirection, target::MDirection) -> (dlon,
+  dlat)` — the small-angle tangent-plane offset (both directions in the
+  same frame).
+- Every `PrimaryBeam` now accepts either a scalar `θ` or a `(dlon,
+  dlat)` pair everywhere (`power_response`, `voltage_response`,
+  `attenuate`, `correct_flux`) — a circularly symmetric beam falls back
+  to the pair's magnitude.
+- TaQL-lite: `pbgaussian(θ, hpbw)`, `pbairy(θ, diameter, freq[,
+  blockage])`, `pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` —
+  pure-numeric wrappers (no `PrimaryBeam` object in TaQL) usable in
+  `query`/`groupby` WHERE and computed `select`.
+
 ### Phase 99 — analytic primary-beam models
 
 ```julia

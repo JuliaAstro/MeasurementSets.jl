@@ -293,3 +293,19 @@ pb = GaussianBeam(1.4e9; diameter = 25.0)
 θ = angular_separation(pointing, source)      # both MDirection{J2000}
 correct_flux(pb, apparent_flux, θ)            # -> true flux
 ```
+
+[`EllipticalGaussianBeam`](@ref)`(hpbw_major, hpbw_minor, pa, reffreq)`
+and [`SquintBeam`](@ref)`(base, squint)` (feed/pointing squint) need the
+offset *direction*, not just its magnitude — a `(dlon, dlat)` tangent-
+plane pair from [`pointing_offset`](@ref)`(pointing, target)` rather than
+a scalar `θ` (every `power_response`/`voltage_response`/`attenuate`/
+`correct_flux` method also accepts this pair; a circularly symmetric
+beam falls back to its magnitude). `pa` follows the `MDirection`
+convention (from north through east).
+
+The string form of [`query`](@ref) / [`groupby`](@ref) exposes three
+pure-numeric wrappers for filtering/computing on beam response directly:
+`pbgaussian(θ, hpbw)`, `pbairy(θ, diameter, freq[, blockage])`,
+`pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` — e.g.
+`query(cat, "pbairy(OFFSET, 25.0, 1.4e9) > 0.5")` on a source-catalogue
+table carrying a per-row pointing-centre offset.

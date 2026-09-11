@@ -91,7 +91,9 @@ export MBaseline, MuvW, MEarthMagnetic, IGRF, earthfield
 export EarthMagneticMachine, emm_lineofsight
 export rotation_measure, faraday_rotation, derotate_angle, RM_IONOSPHERE
 export PrimaryBeam, GaussianBeam, AiryBeam, PolynomialBeam
-export power_response, voltage_response, attenuate, correct_flux, angular_separation, reffreq
+export EllipticalGaussianBeam, SquintBeam
+export power_response, voltage_response, attenuate, correct_flux, angular_separation, reffreq,
+    pointing_offset
 export Ephemeris, open_ephemeris, field_ephemeris, ephemeris_direction,
     ephemeris_radvel, ephemeris_distance, ephemeris_diskpos
 export UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,

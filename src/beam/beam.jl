@@ -37,29 +37,36 @@ specified at.
 """
 function reffreq end
 
+const _PBOffset = Union{Real,NTuple{2,Real}}
+
 """
     voltage_response(beam, θ, freq=reffreq(beam)) -> Float64
 
 `sqrt(power_response(beam, θ, freq))` — the voltage (amplitude) pattern.
+`θ` is a scalar offset (rad) or a `(dlon, dlat)` tangent-plane pair (see
+[`pointing_offset`](@ref) — required for [`EllipticalGaussianBeam`](@ref)
+/ [`SquintBeam`](@ref)).
 """
-voltage_response(b::PrimaryBeam, θ::Real, freq::Real = reffreq(b)) =
+voltage_response(b::PrimaryBeam, θ::_PBOffset, freq::Real = reffreq(b)) =
     sqrt(power_response(b, θ, freq))
 
 """
     attenuate(beam, flux, θ, freq=reffreq(beam)) -> Float64
 
 `flux * power_response(beam, θ, freq)` — the apparent flux of a source
-of true flux `flux` seen through the beam at offset `θ`.
+of true flux `flux` seen through the beam at offset `θ` (scalar or
+`(dlon, dlat)`, see [`voltage_response`](@ref)).
 """
-attenuate(b::PrimaryBeam, flux::Real, θ::Real, freq::Real = reffreq(b)) =
+attenuate(b::PrimaryBeam, flux::Real, θ::_PBOffset, freq::Real = reffreq(b)) =
     flux * power_response(b, θ, freq)
 
 """
     correct_flux(beam, apparent_flux, θ, freq=reffreq(beam)) -> Float64
 
-The primary-beam correction: `apparent_flux / power_response(beam, θ, freq)`.
+The primary-beam correction: `apparent_flux / power_response(beam, θ, freq)`
+(`θ` scalar or `(dlon, dlat)`, see [`voltage_response`](@ref)).
 """
-correct_flux(b::PrimaryBeam, flux::Real, θ::Real, freq::Real = reffreq(b)) =
+correct_flux(b::PrimaryBeam, flux::Real, θ::_PBOffset, freq::Real = reffreq(b)) =
     flux / power_response(b, θ, freq)
 
 """
@@ -70,6 +77,29 @@ reference frame** — `measconvert` one first if they differ. Use as the
 `θ` argument to [`power_response`](@ref) / [`voltage_response`](@ref).
 """
 angular_separation(d1::MDirection, d2::MDirection) = _tql_angdist(d1.lon, d1.lat, d2.lon, d2.lat)
+
+"""
+    pointing_offset(pointing::MDirection, target::MDirection) -> (dlon, dlat)
+
+The 2-D tangent-plane offset (rad) of `target` from `pointing` — a
+small-angle projection, `dlon = (target.lon−pointing.lon)·cos(pointing.lat)`,
+`dlat = target.lat−pointing.lat`. Both directions must be in the same
+reference frame. Use as the `offset` argument to
+[`EllipticalGaussianBeam`](@ref) / [`SquintBeam`](@ref) — a beam that
+needs the offset *direction*, not just its magnitude.
+"""
+function pointing_offset(pointing::MDirection, target::MDirection)
+    dlon = rem2pi(target.lon - pointing.lon, RoundNearest) * cos(pointing.lat)
+    (dlon, target.lat - pointing.lat)
+end
+
+# A circularly symmetric beam's `power_response` only needs the offset
+# magnitude — this fallback lets ANY `PrimaryBeam` accept a 2-D
+# `(dlon, dlat)` offset (e.g. from `pointing_offset`) interchangeably
+# with a scalar `θ`. `EllipticalGaussianBeam` / `SquintBeam` override it
+# with a direction-aware method.
+power_response(b::PrimaryBeam, offset::NTuple{2,Real}, freq::Real = reffreq(b)) =
+    power_response(b, hypot(offset...), freq)
 
 # ======================================================================
 # Gaussian
@@ -176,3 +206,68 @@ function power_response(b::PolynomialBeam, θ::Real, freq::Real = b.reffreq)
     end
     max(p, 0.0)
 end
+
+# ======================================================================
+# Elliptical Gaussian (position-angle-rotated) and beam squint
+# ======================================================================
+
+# `pa` measured from north (the `dlat` axis) through east (`dlon`),
+# the standard astronomical convention -- the major-axis unit vector is
+# `(sin(pa), cos(pa))`.
+function _elliptical_gaussian_power(dlon::Real, dlat::Real, hmaj::Real, hmin::Real, pa::Real)
+    sp, cp = sin(pa), cos(pa)
+    u = dlon * sp + dlat * cp        # along the major axis
+    v = dlon * cp - dlat * sp        # along the minor axis
+    exp(-4 * log(2) * ((u / hmaj)^2 + (v / hmin)^2))
+end
+
+"""
+    EllipticalGaussianBeam(hpbw_major, hpbw_minor, pa, reffreq)
+
+A Gaussian power pattern elongated along position angle `pa` (rad, from
+north through east — the [`MDirection`](@ref) convention): half-power
+widths `hpbw_major` ≥ `hpbw_minor` (rad) at `reffreq` (Hz, scaling as
+`1/freq`, like [`GaussianBeam`](@ref)). `power_response` needs a 2-D
+`(dlon, dlat)` offset, not a scalar `θ` — see [`pointing_offset`](@ref).
+"""
+struct EllipticalGaussianBeam <: PrimaryBeam
+    hpbw_major::Float64
+    hpbw_minor::Float64
+    pa::Float64
+    reffreq::Float64
+end
+EllipticalGaussianBeam(hmaj::Real, hmin::Real, pa::Real, reffreq::Real) =
+    EllipticalGaussianBeam(float(hmaj), float(hmin), float(pa), float(reffreq))
+
+reffreq(b::EllipticalGaussianBeam) = b.reffreq
+
+power_response(b::EllipticalGaussianBeam, ::Real, ::Real = b.reffreq) = throw(ArgumentError(
+    "EllipticalGaussianBeam needs a 2-D (dlon, dlat) offset, not a scalar θ — see `pointing_offset`"))
+
+function power_response(b::EllipticalGaussianBeam, offset::NTuple{2,Real}, freq::Real = b.reffreq)
+    scale = b.reffreq / freq
+    _elliptical_gaussian_power(offset[1], offset[2], b.hpbw_major * scale,
+                               b.hpbw_minor * scale, b.pa)
+end
+
+"""
+    SquintBeam(base::PrimaryBeam, squint)
+
+Wraps `base`, offsetting its effective centre by `squint = (dlon, dlat)`
+(rad) — models feed/beam squint (e.g. a circularly-polarized feed's
+polarization-dependent pointing offset). Needs a 2-D offset (a scalar
+`θ` is ambiguous once the beam isn't centred on the boresight).
+"""
+struct SquintBeam{B<:PrimaryBeam} <: PrimaryBeam
+    base::B
+    squint::NTuple{2,Float64}
+end
+SquintBeam(base::PrimaryBeam, squint::Tuple{<:Real,<:Real}) = SquintBeam(base, Float64.(squint))
+
+reffreq(b::SquintBeam) = reffreq(b.base)
+
+power_response(b::SquintBeam, ::Real, ::Real = reffreq(b)) = throw(ArgumentError(
+    "SquintBeam needs a 2-D (dlon, dlat) offset, not a scalar θ — see `pointing_offset`"))
+
+power_response(b::SquintBeam, offset::NTuple{2,Real}, freq::Real = reffreq(b)) =
+    power_response(b.base, offset .- b.squint, freq)
