@@ -3090,3 +3090,123 @@ untouched after the view drops it, the add-then-remove-still-persists
 case, and a `_HAVE_CASACORE` cross-check. No new storage-format code,
 no new exports — completes the `RefEditTable` feature set started in
 Phase 125/126.
+
+### Phase 128 — `mscal.time()` `*` wildcard / `N[t0~t1]` edge-buffer forms vs real TaQL
+
+Investigated whether the `*` wildcard and `N[t0~t1]` explicit edge-
+buffer forms (both already implemented since Phase 94/121, but never
+individually live-cross-checked) actually match real casacore.
+
+**Confirmed correct, one small real gap found and fixed.** Reading
+`MSTimeGram.ll`/`.yy` confirms `*` is a genuine grammar token (`STAR`,
+`wildNumber: STAR {$$=-1}`) used per-field in `yFields`/`tFields` —
+identical to an omitted field, exactly what this package's
+`_mstime_fields` already did (no bug). Reading `MSTimeParse::
+selectTimeRange` (`MSTimeParse.cc:248-273`) confirms `N[t0~t1]`'s
+buffer is casacore's literal `edgeWidth` (**no `/2`**) — distinct from
+the bracket-only `[t0~t1]` form, which uses `defaultExposure/2` — this
+package's `buf = m[1] === nothing ? dT : parse(Float64, m[1])` already
+matched exactly. The real gap: the buffer number is casacore's own
+`FNUMBER` grammar production (`INT | INT. | .INT | INT.INT`), and the
+regex extracting it only accepted `INT`/`INT.INT` (`\d+(?:\.\d+)?`),
+rejecting the `.5[...]` / `5.[...]` spellings real TaQL accepts. Fixed
+in `src/taql/mscal.jl`.
+
+**A live oracle was investigated and found blocked by two independent,
+real issues — neither fixable here, both now documented in the source.**
+(1) The committed `sample.ms` fixture predates the Phase 121
+`FLAG_CATEGORY`/`CATEGORY`-keyword fix and is fully flagged; opening a
+*writable* copy so casacore's own `addCat()` self-heal can fire (the
+`Update` table mode) makes real casacore's `MSTimeParse::getDefaults()`
+**segfault outright** (not throw) when resolving a wildcard default
+against an all-`FLAG_ROW`-true table — a genuine crash bug in this
+casacore build, live-verified with a full backtrace, recorded as a
+finding rather than something this package can work around. (2) a
+`create_ms`-built synthetic MS gets past the `CATEGORY` keyword
+(Phase 121's own fix) but still fails `MSTableImpl::validate`'s
+measures/units keyword audit — the exact "genuinely large...
+deliberately out of scope" gap Phase 121 already identified and
+declined to chase.
+
+Verified instead the same way Phase 121's own default-row/dT fix was:
+hand-built fixtures + direct `_mssel_time`/`_mstime_fields` calls, the
+logic itself already pinned unambiguously by the grammar/source
+citations. 12 new tests in `test/taql_mscal_tests.jl` ("mscal.time()
+`*` wildcard / N[t0~t1]"): the `*`-vs-omitted-field structural
+equivalence, per-field wildcards in both date and time position, the
+`N[t0~t1]` literal-buffer-vs-`[t0~t1]`'s-`dT`/2 distinction at both a
+too-small and too-large buffer, the plain (non-bracket) range's
+"no buffer at all" exactness, and the `FNUMBER`-form fix
+(`.00001[...]`, `12.[...]`). 569 mscal tests standalone, all green.
+
+### Phase 129 — `edit(ct::ConcatTable)`: in-place edit through a ConcatTable view
+
+Parallel to Phase 125's RefTable investigation. Read `tables/Tables/
+ConcatColumn.cc` and found the exact same shape: `ConcatColumn::put`
+is a pure row-index translation — `refTabPtr_p->rows().mapRownr
+(tableNr, tabRownr, rownr); refColPtr_p[tableNr]->put(tabRownr,
+dataPtr)` — a `ConcatTable` has no storage of its own either; editing
+one in place IS editing whichever PART a row actually belongs to, at
+that part's own local row number (the identical `k =
+searchsortedlast(offsets, i-1); i - offsets[k]` split this package's
+own read-side `ConcatColumn` already does).
+
+New `src/tables/concatedit.jl`: `edit(ct::ConcatTable)` opens an
+`EditTable` for every part (each must be a plain `Table`) and returns
+a `ConcatEditTable`; `t[name][i] = v` translates `i` through `ct`'s
+cumulative offsets to (part, local row) and delegates straight to that
+part's own `EditTable`/`EditColumn` — the same fast-path/regen/tile-
+patch machinery every other `edit` session already uses, unchanged.
+`edit(f, ct::ConcatTable)` runs `f` then flushes every part.
+
+`ConcatTable::canRemoveRow`/`canRemoveColumn`/`canRenameColumn` are all
+hard-coded `false` in casacore and `removeRow` throws outright ("cannot
+remove rows") with no `addRow` override either — `removerows!`/
+`addrows!`/`removecolumn!` are deliberate non-goals, same reasoning as
+`RefEditTable`. `ConcatTable::addColumn` genuinely is supported by
+casacore (adds identically to every part) but not implemented here —
+left for a future phase, mirroring how `RefEditTable`'s own
+`addcolumn!`/`removecolumn!` came a phase later (126/127) after the
+core write-through (125).
+
+9 new tests in `test/edit_tests.jl` ("edit — through a ConcatTable
+view"): single-cell writes landing in the correct part, a whole-view-
+column write spanning both parts, a non-plain-Table-part guard, and a
+`_HAVE_CASACORE` cross-check. No new storage-format code, no new
+exports.
+
+### Phase 130 — `addcolumn!` through a ConcatTable view
+
+Natural continuation of Phase 129, mirroring how Phase 126 followed
+Phase 125 for `RefEditTable`. Read `ConcatTable::addColumn`
+(`ConcatTable.cc:530-560`): both overloads simply call `tables_p[i].
+addColumn(...)` on every part in turn (schema-only, like `addColumn`
+in general — casacore's API never carries values, a later `put` fills
+them in), then registers the column on the `ConcatTable`'s own
+descriptor.
+
+`addcolumn!(t::ConcatEditTable, name; kind)` mirrors this directly —
+`addcolumn!` on every part. `addcolumn!(t::ConcatEditTable, name,
+data; kind, type, shape)` is a MeasurementSets convenience beyond
+casacore's own schema-only API (the same choice Phase 126 made for
+`RefEditTable`): `data` covers every row of the whole concatenated
+view (no "selection" concept here, unlike RefTable), sliced by
+`t.offsets` into one `addcolumn!(part, name, slice; ...)` call per
+part — each part independently infers its own type/shape from its own
+slice, matching how `ConcatTable` itself only ever consults `parts[1]`'s
+schema for anything table-desc-level (a Phase 15 finding) rather than
+enforcing cross-part consistency.
+
+Also confirmed, while re-reading the source for symmetry with Phase
+127's RefTable investigation, that `ConcatTable::removeColumn` and
+`renameColumn` genuinely just THROW unconditionally
+(`ConcatTable.cc:563-583`) — unlike `RefTable::removeColumn`'s
+distinct "pure view-level hide" semantic, `ConcatTable` has no
+removecolumn! analogue at all, so it stays a hard non-goal here (no
+Phase-127-style follow-up needed).
+
+7 new tests in `test/edit_tests.jl` ("edit — addcolumn! through a
+ConcatTable view"): data split correctly across both parts, the
+no-data standard-schema form, a wrong-length error, and a
+`_HAVE_CASACORE` cross-check. 261 edit tests standalone, all green. No
+new storage-format code, no new exports.

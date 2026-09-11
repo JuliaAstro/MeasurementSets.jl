@@ -1161,6 +1161,39 @@ _mssel_inany(x, ranges) = any(r -> r[1] <= x <= r[2], ranges)
 # (`exposure(firstLogicalRow,"s")`) — NOT a mean over every row's
 # `EXPOSURE`, which Phase 94 originally used; and the "default row"
 # itself is the FIRST UNFLAGGED row, not row 1 unconditionally.
+#
+# Phase 128 (wildcard + edge-buffer forms specifically): confirmed the
+# `*` wildcard is a real, first-class lexer token (`MSTimeGram.ll`'s
+# `"*" { return STAR; }`, `MSTimeGram.yy:131` `wildNumber: STAR {$$=-1}`,
+# used per-field in `yFields`/`tFields`) — identical to an omitted
+# field, exactly what `_mstime_fields`'s `_f` already did, so no bug
+# there. Confirmed `N[t0~t1]`'s buffer maps to casacore's own literal
+# `edgeWidth` (`MSTimeParse.cc:262`, `selectTimeRange`) with **no /2**
+# — unlike the bracket-only `[t0~t1]` form, which uses
+# `defaultExposure/2` — our `buf = m[1] === nothing ? dT : parse(...)`
+# already matched this exactly; fixed a smaller, real gap found while
+# re-deriving it from the grammar: the buffer number is casacore's
+# `FNUMBER` (`INT | INT. | .INT | INT.INT`), and the regex only
+# accepted the `INT` / `INT.INT` spellings, rejecting `.5[...]` /
+# `5.[...]`.
+#
+# A LIVE oracle for these forms was investigated and found blocked by
+# two independent, real issues (neither fixable here): (1) the
+# committed `sample.ms` fixture predates the Phase 121 `FLAG_CATEGORY`
+# `CATEGORY`-keyword fix AND is fully flagged, and opening a *writable*
+# copy so casacore's own `addCat()` self-heal can fire (`Update` table
+# mode) makes real casacore's `MSTimeParse::getDefaults()` **segfault**
+# outright (not throw) when resolving a wildcard default against an
+# all-`FLAG_ROW`-true table — a genuine crash bug in this casacore
+# build, live-verified, filed here as a finding, not something this
+# package can work around. (2) a `create_ms`-built synthetic MS gets
+# past the `CATEGORY` keyword (Phase 121's own fix) but still fails
+# `MSTableImpl::validate`'s measures/units keyword audit — the exact
+# "genuinely large... deliberately out of scope" gap Phase 121 already
+# identified and declined to chase. So the `*`/`N[...]` forms below are
+# verified the same way Phase 121's own default-row/dT fix was: hand-
+# built fixtures + direct `_mssel_time` calls, the logic itself already
+# pinned unambiguously by the grammar/source citations above.
 
 # parse one time token -> 6 fields (y,mo,d,h,mi,s), -1 = wildcard/missing;
 # or a bare Float64 (already MJD days) wrapped as `(:mjd, val)`.
@@ -1233,7 +1266,12 @@ function _mssel_time(t::AbstractTable, spec::AbstractString, cn::AbstractSet, n:
             lo = _sec(term[2:end], def);  push!(preds, x -> x >= lo)
         elseif startswith(term, "<")
             hi = _sec(term[2:end], def);  push!(preds, x -> x <= hi)
-        elseif (m = match(r"^(?:(\d+(?:\.\d+)?)\s*)?\[\s*(.+?)\s*~\s*(.+?)\s*\]$", term)) !== nothing
+        elseif (m = match(r"^(?:(\d+\.\d+|\d+\.|\.\d+|\d+)\s*)?\[\s*(.+?)\s*~\s*(.+?)\s*\]$", term)) !== nothing
+            # the buffer literal is casacore's own `FNUMBER` production
+            # (`MSTimeGram.ll`: `INT | INT. | .INT | INT.INT`) -- the
+            # bare-`\d+(?:\.\d+)?` form this regex had before Phase 128
+            # rejected the `.5[...]` / `5.[...]` spellings real TaQL
+            # accepts.
             buf = m[1] === nothing ? dT : parse(Float64, m[1])
             lo = _sec(m[2], def)
             hi = _mstime_incl_hi(m[3], lo)
