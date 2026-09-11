@@ -2040,3 +2040,49 @@ query(main, "mscal.hadec1()")                          # uses the ephemeris auto
   `DiskLong` / `DiskLat` sub-Earth point; the aipsrc
   `measures.comet.directory` lookup; `MeasComet` as a `MeasFrame` for a
   `COMET`-coded direction column outside FIELD.
+
+### Phase 103 — `mscal.pbresponse` per-baseline + elliptical/squint specs
+
+```julia
+query(main, "mscal.pbresponsebl('gaussian:0.008727') > 0.5")     # both antennas tracking
+update!(ms; set = ["DATA" =>
+    "mscal.pbcorrbl(DATA, 'ellipse:0.012:0.008:0.3:squint:0.0005:0.0')"])
+```
+
+- `mscal.pbresponse`'s beam-spec mini-language gains an `"ellipse:HMAJ:
+  HMIN:PA"` form ([`EllipticalGaussianBeam`](@ref)) and an optional
+  trailing `":squint:DLON:DLAT"` on any spec (wraps the base beam in a
+  [`SquintBeam`](@ref)) — `_pb_response_fn` (`src/taql/mscal.jl`) now
+  returns an `offset::(dlon,dlat) -> power` closure uniformly; a
+  circular beam (`gaussian`/`airy`) ignores the offset *direction* via
+  `power_response`'s existing generic 2-D-offset fallback (Phase 100),
+  so the rewrite is a no-op for the Phase 101/102 forms.
+- The main-loop dispatch now computes the real 2-D tangent-plane offset
+  (`pointing_offset`, Phase 100) of the nominal direction from the
+  antenna's actual `POINTING.DIRECTION`, instead of the Phase 101
+  great-circle-magnitude-only `_tql_angdist` — required for a direction-
+  aware ellipse/squint beam, and value-identical to the old scalar path
+  for a circular beam (same magnitude, direction discarded downstream).
+- New `mscal.pbresponsebl('spec' [, dir])` — the same beam evaluated at
+  *both* ANTENNA1's and ANTENNA2's own actual pointing (needs
+  `ANTENNA2`) and multiplied — the joint baseline response, for e.g.
+  `query(main, "mscal.pbresponsebl(...) > threshold")` to cut baselines
+  where either antenna has drifted off source. `mscal.pbcorrbl` /
+  `mscal.pbattenbl` are the write-path sugar (`valexpr / mscal.
+  pbresponsebl(...)` / `valexpr * mscal.pbresponsebl(...)`), mirroring
+  Phase 102's `pbcorr`/`pbatten`.
+- Verified via controlled synthetic POINTING fixtures (the Phase
+  101/102 pattern — no CASA/casacore oracle exists for a
+  MeasurementSets-only extension): both antennas of one baseline given
+  independently known pointing offsets, the per-baseline response
+  checked against the hand-computed product of the two Gaussian
+  responses; the ellipse/squint results checked against
+  `power_response`/`SquintBeam` called directly on an independently
+  recomputed `pointing_offset`; `pbcorrbl`∘`pbattenbl` round-trips a
+  known DATA value; a squint exactly onto the source gives response ≈ 1
+  regardless of the base beam's own off-axis response there.
+- Non-goals: a `PolynomialBeam` spec form; a per-baseline ellipse/squint
+  variant beyond what `mscal.pbresponsebl('ellipse:...')` already gives
+  (each antenna's own response, still direction-aware); an
+  Observatories-array-centre (suffix-less) per-baseline response
+  (baseline responses are inherently per-antenna-pair).

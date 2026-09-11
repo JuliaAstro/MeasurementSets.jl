@@ -535,6 +535,113 @@ end
     @test_throws ArgumentError p("mscal.pbatten(A, 'gaussian:1:2')")
 end
 
+# Phase 103: mscal.pbresponse per-baseline (mscal.pbresponsebl) +
+# elliptical/squint beam specs in the pbresponse mini-language.
+@testset "TaQL-lite — mscal.pbresponse() per-baseline + ellipse/squint" begin
+    main = readtable(SAMPLE_MS)
+    ms = MeasurementSet(SAMPLE_MS)
+    fld = subtable(ms, "FIELD")
+    ant = subtable(ms, "ANTENNA")
+
+    a1 = column(main, "ANTENNA1")[:]
+    a2 = column(main, "ANTENNA2")[:]
+    row0 = findfirst(i -> a1[i] == 0 && a2[i] != 0, eachindex(a1))
+    @test row0 !== nothing
+    ant2 = a2[row0]
+    ep0 = measure(main, "TIME", row0)
+    t0sec = column(main, "TIME")[row0]
+    fi0 = column(main, "FIELD_ID")[row0]
+    dj = measconvert(measure(fld, "PHASE_DIR", fi0 + 1), J2000; frame = MeasFrame(epoch = ep0))
+    ageo = Dict(id => measconvert(dj, AZELGEO;
+                    frame = MeasFrame(epoch = ep0, position = measure(ant, "POSITION", id + 1)))
+                for id in (0, ant2))
+
+    allants = sort(unique(a1) ∪ unique(a2))
+    Δ1, Δ2 = 0.004, -0.006
+    dirs = Dict(0 => Δ1, ant2 => Δ2)
+    tmp = mktempdir(); dir = joinpath(tmp, "pbbl.ms")
+    copyms(SAMPLE_MS, dir)
+    rm(joinpath(dir, "POINTING"); recursive = true)
+    write_table(joinpath(dir, "POINTING"), "POINTING", Pair{String,Any}[
+        "ANTENNA_ID" => Int32.(allants), "TIME" => fill(t0sec, length(allants)),
+        "DIRECTION" => [haskey(dirs, id) ?
+                         [ageo[id].lon + dirs[id] / cos(ageo[id].lat), ageo[id].lat] :
+                         [0.0, 0.0] for id in allants]]; nrow = length(allants),
+        measures = Dict("DIRECTION" => (; kind = :direction, ref = "AZELGEO")))
+
+    where0 = "ANTENNA1 == 0 AND ANTENNA2 == $ant2 AND TIME == $t0sec"
+    resp1 = exp(-4 * log(2) * (Δ1 / 0.008727)^2)
+    resp2 = exp(-4 * log(2) * (Δ2 / 0.008727)^2)
+
+    qbl = query(readtable(dir), where0;
+                select = ["r1" => "mscal.pbresponse('gaussian:0.008727')",
+                          "rbl" => "mscal.pbresponsebl('gaussian:0.008727')"])
+    @test nrow(qbl) >= 1
+    @test collect(qbl.r1)[1] ≈ resp1 atol = 1e-4
+    @test collect(qbl.rbl)[1] ≈ resp1 * resp2 atol = 1e-4
+
+    # pbcorrbl / pbattenbl thread through the same product response
+    testval = ComplexF32(1.5, -2.5)
+    edit(dir) do t
+        t[:DATA][row0] = fill(testval, size(t[:DATA][row0]))
+    end
+    update!(dir; set = ["DATA" => "mscal.pbattenbl(DATA, 'gaussian:0.008727')"], where = where0)
+    afterbl = column(readtable(dir; precision = :full), "DATA")[row0]
+    @test afterbl[1, 1] ≈ testval * resp1 * resp2 rtol = 1e-3
+    n = update!(dir; set = ["DATA" => "mscal.pbcorrbl(DATA, 'gaussian:0.008727')"], where = where0)
+    @test n >= 1
+    afterbl2 = column(readtable(dir; precision = :full), "DATA")[row0]
+    @test afterbl2[1, 1] ≈ testval rtol = 1e-3   # attenuate then correct round-trips
+
+    # ellipse / squint specs: independently recompute the tangent-plane
+    # offset the production code uses (pointing_offset of the nominal
+    # target from antenna 0's actual pointing) and check the closed-form
+    # formulas directly against the query result.
+    dj0 = measconvert(measure(fld, "PHASE_DIR", fi0 + 1), J2000; frame = MeasFrame(epoch = ep0))
+    fr0 = MeasFrame(epoch = ep0, position = measure(ant, "POSITION", 1))
+    nominal_azel = measconvert(dj0, AZEL; frame = fr0)
+    actual_pointing = measconvert(MDirection{AZELGEO}(ageo[0].lon + Δ1 / cos(ageo[0].lat), ageo[0].lat),
+                                   AZEL; frame = fr0)
+    offset = MSv2.pointing_offset(actual_pointing, nominal_azel)
+
+    where1 = "ANTENNA1 == 0 AND TIME == $t0sec"
+    qell = query(readtable(dir), where1;
+                 select = ["r" => "mscal.pbresponse('ellipse:0.02:0.005:0.3')"])
+    expected_ell = MSv2.power_response(MSv2.EllipticalGaussianBeam(0.02, 0.005, 0.3, 1.0), offset, 1.0)
+    @test all(x -> isapprox(x, expected_ell; atol = 1e-4), collect(qell.r))
+
+    # a scalar (gaussian/airy) beam accepts a 2-D offset transparently
+    # (the generic hypot fallback), so plain pbresponse is unaffected
+    # by the offset-tuple rewrite of the dispatch loop
+    qgauss = query(readtable(dir), where1;
+                   select = ["r" => "mscal.pbresponse('gaussian:0.008727')"])
+    @test collect(qgauss.r)[1] ≈ resp1 atol = 1e-4
+
+    # squint: a beam squinted exactly onto the source responds as if
+    # perfectly pointed (peak = 1) regardless of the base beam's own
+    # response at that offset
+    squintspec = "gaussian:0.008727:squint:$(offset[1]):$(offset[2])"
+    qsq = query(readtable(dir), where1; select = ["r" => "mscal.pbresponse('$squintspec')"])
+    @test all(x -> isapprox(x, 1.0; atol = 1e-6), collect(qsq.r))
+
+    # unit checks on the beam-spec parser itself
+    fell = MSv2._pb_response_fn("ellipse:0.02:0.005:0.3")
+    @test fell((0.01, 0.0)) ≈
+          MSv2.power_response(MSv2.EllipticalGaussianBeam(0.02, 0.005, 0.3, 1.0), (0.01, 0.0), 1.0)
+    fsq = MSv2._pb_response_fn("gaussian:0.008727:squint:0.001:-0.0005")
+    @test fsq((0.001, -0.0005)) ≈ 1.0
+    @test fsq((0.0, 0.0)) ≈ exp(-4 * log(2) * (hypot(0.001, -0.0005) / 0.008727)^2)
+    @test_throws ArgumentError MSv2._pb_response_fn("ellipse:1:2")            # wrong arity
+    @test_throws ArgumentError MSv2._pb_response_fn("gaussian:1:squint:1")    # wrong squint arity
+    @test_throws ArgumentError MSv2._pb_response_fn("wombat:1:2:3")
+
+    # parser errors: same shape as pbresponse, one arg earlier for pbcorrbl
+    p2(s) = MSv2._taqllite_parse(s, Set(["A"]))
+    @test_throws ArgumentError p2("mscal.pbresponsebl(A)")
+    @test_throws ArgumentError p2("mscal.pbcorrbl(A, B)")
+    @test p2("mscal.pbresponsebl('gaussian:0.01')").fn == "pbresponsebl:gaussian:0.01"
+end
+
 @testset "TaQL-lite — mscal.time() / mscal.uvdist()" begin
     main = readtable(SAMPLE_MS)
     tm = Float64.(column(main, "TIME")[:])
