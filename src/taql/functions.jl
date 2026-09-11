@@ -1,10 +1,11 @@
 # ======================================================================
 # functions -- NAME(args...).  A curated "lite" subset of TaQL's library
-# (scalar math, complex parts, array-cell reductions, string ops, a few
-# specials).  Function names are case-insensitive; many have aliases,
-# matching casacore's own `TableParseFunc::findFunc`.  Not supported:
-# date/time, measures/cones, sliding-window (`running*`/`boxed*`) ops,
-# `rand`, array reshaping, `rowid()`, `substr`, type conversions, UDFs.
+# (scalar math, complex parts, array-cell reductions, string ops, date/
+# time, measures conversions, running*/boxed* sliding-window array
+# smoothing, a few specials).  Function names are case-insensitive; many
+# have aliases, matching casacore's own `TableParseFunc::findFunc`.  Not
+# supported: cones, `rand`, array reshaping, `rowid()`, `substr`, type
+# conversions, UDFs.
 # ======================================================================
 
 # unary / binary elementwise (map over an array cell, apply directly to
@@ -121,6 +122,79 @@ function _tql_angdist(lon1::Real, lat1::Real, lon2::Real, lat2::Real)
     return atan(hypot(x, y), z)
 end
 
+# --- Phase 108: running*/boxed* sliding-window array reductions -------
+#
+# These are, deliberately, array-*cell* smoothing filters (one MAIN row's
+# array reduced along its own axis/axes), not a multi-row window -- the
+# name overlap with `gs*`'s "s"-suffixed per-element GROUP BY reductions
+# is coincidental, unrelated machinery.
+#
+#   running<X>(arr, hwidth)  -- a centred sliding window: output element
+#       i (per axis d) reduces arr[max(1,i-h[d]) : min(n[d],i+h[d])] --
+#       SAME shape as `arr` (shrinking half-windows at the edges).
+#   boxed<X>(arr, bwidth)    -- non-overlapping bins of size `bwidth`
+#       (per axis) -- SMALLER shape, `cld(n[d], b[d])` per axis (the
+#       trailing bin is partial if `bwidth` doesn't divide evenly).
+#
+# `hwidth`/`bwidth` is a scalar (same width on every axis) or an array
+# literal (one width per axis, `ndims(arr)` elements). Masked-array
+# (`TQLMArray`) input is not supported -- pass `arraydata(...)` first.
+_require_array(x) = x isa AbstractArray ? x : throw(ArgumentError(
+    "TaQL-lite: running*/boxed* need an array-valued first argument"))
+
+function _tql_window_widths(w, nd::Int)
+    ws = w isa AbstractArray ? Int.(w) : fill(Int(w), nd)
+    length(ws) == nd || throw(ArgumentError(
+        "TaQL-lite: running*/boxed* window width must be a scalar or a " *
+        "$nd-element array (one per axis)"))
+    ws
+end
+
+function _running_reduce(f, T::Type, arr::AbstractArray, hw)
+    nd = ndims(arr)
+    h = _tql_window_widths(hw, nd)
+    sz = size(arr)
+    out = Array{T}(undef, sz)
+    for idx in CartesianIndices(arr)
+        rng = ntuple(d -> max(1, idx[d] - h[d]):min(sz[d], idx[d] + h[d]), nd)
+        out[idx] = f(vec(view(arr, rng...)))
+    end
+    out
+end
+
+function _boxed_reduce(f, T::Type, arr::AbstractArray, bw)
+    nd = ndims(arr)
+    b = _tql_window_widths(bw, nd)
+    sz = size(arr)
+    osz = ntuple(d -> cld(sz[d], b[d]), nd)
+    out = Array{T}(undef, osz)
+    for oidx in CartesianIndices(osz)
+        rng = ntuple(d -> ((oidx[d] - 1) * b[d] + 1):min(sz[d], oidx[d] * b[d]), nd)
+        out[oidx] = f(vec(view(arr, rng...)))
+    end
+    out
+end
+
+_running_avg(x, w) = (a = _require_array(x); _running_reduce(Statistics.mean, Float64, a, w))
+_running_med(x, w) = (a = _require_array(x); _running_reduce(Statistics.median, Float64, a, w))
+_running_min(x, w) = (a = _require_array(x); _running_reduce(minimum, eltype(a), a, w))
+_running_max(x, w) = (a = _require_array(x); _running_reduce(maximum, eltype(a), a, w))
+_running_var(x, w) = (a = _require_array(x);
+                      _running_reduce(y -> Statistics.var(y; corrected = false), Float64, a, w))
+_running_std(x, w) = (a = _require_array(x);
+                      _running_reduce(y -> Statistics.std(y; corrected = false), Float64, a, w))
+_running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, w))
+
+_boxed_avg(x, w) = (a = _require_array(x); _boxed_reduce(Statistics.mean, Float64, a, w))
+_boxed_med(x, w) = (a = _require_array(x); _boxed_reduce(Statistics.median, Float64, a, w))
+_boxed_min(x, w) = (a = _require_array(x); _boxed_reduce(minimum, eltype(a), a, w))
+_boxed_max(x, w) = (a = _require_array(x); _boxed_reduce(maximum, eltype(a), a, w))
+_boxed_var(x, w) = (a = _require_array(x);
+                    _boxed_reduce(y -> Statistics.var(y; corrected = false), Float64, a, w))
+_boxed_std(x, w) = (a = _require_array(x);
+                    _boxed_reduce(y -> Statistics.std(y; corrected = false), Float64, a, w))
+_boxed_sum(x, w) = (a = _require_array(x); _boxed_reduce(sum, eltype(a), a, w))
+
 # name => (callable-over-arg-values, allowed arg count).  `min`/`max` and
 # `angdist` are arity-overloaded and handled in `_make_func`, not here.
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
@@ -157,6 +231,17 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "nfalse" => (_red(x -> count(!, x)), 1:1),
     "nelements" => (_tql_nelem, 1:1), "count" => (_tql_nelem, 1:1),
     "ndim" => (_tql_ndim, 1:1),
+    # --- running*/boxed* sliding-window array smoothing (Phase 108) ---
+    "runningaverage" => (_running_avg, 2:2), "runningmean" => (_running_avg, 2:2),
+    "runningmedian" => (_running_med, 2:2),
+    "runningmin" => (_running_min, 2:2), "runningmax" => (_running_max, 2:2),
+    "runningvariance" => (_running_var, 2:2), "runningstddev" => (_running_std, 2:2),
+    "runningsum" => (_running_sum, 2:2),
+    "boxedaverage" => (_boxed_avg, 2:2), "boxedmean" => (_boxed_avg, 2:2),
+    "boxedmedian" => (_boxed_med, 2:2),
+    "boxedmin" => (_boxed_min, 2:2), "boxedmax" => (_boxed_max, 2:2),
+    "boxedvariance" => (_boxed_var, 2:2), "boxedstddev" => (_boxed_std, 2:2),
+    "boxedsum" => (_boxed_sum, 2:2),
     # --- masked arrays ---
     "marray" => ((d, m) -> TQLMArray(collect(d), m isa AbstractArray ?
                      BitArray(m) : fill(Bool(m), size(d))), 2:2),

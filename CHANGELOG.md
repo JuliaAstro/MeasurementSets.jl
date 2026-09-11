@@ -2202,3 +2202,115 @@ query(cat, "meas.itrfxyz(LON, LAT, 0.0) == meas.pos('WGS84', 'ITRF', X, Y, Z)")
   WGS84)` directly (exact — no arithmetic, an identity); `meas.wgs` ∘
   `meas.itrfxyz` round-trips a real VLA-antenna ITRF position to
   `atol = 1e-6` m.
+
+### Phase 107 — fix the `UnitfulExt` precompile method-overwrite bug
+
+```
+WARNING: Method definition _tql_known_unit(AbstractString) in module
+MeasurementSets at src/tables/units.jl:98 overwritten in module
+UnitfulExt at ext/UnitfulExt.jl:84.
+ERROR: Method overwriting is not permitted during Module precompilation.
+```
+
+- Root cause: `_tql_known_unit(s::AbstractString)` (core, `src/tables/
+  units.jl`) and `MS._tql_known_unit(s::AbstractString)` (`ext/
+  UnitfulExt.jl`) used the **identical** signature — a genuine
+  redefinition, not an added dispatch. Every other core/extension
+  stub pair in this package (`_tql_quantity`, `_tql_unit_attach`,
+  `_tql_write_strip`, `_ms_ustring`, `_quantity_column_spec`, `_lst`,
+  `_riseset`, `_geodetic_to_itrf`, `_itrf_to_geodetic`, every `_mconv`
+  method, …) gives the core fallback a strictly *looser* signature
+  (`args...`, an untyped positional, or an abstract/`Union` type) so
+  the extension's concrete method is a genuine specialization, not an
+  overwrite — Julia forbids the latter during extension precompilation.
+  `_tql_known_unit` was the one place that pattern was broken.
+- Fix: drop the `::AbstractString` annotation on the core definition
+  (`_tql_known_unit(s) = ...`) — one line, matches the convention every
+  other stub in the file already follows (`_tql_write_strip(x, u)` is
+  the closest sibling: untyped core, `::Unitful.AbstractQuantity`-typed
+  extension).
+- Swept every other `MS._*` extension method across all four extensions
+  (`SOFAExt`, `EarthOrientationExt`, `HDF5Ext`, `UnitfulExt`) against
+  its core counterpart — confirmed no other instance of this bug exists.
+- Verified: `import Unitful, UnitfulAngles, UnitfulAstro` then
+  `using MeasurementSets` precompiles cleanly (no warning, no error);
+  `_tql_known_unit` correctly defers to the real `_ms_uparse`-backed
+  check when the extension is loaded (e.g. `"erg"` — not in the core
+  `_COMMON_UNITS` fallback set — now resolves `true`); the full
+  `units_tests.jl` + `taql_query_tests.jl` standalone run is unchanged
+  (760 tests, no count change — a pure precompile-hygiene fix).
+
+### Phase 108 — `running*` / `boxed*` sliding-window array reductions
+
+```julia
+query(main, "runningmedian(DATA, 2)[1,1] > 0")            # 5-channel median smooth
+query(cat, "boxedaverage(SPECTRUM, 4) > threshold")        # 4-channel block average
+```
+
+- `running<X>(arr, hwidth)` / `boxed<X>(arr, bwidth)`, `X` ∈ `average`
+  (`mean`)/`median`/`min`/`max`/`variance`/`stddev`/`sum` — array-*cell*
+  sliding-window smoothing (one MAIN row's own array, reduced along its
+  own axis/axes), the last item on the Phase 25 "not yet in TaQL-lite"
+  list. `running` is a **centred** window (`[i−h, i+h]` per axis,
+  shrinking at the edges — output the **same** shape as the input);
+  `boxed` is **non-overlapping bins** of size `bwidth` (output shape
+  `cld(n, b)` per axis, a partial trailing bin if `bwidth` doesn't
+  divide evenly). The width argument is a scalar (same on every axis)
+  or an array literal (`ndims(arr)` elements, one per axis) —
+  `runningaverage(V, [1,3])` smooths axis 1 with half-width 1 and axis
+  2 with half-width 3.
+- Shared generic engine (`src/taql/functions.jl`): `_tql_window_widths`
+  (scalar-or-per-axis-array → an `Int` tuple, arity-checked),
+  `_running_reduce`/`_boxed_reduce` (a plain `CartesianIndices` loop —
+  no attempt at a separable/incremental-sum fast path; these operate on
+  one row's small array cell, not a bulk column). `min`/`max`/`sum`
+  keep the input's element type; `average`/`median`/`variance`/`stddev`
+  promote to `Float64` (matching the plain, non-running `mean`/`median`/
+  etc. reductions already in the function library).
+- Masked-array (`TQLMArray`) input is a documented non-goal — pass
+  `arraydata(...)` first; a non-array (scalar) first argument raises a
+  clear `ArgumentError` rather than silently treating it as a 1-element
+  window.
+- No casacore/CASA oracle for this phase (self-contained numerical
+  routines) — verified by hand-computed 1-D and 2-D references (edge-
+  window shrinking, partial trailing bins, per-axis widths), agreement
+  with a direct `Statistics.var`/`std`/`median` call on the same
+  explicit window, and a query-string round-trip against the same
+  functions called directly on each row's array.
+
+### Phase 109 — `mscal.stokes()` pseudo output types
+
+```julia
+query(main, "mscal.stokes(DATA, 'Ptotal')[1,1] > threshold")     # total polarized intensity
+query(main, "mscal.stokes(DATA, 'I,Ptotal')")                    # physical + pseudo, one call
+```
+
+- `mscal.stokes(col, 'types')`'s `types` now also accepts casacore's
+  derived **pseudo** output types: `Ptotal = √(Q²+U²+V²)`,
+  `Plinear = √(Q²+U²)`, `Pangle = ½·atan2(U,Q)` (rad), `PFtotal`/
+  `PFlinear` (the same totals divided by `I`) — non-linear combinations
+  of Stokes I/Q/U/V, unlike every other `mscal.stokes` output (a plain
+  matrix multiply against the correlation cell).
+- Implementation (`src/taql/mscal.jl`): pseudo types are encoded as
+  **negative** internal codes (`_STOKES_PSEUDO_CODES`, never collide
+  with a real 1-20 correlation code, thread through the existing
+  `_stokes_key`/`_stokes_setups` sentinel machinery unchanged).
+  `StokesSetup` gains an `outtypes` field (to tell pseudo rows apart)
+  and an `iquvmat` (the input frame's own I,Q,U,V conversion matrix,
+  built once, lazily — only when a pseudo type is actually requested).
+  `_stokes_convert`'s `Complex` method computes the ordinary linear
+  rows as before, then — only if any output is a pseudo type —
+  computes I,Q,U,V per channel once and derives each pseudo row's value
+  from it; a query mixing physical and pseudo types in one
+  `mscal.stokes(DATA, 'I,Ptotal')` call shares that single I,Q,U,V pass.
+- `Bool` (`FLAG`) / real (`WEIGHT`) input with a pseudo type requested
+  raises a clear `ArgumentError` — the pseudo formulas are only
+  meaningful for a complex (`DATA`-like) cell.
+- Closes the pseudo-output-type non-goal from Phase 78.
+- No casacore/CASA oracle for the pseudo-type formulas themselves
+  (matches the documented `Stokes::StokesTypes` definitions) — verified
+  by injecting a known `DATA` cell (`RR=3+1i, RL=0.5-0.2i, LR=0.5+0.2i,
+  LL=2-1i` → `I=5, Q=1, U=-0.4, V=1`) via `edit()` and checking every
+  pseudo type's value against the formula computed directly from the
+  same I/Q/U/V; the `I==0` edge case (fractional forms → 0, not
+  NaN/Inf) checked directly on `StokesSetup`.

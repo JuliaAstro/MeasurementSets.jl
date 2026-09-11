@@ -183,8 +183,9 @@ end
     @test p("mscal.stokes(A, 'CIRC') > 0").lhs.outtypes == [5, 6, 7, 8]
     @test p("mscal.stokes(A, 'XX,YY') > 0").lhs.outtypes == [9, 12]
     @test p("mscal.stokes(A, 'I', true) > 0").lhs.rescale
-    @test_throws ArgumentError p("mscal.stokes(A, 'Ptotal') > 0")
+    @test p("mscal.stokes(A, 'Ptotal') > 0").lhs.outtypes == [-1]   # Phase 109 pseudo type
     @test_throws ArgumentError p("mscal.stokes(A, 'RX') > 0")
+    @test_throws ArgumentError p("mscal.stokes(A, 'PBOGUS') > 0")
     @test_throws ArgumentError p("mscal.stokes() > 0")
     @test_throws ArgumentError p("mscal.stokes(A, B) > 0")     # non-literal type
     @test_throws ArgumentError p("mscal.stokes(A, 'I', 1) > 0") # non-bool rescale
@@ -229,6 +230,49 @@ end
     write_table(dir, "T", Pair{String,Any}["DATA" => [rand(ComplexF32, 4, 2) for _ in 1:3]];
                 nrow = 3)
     @test_throws ErrorException query(readtable(dir), "any(mscal.stokes(DATA, 'I') != 0.0)")
+end
+
+# Phase 109: mscal.stokes()'s pseudo (non-linear, derived-from-I,Q,U,V)
+# output types -- Ptotal/Plinear/Pangle/PFtotal/PFlinear.
+@testset "TaQL-lite — mscal.stokes() pseudo types" begin
+    tmp = joinpath(mktempdir(), "pstokes.ms")
+    copyms(SAMPLE_MS, tmp)
+    testval = ComplexF32[3.0 + 1im, 0.5 - 0.2im, 0.5 + 0.2im, 2.0 - 1im]   # RR,RL,LR,LL
+    edit(tmp) do t
+        cell = t[:DATA][1]
+        fill!(cell, 0)
+        cell[:, 1] = testval
+        t[:DATA][1] = cell
+    end
+    main = readtable(tmp; precision = :full)
+    q = query(main, "rownumber() == 1"; select = [
+        "iquv" => "mscal.stokes(DATA)", "pt" => "mscal.stokes(DATA, 'Ptotal')",
+        "pl" => "mscal.stokes(DATA, 'Plinear')", "pa" => "mscal.stokes(DATA, 'Pangle')",
+        "pft" => "mscal.stokes(DATA, 'PFtotal')", "pfl" => "mscal.stokes(DATA, 'PFlinear')",
+        "mixed" => "mscal.stokes(DATA, 'I,Ptotal')"])
+    iquv = column(q, "iquv")[1]
+    I, Q, U, V = real.(iquv[:, 1])
+    @test I ≈ 5.0 && Q ≈ 1.0 && U ≈ -0.4 && V ≈ 1.0
+    @test real(column(q, "pt")[1][1, 1]) ≈ sqrt(Q^2 + U^2 + V^2)
+    @test real(column(q, "pl")[1][1, 1]) ≈ sqrt(Q^2 + U^2)
+    @test real(column(q, "pa")[1][1, 1]) ≈ 0.5 * atan(U, Q)
+    @test real(column(q, "pft")[1][1, 1]) ≈ sqrt(Q^2 + U^2 + V^2) / I
+    @test real(column(q, "pfl")[1][1, 1]) ≈ sqrt(Q^2 + U^2) / I
+    # a physical + a pseudo type in the same call
+    mixed = column(q, "mixed")[1]
+    @test real(mixed[1, 1]) ≈ I
+    @test real(mixed[2, 1]) ≈ sqrt(Q^2 + U^2 + V^2)
+
+    # unit: I == 0 -> the fractional forms return 0 (not NaN/Inf)
+    zc = reshape(ComplexF32[0, 0, 0, 0], 4, 1)
+    s0 = MSv2._stokes_setup([5, 6, 7, 8], [MSv2._STOKES_PSEUDO_CODES["PFTOTAL"]], false)
+    @test real(MSv2._stokes_convert(s0, zc)[1, 1]) == 0.0
+
+    # errors: pseudo type against a non-complex (Bool/Real) cell
+    @test_throws ArgumentError query(main, "rownumber() == 1"; select = [
+        "x" => "mscal.stokes(FLAG, 'Ptotal')"])
+    @test_throws ArgumentError query(main, "rownumber() == 1"; select = [
+        "x" => "mscal.stokes(WEIGHT, 'Plinear')"])
 end
 
 @testset "TaQL-lite — mscal.<sel>() MSSelection-lite" begin

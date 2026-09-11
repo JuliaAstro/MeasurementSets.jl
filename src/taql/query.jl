@@ -246,7 +246,13 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `round`, `sign`, `int`, `pow`, `fmod`), complex parts (`real`, `imag`,
   `arg`/`phase`, `conj`, `norm`), array-cell reductions (`mean`/`avg`,
   `sum`, `product`, `median`, `variance`, `stddev`, `rms`, `min`/`max`,
-  `any`, `all`, `ntrue`/`nfalse`, `nelements`/`count`, `ndim`), string
+  `any`, `all`, `ntrue`/`nfalse`, `nelements`/`count`, `ndim`),
+  `running<X>(arr, hwidth)` / `boxed<X>(arr, bwidth)` (`X` ∈ `average`/
+  `mean`, `median`, `min`/`max`, `variance`, `stddev`, `sum` — sliding-
+  window array-cell smoothing: `running` is a centred window (SAME
+  shape, shrinking half-windows at the edges), `boxed` is non-
+  overlapping bins (SMALLER shape); the width is a scalar or a
+  `ndims(arr)`-element array, one per axis), string
   ops (`strlength`/`len`, `upper`/`lower`, `trim`/`ltrim`/`rtrim`),
   `isnan`/`isinf`/`isfinite`/`nonfinite`, masked arrays
   (`marray(d, m)`, `arraydata`, `arraymask`; `V[boolexpr]` yields a
@@ -316,8 +322,13 @@ pair in radians (`mscal.hadec1([2.0, 0.5])`), or a sexagesimal
 `mscal.stokes(col [, 'types'] [, rescale])` (Phase 78) converts a
 `DATA` / `FLAG` / `WEIGHT` array cell between correlation bases. `types`
 (default `'IQUV'`) is an alias (`IQUV` / `CIRC` / `LIN`) or a
-comma-list (`'I'`, `'I,V'`, `'XX,YY'`); the input basis comes from
-`POLARIZATION.CORR_TYPE` row 1. The result is a `(nOut, nchan)` matrix.
+comma-list (`'I'`, `'I,V'`, `'XX,YY'`, mixable with the pseudo types
+below); the input basis comes from `POLARIZATION.CORR_TYPE` row 1. The
+result is a `(nOut, nchan)` matrix. `types` also accepts the derived
+**pseudo types** `Ptotal` (`√(Q²+U²+V²)`), `Plinear` (`√(Q²+U²)`),
+`Pangle` (`½·atan2(U,Q)`, rad), `PFtotal`/`PFlinear` (the same divided
+by `I`) (Phase 109) — non-linear, so they need a complex (`DATA`-like)
+input; `Bool`/real (`FLAG`/`WEIGHT`) input raises a clear error.
 
 `mscal.<sel>('spec')` (Phase 80) — MSSelection-lite row selection,
 returning a per-row `Bool`. `<sel>` ∈ `baseline` / `field` / `spw` /

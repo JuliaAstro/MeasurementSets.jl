@@ -685,6 +685,51 @@ end
     @test query(t2, "sqrt(B) > 5").rows == query(t, "sqrt(B) > 5").rows
 end
 
+@testset "Phase 108 — running*/boxed* sliding-window array reductions" begin
+    # unit: hand-computed 1-D and 2-D
+    a = [1.0, 2.0, 3.0, 4.0, 5.0]
+    @test MSv2._running_avg(a, 1) == [1.5, 2.0, 3.0, 4.0, 4.5]     # shrinking edge windows
+    @test MSv2._running_min(a, 1) == [1.0, 1.0, 2.0, 3.0, 4.0]
+    @test MSv2._running_max(a, 1) == [2.0, 3.0, 4.0, 5.0, 5.0]
+    @test MSv2._running_sum(a, 2) == [1+2+3, 1+2+3+4, 1+2+3+4+5, 2+3+4+5, 3+4+5]
+    @test MSv2._boxed_avg(a, 2) == [1.5, 3.5, 5.0]                 # non-overlapping bins, partial last
+    @test MSv2._boxed_sum(a, 2) == [3.0, 7.0, 5.0]
+
+    A = Float64[1 2 3; 4 5 6; 7 8 9]
+    @test MSv2._boxed_avg(A, 2) == [3.0 4.5; 7.5 9.0]
+    @test MSv2._boxed_avg(A, [1, 3]) == reshape([2.0, 5.0, 8.0], 3, 1)   # per-axis widths
+    @test MSv2._boxed_min(A, 3) == reshape([1.0], 1, 1)
+    @test MSv2._running_avg(A, 1)[2, 2] ≈ Statistics.mean(A)             # centre cell sees the whole 3x3
+
+    # variance/stddev/median agree with a direct Statistics call on the same window
+    @test MSv2._running_var(a, 1)[3] ≈ Statistics.var([2.0, 3.0, 4.0]; corrected = false)
+    @test MSv2._running_std(a, 1)[1] ≈ Statistics.std([1.0, 2.0]; corrected = false)
+    @test MSv2._boxed_med(a, 2) == [1.5, 3.5, 5.0]
+
+    # errors
+    @test_throws ArgumentError MSv2._require_array(5.0)
+    @test_throws ArgumentError MSv2._tql_window_widths([1, 2], 3)   # wrong-length axis array
+
+    # parser + query string form
+    p(s) = MSv2._taqllite_parse(s, Set(["V"]))
+    @test p("runningaverage(V, 1)") isa MSv2.TQLFunc
+    @test p("boxedmax(V, 2)") isa MSv2.TQLFunc
+    @test_throws ArgumentError p("runningaverage(V)")     # wrong arity
+
+    dir = joinpath(mktempdir(), "rb.tab")
+    V = [Float64[i, i + 1.0, i + 2.0, i + 3.0] for i in 1:6]
+    write_table(dir, "TV", Pair{String,Any}["V" => V]; nrow = 6, tsm = [["V"]])
+    tv = readtable(dir)
+    q = query(tv, "rownumber() >= 1"; select = [
+        "ra" => "runningaverage(V, 1)", "bs" => "boxedsum(V, 2)"])
+    for i in 1:6
+        @test collect(q.ra)[i] ≈ MSv2._running_avg(V[i], 1)
+        @test collect(q.bs)[i] == MSv2._boxed_sum(V[i], 2)
+    end
+    # a non-array argument errors clearly at eval time
+    @test_throws ArgumentError query(tv, "runningaverage(V[1], 1)[1] > 0")
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)
