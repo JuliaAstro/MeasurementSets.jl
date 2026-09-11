@@ -1128,15 +1128,32 @@ _mssel_inany(x, ranges) = any(r -> r[1] <= x <= r[2], ranges)
 
 # --- MSSelection time grammar (casacore ms/MSSel/MSTimeParse) -----------
 # A comma-list of:
-#   t0            single time  -> |TIME - t0| <= dT   (dT = EXPOSURE/2, or 1 s)
+#   t0            single time  -> |TIME - t0| <= dT
 #   t0~t1         range, exclusive edges
 #   [t0~t1]       range, edge-inclusive (|TIME-edge| < dT counts)
 #   N[t0~t1]      range, edge buffer N seconds
 #   t0+dur        range t0 .. t0+dur   (dur = a time string past the MJD epoch)
 #   >t0  <t1      open bounds
 # Each time is `[Y/[M/[D/]]][h:[m:[s]]]` with any component `*` (wildcard);
-# a missing / `*` component defaults to the first MAIN-row TIME (t1 of a
-# `~` range instead inherits from t0).  Bare number = MJD days.
+# a missing / `*` component defaults to the first UNFLAGGED (`FLAG_ROW`)
+# MAIN row's own TIME (t1 of a `~` range instead inherits from t0), or
+# row 1 if every row is flagged or there is no `FLAG_ROW` column (a
+# deliberate MeasurementSets extension — real casacore throws in that
+# case instead). Bare number = MJD days.
+#
+# Phase 121 (`mscal.time`, confirmed a direct pass-through to real
+# casacore's own `msTimeGramParseCommand`, `UDFMSCal.cc:479-491`, the
+# same discipline as Phases 119/120's `mscal.baseline`): read
+# `MSTimeGram.yy`/`.ll` in full — this grammar was ALREADY fully
+# implemented in Phase 94, no missing syntax found (every production —
+# single/range/edge-bracket/duration/bound/wildcard/comma-list — maps
+# to something above). Reading `MSTimeParse::getDefaults`
+# (`MSTimeParse.cc:114-168`) DID find two real bugs, now fixed: `dT`
+# (the tolerance in every form above) is `defaultExposure/2`, and
+# `defaultExposure` is the DEFAULT ROW's own `EXPOSURE`
+# (`exposure(firstLogicalRow,"s")`) — NOT a mean over every row's
+# `EXPOSURE`, which Phase 94 originally used; and the "default row"
+# itself is the FIRST UNFLAGGED row, not row 1 unconditionally.
 
 # parse one time token -> 6 fields (y,mo,d,h,mi,s), -1 = wildcard/missing;
 # or a bare Float64 (already MJD days) wrapped as `(:mjd, val)`.
@@ -1179,13 +1196,22 @@ function _mssel_time(t::AbstractTable, spec::AbstractString, cn::AbstractSet, n:
     "TIME" in cn || error("mscal.time: MAIN table has no TIME column")
     tm = Float64.(column(t, "TIME")[:])
     n == 0 && return Bool[]
-    d0 = MJD_EPOCH + Dates.Millisecond(round(Int, tm[1] * 1000))   # first-row time
+    # casacore's own "default row" (`MSTimeParse::getDefaults`) is the
+    # FIRST UNFLAGGED row (`FLAG_ROW`) -- falling back to row 1 if every
+    # row is flagged is a deliberate MeasurementSets extension: real
+    # casacore *throws* in that case ("No logical row zero found"),
+    # which would make `mscal.time` unusable on a fully-flagged MS (a
+    # real, common state -- the committed test fixture is one).
+    r0 = "FLAG_ROW" in cn ? something(findfirst(!, Bool.(column(t, "FLAG_ROW")[:])), 1) : 1
+    d0 = MJD_EPOCH + Dates.Millisecond(round(Int, tm[r0] * 1000))   # default row's time
     def = (Dates.year(d0), Dates.month(d0), Dates.day(d0),
            Dates.hour(d0), Dates.minute(d0), Dates.second(d0))
     epdef = (1858, 11, 17, 0, 0, 0.0)
-    dT = "EXPOSURE" in cn ?
-         (e = Float64.(column(t, "EXPOSURE")[:]); (isempty(e) ? 2.0 : sum(e) / length(e)) / 2) :
-         1.0
+    # dT = half the DEFAULT ROW's OWN EXPOSURE (casacore's
+    # `defaultExposure = exposure(firstLogicalRow,"s")` -- NOT a mean
+    # over all rows, verified by reading `MSTimeParse.cc:163-166`); the
+    # 0.1 s fallback matches casacore's own no-EXPOSURE-source case.
+    dT = ("EXPOSURE" in cn ? Float64(column(t, "EXPOSURE")[r0]) : 0.1) / 2
 
     _sec(tok, dfl) = begin
         k, v = _mstime_fields(tok)

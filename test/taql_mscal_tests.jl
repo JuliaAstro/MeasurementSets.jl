@@ -908,9 +908,15 @@ end
     @test nrow(query(main, "mscal.time('$dstr/00:00:00+24:00:00')")) == N   # +1 day
     # time-only (date defaults to the first row's) selects the whole run
     @test nrow(query(main, "mscal.time('00:00:00~23:59:59')")) == N
-    # a single time ± EXPOSURE/2 picks that integration's rows
+    # a single time ± (default row's own EXPOSURE)/2 picks that
+    # integration's rows -- Phase 121: `dT` is the FIRST UNFLAGGED row's
+    # own EXPOSURE (casacore `defaultExposure`, read out of
+    # `MSTimeParse.cc:163-166`), not a mean over all rows; the sample
+    # MS's EXPOSURE is uniform (3.0 everywhere) so this particular
+    # assertion doesn't distinguish the two formulas -- see the
+    # dedicated varied-EXPOSURE/FLAG_ROW test below for that.
     exp = Float64.(column(main, "EXPOSURE")[:])
-    dTexp = (isempty(exp) ? 2.0 : sum(exp) / length(exp)) / 2
+    dTexp = exp[1] / 2
     t1s = tm[1]
     dt1 = Dates.DateTime(1858, 11, 17) + Dates.Millisecond(round(Int, t1s * 1000))
     tstr = Dates.format(dt1, "yyyy/mm/dd/HH:MM:SS")
@@ -938,6 +944,96 @@ end
     @test_throws ArgumentError query(main, "mscal.uvdist('1~2parsec')")
     @test_throws ArgumentError query(main, "mscal.uvdist('1~2m, 3~4klambda')")  # mixed
     @test_throws ArgumentError query(main, "mscal.time('not a date')")
+end
+
+# Phase 121: `mscal.time()` grammar/defaults investigation. Read the real
+# `MSTimeGram.yy`/`.ll` + `MSTimeParse.cc` end to end (the same
+# read-the-grammar-first discipline as Phases 119/120, since
+# `mscal.time` is confirmed — `UDFMSCal.cc:479-491` — a direct
+# pass-through to real casacore's own `msTimeGramParseCommand`, exactly
+# like `mscal.baseline` is to `MSAntennaGram`): the FULL real time-value
+# grammar (single time / `t0~t1` / `[t0~t1]` / `N[t0~t1]` / `t0+dur` /
+# `>`/`<` bounds / `*`-wildcard fields / a comma-list OR) was ALREADY
+# fully implemented in Phase 94 — no missing syntax found. Two real
+# correctness bugs WERE found by reading `MSTimeParse::getDefaults`
+# (`MSTimeParse.cc:114-168`) and fixed: the "default row" (both the
+# calendar defaults AND the single-time/edge tolerance `dT`) is the
+# FIRST UNFLAGGED row (`FLAG_ROW`), not row 1 unconditionally; `dT` is
+# that row's OWN `EXPOSURE`, not a mean over every row's `EXPOSURE`
+# (`defaultExposure = exposure(firstLogicalRow,"s")`, verbatim).
+#
+# A live oracle for these fixes was NOT reachable: `mscal.time`'s
+# `UDFMSCal::getDataNode` unconditionally constructs a full
+# `MeasurementSet(table)`, whose C++ constructor strictly validates the
+# table against casacore's `MSMainEnums` requirements. Investigating hit
+# two real, separate writer gaps: (1) `FLAG_CATEGORY` needs a `CATEGORY`
+# keyword casacore's own writable-table code silently adds but a
+# read-only open (every cross-check in this suite) just throws on —
+# fixed here (`_flag_category_kw()`, stamped by `create_ms` and
+# `addcolumn!`); (2) past that, `MeasurementSet`'s validator ALSO
+# requires every `MSMainEnums`-required column's `QuantumUnits`/
+# `MEASINFO` keywords to exactly match casacore's own standard values —
+# `create_ms` stamps none of these today, a genuinely large follow-up
+# (a full measures/units audit of the synthesised MAIN + every
+# subtable), out of this phase's scope. Documented here rather than
+# silently worked around; the `dT`/default-row fix is instead verified
+# directly against a hand-built table with intentionally varied
+# `FLAG_ROW`/`EXPOSURE`, matching the exact formula read from
+# `MSTimeParse.cc`.
+@testset "TaQL-lite — mscal.time() default-row / dT (Phase 121)" begin
+    t0 = 4.6e9
+    tm = [t0, t0 + 100.0, t0 + 200.0, t0 + 300.0]
+    fr = [true, false, false, false]           # row 1 flagged -> skip it
+    ex = [999.0, 10.0, 10.0, 10.0]              # row 1's huge EXPOSURE must be ignored
+    dir = mktempdir()
+    p = joinpath(dir, "T")
+    write_table(p, "T", Pair{String,Any}["TIME" => tm, "FLAG_ROW" => fr,
+                                         "EXPOSURE" => ex]; nrow = 4)
+    tt = readtable(p)
+    cn = Set(columnnames(tt))
+
+    # the default row is row 2 (first unflagged), dT = 10/2 = 5 s
+    mjd2 = (t0 + 100.0) / 86400
+    within4 = MSv2._mssel_time(tt, string(mjd2 + 4 / 86400), cn, 4)
+    within6 = MSv2._mssel_time(tt, string(mjd2 + 6 / 86400), cn, 4)
+    @test within4 == Bool[0, 1, 0, 0]           # inside dT=5 -> matches row 2
+    @test within6 == Bool[0, 0, 0, 0]           # outside dT=5 -> matches nothing
+    # if `dT` had (wrongly) used row 1's EXPOSURE=999 or the mean
+    # (~257), both offsets would match row 2 -- neither does.
+
+    # no FLAG_ROW column at all -> falls back to row 1 (unchanged
+    # pre-Phase-121 behaviour)
+    # no FLAG_ROW column: dT = row 1's own EXPOSURE/2 = 499.5, a huge
+    # tolerance (a single isolated row proves it's genuinely row 1's
+    # EXPOSURE, not a fallback constant, driving the match)
+    p2 = joinpath(dir, "T2")
+    write_table(p2, "T2", Pair{String,Any}["TIME" => [t0], "EXPOSURE" => [999.0]]; nrow = 1)
+    tt2 = readtable(p2)
+    cn2 = Set(columnnames(tt2))
+    mjd1 = t0 / 86400
+    @test MSv2._mssel_time(tt2, string(mjd1 + 490 / 86400), cn2, 1) == Bool[1]  # within 499.5
+    @test MSv2._mssel_time(tt2, string(mjd1 + 510 / 86400), cn2, 1) == Bool[0]  # outside 499.5
+
+    # every row flagged (the committed sample fixture's own state) ->
+    # MeasurementSets stays lenient and still falls back to row 1's own
+    # EXPOSURE for dT, rather than replicating casacore's "No logical
+    # row zero found" throw
+    p3 = joinpath(dir, "T3")
+    write_table(p3, "T3", Pair{String,Any}["TIME" => [t0], "FLAG_ROW" => [true],
+                                           "EXPOSURE" => [999.0]]; nrow = 1)
+    tt3 = readtable(p3)
+    cn3 = Set(columnnames(tt3))
+    @test MSv2._mssel_time(tt3, string(mjd1 + 490 / 86400), cn3, 1) == Bool[1]
+    @test MSv2._mssel_time(tt3, string(mjd1 + 510 / 86400), cn3, 1) == Bool[0]
+
+    # `create_ms` / `addcolumn!` now stamp FLAG_CATEGORY's required
+    # CATEGORY keyword (empty String[], matching casacore's own default)
+    d2 = mktempdir()
+    ms = joinpath(d2, "cms.ms")
+    create_ms(ms; nrow = 4, nchan = 2, ncorr = 1, nant = 2)
+    kw = columndesc(readtable(ms), "FLAG_CATEGORY").keywords
+    @test "CATEGORY" in kw.names
+    @test kw.values[findfirst(==("CATEGORY"), kw.names)] == String[]
 end
 
 if _HAVE_TAQL

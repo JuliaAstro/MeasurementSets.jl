@@ -318,7 +318,8 @@ per-column TiledShapeStMan (`:tsm`).
 function addcolumn!(t::EditTable, name::AbstractString; kind::Symbol=:ssm)
     _check_new_col(t, name)
     sc = _lookup_stdcol(name)
-    desc = _mkdesc(name, sc.type, _stdshape(sc.shape))
+    kw = name == "FLAG_CATEGORY" ? _flag_category_kw() : Record()
+    desc = _mkdesc(name, sc.type, _stdshape(sc.shape); keywords = kw)
     data = Any[_default_cell(desc, t) for _ in 1:length(t.rowmap)]
     push!(t.addcols, (desc, kind, data))
     return t

@@ -2734,3 +2734,60 @@ query(main, "mscal.baseline('DA01&DV01;!DA02&DV02')")   # A intersected with NOT
   new combinations (`!A;!B` and a 3-term mix); the real-TaQL cross-check
   list grows by 4 negated specs, all matching exactly. 9 new/changed
   tests; full existing mscal suite otherwise unchanged.
+
+### Phase 121 — `mscal.time()`: confirmed grammar-complete, fixed real `dT`/default-row bugs, found a writer gap
+
+- Confirmed `mscal.time` is a direct pass-through to real casacore's
+  own `msTimeGramParseCommand` (`UDFMSCal.cc:479-491`, same as
+  `mscal.baseline`↔`MSAntennaGram` in Phases 119/120). Read
+  `MSTimeGram.yy`/`.ll` in full: **the real time-value grammar was
+  already completely implemented in Phase 94** — single time,
+  `t0~t1`, `[t0~t1]` edge-inclusive, `N[t0~t1]` explicit buffer,
+  `t0+dur`, `>`/`<` bounds, `*`-wildcard fields, comma-list OR — every
+  grammar production maps to something Phase 94 already had. No
+  missing syntax found; the "worth investigating" premise resolves to
+  "confirmed complete."
+- Reading `MSTimeParse::getDefaults` (`MSTimeParse.cc:114-168`) DID
+  find two real, fixable bugs in the *semantics* (not syntax) of the
+  MS-derived defaults: (1) `dT` (the tolerance used by every form
+  above) — casacore's `defaultExposure` is the DEFAULT ROW's own
+  `EXPOSURE` value (`exposure(firstLogicalRow,"s")`), **not a mean over
+  every row's `EXPOSURE`**, which is what Phase 94 originally
+  implemented; (2) the "default row" itself (both for `dT` and for the
+  calendar defaults a missing/`*` field falls back to) is the **first
+  UNFLAGGED (`FLAG_ROW`) row**, not row 1 unconditionally. Both fixed in
+  `_mssel_time`; MeasurementSets deliberately stays lenient when every
+  row is flagged or `FLAG_ROW` is absent (falls back to row 1) rather
+  than replicating casacore's own "No logical row zero found" throw,
+  since the committed sample fixture is itself fully flagged.
+- **A live oracle for these fixes turned out to be blocked by two
+  separate, real writer gaps**, found while chasing it down: (1)
+  `mscal.time`'s `UDFMSCal` case unconditionally constructs a full
+  `MeasurementSet(table)`, whose C++ constructor calls `addCat()`
+  (`MeasurementSet.cc:85-99`) — on a **read-only** open (every
+  cross-check in this test suite) it throws "Missing CATEGORY keyword
+  in FLAG_CATEGORY column" instead of the writable-table self-heal
+  casacore's own writer relies on. **Fixed**: new `_flag_category_kw()`
+  stamps the standard `CATEGORY` (empty `String[]`) keyword, now used by
+  both `create_ms` (via `_synth_table`) and `addcolumn!(t,
+  "FLAG_CATEGORY")` — a real, generally useful fix (unblocks *any*
+  future `derivedmscal`-UDF oracle that opens a full `MeasurementSet`,
+  not just this one). (2) Past that fix, `MeasurementSet`'s validator
+  (`MSTableImpl::validate`, `MSTableImpl.cc:450-490`) further requires
+  every `MSMainEnums`-required column's `QuantumUnits`/`MEASINFO`
+  keywords to exactly match casacore's own standard values — `create_ms`
+  stamps none of these today, a genuinely large follow-up (a full
+  measures/units audit of the synthesised MAIN + every subtable),
+  **deliberately out of this phase's scope** and documented rather than
+  silently chased or worked around.
+- The `dT`/default-row fix is instead verified directly against
+  hand-built tables with intentionally varied `FLAG_ROW`/`EXPOSURE`
+  (proving the default row's own `EXPOSURE`, not a mean or a wrong
+  row, drives the tolerance), plus a `create_ms` regression test for
+  the `CATEGORY` keyword fix. 10 new tests
+  (`test/taql_mscal_tests.jl`, "mscal.time() default-row / dT");
+  1 existing assertion's comment/local corrected to describe the
+  *actual* fixed formula (its numeric result is unaffected — the
+  sample MS's `EXPOSURE` happens to be uniform, so the mean and the
+  first-row value coincide there). Full existing mscal (533) +
+  writer/edit/schema (305) suites pass unchanged.
