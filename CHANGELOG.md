@@ -2375,10 +2375,25 @@ taql(t, "DELETE FROM t WHERE A > 3 ORDER BY TIME DESC LIMIT 2")
   per-matched-row path, even with no `where`.
 - Closes the Phase 30 non-goal ("`DELETE`/`UPDATE` `ORDER BY`+`LIMIT`
   … chain `query` then `delete!` by the selected condition instead").
+- **Correction, found only once the full suite ran against real
+  Casacore.jl**: real TaQL's own `UPDATE`/`DELETE` `ORDER BY ... LIMIT
+  n` does **not** sort the matched rows by the given key before `LIMIT`
+  truncates them — a live spike showed `UPDATE $1 SET A=A+100 WHERE A>3
+  ORDER BY T LIMIT 3` gives byte-identical results to the same command
+  with `ORDER BY T` deleted entirely; `T`'s actual values play no role.
+  (`LIMIT`'s own row-selection turned out direction/sign-dependent in a
+  way not worth fully reverse-engineering for this phase.) This
+  package's `orderby`/`limit` are a **deliberate MeasurementSets
+  extension** implementing the genuinely useful "N oldest/newest rows"
+  semantics the original non-goal text described — a real sort-then-
+  limit — not a port of real TaQL's own behaviour; documented plainly
+  in the `update!`/`delete!` docstrings. The planned real-TaQL
+  cross-check test was replaced with the hand-computed-selection tests
+  (already present) plus a comment recording the live-spike finding, in
+  keeping with this project's established pattern for a documented
+  MeasurementSets-only semantic choice.
 - Verified via hand-computed row selections (ascending/descending,
-  positive/negative limit, the Julia and `taql` string forms agreeing)
-  and a real-TaQL cross-check of both `update!` and `delete!` against
-  `tableCommand`.
+  positive/negative limit, the Julia and `taql` string forms agreeing).
 
 ### Phase 112 — `Hypercolumn_*` keyword preservation on copy
 

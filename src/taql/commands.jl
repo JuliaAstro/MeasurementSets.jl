@@ -48,9 +48,15 @@ to `M` instead. Either name may be a slice / mask target.
 column name/`Symbol`, ascending, or a `name => :asc`/`name => :desc`
 pair) sorts the matched rows before `limit` (an `Integer`) keeps only
 the first `limit` of them (`limit < 0` keeps the *last* `|limit|`
-instead) — TaQL's "update the N oldest/newest rows matching a
-condition" form, e.g. `update!(t; set=[...], where="...",
-orderby=["TIME"], limit=10)`. Returns the number of rows changed.
+instead) — "update the N oldest/newest rows matching a condition", e.g.
+`update!(t; set=[...], where="...", orderby=["TIME"], limit=10)`.
+**A deliberate MeasurementSets extension, not a port of real TaQL's own
+`UPDATE ... ORDER BY ... LIMIT n`**: real casacore's `UPDATE`/`DELETE`
+`ORDER BY` does not sort the matched rows by the given key before
+`LIMIT` truncates them (verified live — `ORDER BY T LIMIT 3` and plain
+`LIMIT 3` give byte-identical results on the same data; `T`'s values
+play no role). This package's `orderby`/`limit` do a genuine
+sort-then-limit instead. Returns the number of rows changed.
 """
 function update!(target; set::AbstractVector{<:Pair}, where=nothing,
                  orderby::Union{Nothing,AbstractVector}=nothing,

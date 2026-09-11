@@ -514,30 +514,21 @@ if _HAVE_TAQL
         end
     end
 
-    @testset "update!/delete! -- ORDER BY + LIMIT real TaQL cross-check" begin
-        d = mktempdir()
-        A = collect(Int32, 1:10)
-        T = Float64.(10:-1:1)
-        for nm in ("ours", "ref")
-            write_table(joinpath(d, nm), nm, Pair{String,Any}["A" => copy(A), "T" => copy(T)];
-                       nrow = 10)
-        end
-        update!(joinpath(d, "ours"); set = ["A" => "A + 100"], where = "A > 3",
-               orderby = ["T"], limit = 3)
-        _taqlcmd("UPDATE \$1 SET A = A + 100 WHERE A > 3 ORDER BY T LIMIT 3", joinpath(d, "ref"))
-        @test column(readtable(joinpath(d, "ours")), "A")[:] ==
-              column(readtable(joinpath(d, "ref")), "A")[:]
-
-        d2 = mktempdir()
-        for nm in ("ours", "ref")
-            write_table(joinpath(d2, nm), nm, Pair{String,Any}["A" => copy(A), "T" => copy(T)];
-                       nrow = 10)
-        end
-        delete!(joinpath(d2, "ours"); where = "A > 3", orderby = ["T" => :desc], limit = 2)
-        _taqlcmd("DELETE FROM \$1 WHERE A > 3 ORDER BY T DESC LIMIT 2", joinpath(d2, "ref"))
-        @test column(readtable(joinpath(d2, "ours")), "A")[:] ==
-              column(readtable(joinpath(d2, "ref")), "A")[:]
-    end
+    # NOTE (Phase 111, found by spiking against real Casacore.jl): real
+    # TaQL's own UPDATE/DELETE `ORDER BY ... LIMIT n` does **not** sort
+    # the WHERE-matched rows by the ORDER BY key and then take the first
+    # `n` of that sorted set -- e.g. `UPDATE $1 SET A=A+100 WHERE A>3
+    # ORDER BY T LIMIT 3` gives byte-identical results to the same
+    # command with `ORDER BY T` removed entirely (confirmed live); `T`'s
+    # actual values play no role. `orderby`/`limit` here are a
+    # deliberate MeasurementSets extension implementing the genuinely
+    # useful "update/delete the N oldest/newest rows" semantics the
+    # Phase 30 non-goal text described -- a real sort-then-limit, not a
+    # port of whatever real TaQL's own (surprising, direction-only,
+    # LIMIT-sign-dependent) row-selection turns out to do. No live
+    # cross-check for this reason; verified by hand-computed row
+    # selections above instead (and against a direct spike of real
+    # TaQL's behaviour, kept as the note above, not as a running test).
 end
 
 @testset "insert! -- LIMIT" begin
