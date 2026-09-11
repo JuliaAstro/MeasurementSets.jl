@@ -3253,3 +3253,67 @@ re-derived from the same apparent direction/site the function itself
 uses — checks the Newton LST solver, not `h0`'s own formula, so it
 isn't circular). 1008 tests standalone in `taql_query_tests.jl`, all
 green.
+
+### Phase 132 — found and fixed a real `write_reftable` bug: a RefTable parent wasn't flattened to its root
+
+Investigated the risk Phase 15's own plan had flagged and left
+unverified: "`_strip_directory`'s two-case simplification is only
+exercised by paths our own writer or tests produce" — specifically,
+what `write_reftable` does when its `parent` argument is itself another
+(already-persisted, on-disk) `RefTable`.
+
+**Read casacore's own `RefTable` writer** (`RefTable::RefTable
+(BaseTable*, Vector<rownr_t>)`, `RefTable.cc:77-98`) and found the real
+invariant: a constructed `RefTable` **always** points its `baseTabPtr_p`
+at `btp->root()` — the true, non-RefTable root — never at an
+intermediate RefTable. Building a new RefTable off an existing one
+calls `adjustRownrs` (`RefTable.cc:241-259`), which **translates** the
+given row indices through the existing RefTable's own row map
+(`rownrs[i] = rows[rownrs[i]]`) and (critically) computes the
+`rowOrder` flag against those **translated, absolute root-row indices**
+— not against the row list as given relative to the intermediate.
+
+**Confirmed this package's `write_reftable` did neither**: given a
+`parent` that was itself a persisted `RefTable`, it wrote the
+intermediate's own path as `parentstored` (producing a genuine two-
+level on-disk chain real casacore's own writer never produces) and
+computed the `rowOrder` flag on the rows *as given* — relative to the
+intermediate, not the root. Live-verified the flag consequence: rows
+`[1, 3, 5]` of an already-persisted, fully-reversed selection are
+ascending relative to that intermediate, but resolve to absolute root
+rows `[10, 8, 6]` — genuinely descending. **Why this matters**:
+`BaseTable::logicRows()` (`BaseTable.cc:983-993` — used by table
+boolean/set-algebra operators, e.g. combining two row selections)
+*trusts* the stored `rowOrder` flag to skip re-sorting; a wrong flag
+would make a real casacore consumer silently treat an unsorted root
+selection as sorted in that code path. (Value *reads* through the
+chain were already correct in both readers, live-verified before the
+fix, since neither reader's plain cell/column access consults the flag
+at all — only `logicRows()`-based table-algebra operations would be
+affected.)
+
+**Fix** (`src/tables/table.jl`): new `_flatten_to_root` — recursively
+unwraps a `RefTable` parent chain (translating rows and the column
+name map at each level) before writing, exactly mirroring casacore's
+own `adjustRownrs`. `write_reftable`'s general form now flattens
+before computing `parentstored`/`rowOrder`/`parentnrow`; the
+`write_reftable(dir, rt::RefTable)` convenience form inherits the fix
+automatically (it delegates to the general form).
+
+Also confirmed, incidentally: real casacore's *other* RefTable
+constructor form (used for its own `select(...)` machinery) has
+`BaseTable::adjustRownrs`'s base-class default **unconditionally return
+`true`** for a plain-Table parent, regardless of the actual row order —
+a real casacore quirk. This package's existing choice to compute the
+flag *honestly* even for a plain-Table parent is therefore not a
+divergence to "fix" — if anything it's safer than what casacore's own
+writer does in that specific case, and was left unchanged.
+
+13 new tests in `test/reftable_tests.jl` ("write_reftable — flattens a
+RefTable parent to its root"): a two-level chain with a deliberately
+order-reversing composition (ascending-relative-to-intermediate,
+descending-relative-to-root), a three-level chain, a `_HAVE_CASACORE`
+cross-check that real casacore still opens and reads the flattened
+output correctly, and `select=` renaming resolving against the true
+root's column names after flattening. 257 tests standalone in
+`reftable_tests.jl`, all green.

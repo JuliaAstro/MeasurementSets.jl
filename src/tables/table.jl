@@ -546,6 +546,34 @@ end
 # `_select_spec` (the `select` projection helper shared by
 # `write_reftable` below and `query`) lives in `taql/query.jl`.
 
+# Phase 132: real casacore's own RefTable writer (`RefTable::RefTable
+# (BaseTable*, Vector<rownr_t>)`, `RefTable.cc:77-98`) always points a
+# persisted RefTable at the true, non-RefTable ROOT table
+# (`baseTabPtr_p = btp->root()`), translating the given row indices
+# through any intermediate RefTable's own row map via `adjustRownrs`
+# (`RefTable.cc:241-259`: `rownrs[i] = rows[rownrs[i]]`) — a RefTable
+# never persists a chain pointing at *another* on-disk RefTable file.
+# Flatten the same way here: (1) so a two-level chain we write has the
+# on-disk shape real casacore itself always produces, and (2) because
+# `BaseTable::logicRows()` (`BaseTable.cc:983-993` — used by table
+# boolean/set-algebra operators, e.g. combining two row selections)
+# TRUSTS the stored `rowOrder` flag to skip re-sorting; computing that
+# flag against an intermediate RefTable's own (possibly differently-
+# ordered) row list, instead of the true absolute root-row order, would
+# silently mis-flag a genuinely-unsorted root selection as sorted —
+# live-verified: rows `[1,3,5]` of an already-persisted, fully-reversed
+# RefTable are ascending relative to that intermediate but resolve to
+# root rows `[10,8,6]` (descending); before this fix the on-disk flag
+# claimed "ascending" regardless.
+function _flatten_to_root(parent::AbstractTable, rows::Vector{Int}, namemap::Dict{String,String})
+    if parent isa RefTable
+        rows2 = parent.rows[rows]
+        namemap2 = Dict(out => parent.namemap[srcname] for (out, srcname) in namemap)
+        return _flatten_to_root(parent.parent, rows2, namemap2)
+    end
+    return parent, rows, namemap
+end
+
 """
     write_reftable(dir, parent, rows; select) -> dir
 
@@ -553,21 +581,24 @@ Persist a row-number reference to `parent` (a `Table`, `RefTable`, or
 `ConcatTable`) at `dir`, in casacore's RefTable format — openable by
 `casa` / python-casacore.  `rows` are 1-based row indices into `parent`
 (any order, repeats allowed).  `select` is `output_name => parent_name`
-pairs in output order (default: every column of `parent`, unrenamed).
+pairs in output order (default: every column of `parent`, unrenamed). A
+`RefTable` `parent` is flattened to its true root before writing
+(matching casacore's own RefTable writer — see `_flatten_to_root`).
 """
 function write_reftable(dir::AbstractString, parent::AbstractTable,
                         rows::AbstractVector{<:Integer};
                         select::AbstractVector{<:Pair}=[n => n for n in columnnames(parent)])
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
-
-    namemap, order = _select_spec(parent, select)
     any(x -> x < 1, rows) && throw(ArgumentError("write_reftable: row indices are 1-based"))
 
+    namemap, order = _select_spec(parent, select)
+    root, rootrows, rootnamemap = _flatten_to_root(parent, Int.(collect(rows)), namemap)
+
     mkpath(dir)
-    rows0 = Int.(collect(rows)) .- 1
-    bytes_ = reftable_dat_bytes(_strip_directory(parent.path, dir), rows0, namemap, order,
-                                nrow(parent), length(rows0))
+    rows0 = rootrows .- 1
+    bytes_ = reftable_dat_bytes(_strip_directory(root.path, dir), rows0, rootnamemap, order,
+                                nrow(root), length(rows0))
     _atomic_write(joinpath(dir, "table.dat"), bytes_)
     write_tableinfo(dir; type=parent.type, subtype=parent.subtype, readme=parent.readme)
     return dir

@@ -404,3 +404,59 @@ end
     kept_drop = MSv2._filter_hypercolumns(priv2, Set(["A", "C"]))   # B missing
     @test !haskey(kept_drop, "Hypercolumn_TestCube") && haskey(kept_drop, "SomeOtherKey")
 end
+
+# Phase 132: write_reftable of a RefTable parent flattens to the true
+# root, matching real casacore's own RefTable writer exactly (verified
+# against `RefTable::RefTable(BaseTable*, Vector<rownr_t>)` +
+# `adjustRownrs`, `RefTable.cc:77-98,241-259` -- a RefTable never
+# persists a chain pointing at another on-disk RefTable file).
+@testset "write_reftable — flattens a RefTable parent to its root (Phase 132)" begin
+    d = mktempdir()
+    root = joinpath(d, "root.tab")
+    write_table(root, "T", ["K" => collect(Int32, 1:10), "V" => Float64.(1:10)]; nrow = 10)
+
+    # level 1: fully-reversed selection of root
+    rt1dir = joinpath(d, "rt1.tab")
+    write_reftable(rt1dir, readtable(root), collect(10:-1:1))
+    rt1 = readtable(rt1dir)
+    @test column(rt1, "V")[:] == collect(10.0:-1.0:1.0)
+
+    # level 2: rows [1,3,5] of rt1 -- ASCENDING relative to rt1, but the
+    # corresponding root rows are [10,8,6] -- DESCENDING. Before the
+    # fix, the on-disk chain pointed at rt1 (not root) and the stored
+    # `rowOrder` flag was computed on [1,3,5] (wrongly claiming
+    # ascending); a downstream `BaseTable::logicRows()`-based operation
+    # trusting that flag would silently treat an unsorted root selection
+    # as sorted.
+    rt2dir = joinpath(d, "rt2.tab")
+    write_reftable(rt2dir, rt1, [1, 3, 5])
+    rt2 = readtable(rt2dir)
+    @test rt2.parent isa MSv2.Table                 # flattened, not rt1
+    @test rt2.parent.path == readtable(root).path
+    @test rt2.rows == [10, 8, 6]                    # absolute root rows
+    @test column(rt2, "V")[:] == [10.0, 8.0, 6.0]
+    @test !(all(rt2.rows[i] > rt2.rows[i - 1] for i in 2:length(rt2.rows)))  # genuinely descending
+
+    # a three-level chain flattens all the way through
+    rt3dir = joinpath(d, "rt3.tab")
+    write_reftable(rt3dir, rt2, [2, 1])              # rt2 rows [2,1] -> root rows [8,10]
+    rt3 = readtable(rt3dir)
+    @test rt3.parent isa MSv2.Table
+    @test rt3.rows == [8, 10]
+    @test column(rt3, "V")[:] == [8.0, 10.0]
+
+    if _HAVE_CASACORE
+        for dir in (rt2dir, rt3dir)
+            ct = CCT.Table(dir)
+            @test collect(ct[:V][:]) == column(readtable(dir), "V")[:]
+        end
+    end
+
+    # select= renaming still resolves against the true root's column
+    # names after flattening
+    rt4dir = joinpath(d, "rt4.tab")
+    write_reftable(rt4dir, rt2, [1, 2]; select = ["VV" => "V"])
+    rt4 = readtable(rt4dir)
+    @test columnnames(rt4) == ["VV"]
+    @test column(rt4, "VV")[:] == [10.0, 8.0]
+end
