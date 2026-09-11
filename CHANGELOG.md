@@ -2558,3 +2558,37 @@ query(main, "mscal.baseline('DA01&DV01;DA02&DV02')")
   behavior/test change (the existing `engine_tests.jl` dispatch test —
   `_dmtype("RetypedArrayEngine<Float>") === _UnsupportedDM` — already
   covers the unchanged code path).
+
+### Phase 117 — primary-beam width-parameter validation
+
+```julia
+GaussianBeam(-1.0, 1.4e9)                   # ArgumentError: hpbw must be finite positive
+AiryBeam(25.0; blockage = 25.0)             # ArgumentError: 0 <= blockage < diameter
+EllipticalGaussianBeam(0.005, 0.02, 0, 1.4e9)  # ArgumentError: hpbw_major >= hpbw_minor
+```
+
+- Every `PrimaryBeam` constructor (`GaussianBeam`, `AiryBeam`,
+  `PolynomialBeam`, `EllipticalGaussianBeam`, `SquintBeam`) and every
+  `power_response` method's `freq`/offset argument now validates its
+  inputs — a non-positive/non-finite width, diameter, or frequency, a
+  `blockage` outside `[0, diameter)` (`blockage == diameter` is a `0/0`
+  singularity in the annular-Airy formula, `> diameter` is unphysical),
+  `hpbw_major < hpbw_minor` (silently unenforced before this phase
+  despite the docstring's `≥` claim), or a NaN/Inf offset/coefficient
+  now raises a clear `ArgumentError` immediately instead of silently
+  propagating to a NaN/Inf power response several calls downstream.
+- New shared helpers `_pb_finite`/`_pb_positive`/`_pb_check_freq`/
+  `_pb_check_offset` (`src/beam/beam.jl`); every constructor gained (or
+  kept, for `PolynomialBeam`'s pre-existing default one) an inner
+  constructor doing the check-then-convert; `power_response` methods
+  check `freq` and the `θ`/`(dlon,dlat)` offset at entry. `SquintBeam`'s
+  own `power_response` delegates its `freq` check to the wrapped base
+  beam (no duplicate check) but validates its own offset before
+  subtracting the squint.
+- A useful side effect: `mscal.pbresponse('ellipse:HMIN:HMAJ:PA')` (a
+  transposed hmaj/hmin typo in a spec string) now raises a clear error
+  at parse time instead of silently computing a rotated-wrong beam.
+- 41 new tests (`test/beam_tests.jl`, "Phase 117 parameter validation");
+  full existing beam + `mscal.pbresponse`/`pbcorr`/`pbatten` test suites
+  (104 + 500 tests) pass unchanged — no valid existing usage anywhere
+  in the codebase violated any of the new invariants.

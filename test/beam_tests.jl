@@ -166,3 +166,65 @@ end
     @test_throws ArgumentError MSv2._taqllite_parse("pbairy(A)", Set(["A"]))
     @test_throws ArgumentError MSv2._taqllite_parse("pbgaussian(A)", Set(["A"]))
 end
+
+# Phase 117: constructor / power_response parameter validation -- a
+# nonsensical input (non-positive width/diameter/frequency, blockage
+# out of range, hmaj < hmin, a NaN/Inf offset or frequency) raises a
+# clear ArgumentError instead of silently producing NaN/Inf.
+@testset "beam — Phase 117 parameter validation" begin
+    # GaussianBeam
+    @test_throws ArgumentError GaussianBeam(-1.0, 1.4e9)
+    @test_throws ArgumentError GaussianBeam(0.0, 1.4e9)
+    @test_throws ArgumentError GaussianBeam(deg2rad(1.0), 0.0)
+    @test_throws ArgumentError GaussianBeam(deg2rad(1.0), -1.0)
+    @test_throws ArgumentError GaussianBeam(NaN, 1.4e9)
+    @test_throws ArgumentError GaussianBeam(Inf, 1.4e9)
+    @test_throws ArgumentError GaussianBeam(0.0; diameter = 25.0)         # freq <= 0
+    @test_throws ArgumentError GaussianBeam(1.4e9; diameter = -25.0)
+    @test_throws ArgumentError GaussianBeam(1.4e9; diameter = 25.0, k = 0.0)
+    g = GaussianBeam(deg2rad(1.0), 1.4e9)
+    @test_throws ArgumentError power_response(g, deg2rad(0.1), 0.0)       # freq <= 0
+    @test_throws ArgumentError power_response(g, deg2rad(0.1), -1.4e9)
+    @test_throws ArgumentError power_response(g, NaN)
+    @test_throws ArgumentError power_response(g, Inf)
+    @test_throws ArgumentError voltage_response(g, NaN)
+
+    # AiryBeam
+    @test_throws ArgumentError AiryBeam(-25.0)
+    @test_throws ArgumentError AiryBeam(0.0)
+    @test_throws ArgumentError AiryBeam(NaN)
+    @test_throws ArgumentError AiryBeam(25.0; blockage = -1.0)
+    @test_throws ArgumentError AiryBeam(25.0; blockage = 25.0)            # ε == 1, 0/0 singularity
+    @test_throws ArgumentError AiryBeam(25.0; blockage = 30.0)            # > diameter
+    @test_throws ArgumentError AiryBeam(25.0; blockage = NaN)
+    a = AiryBeam(25.0)
+    @test_throws ArgumentError power_response(a, deg2rad(0.1), 0.0)
+    @test_throws ArgumentError power_response(a, NaN, 1.4e9)
+
+    # PolynomialBeam
+    @test_throws ArgumentError PolynomialBeam([0.1], -1.0, 1.4e9)
+    @test_throws ArgumentError PolynomialBeam([0.1], 0.0, 1.4e9)
+    @test_throws ArgumentError PolynomialBeam([0.1], deg2rad(1.0), 0.0)
+    @test_throws ArgumentError PolynomialBeam([0.1, NaN], deg2rad(1.0), 1.4e9)
+    @test_throws ArgumentError PolynomialBeam([Inf], deg2rad(1.0), 1.4e9)
+    p = PolynomialBeam([0.1], deg2rad(1.0), 1.4e9)
+    @test_throws ArgumentError power_response(p, deg2rad(0.1), 0.0)
+    @test_throws ArgumentError power_response(p, NaN)
+
+    # EllipticalGaussianBeam
+    @test_throws ArgumentError EllipticalGaussianBeam(-0.02, 0.005, 0.0, 1.4e9)
+    @test_throws ArgumentError EllipticalGaussianBeam(0.02, -0.005, 0.0, 1.4e9)
+    @test_throws ArgumentError EllipticalGaussianBeam(0.005, 0.02, 0.0, 1.4e9)  # hmaj < hmin
+    @test_throws ArgumentError EllipticalGaussianBeam(0.02, 0.005, NaN, 1.4e9)
+    @test_throws ArgumentError EllipticalGaussianBeam(0.02, 0.005, 0.0, 0.0)
+    eb = EllipticalGaussianBeam(0.02, 0.005, 0.0, 1.4e9)
+    @test_throws ArgumentError power_response(eb, (NaN, 0.0))
+    @test_throws ArgumentError power_response(eb, (0.0, 0.0), 0.0)
+
+    # SquintBeam
+    @test_throws ArgumentError SquintBeam(g, (NaN, 0.0))
+    @test_throws ArgumentError SquintBeam(g, (0.0, Inf))
+    sb = SquintBeam(g, (deg2rad(0.1), 0.0))
+    @test_throws ArgumentError power_response(sb, (Inf, 0.0))
+    @test_throws ArgumentError power_response(sb, (0.0, 0.0), 0.0)        # delegated to GaussianBeam
+end

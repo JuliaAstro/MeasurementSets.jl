@@ -101,6 +101,22 @@ end
 power_response(b::PrimaryBeam, offset::NTuple{2,Real}, freq::Real = reffreq(b)) =
     power_response(b, hypot(offset...), freq)
 
+# Parameter validation (Phase 117): every beam constructor's physical
+# parameters (widths, diameters, frequencies, position angles) and every
+# `power_response` call's `freq`/offset argument are checked here, so a
+# nonsensical input (a non-positive HPBW/diameter/frequency, a
+# blockage ≥ diameter, a NaN/Inf offset) raises a clear `ArgumentError`
+# immediately instead of silently propagating to a NaN/Inf power
+# response several calls downstream.
+_pb_finite(label::AbstractString, x::Real) = isfinite(x) ||
+    throw(ArgumentError("MeasurementSets: $label must be finite, got $x"))
+_pb_positive(label::AbstractString, x::Real) = (isfinite(x) && x > 0) ||
+    throw(ArgumentError("MeasurementSets: $label must be a finite positive value, got $x"))
+_pb_check_freq(freq::Real) = _pb_positive("freq", freq)
+_pb_check_offset(θ::Real) = _pb_finite("θ", θ)
+_pb_check_offset(offset::NTuple{2,Real}) =
+    (_pb_finite("offset[1] (dlon)", offset[1]); _pb_finite("offset[2] (dlat)", offset[2]))
+
 # ======================================================================
 # Gaussian
 # ======================================================================
@@ -113,18 +129,30 @@ A circular Gaussian power pattern, `exp(-4ln2·(θ/HPBW)²)`, `HPBW` the
 half-power beam width (rad) at `reffreq` (Hz) — scales as `1/freq` at
 other frequencies. The second form derives `HPBW = k·λ/diameter`
 (`k≈1.02` is the standard illuminated-aperture factor; `k=1.22` is the
-diffraction-limited/Airy value).
+diffraction-limited/Airy value). `hpbw`/`reffreq`/`freq`/`diameter`/`k`
+must all be finite and positive.
 """
 struct GaussianBeam <: PrimaryBeam
     hpbw::Float64
     reffreq::Float64
+    function GaussianBeam(hpbw::Real, reffreq::Real)
+        _pb_positive("hpbw", hpbw)
+        _pb_positive("reffreq", reffreq)
+        new(float(hpbw), float(reffreq))
+    end
 end
-GaussianBeam(freq::Real; diameter::Real, k::Real = 1.02) =
+function GaussianBeam(freq::Real; diameter::Real, k::Real = 1.02)
+    _pb_positive("freq", freq)
+    _pb_positive("diameter", diameter)
+    _pb_positive("k", k)
     GaussianBeam(k * C_LIGHT / (freq * diameter), float(freq))
+end
 
 reffreq(b::GaussianBeam) = b.reffreq
 
 function power_response(b::GaussianBeam, θ::Real, freq::Real = b.reffreq)
+    _pb_check_offset(θ)
+    _pb_check_freq(freq)
     hpbw = b.hpbw * b.reffreq / freq          # beam narrows with increasing freq
     exp(-4 * log(2) * (θ / hpbw)^2)
 end
@@ -142,13 +170,24 @@ The diffraction pattern of a uniformly illuminated circular aperture of
 metres — the sub-reflector shadow — modelled as a second, negated Airy
 term, the standard closed form for an annular aperture):
 `voltage(x) = [2·J₁(x)/x − ε²·2·J₁(εx)/(εx)] / (1−ε²)`,
-`x = π·diameter·θ/λ`, `ε = blockage/diameter`.
+`x = π·diameter·θ/λ`, `ε = blockage/diameter`. `diameter` must be
+finite and positive; `blockage` must be finite, `0 ≤ blockage < diameter`
+(`blockage == diameter` makes `ε == 1`, a `0/0` singularity in the
+annular-aperture formula above; `blockage > diameter` is unphysical).
 """
 struct AiryBeam <: PrimaryBeam
     diameter::Float64
     blockage::Float64
+    function AiryBeam(diameter::Real, blockage::Real)
+        _pb_positive("diameter", diameter)
+        _pb_finite("blockage", blockage)
+        0 <= blockage < diameter || throw(ArgumentError(
+            "MeasurementSets: blockage must satisfy 0 <= blockage < diameter " *
+            "(got blockage=$blockage, diameter=$diameter)"))
+        new(float(diameter), float(blockage))
+    end
 end
-AiryBeam(diameter::Real; blockage::Real = 0.0) = AiryBeam(float(diameter), float(blockage))
+AiryBeam(diameter::Real; blockage::Real = 0.0) = AiryBeam(diameter, blockage)
 
 reffreq(::AiryBeam) = error(
     "MeasurementSets: AiryBeam has no default frequency — pass `freq` to power_response/voltage_response")
@@ -161,6 +200,8 @@ function _airy_voltage(x::Real, ε::Real)
 end
 
 function power_response(b::AiryBeam, θ::Real, freq::Real)
+    _pb_check_offset(θ)
+    _pb_check_freq(freq)
     λ = C_LIGHT / freq
     x = π * b.diameter * θ / λ
     ε = b.blockage / b.diameter
@@ -183,12 +224,20 @@ A polynomial primary-beam fit in the CASA `PBMath1DPoly` convention:
 (GHz · arcmin), valid for `θ ≤ maxrad` (rad) — `0` beyond that radius.
 No coefficients are bundled; provide a real telescope's fitted table
 (e.g. from CASA's own data) or use [`GaussianBeam`](@ref) /
-[`AiryBeam`](@ref) instead.
+[`AiryBeam`](@ref) instead. `maxrad`/`reffreq` must be finite and
+positive; every entry of `coeffs` must be finite.
 """
 struct PolynomialBeam <: PrimaryBeam
     coeffs::Vector{Float64}
     maxrad::Float64
     reffreq::Float64
+    function PolynomialBeam(coeffs::Vector{Float64}, maxrad::Float64, reffreq::Float64)
+        _pb_positive("maxrad", maxrad)
+        _pb_positive("reffreq", reffreq)
+        all(isfinite, coeffs) || throw(ArgumentError(
+            "MeasurementSets: every PolynomialBeam coefficient must be finite, got $coeffs"))
+        new(coeffs, maxrad, reffreq)
+    end
 end
 PolynomialBeam(coeffs::AbstractVector{<:Real}, maxrad::Real, reffreq::Real) =
     PolynomialBeam(Float64.(coeffs), float(maxrad), float(reffreq))
@@ -196,6 +245,8 @@ PolynomialBeam(coeffs::AbstractVector{<:Real}, maxrad::Real, reffreq::Real) =
 reffreq(b::PolynomialBeam) = b.reffreq
 
 function power_response(b::PolynomialBeam, θ::Real, freq::Real = b.reffreq)
+    _pb_check_offset(θ)
+    _pb_check_freq(freq)
     θ > b.maxrad && return 0.0
     x = (freq / 1e9) * rad2deg(θ) * 60
     x2 = x^2
@@ -229,15 +280,25 @@ north through east — the [`MDirection`](@ref) convention): half-power
 widths `hpbw_major` ≥ `hpbw_minor` (rad) at `reffreq` (Hz, scaling as
 `1/freq`, like [`GaussianBeam`](@ref)). `power_response` needs a 2-D
 `(dlon, dlat)` offset, not a scalar `θ` — see [`pointing_offset`](@ref).
+`hpbw_major`/`hpbw_minor`/`reffreq` must be finite and positive, with
+`hpbw_major ≥ hpbw_minor`; `pa` must be finite.
 """
 struct EllipticalGaussianBeam <: PrimaryBeam
     hpbw_major::Float64
     hpbw_minor::Float64
     pa::Float64
     reffreq::Float64
+    function EllipticalGaussianBeam(hmaj::Real, hmin::Real, pa::Real, reffreq::Real)
+        _pb_positive("hpbw_major", hmaj)
+        _pb_positive("hpbw_minor", hmin)
+        hmaj >= hmin || throw(ArgumentError(
+            "MeasurementSets: EllipticalGaussianBeam needs hpbw_major >= hpbw_minor " *
+            "(got hpbw_major=$hmaj, hpbw_minor=$hmin)"))
+        _pb_finite("pa", pa)
+        _pb_positive("reffreq", reffreq)
+        new(float(hmaj), float(hmin), float(pa), float(reffreq))
+    end
 end
-EllipticalGaussianBeam(hmaj::Real, hmin::Real, pa::Real, reffreq::Real) =
-    EllipticalGaussianBeam(float(hmaj), float(hmin), float(pa), float(reffreq))
 
 reffreq(b::EllipticalGaussianBeam) = b.reffreq
 
@@ -245,6 +306,8 @@ power_response(b::EllipticalGaussianBeam, ::Real, ::Real = b.reffreq) = throw(Ar
     "EllipticalGaussianBeam needs a 2-D (dlon, dlat) offset, not a scalar θ — see `pointing_offset`"))
 
 function power_response(b::EllipticalGaussianBeam, offset::NTuple{2,Real}, freq::Real = b.reffreq)
+    _pb_check_offset(offset)
+    _pb_check_freq(freq)
     scale = b.reffreq / freq
     _elliptical_gaussian_power(offset[1], offset[2], b.hpbw_major * scale,
                                b.hpbw_minor * scale, b.pa)
@@ -256,12 +319,20 @@ end
 Wraps `base`, offsetting its effective centre by `squint = (dlon, dlat)`
 (rad) — models feed/beam squint (e.g. a circularly-polarized feed's
 polarization-dependent pointing offset). Needs a 2-D offset (a scalar
-`θ` is ambiguous once the beam isn't centred on the boresight).
+`θ` is ambiguous once the beam isn't centred on the boresight). Both
+components of `squint` must be finite (no sign/magnitude restriction —
+a squint offset can point anywhere).
 """
 struct SquintBeam{B<:PrimaryBeam} <: PrimaryBeam
     base::B
     squint::NTuple{2,Float64}
+    function SquintBeam{B}(base::B, squint::NTuple{2,Float64}) where {B<:PrimaryBeam}
+        _pb_finite("squint[1] (dlon)", squint[1])
+        _pb_finite("squint[2] (dlat)", squint[2])
+        new{B}(base, squint)
+    end
 end
+SquintBeam(base::B, squint::NTuple{2,Float64}) where {B<:PrimaryBeam} = SquintBeam{B}(base, squint)
 SquintBeam(base::PrimaryBeam, squint::Tuple{<:Real,<:Real}) = SquintBeam(base, Float64.(squint))
 
 reffreq(b::SquintBeam) = reffreq(b.base)
@@ -269,5 +340,7 @@ reffreq(b::SquintBeam) = reffreq(b.base)
 power_response(b::SquintBeam, ::Real, ::Real = reffreq(b)) = throw(ArgumentError(
     "SquintBeam needs a 2-D (dlon, dlat) offset, not a scalar θ — see `pointing_offset`"))
 
-power_response(b::SquintBeam, offset::NTuple{2,Real}, freq::Real = reffreq(b)) =
+function power_response(b::SquintBeam, offset::NTuple{2,Real}, freq::Real = reffreq(b))
+    _pb_check_offset(offset)
     power_response(b.base, offset .- b.squint, freq)
+end
