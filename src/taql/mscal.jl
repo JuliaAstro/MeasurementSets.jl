@@ -570,16 +570,23 @@ function _stokes_setup(intypes::Vector{Int}, outtypes::Vector{Int}, rescale::Boo
     return StokesSetup(cmat, cmat .!= 0, abs.(cmat), outtypes, iquvmat)
 end
 
-# derived pseudo-Stokes value from a (possibly complex-valued, take the
-# real part) I,Q,U,V tuple, per casacore's `Stokes::StokesTypes` pseudo
-# codes: Ptotal = sqrt(Q²+U²+V²), Plinear = sqrt(Q²+U²), Pangle =
-# ½·atan2(U,Q) (rad), PFtotal/PFlinear = the same totals divided by I.
-function _stokes_pseudo(sym::Symbol, I::Real, Q::Real, U::Real, V::Real)
-    sym === :total   ? sqrt(Q^2 + U^2 + V^2) :
-    sym === :linear  ? sqrt(Q^2 + U^2) :
-    sym === :angle   ? 0.5 * atan(U, Q) :
-    sym === :ftotal  ? (I == 0 ? 0.0 : sqrt(Q^2 + U^2 + V^2) / I) :
-    sym === :flinear ? (I == 0 ? 0.0 : sqrt(Q^2 + U^2) / I) :
+# derived pseudo-Stokes value from a complex I,Q,U,V tuple, per casacore's
+# `StokesConverter::convert(Array<Complex>&, ...)` (StokesConverter.cc:284-352,
+# live-verified against real Casacore.jl): Ptotal = sqrt(|Q|²+|U|²+|V|²),
+# Plinear = sqrt(|Q|²+|U|²) -- note |·|² = real(z·conj(z)), i.e. the full
+# complex magnitude squared, NOT real(z)² (an earlier version of this
+# function used real(z)² throughout and was measurably wrong -- e.g. for
+# Q=0.5+0.1i,U=-0.3+0.1i,V=1+1.2i real casacore gives Ptotal≈1.6733 while
+# real(Q)²+real(U)²+real(V)² gives ≈1.1576). Pangle = ½·atan2(real(U),
+# real(Q)) ("not well defined for complex quantities" per the source
+# comment -- real parts only, confirmed correct). PFtotal/PFlinear divide
+# by amplitude(I) = abs(I) (the full complex modulus), not real(I).
+function _stokes_pseudo(sym::Symbol, I::Complex, Q::Complex, U::Complex, V::Complex)
+    sym === :total   ? sqrt(abs2(Q) + abs2(U) + abs2(V)) :
+    sym === :linear  ? sqrt(abs2(Q) + abs2(U)) :
+    sym === :angle   ? 0.5 * atan(real(U), real(Q)) :
+    sym === :ftotal  ? (I == 0 ? 0.0 : sqrt(abs2(Q) + abs2(U) + abs2(V)) / abs(I)) :
+    sym === :flinear ? (I == 0 ? 0.0 : sqrt(abs2(Q) + abs2(U)) / abs(I)) :
     error("mscal.stokes: internal: unhandled pseudo type $sym")
 end
 
@@ -607,7 +614,7 @@ function _stokes_convert(s::StokesSetup, x::AbstractMatrix{<:Complex})
             for o in 1:nO
                 t = s.outtypes[o]
                 t < 0 || continue
-                out[o, ch] = _stokes_pseudo(_STOKES_PSEUDO_SYM[t], real(I), real(Q), real(U), real(V))
+                out[o, ch] = _stokes_pseudo(_STOKES_PSEUDO_SYM[t], I, Q, U, V)
             end
         end
     end
