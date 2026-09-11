@@ -2916,3 +2916,39 @@ every currently-implemented Tiled* wrapper uses, and (c) a
 `casatools`-authored fixture as the write-side oracle. Plan
 Scope-notes' "Still unsupported" bullet reworded to separate it from
 the genuinely infeasible `RetypedArrayEngine`. No test-count change.
+
+### Phase 124 — `ForwardColumnIndexedRowEngine` feasibility investigation
+
+Investigation-only phase (no code change). Read
+`tables/DataMan/ForwardColRow.{h,cc}` — the sibling of Phase 40's
+`ForwardColumnEngine`, adding a per-row indirection (a "row index
+column" maps this table's row to a *different* row in the referenced
+table, instead of the identity mapping `ForwardColumnEngine` uses).
+
+Unlike `TiledDataStMan` (Phase 123, confirmed real), this one lands in
+the same genuinely-infeasible bucket as `RetypedArrayEngine`
+(Phase 116), for an even more clear-cut reason:
+
+- Zero real callers anywhere in the casacore source tree outside its
+  own header/`.cc` and its own test file.
+- **Not in `DataManager`'s default auto-registration map**
+  (`DataManager.cc:452-461`) — `ForwardColumnEngine` and all three
+  `BitFlagsEngine<T>` instantiations are registered there;
+  `ForwardColumnIndexedRowEngine` is not. A real casacore build cannot
+  open a table using it unless the writing program explicitly calls
+  its `registerClass()` itself — something nothing in casacore's own
+  source ever does.
+- **Live-verified it isn't even shipped as a loadable plugin**: a real
+  `tableCommand` DMINFO construction attempt fails with a `dlopen`
+  search for `libcasa_forwardcolumnindexedrowengine.{8.,}dylib` that
+  doesn't exist anywhere — unlike Dysco's real, separate
+  `libcasa_dyscostman` plugin, this engine's fallback path is dead too.
+
+There is no route through TaQL, `casatools`, or any standard casacore
+tool to even construct a fixture using it. Its wire format itself
+isn't the obstacle (a fixed, non-templated `className()`, a
+structurally simple extra row-index-column keyword) — but with zero
+real producers and no way to build a test fixture at all, implementing
+it would be speculation against a format nothing in the real world
+emits. Confirmed the existing unregistered-DM error path degrades
+cleanly (same mechanism verified in Phase 123). No source/test changes.
