@@ -3065,3 +3065,28 @@ RefTable view"): data-per-view-row with the rest of the parent
 defaulted, the no-data standard-schema form, duplicate-name and
 wrong-length errors, and a `_HAVE_CASACORE` cross-check. No new
 storage-format code, no new exports.
+
+### Phase 127 — `removecolumn!` on a RefEditTable (view-level hide)
+
+Completes the distinct semantic Phase 126 identified but deliberately
+left unimplemented: `RefTable::removeColumn` only edits the RefTable's
+own descriptor/name map — it never calls `baseTabPtr_p->removeColumn`,
+so a column "removed" from a RefTable view is still there, unchanged,
+in the table it's really stored in.
+
+`removecolumn!(t::RefEditTable, name)` mirrors this exactly: deletes
+`name` from the view's own `namemap`/`order` only. The parent (its real
+storage, and anything pending in its own edit session — including a
+column just `addcolumn!`'d in the *same* session) is left completely
+untouched. A perhaps-surprising but faithful consequence, tested
+explicitly: `addcolumn!(rv, "TMP", ...); removecolumn!(rv, "TMP")` in
+one session hides "TMP" from the rest of that view's own access, but
+"TMP" is still written to the parent at flush.
+
+10 new assertions in `test/edit_tests.jl` ("edit — removecolumn! on a
+RefEditTable view"): the hide-then-error-on-access case, double-remove
+and unknown-column errors, confirming the parent's column is completely
+untouched after the view drops it, the add-then-remove-still-persists
+case, and a `_HAVE_CASACORE` cross-check. No new storage-format code,
+no new exports — completes the `RefEditTable` feature set started in
+Phase 125/126.

@@ -34,9 +34,18 @@
 # `RefTable::removeColumn` (also read) is a genuinely different shape —
 # it only edits the RefTable's OWN descriptor/name map, never touching
 # the parent (a pure view-level "hide this column", unlike our
-# `EditTable`'s `removecolumn!`, which always drops real storage) — a
-# distinct semantic deserving its own design, left a deliberate non-goal
-# here rather than rushed in alongside `addcolumn!`.
+# `EditTable`'s `removecolumn!`, which always drops real storage).
+#
+# Phase 127 — implements that distinct semantic:
+# `removecolumn!(::RefEditTable, name)` deletes `name` from the view's
+# own `namemap`/`order` only. The parent (including any of ITS pending
+# `addcols`/`dropcols` from this same session) is left completely
+# untouched — so `addcolumn!(rv, "X", ...); removecolumn!(rv, "X")` in
+# one session hides "X" from the rest of THIS view's own access, but
+# "X" is still written to the parent at flush (matches real casacore
+# exactly: `RefTable::removeColumn` never calls
+# `baseTabPtr_p->removeColumn`, so a column dropped from a RefTable view
+# never disappears from the table it was really stored in).
 
 """
     RefEditTable
@@ -75,10 +84,10 @@ Row-*count* changes have no RefTable analogue in casacore itself (a
 selection's rows are fixed at query time, and removing a RefTable row
 only shrinks the in-memory selection, never touching the parent) —
 `addrows!`/`removerows!` are not supported on a `RefEditTable`; build a
-new `RefTable` via `query` instead. `addcolumn!` IS supported (it adds
-to the parent's schema, matching `RefTable::addColumn`); `removecolumn!`
-is not (casacore's own version is a pure view-level hide, a different
-shape from ours — a future phase).
+new `RefTable` via `query` instead. `addcolumn!` adds to the parent's
+schema, matching `RefTable::addColumn`; `removecolumn!` only hides a
+column from this view (the parent keeps it), matching `RefTable::
+removeColumn` — see its own docstring.
 """
 function edit(rt::RefTable)
     rt.parent isa Table || error(
@@ -172,5 +181,21 @@ function addcolumn!(t::RefEditTable, name::AbstractString, data::AbstractVector;
     push!(t.parent.addcols, (desc, kind, full))
     t.namemap[name] = name
     push!(t.order, name)
+    return t
+end
+
+"""
+    removecolumn!(t::RefEditTable, name) -> t
+
+Hide `name` from this view — matches `RefTable::removeColumn`: only the
+VIEW's own column list is edited. The parent's actual column (real
+storage, and anything else about the parent's own edit session) is left
+completely untouched — a column "removed" from a RefTable view is still
+there in the table it's really stored in, exactly as in casacore.
+"""
+function removecolumn!(t::RefEditTable, name::AbstractString)
+    haskey(t.namemap, name) || error("removecolumn!: no column \"$name\" in this view")
+    delete!(t.namemap, name)
+    filter!(!=(name), t.order)
     return t
 end

@@ -391,3 +391,45 @@ end
         @test ct[:W][:] == [0.0, 0.0, 0.0, 10.0, 20.0, 30.0]
     end
 end
+
+# Phase 127: removecolumn! on a RefEditTable -- a pure view-level hide,
+# matching RefTable::removeColumn exactly: the parent's real storage
+# (and anything pending in its own edit session) is never touched.
+@testset "edit — removecolumn! on a RefEditTable view (Phase 127)" begin
+    dir = joinpath(mktempdir(), "rrc.tab")
+    n = 5
+    write_table(dir, "T", ["K" => collect(Int32, 1:n), "V" => Float64.(1:n)]; nrow = n)
+
+    rt = query(readtable(dir), "K > 2")           # rows 3,4,5
+    edit(rt) do rv
+        removecolumn!(rv, "V")
+        @test_throws ErrorException rv[:V]        # hidden for the rest of THIS view
+        @test_throws ErrorException removecolumn!(rv, "V")   # already gone from the view
+        @test_throws ErrorException removecolumn!(rv, "NOPE")
+    end
+
+    # the parent's actual column is completely untouched -- it's still
+    # there, unchanged, exactly as casacore's RefTable::removeColumn
+    r2 = readtable(dir)
+    @test "V" in columnnames(r2)
+    @test column(r2, "V")[:] == Float64.(1:n)
+
+    # a column added THIS session and then hidden from the view is still
+    # written to the parent at flush -- removecolumn! never reaches
+    # t.parent, matching real casacore's own "still stored" semantics
+    rt2 = query(readtable(dir), "K > 2")
+    edit(rt2) do rv
+        addcolumn!(rv, "TMP", [1.0, 2.0, 3.0])
+        removecolumn!(rv, "TMP")
+        @test_throws ErrorException rv[:TMP]
+    end
+    r3 = readtable(dir)
+    @test "TMP" in columnnames(r3)
+    @test column(r3, "TMP")[:] == [0.0, 0.0, 1.0, 2.0, 3.0]
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:V][:] == Float64.(1:n)
+        @test ct[:TMP][:] == [0.0, 0.0, 1.0, 2.0, 3.0]
+    end
+end
