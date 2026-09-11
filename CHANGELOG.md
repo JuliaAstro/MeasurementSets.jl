@@ -2857,3 +2857,62 @@ returns `0.0` instead, a documented, pre-existing, intentional
 divergence unrelated to this phase's fix). 6 new assertions in that
 testset plus the corrected pseudo-types testset; full mscal suite (557
 tests standalone) green.
+
+### Phase 123 — `TiledDataStMan` feasibility investigation
+
+Investigation-only phase (no code change), following the Phase
+116/118 discipline of reading real casacore source before making any
+scoping claim. Read `tables/DataMan/TiledDataStMan.{h,cc}` +
+`TiledDataStManAccessor.{h,cc}` + `TSMCube.cc`'s `putObject`/
+`extendCoordinates`.
+
+**Confirmed real, not a dead end** (unlike Phase 116's
+`RetypedArrayEngine`, which has zero real callers anywhere in
+casacore): `ms/MSOper/NewMSSimulator.cc` (the backend of CASA's
+`simobserve`/`simalma` simulator tool) binds `DATA`/`MODEL_DATA`/
+`SIGMA`/`FLAG` through it, and `ms/MSOper/MSFlagger.cc` uses it to add
+an on-demand tiled `FLAG_CATEGORY` column — a real path CASA's
+flagging tools can trigger on an existing MS. So a simulated MS, or a
+real MS that has been through certain flagging operations, can
+genuinely carry a column this package currently can't read.
+
+**Key differences from the already-implemented `TiledShapeStMan`/
+`TiledColumnStMan`** (Phase 11): explicit, caller-controlled
+row→hypercube assignment via id-column *values* (not auto-derived from
+cell shape), and id/coordinate columns bound to the storage manager
+itself — both were explicit non-goals of Phase 11's own plan.
+
+**Two findings that matter for a future implementation:** (1) the
+on-disk id/coordinate-value format (`TSMCube::putObject`, `ios <<
+values_p`) is a plain casacore `Record` — exactly what this package's
+`read_record`/`write_record` already handle byte-for-byte since
+Phase 1/6, not a new serialization problem. (2) **TaQL's `CREATE TABLE
+... DMINFO [...]` cannot construct a `TiledDataStMan`-bound table at
+all** — live-verified against real Casacore.jl: a
+`DMINFO [TYPE="TiledDataStMan", ...]` clause throws `"RecordInterface:
+field Hypercolumn_TSMd is unknown"`, because the hypercolumn
+id/coordinate/data grouping (`defineHypercolumn`) is a C++-API-only
+call with no TaQL surface. Explains the storage manager's rarity in
+practice and rules out a `tableCommand`-based oracle for a future
+phase — the Dysco-precedent `casatools.table.create(...; dminfo=...)`
+route (Phase 18) would be the fixture-generation path instead.
+
+**Confirmed graceful degradation**: `readtable()` on a table carrying
+an unsupported `TiledDataStMan` column already opens cleanly (nothing
+about opening a `Table` needs to understand a bound DM's internals);
+only touching that specific column raises the existing clear
+`"data manager \"TiledDataStMan\" not yet supported (column data)"`
+error — the same generic unregistered-DM path every not-yet-supported
+manager went through before its own phase landed (Dysco pre-Phase-18,
+the virtual engines pre-Phase-12). No crash, no effect on the rest of
+the table.
+
+**Conclusion**: a real, legitimate, scoped future phase — not
+infeasible — of similar-or-larger size to Phase 11, needing (a) an
+id/coordinate-column read+write path served from each cube's own
+`values_p` Record instead of a regular storage manager, (b) explicit
+id-value-keyed row→cube lookup instead of the interval-map scheme
+every currently-implemented Tiled* wrapper uses, and (c) a
+`casatools`-authored fixture as the write-side oracle. Plan
+Scope-notes' "Still unsupported" bullet reworded to separate it from
+the genuinely infeasible `RetypedArrayEngine`. No test-count change.
