@@ -251,17 +251,24 @@ end
         "pft" => "mscal.stokes(DATA, 'PFtotal')", "pfl" => "mscal.stokes(DATA, 'PFlinear')",
         "mixed" => "mscal.stokes(DATA, 'I,Ptotal')"])
     iquv = column(q, "iquv")[1]
-    I, Q, U, V = real.(iquv[:, 1])
+    Iq, Qq, Uq, Vq = iquv[:, 1]                    # complex I,Q,U,V (V has Im != 0 here)
+    I, Q, U, V = real.((Iq, Qq, Uq, Vq))
     @test I ≈ 5.0 && Q ≈ 1.0 && U ≈ -0.4 && V ≈ 1.0
-    @test real(column(q, "pt")[1][1, 1]) ≈ sqrt(Q^2 + U^2 + V^2)
-    @test real(column(q, "pl")[1][1, 1]) ≈ sqrt(Q^2 + U^2)
+    @test imag(Vq) ≈ 2.0                           # exercises the |V|² (not real(V)²) fix
+    # Phase 122: real casacore sums |Q|²+|U|²+|V|² (complex magnitude
+    # squared = real(z*conj(z))), not real(z)² -- live-verified against
+    # real Casacore.jl (see the _stokes_pseudo doc comment).
+    ptotal_ref = sqrt(abs2(Qq) + abs2(Uq) + abs2(Vq))
+    plinear_ref = sqrt(abs2(Qq) + abs2(Uq))
+    @test real(column(q, "pt")[1][1, 1]) ≈ ptotal_ref
+    @test real(column(q, "pl")[1][1, 1]) ≈ plinear_ref
     @test real(column(q, "pa")[1][1, 1]) ≈ 0.5 * atan(U, Q)
-    @test real(column(q, "pft")[1][1, 1]) ≈ sqrt(Q^2 + U^2 + V^2) / I
-    @test real(column(q, "pfl")[1][1, 1]) ≈ sqrt(Q^2 + U^2) / I
+    @test real(column(q, "pft")[1][1, 1]) ≈ ptotal_ref / abs(Iq)
+    @test real(column(q, "pfl")[1][1, 1]) ≈ plinear_ref / abs(Iq)
     # a physical + a pseudo type in the same call
     mixed = column(q, "mixed")[1]
     @test real(mixed[1, 1]) ≈ I
-    @test real(mixed[2, 1]) ≈ sqrt(Q^2 + U^2 + V^2)
+    @test real(mixed[2, 1]) ≈ ptotal_ref
 
     # unit: I == 0 -> the fractional forms return 0 (not NaN/Inf)
     zc = reshape(ComplexF32[0, 0, 0, 0], 4, 1)
@@ -1066,18 +1073,38 @@ if _HAVE_TAQL
 
     @testset "TaQL-lite — mscal.stokes() vs real TaQL" begin
         ts = try
-            _taqlcmd("SELECT mscal.stokes(DATA, 'I') AS SI, mscal.stokes(DATA) AS SA " *
-                     "FROM \$1", CCT.Table(SAMPLE_MS))
+            _taqlcmd("SELECT mscal.stokes(DATA, 'I') AS SI, mscal.stokes(DATA) AS SA, " *
+                     "mscal.stokes(DATA, 'Ptotal') AS PT, mscal.stokes(DATA, 'Plinear') AS PL, " *
+                     "mscal.stokes(DATA, 'Pangle') AS PA, mscal.stokes(DATA, 'PFtotal') AS PFT, " *
+                     "mscal.stokes(DATA, 'PFlinear') AS PFL FROM \$1", CCT.Table(SAMPLE_MS))
         catch
             nothing
         end
         if ts !== nothing
             main = readtable(SAMPLE_MS; precision = :full)
             q = query(main, "rownumber() >= 1"; select = [
-                "si" => "mscal.stokes(DATA, 'I')", "sa" => "mscal.stokes(DATA)"])
+                "si" => "mscal.stokes(DATA, 'I')", "sa" => "mscal.stokes(DATA)",
+                "pt" => "mscal.stokes(DATA, 'Ptotal')", "pl" => "mscal.stokes(DATA, 'Plinear')",
+                "pa" => "mscal.stokes(DATA, 'Pangle')", "pft" => "mscal.stokes(DATA, 'PFtotal')",
+                "pfl" => "mscal.stokes(DATA, 'PFlinear')"])
             for i in (5, 123, 400)
                 @test vec(column(q, "si")[i]) ≈ vec(ComplexF64.(ts[:SI][i])) rtol = 1e-5
                 @test column(q, "sa")[i] ≈ ComplexF64.(ts[:SA][i]) rtol = 1e-5
+                # Phase 122: live-verified real casacore uses |Q|²+|U|²+|V|²
+                # (complex magnitude squared) for Ptotal/Plinear, and abs(I)
+                # (not real(I)) for the PFtotal/PFlinear divisor.
+                @test real(column(q, "pt")[i][1, 1]) ≈ real(ts[:PT][i][1, 1]) rtol = 1e-4
+                @test real(column(q, "pl")[i][1, 1]) ≈ real(ts[:PL][i][1, 1]) rtol = 1e-4
+                @test real(column(q, "pa")[i][1, 1]) ≈ real(ts[:PA][i][1, 1]) rtol = 1e-4
+                # I == 0 at this cell -> real casacore divides by 0 (NaN);
+                # we deliberately return 0.0 instead (documented guard).
+                if isfinite(real(ts[:PFT][i][1, 1]))
+                    @test real(column(q, "pft")[i][1, 1]) ≈ real(ts[:PFT][i][1, 1]) rtol = 1e-4
+                    @test real(column(q, "pfl")[i][1, 1]) ≈ real(ts[:PFL][i][1, 1]) rtol = 1e-4
+                else
+                    @test real(column(q, "pft")[i][1, 1]) == 0.0
+                    @test real(column(q, "pfl")[i][1, 1]) == 0.0
+                end
             end
         else
             @info "mscal.stokes UDF not available in this casacore build; skipping"

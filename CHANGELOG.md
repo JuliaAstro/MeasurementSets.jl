@@ -2791,3 +2791,69 @@ query(main, "mscal.baseline('DA01&DV01;!DA02&DV02')")   # A intersected with NOT
   sample MS's `EXPOSURE` happens to be uniform, so the mean and the
   first-row value coincide there). Full existing mscal (533) +
   writer/edit/schema (305) suites pass unchanged.
+
+### Phase 122 — `mscal.stokes()` pseudo-type real-TaQL cross-check: found and fixed two real formula bugs
+
+**Context.** Phase 109 implemented `mscal.stokes()`'s pseudo output
+types (`Ptotal`/`Plinear`/`Pangle`/`PFtotal`/`PFlinear`) from a *reading*
+of casacore's `Stokes::StokesTypes` documentation, with the plan's own
+note that Phase 109 had "no casacore/CASA oracle for the formulas" — a
+carry-over from the even earlier Phase 78 plan. This phase's whole point
+was to check that assumption. It was wrong on both counts: a real,
+complete implementation exists in `ms/MeasurementSets/StokesConverter.cc`
+(`StokesConverter::convert(Array<Complex>&, ...)`, verbatim-quoted
+during investigation), and reading it — then live-verifying every
+formula against real Casacore.jl with a deliberately non-real-valued
+test cell (`V = 1 + 2i`, not `V = 1 + 0i`) — found **two real, separate
+bugs** in our Phase 109 port, not the one speculative discrepancy the
+Phase 109/122 plans anticipated:
+
+1. **`Ptotal`/`Plinear` used `real(z)²` instead of `|z|²`.** Real
+   casacore sums `real(z · conj(z))` — the full complex magnitude
+   squared — for each of Q, U, V (and Q, U for `Plinear`), not the
+   square of the real part alone. For `Q=0.5+0.1i, U=-0.3+0.1i,
+   V=1+1.2i` real casacore gives `Ptotal ≈ 1.67332`, while the old
+   `real(Q)²+real(U)²+real(V)²` formula this package shipped gave
+   `≈ 1.15756` — a genuinely wrong answer whenever a visibility's
+   derived Q/U/V has a non-negligible imaginary part (routine for real
+   cross-correlation data, not just a theoretical edge case).
+2. **`PFtotal`/`PFlinear` divided by `real(I)` instead of `abs(I)`** —
+   confirms the discrepancy the Phase 109/122 plans had already
+   flagged as a candidate bug (casacore's `amplitude(iquv.row(0))` is
+   the complex modulus, not the real part).
+
+`Pangle = 0.5·atan2(real(U), real(Q))` was already correct — casacore's
+own source comment explicitly notes "angle is not well defined for
+complex quantities... only makes sense if Q and U phase differs by 0 or
+180 degrees", and its code does use `real(...)` there deliberately.
+
+**Fix** (`src/taql/mscal.jl`): `_stokes_pseudo` now takes `Complex`
+`I,Q,U,V` directly (was `Real`, fed `real(...)` values from the call
+site) and uses `abs2(Q)+abs2(U)+abs2(V)` (== `real(z·conj(z))` summed)
+for `Ptotal`/`Plinear`/`PFtotal`/`PFlinear`, `abs(I)` for the `PF*`
+divisor, and `real(U)`/`real(Q)` only for `Pangle` — a verbatim match to
+`StokesConverter::convert`'s per-case logic, confirmed line-for-line.
+
+**Live-verified against real Casacore.jl** (the exact discipline this
+session's earlier phases established): a purpose-built 1-row/1-chan
+RR/RL/LR/LL cell with `V = RR - LL = 1 + 2i` (genuinely complex, not
+coincidentally real) — real casacore's `Ptotal` matched the
+`abs2`-based formula to float32 precision and diverged sharply from the
+old `real(z)²` formula; `PFtotal`/`PFlinear` matched `/abs(I)` and
+diverged from `/real(I)`. Both fixes confirmed simultaneously, not just
+argued from source reading.
+
+Existing `test/taql_mscal_tests.jl` "mscal.stokes() pseudo types" test
+updated to use the same complex-magnitude formula for its expected
+values (its original fixture already had `V = 1 + 2i` under the hood —
+`real(V) ≈ 1.0` — so the old assertion was silently checking the wrong
+number the whole time; this phase's fix makes the test assert the
+*right* one). The existing "mscal.stokes() vs real TaQL" cross-check
+testset extended with `Ptotal`/`Plinear`/`Pangle`/`PFtotal`/`PFlinear`
+against real TaQL on the actual sample-MS `DATA` column (guarding the
+`PFtotal`/`PFlinear` comparison for cells where `I == 0` — real casacore
+divides by zero there and returns `NaN`; this package deliberately
+returns `0.0` instead, a documented, pre-existing, intentional
+divergence unrelated to this phase's fix). 6 new assertions in that
+testset plus the corrected pseudo-types testset; full mscal suite (557
+tests standalone) green.
