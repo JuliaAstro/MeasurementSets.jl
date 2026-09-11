@@ -427,6 +427,19 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
             # pbatten(bl): valexpr * response (simulate the beam's attenuation)
             return TQLArith(startswith(fn, "pbcorr") ? (/) : (*), args[1], resp)
         end
+        if fn in ("riseset", "riseset1", "riseset2")
+            0 <= n <= 2 || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn([elev0][, dir]) in \"$src\""))
+            elev0 = 0.0
+            if n >= 1
+                (args[1] isa TQLLit && args[1].value isa Real) || throw(ArgumentError(
+                    "TaQL-lite: mscal.$fn's elevation-cutoff argument must be a " *
+                    "numeric literal (radians) in \"$src\""))
+                elev0 = Float64(args[1].value)
+            end
+            dir = n == 2 ? _mscal_dir_arg(args[2], src) : ""
+            return TQLMScal(fn * ":" * string(elev0), dir)
+        end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
         n == 0 && return TQLMScal(fn)

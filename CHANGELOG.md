@@ -2136,3 +2136,37 @@ query(fld, "meas.riseset(RA, DEC, TIME/86400, X, Y, Z)[1] < TIME/86400")
   (`meas.riseset`, `meas.freq`/`meas.doppler`/`meas.rv`); the
   column-MEASINFO-driven direction-argument form and
   `meas.pos`/`meas.itrfxyz`/`meas.wgs` position UDFs remain non-goals.
+
+### Phase 105 — `mscal.riseset()`: automatic rise/set for the row's own antenna
+
+```julia
+query(main, "mscal.riseset1()[1] < TIME/86400")             # already risen
+groupby(main, "FIELD_ID"; select = ["s" => "gmean(mscal.riseset1(0.2)[2])"])
+```
+
+- `mscal.riseset[1|2]([elev0][, dir])` → `[rise_mjd, set_mjd]` wires the
+  Phase 104 `meas.riseset` / `_riseset` machinery into the automatic
+  per-row `mscal.*` geometry — ANTENNA1's/ANTENNA2's own ITRF position
+  (`1`/`2` suffix; bare = array centre, same convention as every other
+  `mscal.*` direction function) and `dir` (default `FIELD.PHASE_DIR`,
+  same optional-direction-argument grammar as `mscal.el1('SUN')` etc.),
+  for the UTC day containing the row's `TIME`. `elev0` (rad, default 0)
+  is a numeric literal baked into the function's parsed key (like
+  `mscal.pbresponse`'s beam spec), not a per-row expression.
+- Memoized per `(antenna-or-centre, direction, UTC day)` rather than per
+  exact `TIME` — rise/set only changes once a day, so this is
+  effectively free even over a MAIN table with many integrations per day.
+- **Bug found and fixed during implementation** (only visible once a
+  query used two different `elev0` values in one call): the memo key
+  didn't include `elev0`, so `mscal.riseset1(0.2)` silently returned the
+  `elev0=0.0` result whenever both were evaluated in the same
+  `_mscal_columns` call. Fixed by keying the memo on
+  `(antenna, direction, day, elev0)`.
+- No casacore/CASA oracle (mscal.* extension over Phase 104's own
+  meas.riseset, itself independently derived). Verified: parser unit
+  tests for the encoded key + dir/elev0 threading; on the sample MS,
+  both rise and set are finite for a real antenna/field/day, the `2`
+  suffix gives ANTENNA2's own (slightly different) window, and a
+  tighter elevation cutoff never widens the window (`rise2 >= rise`,
+  `set2 <= set` at every sampled row) — this is exactly the assertion
+  that caught the memo-key bug above.

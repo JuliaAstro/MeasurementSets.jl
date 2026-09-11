@@ -92,8 +92,10 @@ carries a `QuantumUnits` keyword; needs the Unitful extension),
 `mscal.ha1()` / `mscal.hadec1()` / `mscal.azel1()` / `mscal.az1()` /
 `mscal.el1()` / `mscal.pa1()` (parallactic angle) / `mscal.last1()`
 (local sidereal time) / `mscal.itrf()` / `mscal.uvw_j2000()` /
-`mscal.delay()` — computed per MAIN row from `TIME` + the `ANTENNA` /
-`FIELD` subtables (`query(main, "mscal.el1() > 0.3")`,
+`mscal.delay()` / `mscal.riseset[1|2]([elev0][, dir])` (rise/set MJD for
+that antenna's own position and `dir`, the `meas.riseset` machinery
+wired in automatically) — computed per MAIN row from `TIME` + the
+`ANTENNA` / `FIELD` subtables (`query(main, "mscal.el1() > 0.3")`,
 `groupby(main, "FIELD_ID"; select = ["az" => "gmean(mscal.az1())"])`).
 The direction functions take an optional direction argument — a body
 name (`mscal.el1('SUN')`), a FIELD direction column

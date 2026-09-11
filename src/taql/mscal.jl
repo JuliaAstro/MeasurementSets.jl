@@ -16,6 +16,7 @@
 struct TQLMScal <: TQLExpr
     fn::String        # "ha"/"ha1"/"ha2" "hadec*" "azel*" "az*"/"el*"
                       # "pa*" "last*" "itrf" "uvw_j2000" "delay"
+                      # "riseset[1|2]:<elev0>" (Phase 105)
     dir::String       # "" (use FIELD.PHASE_DIR) | a body name ("SUN") |
                       # a FIELD direction column ("DELAY_DIR") | "[ra,dec]"
 end
@@ -151,7 +152,8 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     all(c -> c in cn, ("ANTENNA1", "FIELD_ID", "TIME")) || error(
         "mscal.* needs a MAIN table with ANTENNA1, FIELD_ID and TIME columns")
     bases = [first(_mscal_split_dir(f)) for f in fns]
-    need2 = any(f -> endswith(f, "2") || f == "delay" || startswith(f, "pbresponsebl:"), bases)
+    need2 = any(f -> endswith(f, "2") || f == "delay" || startswith(f, "pbresponsebl:") ||
+                     startswith(f, "riseset2:"), bases)
     (need2 && !("ANTENNA2" in cn)) && error(
         "mscal.* needs an ANTENNA2 column for a `*2` / delay function")
 
@@ -308,10 +310,32 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         end
     end
 
+    # Phase 105: `mscal.riseset[1|2]([elev0][, dir])` -- the rise/set MJD
+    # of `dir` (default FIELD.PHASE_DIR) for the antenna's own ITRF
+    # position, memoized per (antenna-or-centre, direction, UTC day) --
+    # rise/set only changes once a day, unlike every other mscal.*
+    # geometry function which is memoized per exact TIME.
+    risememo = Dict{Tuple{Int,Any,Float64,Float64},Vector{Float64}}()
+    function _riseset_for(antid::Int, dir::AbstractString, elev0::Float64, i::Int)
+        dj, dkey = _djfor(dir, i)
+        pkey = antid >= 0 ? antid : -obsid[i] - 1
+        day = floor(tsec[i] / 86400.0)
+        get!(risememo, (pkey, dkey, day, elev0)) do
+            pos = antid >= 0 ? antpos[antid + 1] : centrepos[obsid[i]]
+            mjd = tsec[i] / 86400.0
+            collect(Float64, _riseset(dj.lon, dj.lat, mjd, _pvec(pos)..., elev0))
+        end
+    end
+
     out = Dict{String,AbstractVector}()
     for spec in fns
         f, dir = _mscal_split_dir(spec)
-        if startswith(f, "pbresponsebl:")
+        if (rm = match(r"^riseset(1|2)?:(.+)$", f)) !== nothing
+            suf = rm.captures[1]
+            elev0 = parse(Float64, rm.captures[2])
+            antidfn = suf == "2" ? (i -> a2[i]) : suf == "1" ? (i -> a1[i]) : (i -> -1)
+            out[_mscal_key(spec)] = [_riseset_for(antidfn(i), dir, elev0, i) for i in 1:n]
+        elseif startswith(f, "pbresponsebl:")
             respfn = _pb_response_fn(f[(length("pbresponsebl:") + 1):end])
             out[_mscal_key(spec)] = Float64[
                 respfn(_pb_offset(_pointing_azel(a1[i], i), _cache(a1[i], dir, i).azel)) *
