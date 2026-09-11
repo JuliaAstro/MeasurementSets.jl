@@ -68,6 +68,71 @@ end
 
 _pvec(p) = (p.x, p.y, p.z)
 
+# Phase 101/103: parse a `mscal.pbresponse` beam spec into an
+# `offset::(dlon,dlat) -> power::Float64` closure (a scalar circular
+# beam ignores the offset direction via `power_response`'s generic
+# 2-D-offset fallback in beam.jl).  Forms:
+#   "gaussian:HPBW"                     -- GaussianBeam
+#   "airy:DIAMETER:FREQ[:BLOCKAGE]"     -- AiryBeam
+#   "ellipse:HMAJ:HMIN:PA"              -- EllipticalGaussianBeam
+# any of which may carry a trailing ":squint:DLON:DLAT" to wrap the base
+# beam in a `SquintBeam` (feed/beam pointing offset, radians).
+# Called both at parse time (early validation in `functions.jl`, closure
+# discarded) and at column-build time (the closure is used).
+function _pb_num(p::AbstractString, spec::AbstractString)
+    v = tryparse(Float64, strip(p))
+    v === nothing && throw(ArgumentError(
+        "mscal.pbresponse: bad numeric parameter \"$p\" in \"$spec\""))
+    v
+end
+
+function _pb_response_fn(spec::AbstractString)
+    parts = split(spec, ':')
+    isempty(parts) && throw(ArgumentError("mscal.pbresponse: empty beam spec"))
+    kind = lowercase(strip(parts[1]))
+    rest = parts[2:end]
+    sqidx = findfirst(p -> lowercase(strip(p)) == "squint", rest)
+    squint = nothing
+    if sqidx !== nothing
+        sqparams = rest[(sqidx + 1):end]
+        length(sqparams) == 2 || throw(ArgumentError(
+            "mscal.pbresponse: \"squint:dlon:dlat\" takes 2 parameters, got " *
+            "$(length(sqparams)) in \"$spec\""))
+        squint = (_pb_num(sqparams[1], spec), _pb_num(sqparams[2], spec))
+        rest = rest[1:(sqidx - 1)]
+    end
+    nums = [_pb_num(p, spec) for p in rest]
+    freq = 1.0
+    base = if kind == "gaussian"
+        length(nums) == 1 || throw(ArgumentError(
+            "mscal.pbresponse: \"gaussian:HPBW\" takes 1 parameter, got $(length(nums))"))
+        GaussianBeam(nums[1], 1.0)
+    elseif kind == "airy"
+        length(nums) in (2, 3) || throw(ArgumentError(
+            "mscal.pbresponse: \"airy:diameter:freq[:blockage]\" takes 2 or 3 " *
+            "parameters, got $(length(nums))"))
+        freq = nums[2]
+        AiryBeam(nums[1]; blockage = length(nums) == 3 ? nums[3] : 0.0)
+    elseif kind == "ellipse"
+        length(nums) == 3 || throw(ArgumentError(
+            "mscal.pbresponse: \"ellipse:hmaj:hmin:pa\" takes 3 parameters, got " *
+            "$(length(nums))"))
+        EllipticalGaussianBeam(nums[1], nums[2], nums[3], 1.0)
+    else
+        throw(ArgumentError(
+            "mscal.pbresponse: unknown beam kind \"$kind\" (gaussian / airy / ellipse) " *
+            "in \"$spec\""))
+    end
+    beam = squint === nothing ? base : SquintBeam(base, squint)
+    return offset -> power_response(beam, offset, freq)
+end
+
+# the 2-D tangent-plane offset (dlon,dlat) of the nominal (target)
+# direction from the antenna's actual pointing (the beam centre) --
+# both AZEL (lon,lat) tuples.
+_pb_offset(actual_azel::NTuple{2}, nominal_azel::NTuple{2}) =
+    pointing_offset(MDirection{AZEL}(actual_azel...), MDirection{AZEL}(nominal_azel...))
+
 """
     _mscal_columns(t, fns) -> Dict{String,AbstractVector}
 
@@ -86,7 +151,7 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     all(c -> c in cn, ("ANTENNA1", "FIELD_ID", "TIME")) || error(
         "mscal.* needs a MAIN table with ANTENNA1, FIELD_ID and TIME columns")
     bases = [first(_mscal_split_dir(f)) for f in fns]
-    need2 = any(f -> endswith(f, "2") || f == "delay", bases)
+    need2 = any(f -> endswith(f, "2") || f == "delay" || startswith(f, "pbresponsebl:"), bases)
     (need2 && !("ANTENNA2" in cn)) && error(
         "mscal.* needs an ANTENNA2 column for a `*2` / delay function")
 
@@ -183,6 +248,45 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         end
     end
 
+    # Phase 101: `mscal.pbresponse('gaussian:HPBW' | 'airy:D:FREQ[:BLK]'
+    # [, dir])` -- primary-beam response toward `dir` (default
+    # FIELD.PHASE_DIR) as seen through ANTENNA1's *actual* pointing
+    # (POINTING.DIRECTION) rather than its nominal position -- the
+    # attenuation from a pointing/tracking error. Both directions are
+    # brought to AZEL and compared with the great-circle offset.
+    need_pb = any(b -> startswith(b, "pbresponse"), bases)
+    pointing_lut = Dict{Int,Vector{Tuple{Float64,Int}}}()  # antenna -> sorted [(TIME, row)]
+    pt = nothing
+    if need_pb
+        haskey(subs, "POINTING") || error("mscal.pbresponse: needs a POINTING subtable")
+        pt = readtable(subs["POINTING"])
+        pt_ant = Int.(column(pt, "ANTENNA_ID")[:])
+        pt_time = Float64.(column(pt, "TIME")[:])
+        for r in 1:nrow(pt)
+            push!(get!(() -> Tuple{Float64,Int}[], pointing_lut, pt_ant[r]), (pt_time[r], r))
+        end
+        for v in values(pointing_lut)
+            sort!(v; by = first)
+        end
+    end
+    function _pointing_row(antid::Int, t::Float64)
+        v = get(pointing_lut, antid, nothing)
+        (v === nothing || isempty(v)) && error(
+            "mscal.pbresponse: no POINTING rows for antenna $antid")
+        k = searchsortedlast(v, (t, typemax(Int)); by = first)
+        v[max(k, 1)][2]
+    end
+    pbmemo = Dict{Tuple{Int,Float64},NTuple{2,Float64}}()   # (antenna, TIME) -> actual azel
+    function _pointing_azel(antid::Int, i::Int)
+        get!(pbmemo, (antid, tsec[i])) do
+            r = _pointing_row(antid, tsec[i])
+            d = measure(pt, "DIRECTION", r; epoch = epochs[i])
+            a = measconvert(d, AZEL;
+                            frame = MeasFrame(epoch = epochs[i], position = antpos[antid + 1]))
+            (a.lon, a.lat)
+        end
+    end
+
     # memo: (position key, direction key, TIME seconds) -> frame-converted values.
     # antid >= 0 is an antenna; antid < 0 means the array centre for
     # OBSERVATION_ID `-antid-1`.
@@ -207,7 +311,18 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     out = Dict{String,AbstractVector}()
     for spec in fns
         f, dir = _mscal_split_dir(spec)
-        if f == "delay"
+        if startswith(f, "pbresponsebl:")
+            respfn = _pb_response_fn(f[(length("pbresponsebl:") + 1):end])
+            out[_mscal_key(spec)] = Float64[
+                respfn(_pb_offset(_pointing_azel(a1[i], i), _cache(a1[i], dir, i).azel)) *
+                respfn(_pb_offset(_pointing_azel(a2[i], i), _cache(a2[i], dir, i).azel))
+                for i in 1:n]
+        elseif startswith(f, "pbresponse:")
+            respfn = _pb_response_fn(f[(length("pbresponse:") + 1):end])
+            out[_mscal_key(spec)] = Float64[
+                respfn(_pb_offset(_pointing_azel(a1[i], i), _cache(a1[i], dir, i).azel))
+                for i in 1:n]
+        elseif f == "delay"
             v = Vector{Float64}(undef, n)
             for i in 1:n
                 x = _cache(-1, dir, i).itrf_xyz

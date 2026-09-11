@@ -116,7 +116,25 @@ index ranges `a~b`/`a~b^step` or `CHAN_FREQ` ranges `f1~f2GHz`);
 `mscal.chan('0:5~20')` returns the per-row selected-channel `BitVector`.
 `mscal.corr('RR,LL')` (polarization-setup match) and `mscal.feed('0 & 1')`
 (the `mscal.baseline` form on `FEED1`/`FEED2`) round out the selection
-set.  **`meas.*`** (a subset of casacore's `libmeas` UDFs) does measure
+set.  **`mscal.pbresponse('gaussian:HPBW' | 'airy:D:FREQ[:BLK]' |
+'ellipse:HMAJ:HMIN:PA' [':squint:DLON:DLAT'] [, dir])`**
+(a MeasurementSets extension, not a real `derivedmscal` UDF) is the
+[`GaussianBeam`](@ref) / [`AiryBeam`](@ref) / [`EllipticalGaussianBeam`](@ref)
+power response toward `dir` (default `FIELD.PHASE_DIR`) as seen through
+ANTENNA1's *actual* pointing (`POINTING.DIRECTION`) — the attenuation
+from a pointing/tracking error, computed automatically from the row's
+`TIME`/`ANTENNA1`/`FIELD_ID` geometry, matching how `mscal.azel1()` etc.
+work. A trailing `:squint:DLON:DLAT` on any spec wraps the beam in a
+[`SquintBeam`](@ref). `mscal.pbresponsebl(...)` evaluates the beam at
+*both* ANTENNA1's and ANTENNA2's own pointing and multiplies the two
+responses — the joint baseline response.
+`mscal.pbcorr(valexpr, 'spec' [, dir])` / `mscal.pbatten(valexpr, 'spec'
+[, dir])` (and their `...bl` per-baseline counterparts) are parser sugar
+for `valexpr / mscal.pbresponse(...)` / `valexpr * mscal.pbresponse(...)`
+— pass a `DATA`-like expression to primary-beam-correct (or simulate the
+attenuation of) an array cell in place, e.g. `update!(ms; set = ["DATA" =>
+"mscal.pbcorr(DATA, 'gaussian:0.008727')"])`.  **`meas.*`** (a
+subset of casacore's `libmeas` UDFs) does measure
 conversions on ordinary expressions:
 `meas.<frame>(['SRC', ]lon, lat[, mjd[, x, y, z]])` →
 `[lon, lat]` in `j2000` / `b1950` / `app` / `galactic` / `ecliptic` /
@@ -308,4 +326,6 @@ pure-numeric wrappers for filtering/computing on beam response directly:
 `pbgaussian(θ, hpbw)`, `pbairy(θ, diameter, freq[, blockage])`,
 `pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` — e.g.
 `query(cat, "pbairy(OFFSET, 25.0, 1.4e9) > 0.5")` on a source-catalogue
-table carrying a per-row pointing-centre offset.
+table carrying a per-row pointing-centre offset. **`mscal.pbresponse`**
+wires the geometry in automatically instead — see the `mscal.*` section
+above.

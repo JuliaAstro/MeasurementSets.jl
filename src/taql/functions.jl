@@ -331,6 +331,34 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
                 "TaQL-lite: mscal.$fn takes one selection-string argument in \"$src\""))
             return TQLMSSel(fn, _mssel_str_arg(args[1], src))
         end
+        if fn == "pbresponse" || fn == "pbresponsebl"
+            1 <= n <= 2 || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn('beamspec' [, dir]) in \"$src\""))
+            (args[1] isa TQLLit && args[1].value isa AbstractString) || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn's first argument must be a string " *
+                "literal beam spec (\"gaussian:HPBW\" / \"airy:D:FREQ[:BLK]\" / " *
+                "\"ellipse:HMAJ:HMIN:PA\", optionally \":squint:DLON:DLAT\") in \"$src\""))
+            beamspec = String(args[1].value)
+            _pb_response_fn(beamspec)      # validate now; the closure is rebuilt per-column
+            dir = n == 2 ? _mscal_dir_arg(args[2], src) : ""
+            return TQLMScal(fn * ":" * beamspec, dir)
+        end
+        if fn in ("pbcorr", "pbatten", "pbcorrbl", "pbattenbl")
+            2 <= n <= 3 || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn(valexpr, 'beamspec' [, dir]) in \"$src\""))
+            (args[2] isa TQLLit && args[2].value isa AbstractString) || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn's second argument must be a string literal " *
+                "beam spec (\"gaussian:HPBW\" / \"airy:D:FREQ[:BLK]\" / " *
+                "\"ellipse:HMAJ:HMIN:PA\") in \"$src\""))
+            beamspec = String(args[2].value)
+            _pb_response_fn(beamspec)      # validate now
+            dir = n == 3 ? _mscal_dir_arg(args[3], src) : ""
+            respname = endswith(fn, "bl") ? "pbresponsebl" : "pbresponse"
+            resp = TQLMScal(respname * ":" * beamspec, dir)
+            # pbcorr(bl): valexpr / response (true flux from an apparent one);
+            # pbatten(bl): valexpr * response (simulate the beam's attenuation)
+            return TQLArith(startswith(fn, "pbcorr") ? (/) : (*), args[1], resp)
+        end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
         n == 0 && return TQLMScal(fn)
