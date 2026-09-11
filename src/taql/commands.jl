@@ -393,13 +393,19 @@ open `Table`):
 * `SELECT …` with no `INTO`/`GIVING`              → [`query`](@ref), returns the result
 * `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…) [LIMIT n]`  → [`insert!`](@ref), returns `Int`
 * `INSERT [LIMIT n] INTO t SET c1 = v1, c2 = v2`   → [`insert!`](@ref), returns `Int`
+* `INSERT INTO t SELECT col [AS a], … FROM 'path' [WHERE cond] [LIMIT n]`
+  → [`insert!`](@ref) from a query of the table at `'path'`, returns `Int`
 
-`INSERT` values must be constant expressions (no column references).
-Clause keywords (`SET` / `WHERE` / `INTO` / `GIVING` / `FROM`) are found
-by a case-insensitive split; a quoted literal containing one of them is
-not supported — use the Julia functions for that. `GROUP BY` /
-aggregates in a `SELECT` string are not supported (use
-`copytable(dst, groupby(…))`).
+`INSERT … VALUES`/`SET` values must be constant expressions (no column
+references) — `INSERT … SELECT … FROM 'path'` is the row-copying form,
+its `col`s (and `WHERE`) are ordinary expressions over the *source*
+table (`*` selects every source column as-is; `AS a` renames a column
+to match `t`'s own column name). Clause keywords (`SET` / `WHERE` /
+`INTO` / `GIVING` / `FROM` / `SELECT`) are found by a case-insensitive
+split; a quoted literal containing one of them is not supported — use
+the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
+string are not supported (use `copytable(dst, groupby(…))`, or
+`insert!(t, groupby(…))`).
 """
 function taql(target, command::AbstractString)
     cmd = strip(command)
@@ -520,6 +526,27 @@ function _taql_insert(target, cmd::AbstractString)
             throw(ArgumentError("taql: INSERT has more than one LIMIT clause"))
         limit = Int(_taql_const(tm.captures[2]))
         cmd = String(tm.captures[1])
+    end
+    msel = match(r"^INSERT\s+INTO\s+\S+\s+SELECT\s+(.*?)\s+FROM\s+'([^']+)'\s*" *
+                r"(?:WHERE\s+(.+))?\s*$"is, cmd)
+    if msel !== nothing
+        collist = String(strip(msel.captures[1]))
+        src = readtable(String(msel.captures[2]))
+        wherestr = msel.captures[3] === nothing ? nothing : String(strip(msel.captures[3]))
+        if collist == "*" || isempty(collist)
+            select = [n => n for n in columnnames(src)]
+        else
+            select = Pair{String,String}[]
+            for piece in _split_commas(collist)
+                cm = match(r"^(.+?)(?:\s+AS\s+(\w+))?$"is, piece)
+                cm === nothing && throw(ArgumentError("taql: malformed column \"$piece\""))
+                srcname = String(strip(cm.captures[1]))
+                alias = cm.captures[2]
+                push!(select, (alias === nothing ? srcname : String(alias)) => srcname)
+            end
+        end
+        result = wherestr === nothing ? query(src, "TRUE"; select) : query(src, wherestr; select)
+        return insert!(target; values=result, limit)
     end
     mv = match(r"^INSERT\s+INTO\s+\S+\s*(?:[([]([^)\]]*)[)\]]\s*)?VALUES\s+(.+)$"is, cmd)
     if mv !== nothing

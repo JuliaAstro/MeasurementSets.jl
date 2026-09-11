@@ -2436,3 +2436,27 @@ copytable(dst, readtable(src))     # src's Hypercolumn_* private keywords now su
   plus an unrelated private key passing through either way. No
   casacore/CASA oracle needed (pure keyword passthrough, not a new
   binary format).
+
+### Phase 113 — `taql()`: `INSERT INTO t SELECT ... FROM 'path'`
+
+```julia
+taql(t, "INSERT INTO t SELECT * FROM 'src.ms/POINTING'")
+taql(t, "INSERT INTO t SELECT A AS X, B FROM 'src' WHERE A > 7")
+```
+
+- `taql()`'s `INSERT` string form gains the row-copying variant:
+  `INSERT INTO t SELECT col [AS a], … FROM 'path' [WHERE cond] [LIMIT
+  n]` — `*` selects every source column as-is, an explicit list may
+  rename a source column to match `t`'s own name (`A AS X`), `WHERE` is
+  an ordinary TaQL-lite condition over the *source* table, and `LIMIT`
+  reuses [`insert!`](@ref)'s existing cycling/truncating semantics.
+  Implemented as a thin wrapper: parses the clause, builds a
+  [`query`](@ref) of the source table, and calls `insert!(target;
+  values=result, limit)` — no new mutation machinery. Closes the
+  Phase 31 non-goal.
+- Unlike Phase 111's `UPDATE`/`DELETE` `ORDER BY`/`LIMIT` surprise,
+  this form **was live-verified against real Casacore.jl first**
+  (`INSERT INTO $1 SELECT A, B FROM 'src' WHERE A > 7`, `SELECT *`, and
+  an `AS` rename all spiked before writing the test) and matches our
+  own implementation's semantics exactly — a genuine real-TaQL
+  cross-check testset was added, not just hand-computed references.
