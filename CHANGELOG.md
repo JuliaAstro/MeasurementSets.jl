@@ -2592,3 +2592,47 @@ EllipticalGaussianBeam(0.005, 0.02, 0, 1.4e9)  # ArgumentError: hpbw_major >= hp
   full existing beam + `mscal.pbresponse`/`pbcorr`/`pbatten` test suites
   (104 + 500 tests) pass unchanged — no valid existing usage anywhere
   in the codebase violated any of the new invariants.
+
+### Phase 118 — `mscal.baseline()` antenna diameter/mount selection investigation
+
+- Investigated whether real casacore's baseline-selection surface has
+  any selection-by-physical-property (`DISH_DIAMETER`, `MOUNT`) syntax
+  beyond name/id/glob/regex. Traced `mscal.baseline(spec)`
+  (`derivedmscal/DerivedMC/UDFMSCal.cc:445-465`, the `BASELINE` case of
+  `UDFMSCal::getDataNode`) to confirm it is a **direct pass-through to
+  real casacore's own `MSAntennaGram`/`MSAntennaParse`**
+  (`msAntennaGramParseCommand`) — not a separate mini-grammar, so its
+  full syntax surface is exactly whatever the real MSSelection antenna
+  grammar supports. `grep -rin "diameter|mount"` across every file in
+  `ms/MSSel/` (all grammar `.yy`/`.ll` files, every `*Parse.cc`) and a
+  direct read of `MSAntennaIndex.h`'s public interface (`matchAntennaName`
+  / `matchAntennaRegexOrPattern` / `matchStationName` /
+  `matchAntennaNameAndStation` / `matchId` — id, name, and station only)
+  both confirm **zero** diameter/mount selection anywhere in casacore's
+  own antenna-selection machinery. **Confirmed absent, not missing** —
+  matches the earlier (correct) assumption; no code change needed.
+  Achievable today anyway via a plain `WHERE`/`join` on
+  `ANTENNA.DISH_DIAMETER` / `ANTENNA.MOUNT` (already fully general),
+  just not through `mscal.baseline`'s own spec-string syntax (which
+  real casacore doesn't have either).
+- **Incidental discovery, flagged for a future phase, not implemented
+  here** (out of this phase's chosen scope): reading `MSAntennaGram.yy`/
+  `.ll` end to end while investigating turned up the *real* form of
+  the Phase 80 non-goal "blregexlist" — Phase 115 investigated and
+  discarded a `[name1,name2]`-bracket-list guess (real casacore
+  rejects it). The actual grammar production is `blregexlist: BLREGEX
+  (COMMA BLREGEX)*`, where a `BLREGEX` token is a `/…/`-delimited regex
+  whose body contains a literal `&` (the lexer's own discriminator,
+  `MSAntennaGram.ll:76-86`: a `/…/` regex containing `&` becomes
+  `BLREGEX` instead of a plain per-name `REGEX`) — matched via
+  `MSAntennaParse::selectBLRegex` against the whole `"name1&name2"`
+  baseline string, not against each antenna name separately. Separately,
+  `MSAntennaGram.yy:150-163` shows `gbaseline: NOT baseline | baseline`
+  and `indexcombexpr: gbaseline | indexcombexpr SEMICOLON gbaseline` —
+  each `;`-joined term can syntactically carry its own independent
+  `NOT`, which suggests Phase 115's live-probed "`!` combined with `;`
+  silently drops the other term" finding may have a real, traceable
+  explanation in how `MSAntennaParse` *accumulates* results across
+  `;`-joined terms (rather than being a bug) — worth revisiting with
+  this grammar-level context before either implementing real
+  `BLREGEX` support or reconsidering the Phase 115 `!`+`;` refusal.
