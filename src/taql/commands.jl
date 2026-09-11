@@ -499,6 +499,23 @@ function _paren_groups(s::AbstractString)
     return out
 end
 
+# a `[a, b, ...]` array literal evaluates to a plain `Vector{Any}` (or,
+# nested, a `Vector{Vector{...}}`) -- turn a rectangular nesting into a
+# real multi-dimensional `Array` (`[[1,2],[3,4]]` -> a (2,2) `Matrix`),
+# matching what an array-shaped column cell needs. Element order matches
+# real casacore TaQL's own nested-array-literal convention (cross-checked
+# live): the flattened literal is reshaped *column-major*, i.e. each
+# inner vector becomes one column of the result (`stack`'s default),
+# not one row -- `[[1,2],[3,4]]` -> `[1 3; 2 4]`. A ragged nesting, or
+# one that bottoms out in something other than plain numbers/strings/
+# bools, is left as nested vectors.
+_nest_to_array(x) = x
+function _nest_to_array(v::AbstractVector)
+    (isempty(v) || !all(x -> x isa AbstractVector, v)) && return v   # flat -- leave as-is
+    ev = [_nest_to_array(x) for x in v]
+    all(x -> x isa AbstractArray, ev) && allequal(size.(ev)) ? stack(ev) : ev
+end
+
 # evaluate a single TaQL-lite expression with no columns in scope
 function _taql_const(exprstr::AbstractString)
     ast = try
@@ -510,7 +527,7 @@ function _taql_const(exprstr::AbstractString)
     end
     !_has_aggr(ast) ||
         throw(ArgumentError("taql: INSERT values must be constant, not aggregates"))
-    return _tqleval(ast, Dict{String,AbstractVector}(), 1)
+    return _nest_to_array(_tqleval(ast, Dict{String,AbstractVector}(), 1))
 end
 
 function _taql_insert(target, cmd::AbstractString)

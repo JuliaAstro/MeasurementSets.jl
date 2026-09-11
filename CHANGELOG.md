@@ -2460,3 +2460,30 @@ taql(t, "INSERT INTO t SELECT A AS X, B FROM 'src' WHERE A > 7")
   an `AS` rename all spiked before writing the test) and matches our
   own implementation's semantics exactly — a genuine real-TaQL
   cross-check testset was added, not just hand-computed references.
+
+### Phase 114 — array-cell values in `taql` INSERT VALUES string form
+
+```julia
+taql(t, "INSERT INTO t (A, V) VALUES (9, [[1.0,2.0],[3.0,4.0]])")
+```
+
+- `taql()`'s `INSERT INTO t VALUES (...)` string form now accepts an
+  array-cell value as a bracketed literal — flat (`[1.0, 2.0, 3.0]`,
+  already worked once `TQLArrayLit` stopped being `IN`-only) or nested
+  (`[[1.0,2.0],[3.0,4.0]]`, new) — instead of requiring the Julia
+  `insert!(t; values=["V" => matrix])` form for an array-shaped column.
+  New `_taql_const`-internal `_nest_to_array`: a rectangular nesting of
+  vectors becomes a real multi-dimensional `Array` (`stack`); a ragged
+  one is left as nested `Vector`s (which then fails, clearly, when
+  written to an array-shaped column).
+- **Element order matches real casacore TaQL's own nested-array-literal
+  convention, confirmed by a live cross-check**: the nesting is
+  reshaped *column-major* — each inner vector becomes one **column** of
+  the result, not one row (`[[1,2],[3,4]]` → `[1 3; 2 4]`, not
+  `[1 2; 3 4]`) — `stack`'s own default axis order happens to match
+  casacore's exactly, so no transpose/reshape juggling was needed once
+  this was spiked against real TaQL (`INSERT INTO $1 (A, V) VALUES
+  (9.0, [[1.0,2.0],[3.0,4.0]])` on a real casacore table, then compared
+  cell-for-cell against our own reader's output for the same insert).
+  Closes the remaining half of the Phase 31 non-goal (the row-copying
+  `INSERT ... SELECT ... FROM` half closed in Phase 113).

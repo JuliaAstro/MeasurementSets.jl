@@ -316,6 +316,44 @@ end
     @test_throws ArgumentError taql(p5, "INSERT INTO t FROBNICATE")
 end
 
+# Phase 114: array-cell values in the `taql` INSERT VALUES string form.
+@testset "insert! -- taql INSERT VALUES array-cell literals" begin
+    mkarr(dir, name) = (p = joinpath(dir, name);
+        write_table(p, name, Pair{String,Any}["A" => Int32[1, 2],
+            "V" => [rand(2, 2) for _ in 1:2], "L" => [rand(3) for _ in 1:2]];
+            nrow=2, tsm=[["V"], ["L"]]); p)
+
+    dir = mktempdir()
+    p1 = mkarr(dir, "a1")                  # flat + nested array literals
+    @test taql(p1, "INSERT INTO t (A, V, L) VALUES (9, [[1.0,2.0],[3.0,4.0]], [7.0,8.0,9.0])") == 1
+    t1 = readtable(p1)
+    @test column(t1, "A")[:] == Int32[1, 2, 9]
+    @test column(t1, "V")[end] == [1.0 3.0; 2.0 4.0]   # column-major nesting, see _nest_to_array
+    @test column(t1, "L")[end] == [7.0, 8.0, 9.0]
+
+    p2 = mkarr(dir, "a2")                  # multi-row VALUES, each with an array literal
+    @test taql(p2, "INSERT INTO t (A, V, L) VALUES " *
+                   "(10, [[1.0,0.0],[0.0,1.0]], [1.0,1.0,1.0]), " *
+                   "(11, [[2.0,0.0],[0.0,2.0]], [2.0,2.0,2.0])") == 2
+    t2 = readtable(p2)
+    @test column(t2, "A")[end-1:end] == Int32[10, 11]
+    @test column(t2, "V")[end-1] == [1.0 0.0; 0.0 1.0]
+    @test column(t2, "V")[end] == [2.0 0.0; 0.0 2.0]
+
+    # a ragged nested literal isn't rectangular -> left as nested vectors,
+    # not silently reshaped; writing that into an array-shaped column errors
+    p3 = mkarr(dir, "a3")
+    @test_throws Exception taql(p3,
+        "INSERT INTO t (A, V, L) VALUES (1, [[1.0,2.0],[3.0]], [1.0,2.0,3.0])")
+
+    # `_nest_to_array` directly: flat/scalar values pass through unchanged,
+    # a rectangular nesting becomes a real Array, a ragged one doesn't
+    @test MSv2._taql_const("[1,2,3]") == [1, 2, 3]
+    @test MSv2._taql_const("[[1,2],[3,4]]") == [1 3; 2 4]
+    @test MSv2._taql_const("[[1,2],[3]]") == [[1, 2], [3]]
+    @test MSv2._taql_const("3.5") === 3.5
+end
+
 # Phase 113: `INSERT INTO t SELECT ... FROM 'path' [WHERE cond]`.
 @testset "insert! -- taql INSERT ... SELECT ... FROM 'path'" begin
     dir = mktempdir()
@@ -669,6 +707,28 @@ if _HAVE_TAQL
             @test nrow(ours) == nrow(ref)
             @test column(ours, "A")[:] ≈ column(ref, "A")[:]
             @test column(ours, "B")[:] ≈ column(ref, "B")[:]
+        end
+
+        # Phase 114: array-cell VALUES literals -- cross-checks the
+        # column-major nested-array-literal reshape convention itself
+        for taql_cmd in (
+            "INSERT INTO \$1 (A, V) VALUES (9.0, [[1.0,2.0],[3.0,4.0]])",
+        )
+            d = mktempdir()
+            for nm in ("ours", "ref")
+                write_table(joinpath(d, nm), nm,
+                            Pair{String,Any}["A" => collect(Float64, 1:3),
+                                             "V" => [reshape(collect(Float64, 4i-3:4i), 2, 2)
+                                                     for i in 1:3]];
+                            nrow=3, tsm=[["V"]])
+            end
+            taql(joinpath(d, "ours"), replace(taql_cmd, "\$1" => "t"))
+            _run(joinpath(d, "ref"), taql_cmd)
+            ours = readtable(joinpath(d, "ours"))
+            ref = readtable(joinpath(d, "ref"))
+            @test nrow(ours) == nrow(ref)
+            @test column(ours, "A")[:] ≈ column(ref, "A")[:]
+            @test column(ours, "V")[end] ≈ column(ref, "V")[end]
         end
 
         for taql_cmd in ("INSERT INTO \$1 (A, B) VALUES (7.0, 0.5) LIMIT 4",
