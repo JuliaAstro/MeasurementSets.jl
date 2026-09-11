@@ -87,6 +87,15 @@ _tql_unit_attach(args...) = _unitful_load_hint()
 # literal (`col > 3 km`).  Core: a small common-unit set (so the common
 # case still lexes without Unitful and `_tql_quantity` then gives the
 # load hint).  `UnitfulExt` overrides with a full `_ms_uparse` try.
+#
+# NOTE: the core signature here is deliberately untyped (not
+# `s::AbstractString`) -- matching every other stub in this file
+# (`_tql_write_strip(x, u)` etc). An extension can only ADD a method,
+# never overwrite one with an identical signature (Julia forbids that
+# during precompilation); giving the core fallback the exact same
+# `::AbstractString` signature the extension wants to specialize on
+# was a genuine bug here (surfaced as "Method overwriting is not
+# permitted during Module precompilation" whenever Unitful was loaded).
 const _COMMON_UNITS = Set([
     "m", "cm", "mm", "km", "au", "pc", "kpc", "mpc", "lyr",
     "s", "ms", "us", "ns", "min", "h", "hr", "d", "day", "yr",
@@ -95,7 +104,7 @@ const _COMMON_UNITS = Set([
     "jy", "mjy", "ujy", "k", "mk", "w", "mw", "kw",
     "g", "kg", "n", "pa", "hpa", "bar", "t", "gauss", "nt",
     "m/s", "km/s", "cm/s", "rad/s"])
-_tql_known_unit(s::AbstractString) = lowercase(strip(String(s))) in _COMMON_UNITS
+_tql_known_unit(s) = lowercase(strip(String(s))) in _COMMON_UNITS
 
 """Strip a dimensionless `Quantity` result of a TaQL-lite expression to a
 plain number; error on a dimensional one. Identity for anything else."""

@@ -2202,3 +2202,40 @@ query(cat, "meas.itrfxyz(LON, LAT, 0.0) == meas.pos('WGS84', 'ITRF', X, Y, Z)")
   WGS84)` directly (exact — no arithmetic, an identity); `meas.wgs` ∘
   `meas.itrfxyz` round-trips a real VLA-antenna ITRF position to
   `atol = 1e-6` m.
+
+### Phase 107 — fix the `UnitfulExt` precompile method-overwrite bug
+
+```
+WARNING: Method definition _tql_known_unit(AbstractString) in module
+MeasurementSets at src/tables/units.jl:98 overwritten in module
+UnitfulExt at ext/UnitfulExt.jl:84.
+ERROR: Method overwriting is not permitted during Module precompilation.
+```
+
+- Root cause: `_tql_known_unit(s::AbstractString)` (core, `src/tables/
+  units.jl`) and `MS._tql_known_unit(s::AbstractString)` (`ext/
+  UnitfulExt.jl`) used the **identical** signature — a genuine
+  redefinition, not an added dispatch. Every other core/extension
+  stub pair in this package (`_tql_quantity`, `_tql_unit_attach`,
+  `_tql_write_strip`, `_ms_ustring`, `_quantity_column_spec`, `_lst`,
+  `_riseset`, `_geodetic_to_itrf`, `_itrf_to_geodetic`, every `_mconv`
+  method, …) gives the core fallback a strictly *looser* signature
+  (`args...`, an untyped positional, or an abstract/`Union` type) so
+  the extension's concrete method is a genuine specialization, not an
+  overwrite — Julia forbids the latter during extension precompilation.
+  `_tql_known_unit` was the one place that pattern was broken.
+- Fix: drop the `::AbstractString` annotation on the core definition
+  (`_tql_known_unit(s) = ...`) — one line, matches the convention every
+  other stub in the file already follows (`_tql_write_strip(x, u)` is
+  the closest sibling: untyped core, `::Unitful.AbstractQuantity`-typed
+  extension).
+- Swept every other `MS._*` extension method across all four extensions
+  (`SOFAExt`, `EarthOrientationExt`, `HDF5Ext`, `UnitfulExt`) against
+  its core counterpart — confirmed no other instance of this bug exists.
+- Verified: `import Unitful, UnitfulAngles, UnitfulAstro` then
+  `using MeasurementSets` precompiles cleanly (no warning, no error);
+  `_tql_known_unit` correctly defers to the real `_ms_uparse`-backed
+  check when the extension is loaded (e.g. `"erg"` — not in the core
+  `_COMMON_UNITS` fallback set — now resolves `true`); the full
+  `units_tests.jl` + `taql_query_tests.jl` standalone run is unchanged
+  (760 tests, no count change — a pure precompile-hygiene fix).
