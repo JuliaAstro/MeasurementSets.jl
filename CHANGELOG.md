@@ -1583,6 +1583,26 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 102 — `mscal.pbcorr()` / `mscal.pbatten()`: primary-beam write path
+
+```julia
+update!(ms; set = ["DATA" => "mscal.pbcorr(DATA, 'gaussian:0.008727')"])   # true flux
+update!(ms; set = ["DATA" => "mscal.pbatten(DATA, 'airy:25.0:8.0e9')"])   # simulate attenuation
+```
+
+- `mscal.pbcorr(valexpr, 'spec' [, dir])` / `mscal.pbatten(valexpr,
+  'spec' [, dir])` — pure parser sugar desugaring to `valexpr /
+  mscal.pbresponse('spec', dir)` / `valexpr * mscal.pbresponse(...)`
+  (no new AST node, no new `_mscal_columns` branch — `TQLArith`'s
+  existing elementwise `_bcast` already broadcasts the division/
+  multiplication over an array cell like `DATA` against the scalar
+  response). Usable anywhere an expression is, including an `update!`
+  SET RHS to primary-beam-correct a column in place using the same
+  per-row `TIME`/`ANTENNA1`/`FIELD_ID`/`POINTING.DIRECTION` geometry as
+  `mscal.pbresponse`.
+- Exact inverses of each other (up to storage precision) — `pbatten`
+  then `pbcorr` round-trips a value.
+
 ### Phase 101 — `mscal.pbresponse()`: primary beam ↔ `mscal.*` integration
 
 ```julia

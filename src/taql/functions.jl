@@ -342,6 +342,20 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
             dir = n == 2 ? _mscal_dir_arg(args[2], src) : ""
             return TQLMScal("pbresponse:" * beamspec, dir)
         end
+        if fn == "pbcorr" || fn == "pbatten"
+            2 <= n <= 3 || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn(valexpr, 'beamspec' [, dir]) in \"$src\""))
+            (args[2] isa TQLLit && args[2].value isa AbstractString) || throw(ArgumentError(
+                "TaQL-lite: mscal.$fn's second argument must be a string literal " *
+                "beam spec (\"gaussian:HPBW\" / \"airy:D:FREQ[:BLK]\") in \"$src\""))
+            beamspec = String(args[2].value)
+            _pb_response_fn(beamspec)      # validate now
+            dir = n == 3 ? _mscal_dir_arg(args[3], src) : ""
+            resp = TQLMScal("pbresponse:" * beamspec, dir)
+            # pbcorr: valexpr / response (true flux from an apparent one);
+            # pbatten: valexpr * response (simulate the beam's attenuation)
+            return TQLArith(fn == "pbcorr" ? (/) : (*), args[1], resp)
+        end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
         n == 0 && return TQLMScal(fn)

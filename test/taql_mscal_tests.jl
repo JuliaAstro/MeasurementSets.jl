@@ -460,6 +460,81 @@ end
     @test_throws ErrorException query(readtable(tmp3dir), "mscal.pbresponse('gaussian:0.01')")
 end
 
+# Phase 102: `mscal.pbcorr(valexpr, 'spec' [, dir])` /
+# `mscal.pbatten(...)` -- pure parser sugar (`valexpr / mscal.pbresponse(...)`
+# / `valexpr * mscal.pbresponse(...)`), exercised here through `update!`
+# to primary-beam-correct DATA in place.
+@testset "TaQL-lite — mscal.pbcorr() / mscal.pbatten()" begin
+    main = readtable(SAMPLE_MS)
+    ms = MeasurementSet(SAMPLE_MS)
+    fld = subtable(ms, "FIELD")
+    ant = subtable(ms, "ANTENNA")
+
+    a1 = column(main, "ANTENNA1")[:]
+    row0 = findfirst(==(0), a1)
+    ep0 = measure(main, "TIME", row0)
+    t0sec = column(main, "TIME")[row0]
+    fi0 = column(main, "FIELD_ID")[row0]
+    dj = measconvert(measure(fld, "PHASE_DIR", fi0 + 1), J2000; frame = MeasFrame(epoch = ep0))
+    fr0 = MeasFrame(epoch = ep0, position = measure(ant, "POSITION", 1))
+    ageo0 = measconvert(dj, AZELGEO; frame = fr0)
+    allants = sort(unique(a1))
+    Δ = 0.003
+    where0 = "ANTENNA1 == 0 AND TIME == $t0sec"
+
+    function _fixture()
+        dir = joinpath(mktempdir(), "pbc.ms")
+        copyms(SAMPLE_MS, dir)
+        rm(joinpath(dir, "POINTING"); recursive = true)
+        write_table(joinpath(dir, "POINTING"), "POINTING", Pair{String,Any}[
+            "ANTENNA_ID" => Int32.(allants), "TIME" => fill(t0sec, length(allants)),
+            "DIRECTION" => [id == 0 ? [ageo0.lon + Δ / cos(ageo0.lat), ageo0.lat] : [0.0, 0.0]
+                            for id in allants]]; nrow = length(allants),
+            measures = Dict("DIRECTION" => (; kind = :direction, ref = "AZELGEO")))
+        testval = ComplexF32(3.0, 4.0)
+        edit(dir) do t
+            t[:DATA][row0] = fill(testval, size(t[:DATA][row0]))
+        end
+        return dir, testval
+    end
+
+    resp = exp(-4 * log(2) * (Δ / 0.008727)^2)   # matches mscal.pbresponse('gaussian:0.008727')
+
+    dir1, testval1 = _fixture()
+    n1 = update!(dir1; set = ["DATA" => "mscal.pbcorr(DATA, 'gaussian:0.008727')"], where = where0)
+    @test n1 >= 1   # every ANTENNA1==0 row at t0sec, not just row0
+    after1 = column(readtable(dir1; precision = :full), "DATA")[row0]
+    @test after1[1, 1] ≈ testval1 / resp rtol = 1e-3   # Float32 storage precision
+
+    dir2, testval2 = _fixture()
+    n2 = update!(dir2; set = ["DATA" => "mscal.pbatten(DATA, 'gaussian:0.008727')"], where = where0)
+    @test n2 >= 1
+    after2 = column(readtable(dir2; precision = :full), "DATA")[row0]
+    @test after2[1, 1] ≈ testval2 * resp rtol = 1e-3
+
+    # pbcorr and pbatten are exact inverses of each other (up to storage
+    # precision) -- a round trip recovers the original value
+    dir3, testval3 = _fixture()
+    update!(dir3; set = ["DATA" => "mscal.pbatten(DATA, 'gaussian:0.008727')"], where = where0)
+    update!(dir3; set = ["DATA" => "mscal.pbcorr(DATA, 'gaussian:0.008727')"], where = where0)
+    after3 = column(readtable(dir3; precision = :full), "DATA")[row0]
+    @test after3[1, 1] ≈ testval3 rtol = 1e-3
+
+    # a direction argument threads through, same as mscal.pbresponse
+    dir4, testval4 = _fixture()
+    update!(dir4; set = ["DATA" => "mscal.pbcorr(DATA, 'gaussian:0.008727', 'DELAY_DIR')"],
+            where = where0)
+    after4 = column(readtable(dir4; precision = :full), "DATA")[row0]
+    @test after4[1, 1] ≈ testval4 / resp rtol = 1e-3   # DELAY_DIR == PHASE_DIR in the sample
+
+    # errors — same validation as mscal.pbresponse, one arg earlier
+    p(s) = MSv2._taqllite_parse(s, Set(["A"]))
+    @test_throws ArgumentError p("mscal.pbcorr(A, 'bogus:1.0')")
+    @test_throws ArgumentError p("mscal.pbcorr(A, B)")            # non-literal spec
+    @test_throws ArgumentError p("mscal.pbcorr(A)")                # missing spec
+    @test_throws ArgumentError p("mscal.pbatten(A, 'gaussian:1:2')")
+end
+
 @testset "TaQL-lite — mscal.time() / mscal.uvdist()" begin
     main = readtable(SAMPLE_MS)
     tm = Float64.(column(main, "TIME")[:])

@@ -122,7 +122,13 @@ set.  **`mscal.pbresponse('gaussian:HPBW' | 'airy:D:FREQ[:BLK]' [, dir])`**
 (default `FIELD.PHASE_DIR`) as seen through ANTENNA1's *actual* pointing
 (`POINTING.DIRECTION`) — the attenuation from a pointing/tracking error,
 computed automatically from the row's `TIME`/`ANTENNA1`/`FIELD_ID`
-geometry, matching how `mscal.azel1()` etc. work.  **`meas.*`** (a
+geometry, matching how `mscal.azel1()` etc. work.
+`mscal.pbcorr(valexpr, 'spec' [, dir])` / `mscal.pbatten(valexpr, 'spec'
+[, dir])` are parser sugar for `valexpr / mscal.pbresponse(...)` /
+`valexpr * mscal.pbresponse(...)` — pass a `DATA`-like expression to
+primary-beam-correct (or simulate the attenuation of) an array cell
+in place, e.g. `update!(ms; set = ["DATA" =>
+"mscal.pbcorr(DATA, 'gaussian:0.008727')"])`.  **`meas.*`** (a
 subset of casacore's `libmeas` UDFs) does measure
 conversions on ordinary expressions:
 `meas.<frame>(['SRC', ]lon, lat[, mjd[, x, y, z]])` →

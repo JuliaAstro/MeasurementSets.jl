@@ -332,6 +332,10 @@ UDF) — the [`GaussianBeam`](@ref) / [`AiryBeam`](@ref) power response
 toward `dir` (default `FIELD.PHASE_DIR`) as seen through ANTENNA1's
 *actual* pointing (`POINTING.DIRECTION`), i.e. the attenuation from a
 pointing/tracking error, needs a `POINTING` subtable.
+`mscal.pbcorr(valexpr, spec [, dir])` / `mscal.pbatten(valexpr, spec
+[, dir])` (Phase 102) desugar to `valexpr / mscal.pbresponse(spec,
+dir)` / `valexpr * mscal.pbresponse(spec, dir)` — usable as an
+`update!` SET RHS to primary-beam-correct an array column in place.
 
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 boolean-mask array subscripts.
