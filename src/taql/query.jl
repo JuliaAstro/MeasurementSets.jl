@@ -255,7 +255,10 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `observatory('VLA')` (a telescope's ITRF `[x,y,z]`),
   `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` /
   `meas.epoch('TAI', mjd)` / `meas.last(mjd, x, y, z)` (measure
-  conversions -- needs `import SOFA`), `pi`, `e`;
+  conversions -- needs `import SOFA`),
+  `pbgaussian(θ, hpbw)` / `pbairy(θ, diameter, freq[, blockage])` /
+  `pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` (primary-beam
+  power response, see `src/beam/beam.jl`), `pi`, `e`;
 * an optional trailing `ORDER BY col [ASC|DESC], ...` (bare columns).
 
 Column names are case-sensitive and must name a column of `t`; keywords

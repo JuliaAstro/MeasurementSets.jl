@@ -495,9 +495,12 @@ end
 #   name         exact match against the type's NAME column
 #   name*        glob (`* ? [...]`) against NAME
 #   /regex/      regex against NAME
-# `mscal.baseline` additionally takes `L & R` / `L && R` (baseline
-# between two antenna sets; `&` excludes autocorrelations, `&&` keeps
-# them) and a whole-spec `!` negation.
+# `mscal.baseline` additionally takes `L & R` / `L && R` / `L &&& `
+# (baseline between two antenna sets; `&` = cross-only, `&&` = cross +
+# auto, `&&&` = auto-only — casacore `MSAntennaParse::CrossOnly` /
+# `AutoCorrAlso` / `AutoCorrOnly`), a physical baseline-length range
+# (`'100~500m'` / `'<200m'` / `'>1km'`, from `ANTENNA.POSITION`, no `&`
+# involved), and a whole-spec `!` negation.
 #
 # Threading mirrors `mscal.*`: a `TQLMSSel` node, a `"::mssel::<fn>::<spec>"`
 # sentinel split by `_mssel_split` in `_tql_cols` / `_vtq_prepare!`.
@@ -604,7 +607,13 @@ function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants)
     spec = strip(spec)
     neg = startswith(spec, "!")
     neg && (spec = strip(spec[2:end]))
-    pred = if occursin("&&", spec)
+    # count leading ampersands after the left antenna list to distinguish
+    # `&` / `&&` / `&&&` (checked longest-first: `&&&` also contains `&&`)
+    pred = if occursin("&&&", spec)
+        l = split(spec, "&&&"; limit = 2)[1]
+        SL = _mssel_idset(strip(l), allants, n2i)
+        (a1, a2) -> a1 == a2 && a1 in SL
+    elseif occursin("&&", spec)
         l, r = split(spec, "&&"; limit = 2)
         SL = _mssel_idset(strip(l), allants, n2i)
         SR = isempty(strip(r)) ? SL : _mssel_idset(strip(r), allants, n2i)
@@ -619,6 +628,34 @@ function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants)
         (a1, a2) -> a1 in S || a2 in S
     end
     return neg ? (a1, a2) -> !pred(a1, a2) : pred
+end
+
+# a bare baseline-length range/bound, no `&` involved (casacore's
+# `blengthlist` — `LT`/`GT`/`a-b`, unit `m`/`km`, default `m`).
+_mssel_is_blength(spec::AbstractString) =
+    !occursin('&', spec) && occursin(r"^(?:[<>]|.*[-~])\s*[\d.]+\s*k?m\s*$"i, spec)
+
+function _mssel_blength_pred(spec::AbstractString)
+    ranges = Tuple{Float64,Float64}[]
+    for raw in _mssel_commas(spec)
+        term = strip(raw)
+        isempty(term) && continue
+        um = match(r"(k?m)\s*$"i, term)
+        scale = (um !== nothing && lowercase(um[1]) == "km") ? 1e3 : 1.0
+        body = strip(um === nothing ? term : term[1:prevind(term, um.offset)])
+        num(s) = parse(Float64, strip(s)) * scale
+        if startswith(body, ">")
+            push!(ranges, (num(body[2:end]), Inf))
+        elseif startswith(body, "<")
+            push!(ranges, (-Inf, num(body[2:end])))
+        else
+            m = match(r"^(.+?)\s*[-~]\s*(.+)$", body)
+            m === nothing && throw(ArgumentError(
+                "mscal.baseline: bad length range \"$term\""))
+            push!(ranges, (num(m[1]), num(m[2])))
+        end
+    end
+    return (bl) -> _mssel_inany(bl, ranges)
 end
 
 # resolve one `mscal.<fn>('spec')` to a per-row Bool vector
@@ -654,6 +691,15 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         haskey(subs, "ANTENNA") || error("mscal.baseline: no ANTENNA subtable")
         a1 = Int.(column(t, "ANTENNA1")[:])
         a2 = "ANTENNA2" in cn ? Int.(column(t, "ANTENNA2")[:]) : a1
+        neg = startswith(strip(spec), "!")
+        body = neg ? strip(strip(spec)[2:end]) : strip(spec)
+        if _mssel_is_blength(body)
+            pos = column(readtable(subs["ANTENNA"]), "POSITION")[:]
+            blen(i1, i2) = hypot((Float64.(pos[i1 + 1]) .- Float64.(pos[i2 + 1]))...)
+            lpred = _mssel_blength_pred(body)
+            return Bool[(neg ? !lpred(blen(a1[i], a2[i])) : lpred(blen(a1[i], a2[i])))
+                        for i in 1:n]
+        end
         n2i = _mssel_names_to_ids(column(readtable(subs["ANTENNA"]), "NAME")[:])
         pred = _mssel_baseline_pred(spec, n2i, 0:(length(column(readtable(subs["ANTENNA"]), "NAME")) - 1))
         return Bool[pred(a1[i], a2[i]) for i in 1:n]

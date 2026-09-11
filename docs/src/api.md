@@ -222,3 +222,21 @@ Base.join(::MeasurementSets.AbstractTable, ::MeasurementSets.AbstractTable)
 Base.delete!(::Union{AbstractString, MeasurementSets.AbstractTable})
 Base.insert!(::Union{AbstractString, MeasurementSets.AbstractTable})
 ```
+
+## Primary beams
+
+```@docs
+PrimaryBeam
+GaussianBeam
+AiryBeam
+PolynomialBeam
+EllipticalGaussianBeam
+SquintBeam
+power_response
+voltage_response
+attenuate
+correct_flux
+angular_separation
+pointing_offset
+reffreq
+```

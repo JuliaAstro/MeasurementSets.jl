@@ -104,8 +104,11 @@ sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
 `'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`.
 `mscal.<sel>('spec')` (`baseline` / `field` / `spw` / `scan` / `state` /
 `array` / `obs`) is MSSelection-lite row selection — a comma-list of
-ids / `N~M` ranges / name globs, `!` to subtract, `L & R` baselines
+ids / `N~M` ranges / name globs, `!` to subtract, `L & R` (cross only) /
+`L && R` (cross + auto) / `L &&&` (auto only) baselines
 (`query(main, "mscal.baseline('ea01 & *') AND mscal.field('3C*')")`).
+`mscal.baseline` also takes a physical baseline-length range/bound with
+no `&` (`'100~500m'` / `'<200m'` / `'>1km'`, from `ANTENNA.POSITION`).
 `mscal.time('t0~t1')` (ISO / `YYYY/MM/DD` endpoints) and
 `mscal.uvdist('a~b[m|km|klambda|…]')` select `TIME` / 2-D uv-distance
 ranges. `mscal.spw('0:5~20')` takes an optional `:chanlist` (channel
@@ -266,3 +269,43 @@ The bridge functions broadcast, so a whole spectral axis is one call —
 each channel of a spectral window relative to a line rest frequency.
 `shiftfreq(d, νs)` multiplies a frequency grid by the Doppler factor
 `√((1−β)/(1+β))` (casacore `MDoppler::shiftFrequency`).
+
+## Primary beams
+
+Analytic primary-beam (voltage/power pattern) models for the apparent-
+flux attenuation of a source away from the pointing centre — a
+standalone MeasurementSets feature (no casacore/CASA source is vendored
+on this machine for a real telescope's fitted polynomial coefficient
+table, so none are bundled).
+[`GaussianBeam`](@ref)`(freq; diameter)` — `HPBW = 1.02λ/D` — and
+[`AiryBeam`](@ref)`(diameter; blockage)` — the diffraction pattern of a
+(optionally centrally obstructed) circular aperture, via
+`SpecialFunctions.besselj1` — are textbook optics, independently
+verifiable. [`PolynomialBeam`](@ref) is the CASA `PBMath1DPoly`
+functional form (`pb = 1 + Σ cₖ·(ν[GHz]·θ[arcmin])^(2k)`) for a
+caller-supplied coefficient table. Every model implements
+[`power_response`](@ref)`(beam, θ, freq)`; [`voltage_response`](@ref),
+[`attenuate`](@ref) and [`correct_flux`](@ref) are generic over it.
+[`angular_separation`](@ref)`(d1, d2)` (both `MDirection`s in the same
+frame) gives the offset `θ`:
+```julia
+pb = GaussianBeam(1.4e9; diameter = 25.0)
+θ = angular_separation(pointing, source)      # both MDirection{J2000}
+correct_flux(pb, apparent_flux, θ)            # -> true flux
+```
+
+[`EllipticalGaussianBeam`](@ref)`(hpbw_major, hpbw_minor, pa, reffreq)`
+and [`SquintBeam`](@ref)`(base, squint)` (feed/pointing squint) need the
+offset *direction*, not just its magnitude — a `(dlon, dlat)` tangent-
+plane pair from [`pointing_offset`](@ref)`(pointing, target)` rather than
+a scalar `θ` (every `power_response`/`voltage_response`/`attenuate`/
+`correct_flux` method also accepts this pair; a circularly symmetric
+beam falls back to its magnitude). `pa` follows the `MDirection`
+convention (from north through east).
+
+The string form of [`query`](@ref) / [`groupby`](@ref) exposes three
+pure-numeric wrappers for filtering/computing on beam response directly:
+`pbgaussian(θ, hpbw)`, `pbairy(θ, diameter, freq[, blockage])`,
+`pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` — e.g.
+`query(cat, "pbairy(OFFSET, 25.0, 1.4e9) > 0.5")` on a source-catalogue
+table carrying a per-row pointing-centre offset.

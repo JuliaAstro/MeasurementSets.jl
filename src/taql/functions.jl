@@ -201,6 +201,10 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
         p === nothing && throw(ArgumentError("TaQL-lite: unknown observatory \"$s\""))
         Float64[p.x, p.y, p.z]
     end, 1:1),
+    # primary-beam power response (Phase 99/100 `src/beam/beam.jl`)
+    "pbgaussian" => ((θ, hpbw) -> exp(-4 * log(2) * (float(θ) / float(hpbw))^2), 2:2),
+    "pbellipse" => ((dlon, dlat, hmaj, hmin, pa) ->
+        _elliptical_gaussian_power(float(dlon), float(dlat), float(hmaj), float(hmin), float(pa)), 5:5),
 )
 
 # g-prefixed aggregate functions.  `_geval(::TQLAggr)` collects the
@@ -370,6 +374,13 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
             "TaQL-lite: $name() takes 4 scalar radians or two `[lon, lat]` arrays in \"$src\""))
         fn = n == 4 ? ((a, b, c, d) -> _tql_angdist(a, b, c, d)) :
                       ((a, b) -> _tql_angdist(a[1], a[2], b[1], b[2]))
+        return TQLFunc(fn, args)
+    elseif name == "pbairy"
+        n in 3:4 || throw(ArgumentError(
+            "TaQL-lite: pbairy(θ, diameter, freq[, blockage]) in \"$src\""))
+        fn = n == 3 ? (θ, d, freq) -> power_response(AiryBeam(float(d)), float(θ), float(freq)) :
+                      (θ, d, freq, blk) -> power_response(AiryBeam(float(d); blockage = float(blk)),
+                                                          float(θ), float(freq))
         return TQLFunc(fn, args)
     end
     haskey(_TQL_FUNCS, name) || throw(ArgumentError(
