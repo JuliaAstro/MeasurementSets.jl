@@ -160,3 +160,27 @@ function addcolumn!(t::ConcatEditTable, name::AbstractString, data::AbstractVect
     end
     return t
 end
+
+# Phase 133: clear, actionable errors instead of a raw MethodError.
+# `BaseTable::canAddRow()`/`canRemoveRow()` both hard-`false` for a
+# ConcatTable (neither is overridden — confirmed by reading
+# `BaseTable.cc:592-598`, the base-class default: `addRow` throws
+# "Table: cannot add a row..."; `removeRow` throws the ConcatTable-
+# specific "ConcatTable cannot remove rows" already cited above) — so
+# `addrows!`/`removerows!` genuinely have no analogue here, and
+# `removecolumn!` was already confirmed a hard non-goal in Phase 130
+# (`ConcatTable::removeColumn` throws unconditionally, no view-level-
+# hide analogue like `RefTable`'s).
+addrows!(::ConcatEditTable, ::Integer) = error(
+    "addrows!: a ConcatTable has no row-count analogue in casacore " *
+    "(BaseTable::canAddRow() is false, addRow throws) — edit a part " *
+    "directly, or build a new ConcatTable via `write_concattable`")
+removerows!(::ConcatEditTable, rows) = error(
+    "removerows!: a ConcatTable cannot remove rows in casacore " *
+    "(ConcatTable::removeRow throws unconditionally) — edit a part " *
+    "directly, or build a new ConcatTable via `write_concattable`")
+removecolumn!(::ConcatEditTable, name::AbstractString) = error(
+    "removecolumn!: a ConcatTable cannot remove columns in casacore " *
+    "(ConcatTable::removeColumn throws unconditionally — unlike " *
+    "RefTable, there's no view-level-hide analogue) — remove the " *
+    "column from each part directly instead")

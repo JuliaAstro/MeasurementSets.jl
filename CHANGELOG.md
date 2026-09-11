@@ -3317,3 +3317,32 @@ cross-check that real casacore still opens and reads the flattened
 output correctly, and `select=` renaming resolving against the true
 root's column names after flattening. 257 tests standalone in
 `reftable_tests.jl`, all green.
+
+### Phase 133 — confirmed ConcatTable's addRow/removeColumn are genuinely unsupported; clear errors for the whole edit-session non-goal set
+
+Investigated the last uncertainty in the `RefEditTable`/`ConcatEditTable`
+feature set: Phase 129/130 assumed `ConcatTable` has no `addRow`
+analogue based on there being no override in `ConcatTable.h`, without
+confirming what the inherited `BaseTable` default actually does.
+Confirmed cleanly: `BaseTable::canAddRow()`/`canRemoveRow()` are both
+hard-coded `false` and unoverridden by either `RefTable` or
+`ConcatTable`; the inherited `BaseTable::addRow` throws a clear
+`TableInvOper("Table: cannot add a row to table ...")` — not a crash,
+not silently wrong. No surprises for either table kind.
+
+**Fixed a real (if minor) UX gap found while confirming this**:
+`addrows!`/`removerows!` had no methods at all for `RefEditTable`/
+`ConcatEditTable` (nor did `removecolumn!` for `ConcatEditTable`) —
+calling any of them produced a raw, unhelpful `MethodError` instead of
+an actionable message, unlike every other documented non-goal in this
+package. Added clear-error methods for all five combinations
+(`addrows!`/`removerows!` on both view types, plus `removecolumn!` on
+`ConcatEditTable` — `RefEditTable`'s own `removecolumn!` already exists
+with real view-level-hide semantics since Phase 127), each naming the
+specific casacore behaviour that makes it unsupported and pointing at
+the right alternative (`query`/`write_concattable`/editing a part
+directly).
+
+5 new tests in `test/edit_tests.jl` ("edit — clear errors for
+unsupported row/column ops"). 266 tests standalone, all green. No
+behaviour change beyond the error message quality.
