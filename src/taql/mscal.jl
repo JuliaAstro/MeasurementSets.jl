@@ -448,6 +448,16 @@ const _STOKES_ALIASES = Dict{String,String}(
     "CIRC" => "RR,RL,LR,LL", "CIRCULAR" => "RR,RL,LR,LL",
     "LIN" => "XX,XY,YX,YY", "LINEAR" => "XX,XY,YX,YY")
 
+# Phase 109: the derived (non-linear) "pseudo Stokes" output types --
+# encoded as negative codes internally (never real correlation codes,
+# so they thread through `_stokes_key`/`_stokes_setups` unchanged and
+# are trivially distinguishable from a physical 1..12 output).
+const _STOKES_PSEUDO_CODES = Dict{String,Int}(
+    "PTOTAL" => -1, "PLINEAR" => -2, "PANGLE" => -3,
+    "PFTOTAL" => -4, "PFLINEAR" => -5)
+const _STOKES_PSEUDO_SYM = Dict{Int,Symbol}(
+    -1 => :total, -2 => :linear, -3 => :angle, -4 => :ftotal, -5 => :flinear)
+
 function _parse_stokes_types(s::AbstractString)
     up = uppercase(strip(s))
     up = get(_STOKES_ALIASES, up, up)
@@ -455,12 +465,16 @@ function _parse_stokes_types(s::AbstractString)
     for tok in split(up, ',')
         t = strip(tok)
         isempty(t) && continue
-        haskey(_STOKES_NAMES, t) || throw(ArgumentError(
-            "mscal.stokes: unknown polarization type \"$t\""))
-        code = _STOKES_NAMES[t]
-        code <= 12 || throw(ArgumentError(
-            "mscal.stokes: output type \"$t\" (mixed-hand RX..YL) is not supported"))
-        push!(out, code)
+        if haskey(_STOKES_NAMES, t)
+            code = _STOKES_NAMES[t]
+            code <= 12 || throw(ArgumentError(
+                "mscal.stokes: output type \"$t\" (mixed-hand RX..YL) is not supported"))
+            push!(out, code)
+        elseif haskey(_STOKES_PSEUDO_CODES, t)
+            push!(out, _STOKES_PSEUDO_CODES[t])
+        else
+            throw(ArgumentError("mscal.stokes: unknown polarization type \"$t\""))
+        end
     end
     isempty(out) && throw(ArgumentError("mscal.stokes: empty polarization type list"))
     return out
@@ -525,16 +539,27 @@ _stokes_factor(t::Int, rescale::Bool) =
     !rescale ? 1.0 : (5 <= t <= 12 ? 0.5 : 13 <= t <= 20 ? sqrt(2) / 4 : 1.0)
 
 struct StokesSetup
-    cmat::Matrix{ComplexF64}   # nOut x nIn
+    cmat::Matrix{ComplexF64}   # nOut x nIn; rows for a pseudo output are all-zero (unused)
     fmat::BitMatrix            # cmat .!= 0
     wmat::Matrix{Float64}      # abs.(cmat)
+    outtypes::Vector{Int}      # 1..12 physical, or a negative pseudo code (Phase 109)
+    iquvmat::Matrix{ComplexF64}  # 4 x nIn: I,Q,U,V from the input frame -- built iff any pseudo output
 end
 
 function _stokes_setup(intypes::Vector{Int}, outtypes::Vector{Int}, rescale::Bool)
     inf = _stokes_frame(intypes)
     nO, nI = length(outtypes), length(intypes)
     cmat = zeros(ComplexF64, nO, nI)
+    haspseudo = any(<(0), outtypes)
+    iquvmat = zeros(ComplexF64, haspseudo ? 4 : 0, nI)
+    if haspseudo
+        basei = _STOKES_BASE[(inf, :iquv)]
+        for j in 1:nI, r in 1:4
+            iquvmat[r, j] = basei[r, _stokes_canon(intypes[j])]
+        end
+    end
     for o in 1:nO
+        outtypes[o] < 0 && continue        # a pseudo output has no linear cmat row
         base = _STOKES_BASE[(inf, _stokes_frame((outtypes[o],)))]
         for j in 1:nI
             cmat[o, j] = base[_stokes_canon(outtypes[o]), _stokes_canon(intypes[j])] *
@@ -542,7 +567,20 @@ function _stokes_setup(intypes::Vector{Int}, outtypes::Vector{Int}, rescale::Boo
                          _stokes_factor(outtypes[o], rescale)
         end
     end
-    return StokesSetup(cmat, cmat .!= 0, abs.(cmat))
+    return StokesSetup(cmat, cmat .!= 0, abs.(cmat), outtypes, iquvmat)
+end
+
+# derived pseudo-Stokes value from a (possibly complex-valued, take the
+# real part) I,Q,U,V tuple, per casacore's `Stokes::StokesTypes` pseudo
+# codes: Ptotal = sqrt(Q²+U²+V²), Plinear = sqrt(Q²+U²), Pangle =
+# ½·atan2(U,Q) (rad), PFtotal/PFlinear = the same totals divided by I.
+function _stokes_pseudo(sym::Symbol, I::Real, Q::Real, U::Real, V::Real)
+    sym === :total   ? sqrt(Q^2 + U^2 + V^2) :
+    sym === :linear  ? sqrt(Q^2 + U^2) :
+    sym === :angle   ? 0.5 * atan(U, Q) :
+    sym === :ftotal  ? (I == 0 ? 0.0 : sqrt(Q^2 + U^2 + V^2) / I) :
+    sym === :flinear ? (I == 0 ? 0.0 : sqrt(Q^2 + U^2) / I) :
+    error("mscal.stokes: internal: unhandled pseudo type $sym")
 end
 
 # --- applying a setup to one array cell -----------------------------------
@@ -551,14 +589,35 @@ function _stokes_convert(s::StokesSetup, x::AbstractMatrix{<:Complex})
     nI, nch = size(x)
     nI == size(s.cmat, 2) || throw(ArgumentError(
         "mscal.stokes: cell has $nI correlations, POLARIZATION.CORR_TYPE has $(size(s.cmat, 2))"))
-    out = zeros(ComplexF64, size(s.cmat, 1), nch)
-    @inbounds for ch in 1:nch, o in axes(out, 1), j in 1:nI
-        out[o, ch] += s.cmat[o, j] * x[j, ch]
+    nO = length(s.outtypes)
+    out = zeros(ComplexF64, nO, nch)
+    @inbounds for ch in 1:nch, o in 1:nO
+        s.outtypes[o] < 0 && continue
+        for j in 1:nI
+            out[o, ch] += s.cmat[o, j] * x[j, ch]
+        end
+    end
+    if any(<(0), s.outtypes)
+        @inbounds for ch in 1:nch
+            I = zero(ComplexF64); Q = zero(ComplexF64); U = zero(ComplexF64); V = zero(ComplexF64)
+            for j in 1:nI
+                I += s.iquvmat[1, j] * x[j, ch]; Q += s.iquvmat[2, j] * x[j, ch]
+                U += s.iquvmat[3, j] * x[j, ch]; V += s.iquvmat[4, j] * x[j, ch]
+            end
+            for o in 1:nO
+                t = s.outtypes[o]
+                t < 0 || continue
+                out[o, ch] = _stokes_pseudo(_STOKES_PSEUDO_SYM[t], real(I), real(Q), real(U), real(V))
+            end
+        end
     end
     return out
 end
 
 function _stokes_convert(s::StokesSetup, x::AbstractMatrix{Bool})
+    any(<(0), s.outtypes) && throw(ArgumentError(
+        "mscal.stokes: pseudo Stokes types (Ptotal/Plinear/Pangle/PFtotal/PFlinear) " *
+        "need complex (DATA-like) input, not a FLAG-like Bool cell"))
     nI, nch = size(x)
     nI == size(s.cmat, 2) || throw(ArgumentError(
         "mscal.stokes: FLAG cell has $nI correlations, expected $(size(s.cmat, 2))"))
@@ -570,6 +629,9 @@ function _stokes_convert(s::StokesSetup, x::AbstractMatrix{Bool})
 end
 
 function _stokes_convert(s::StokesSetup, x::AbstractMatrix{<:Real})
+    any(<(0), s.outtypes) && throw(ArgumentError(
+        "mscal.stokes: pseudo Stokes types (Ptotal/Plinear/Pangle/PFtotal/PFlinear) " *
+        "need complex (DATA-like) input, not a WEIGHT-like real cell"))
     nI, nch = size(x)
     nI == size(s.cmat, 2) || throw(ArgumentError(
         "mscal.stokes: WEIGHT cell has $nI correlations, expected $(size(s.cmat, 2))"))

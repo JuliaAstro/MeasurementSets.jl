@@ -103,7 +103,9 @@ name (`mscal.el1('SUN')`), a FIELD direction column
 sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
 `mscal.stokes(col [, 'types'] [, rescale])` converts a `DATA` / `FLAG` /
 `WEIGHT` array cell between correlation bases (`'IQUV'` / `'CIRC'` /
-`'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`.
+`'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`; `types` also
+accepts the derived pseudo types `Ptotal`/`Plinear`/`Pangle`/`PFtotal`/
+`PFlinear` (need complex `DATA`-like input).
 `mscal.<sel>('spec')` (`baseline` / `field` / `spw` / `scan` / `state` /
 `array` / `obs`) is MSSelection-lite row selection — a comma-list of
 ids / `N~M` ranges / name globs, `!` to subtract, `L & R` (cross only) /

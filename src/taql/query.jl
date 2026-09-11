@@ -322,8 +322,13 @@ pair in radians (`mscal.hadec1([2.0, 0.5])`), or a sexagesimal
 `mscal.stokes(col [, 'types'] [, rescale])` (Phase 78) converts a
 `DATA` / `FLAG` / `WEIGHT` array cell between correlation bases. `types`
 (default `'IQUV'`) is an alias (`IQUV` / `CIRC` / `LIN`) or a
-comma-list (`'I'`, `'I,V'`, `'XX,YY'`); the input basis comes from
-`POLARIZATION.CORR_TYPE` row 1. The result is a `(nOut, nchan)` matrix.
+comma-list (`'I'`, `'I,V'`, `'XX,YY'`, mixable with the pseudo types
+below); the input basis comes from `POLARIZATION.CORR_TYPE` row 1. The
+result is a `(nOut, nchan)` matrix. `types` also accepts the derived
+**pseudo types** `Ptotal` (`√(Q²+U²+V²)`), `Plinear` (`√(Q²+U²)`),
+`Pangle` (`½·atan2(U,Q)`, rad), `PFtotal`/`PFlinear` (the same divided
+by `I`) (Phase 109) — non-linear, so they need a complex (`DATA`-like)
+input; `Bool`/real (`FLAG`/`WEIGHT`) input raises a clear error.
 
 `mscal.<sel>('spec')` (Phase 80) — MSSelection-lite row selection,
 returning a per-row `Bool`. `<sel>` ∈ `baseline` / `field` / `spw` /

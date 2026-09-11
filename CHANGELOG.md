@@ -2277,3 +2277,40 @@ query(cat, "boxedaverage(SPECTRUM, 4) > threshold")        # 4-channel block ave
   with a direct `Statistics.var`/`std`/`median` call on the same
   explicit window, and a query-string round-trip against the same
   functions called directly on each row's array.
+
+### Phase 109 — `mscal.stokes()` pseudo output types
+
+```julia
+query(main, "mscal.stokes(DATA, 'Ptotal')[1,1] > threshold")     # total polarized intensity
+query(main, "mscal.stokes(DATA, 'I,Ptotal')")                    # physical + pseudo, one call
+```
+
+- `mscal.stokes(col, 'types')`'s `types` now also accepts casacore's
+  derived **pseudo** output types: `Ptotal = √(Q²+U²+V²)`,
+  `Plinear = √(Q²+U²)`, `Pangle = ½·atan2(U,Q)` (rad), `PFtotal`/
+  `PFlinear` (the same totals divided by `I`) — non-linear combinations
+  of Stokes I/Q/U/V, unlike every other `mscal.stokes` output (a plain
+  matrix multiply against the correlation cell).
+- Implementation (`src/taql/mscal.jl`): pseudo types are encoded as
+  **negative** internal codes (`_STOKES_PSEUDO_CODES`, never collide
+  with a real 1-20 correlation code, thread through the existing
+  `_stokes_key`/`_stokes_setups` sentinel machinery unchanged).
+  `StokesSetup` gains an `outtypes` field (to tell pseudo rows apart)
+  and an `iquvmat` (the input frame's own I,Q,U,V conversion matrix,
+  built once, lazily — only when a pseudo type is actually requested).
+  `_stokes_convert`'s `Complex` method computes the ordinary linear
+  rows as before, then — only if any output is a pseudo type —
+  computes I,Q,U,V per channel once and derives each pseudo row's value
+  from it; a query mixing physical and pseudo types in one
+  `mscal.stokes(DATA, 'I,Ptotal')` call shares that single I,Q,U,V pass.
+- `Bool` (`FLAG`) / real (`WEIGHT`) input with a pseudo type requested
+  raises a clear `ArgumentError` — the pseudo formulas are only
+  meaningful for a complex (`DATA`-like) cell.
+- Closes the pseudo-output-type non-goal from Phase 78.
+- No casacore/CASA oracle for the pseudo-type formulas themselves
+  (matches the documented `Stokes::StokesTypes` definitions) — verified
+  by injecting a known `DATA` cell (`RR=3+1i, RL=0.5-0.2i, LR=0.5+0.2i,
+  LL=2-1i` → `I=5, Q=1, U=-0.4, V=1`) via `edit()` and checking every
+  pseudo type's value against the formula computed directly from the
+  same I/Q/U/V; the `I==0` edge case (fractional forms → 0, not
+  NaN/Inf) checked directly on `StokesSetup`.
