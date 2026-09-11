@@ -2436,3 +2436,97 @@ copytable(dst, readtable(src))     # src's Hypercolumn_* private keywords now su
   plus an unrelated private key passing through either way. No
   casacore/CASA oracle needed (pure keyword passthrough, not a new
   binary format).
+
+### Phase 113 — `taql()`: `INSERT INTO t SELECT ... FROM 'path'`
+
+```julia
+taql(t, "INSERT INTO t SELECT * FROM 'src.ms/POINTING'")
+taql(t, "INSERT INTO t SELECT A AS X, B FROM 'src' WHERE A > 7")
+```
+
+- `taql()`'s `INSERT` string form gains the row-copying variant:
+  `INSERT INTO t SELECT col [AS a], … FROM 'path' [WHERE cond] [LIMIT
+  n]` — `*` selects every source column as-is, an explicit list may
+  rename a source column to match `t`'s own name (`A AS X`), `WHERE` is
+  an ordinary TaQL-lite condition over the *source* table, and `LIMIT`
+  reuses [`insert!`](@ref)'s existing cycling/truncating semantics.
+  Implemented as a thin wrapper: parses the clause, builds a
+  [`query`](@ref) of the source table, and calls `insert!(target;
+  values=result, limit)` — no new mutation machinery. Closes the
+  Phase 31 non-goal.
+- Unlike Phase 111's `UPDATE`/`DELETE` `ORDER BY`/`LIMIT` surprise,
+  this form **was live-verified against real Casacore.jl first**
+  (`INSERT INTO $1 SELECT A, B FROM 'src' WHERE A > 7`, `SELECT *`, and
+  an `AS` rename all spiked before writing the test) and matches our
+  own implementation's semantics exactly — a genuine real-TaQL
+  cross-check testset was added, not just hand-computed references.
+
+### Phase 114 — array-cell values in `taql` INSERT VALUES string form
+
+```julia
+taql(t, "INSERT INTO t (A, V) VALUES (9, [[1.0,2.0],[3.0,4.0]])")
+```
+
+- `taql()`'s `INSERT INTO t VALUES (...)` string form now accepts an
+  array-cell value as a bracketed literal — flat (`[1.0, 2.0, 3.0]`,
+  already worked once `TQLArrayLit` stopped being `IN`-only) or nested
+  (`[[1.0,2.0],[3.0,4.0]]`, new) — instead of requiring the Julia
+  `insert!(t; values=["V" => matrix])` form for an array-shaped column.
+  New `_taql_const`-internal `_nest_to_array`: a rectangular nesting of
+  vectors becomes a real multi-dimensional `Array` (`stack`); a ragged
+  one is left as nested `Vector`s (which then fails, clearly, when
+  written to an array-shaped column).
+- **Element order matches real casacore TaQL's own nested-array-literal
+  convention, confirmed by a live cross-check**: the nesting is
+  reshaped *column-major* — each inner vector becomes one **column** of
+  the result, not one row (`[[1,2],[3,4]]` → `[1 3; 2 4]`, not
+  `[1 2; 3 4]`) — `stack`'s own default axis order happens to match
+  casacore's exactly, so no transpose/reshape juggling was needed once
+  this was spiked against real TaQL (`INSERT INTO $1 (A, V) VALUES
+  (9.0, [[1.0,2.0],[3.0,4.0]])` on a real casacore table, then compared
+  cell-for-cell against our own reader's output for the same insert).
+  Closes the remaining half of the Phase 31 non-goal (the row-copying
+  `INSERT ... SELECT ... FROM` half closed in Phase 113).
+
+### Phase 115 — `mscal.baseline()` `;`-separated multi-term specs
+
+```julia
+query(main, "mscal.baseline('DA01&DV01;DA02&DV02')")
+```
+
+- Investigated the standing Phase 80 non-goal ("baseline regex lists,
+  `blregexlist`") against real casacore and found the plan's own
+  characterization **did not hold**: `mscal.baseline('[0,1]&2')` and
+  `'{0,1}&2'` are both flatly *rejected* by real `tableCommand`
+  ("mismatched [ and ]" / parse error near `{`) — no bracketed
+  antenna-name-list syntax exists in this casacore build. A first
+  implementation attempt (splitting the whole spec on every top-level
+  comma into separate OR'd pair-terms, with `[...]` grouping antenna
+  names within one term) was built, then **discarded before being
+  committed** once live cross-checking showed real casacore does the
+  opposite: a plain comma *extends* one antenna-set list — even across
+  `&` — rather than separating whole pair-terms (`'DA01,DA02&DV01'` is
+  one pair-term with a 2-antenna LHS, not two terms; this already
+  worked with zero code changes, since the pre-Phase-115 code only ever
+  split on the *first* `&`, leaving every comma inside each side to
+  `_mssel_idset`'s own union logic).
+- The genuine gap, found instead: `;` **is** casacore's real
+  multiple-baseline-pair-term separator (`'DA01&DV01;DA02&DV02'`, OR'd)
+  — confirmed live across 7+ combinations (single/multi-antenna sides,
+  duplicate terms, `&&`/`&&&` terms, 2–3 terms), every one matching a
+  plain OR of each term's own match set exactly.
+- **`!` negation combined with `;` is deliberately NOT implemented**: 4
+  further live probes (`'!A&B;C&D'`, `'A&B;!C&D'`, and their variants)
+  showed the *second* half of a `;`-list is silently dropped whichever
+  term carries the `!` — not a reproducible boolean combination, almost
+  certainly a real casacore parser limitation rather than a defined
+  feature. Replicating a bug isn't useful, so combining `!` with `;`
+  raises a clear `ArgumentError` instead of a silent wrong answer; a
+  `;`-free leading `!` (already supported before this phase) is
+  unaffected.
+- `_mssel_baseline_pred` split into `_mssel_baseline_term_pred` (one
+  `&`-pair term, unchanged logic) + a thin wrapper doing the `;`-split
+  + `!`-combination guard + OR.
+- Real-TaQL cross-check testset (5 multi-term specs, all matching);
+  docs updated (the Phase 80 comment block, `_mssel_baseline_pred`'s
+  own docstring-comment recording the specific probes).
