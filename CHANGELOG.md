@@ -3090,3 +3090,51 @@ untouched after the view drops it, the add-then-remove-still-persists
 case, and a `_HAVE_CASACORE` cross-check. No new storage-format code,
 no new exports — completes the `RefEditTable` feature set started in
 Phase 125/126.
+
+### Phase 128 — `mscal.time()` `*` wildcard / `N[t0~t1]` edge-buffer forms vs real TaQL
+
+Investigated whether the `*` wildcard and `N[t0~t1]` explicit edge-
+buffer forms (both already implemented since Phase 94/121, but never
+individually live-cross-checked) actually match real casacore.
+
+**Confirmed correct, one small real gap found and fixed.** Reading
+`MSTimeGram.ll`/`.yy` confirms `*` is a genuine grammar token (`STAR`,
+`wildNumber: STAR {$$=-1}`) used per-field in `yFields`/`tFields` —
+identical to an omitted field, exactly what this package's
+`_mstime_fields` already did (no bug). Reading `MSTimeParse::
+selectTimeRange` (`MSTimeParse.cc:248-273`) confirms `N[t0~t1]`'s
+buffer is casacore's literal `edgeWidth` (**no `/2`**) — distinct from
+the bracket-only `[t0~t1]` form, which uses `defaultExposure/2` — this
+package's `buf = m[1] === nothing ? dT : parse(Float64, m[1])` already
+matched exactly. The real gap: the buffer number is casacore's own
+`FNUMBER` grammar production (`INT | INT. | .INT | INT.INT`), and the
+regex extracting it only accepted `INT`/`INT.INT` (`\d+(?:\.\d+)?`),
+rejecting the `.5[...]` / `5.[...]` spellings real TaQL accepts. Fixed
+in `src/taql/mscal.jl`.
+
+**A live oracle was investigated and found blocked by two independent,
+real issues — neither fixable here, both now documented in the source.**
+(1) The committed `sample.ms` fixture predates the Phase 121
+`FLAG_CATEGORY`/`CATEGORY`-keyword fix and is fully flagged; opening a
+*writable* copy so casacore's own `addCat()` self-heal can fire (the
+`Update` table mode) makes real casacore's `MSTimeParse::getDefaults()`
+**segfault outright** (not throw) when resolving a wildcard default
+against an all-`FLAG_ROW`-true table — a genuine crash bug in this
+casacore build, live-verified with a full backtrace, recorded as a
+finding rather than something this package can work around. (2) a
+`create_ms`-built synthetic MS gets past the `CATEGORY` keyword
+(Phase 121's own fix) but still fails `MSTableImpl::validate`'s
+measures/units keyword audit — the exact "genuinely large...
+deliberately out of scope" gap Phase 121 already identified and
+declined to chase.
+
+Verified instead the same way Phase 121's own default-row/dT fix was:
+hand-built fixtures + direct `_mssel_time`/`_mstime_fields` calls, the
+logic itself already pinned unambiguously by the grammar/source
+citations. 12 new tests in `test/taql_mscal_tests.jl` ("mscal.time()
+`*` wildcard / N[t0~t1]"): the `*`-vs-omitted-field structural
+equivalence, per-field wildcards in both date and time position, the
+`N[t0~t1]` literal-buffer-vs-`[t0~t1]`'s-`dT`/2 distinction at both a
+too-small and too-large buffer, the plain (non-bracket) range's
+"no buffer at all" exactness, and the `FNUMBER`-form fix
+(`.00001[...]`, `12.[...]`). 569 mscal tests standalone, all green.

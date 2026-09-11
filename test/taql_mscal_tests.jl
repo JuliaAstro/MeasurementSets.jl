@@ -1043,6 +1043,57 @@ end
     @test kw.values[findfirst(==("CATEGORY"), kw.names)] == String[]
 end
 
+# Phase 128: `*` wildcard fields + the `N[t0~t1]` explicit edge-buffer
+# form. A live oracle is blocked (see the doc comment above
+# `_mssel_time` for the two independent reasons found — a real
+# casacore segfault in `MSTimeParse::getDefaults()` on an all-flagged
+# writable table, and the pre-existing `MSTableImpl::validate`
+# measures/units gap) so these are hand-built-fixture + direct
+# `_mssel_time` checks, same discipline as the Phase 121 testset above.
+@testset "TaQL-lite — mscal.time() `*` wildcard / N[t0~t1] (Phase 128)" begin
+    # `*` is a real grammar token (STAR), identical to an omitted field
+    @test MSv2._mstime_fields("*") == MSv2._mstime_fields("")
+    @test MSv2._mstime_fields("2024/05/24/*") == (:cal, (2024.0, 5.0, 24.0, -1.0, -1.0, -1.0))
+    @test MSv2._mstime_fields("*/*/*") == MSv2._mstime_fields("")
+
+    t0 = 4.6e9; gap = 10.0
+    tm = [t0, t0 + gap]
+    dir = mktempdir()
+    p = joinpath(dir, "T")
+    write_table(p, "T", Pair{String,Any}["TIME" => tm, "EXPOSURE" => [8.0, 8.0]]; nrow = 2)
+    tt = readtable(p)
+    cn = Set(columnnames(tt))
+    d0 = MSv2.MJD_EPOCH + Dates.Millisecond(round(Int, t0 * 1000))
+    dstr = Dates.format(d0, "yyyy/mm/dd")
+    tstr = Dates.format(d0, "HH:MM:SS")
+
+    # bare `*` -> the default row's own time (row 1, no FLAG_ROW column)
+    # -> within dT=4.0s of t0 only (the second row is 10s away)
+    @test MSv2._mssel_time(tt, "*", cn, 2) == Bool[1, 0]
+    # date fixed + time wildcard, and the reverse -- both fields
+    # individually wildcarded still resolve to the same default
+    @test MSv2._mssel_time(tt, "$dstr/*", cn, 2) == Bool[1, 0]
+    @test MSv2._mssel_time(tt, "*/*/*/$tstr", cn, 2) == Bool[1, 0]
+
+    # N[t0~t0]: an explicit buffer, literal (no /2) -- bigger than the
+    # 10s gap matches both rows, smaller matches only the first
+    spec0 = "$dstr/$tstr~$dstr/$tstr"
+    @test MSv2._mssel_time(tt, "12[$spec0]", cn, 2) == Bool[1, 1]
+    @test MSv2._mssel_time(tt, "3[$spec0]", cn, 2) == Bool[1, 0]
+    # bracket-only (no N prefix) uses dT=4.0s < the 10s gap -> row 1 only
+    @test MSv2._mssel_time(tt, "[$spec0]", cn, 2) == Bool[1, 0]
+    # a plain (non-bracket) t0~t0 range has NO buffer at all
+    # (`selectTimeRange`'s `edgeInclusive=false` branch: plain
+    # `>=lo && <=hi`, no `abs(x-edge)<buf` term) -> with lo==hi==t0,
+    # only the exact value matches
+    @test MSv2._mssel_time(tt, spec0, cn, 2) == Bool[1, 0]
+
+    # the buffer literal is casacore's own FNUMBER (INT | INT. | .INT |
+    # INT.INT) -- `.5`/`12.` spellings must parse, not just `12`/`12.5`
+    @test MSv2._mssel_time(tt, ".00001[$spec0]", cn, 2) == Bool[1, 0]   # ~0 buffer
+    @test MSv2._mssel_time(tt, "12.[$spec0]", cn, 2) == Bool[1, 1]      # trailing-dot form
+end
+
 if _HAVE_TAQL
     @testset "TaQL-lite — mscal.* vs real TaQL" begin
         # derivedmscal UDFs must be registered in this casacore build
