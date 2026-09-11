@@ -2530,3 +2530,31 @@ query(main, "mscal.baseline('DA01&DV01;DA02&DV02')")
 - Real-TaQL cross-check testset (5 multi-term specs, all matching);
   docs updated (the Phase 80 comment block, `_mssel_baseline_pred`'s
   own docstring-comment recording the specific probes).
+
+### Phase 116 — `RetypedArrayEngine` feasibility investigation
+
+- Investigated the one remaining unsupported data manager's Phase 40
+  hand-wave ("needs the C++ source-type class") by reading `casacore/
+  tables/DataMan/RetypedArrayEngine.{h,tcc}` end to end. **Confirmed
+  genuinely infeasible, not just under-scoped**: `S` in
+  `RetypedArrayEngine<S,T>` is a C++ class template parameter — its
+  `dataTypeId()`/`set()`/`get()` conversion functions and binary layout
+  are arbitrary code compiled into whatever third-party program created
+  the table, with no fixed wire format to target; the on-disk DM type
+  string itself (`className()`) is built from `S::dataTypeId()`, and
+  `registerClass()` must be called explicitly per instantiation by that
+  program (casacore's own `libcasa_tables` never auto-registers any,
+  unlike Dysco / BitFlags / ForwardColumn). `grep -rl
+  RetypedArrayEngine` across the *entire* casacore source tree turns up
+  zero real callers anywhere in casacore itself — including every
+  Measurement Set-related file — only its own demo/test code
+  (`DataMan/test/dRetypedArrayEngine.{cc,h}`).
+- **Outcome: still unsupported, as before — the original assessment was
+  correct.** The only change is a clearer, investigation-backed error
+  message + header comment in `src/datamanagers/forwardcol.jl`'s
+  `_UnsupportedDM` (cites the specific finding instead of the terser
+  original text), so a future reader hitting it understands it's a
+  structural dead end rather than a missing feature to file. No
+  behavior/test change (the existing `engine_tests.jl` dispatch test —
+  `_dmtype("RetypedArrayEngine<Float>") === _UnsupportedDM` — already
+  covers the unchanged code path).

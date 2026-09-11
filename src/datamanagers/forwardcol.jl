@@ -49,12 +49,37 @@ function getcolumn(fce::ForwardColumnEngine, ::Integer, ::ColumnDesc, nrow::Inte
 end
 
 # --- unsupported engines: a clear error (neither occurs in a standard MS)
+#
+# RetypedArrayEngine<S,T> (Phase 116 investigation, `~/Development/
+# CASACORE/casacore/tables/DataMan/RetypedArrayEngine.{h,tcc}`):
+# confirmed genuinely infeasible, not just under-scoped. `S` (the
+# "virtual type" -- e.g. a "StokesVector" struct) is a C++ class
+# TEMPLATE PARAMETER: its `dataTypeId()`, `set()`/`get()` conversion
+# functions, and in-memory binary layout are arbitrary code compiled
+# into whatever third-party program created the table -- there is no
+# canonical registry of `S` types and no fixed wire format to decode
+# against (`className()` builds the DM type string from `S`'s own
+# `dataTypeId()`, and `registerClass()` must be called explicitly per
+# instantiation by that third-party code -- casacore's own
+# `libcasa_tables` never auto-registers any). A `grep -rl
+# RetypedArrayEngine` across the whole casacore source tree confirms
+# zero real callers anywhere in casacore itself, including every
+# Measurement Set-related file -- its only two uses are its own demo/
+# test code (`DataMan/test/dRetypedArrayEngine.{cc,h}`) showing a
+# third party how to define one. No real MS from any standard pipeline
+# uses it.
 
 struct _UnsupportedDM end
 DATAMANAGERS["ForwardColumnIndexedRowEngine"] = _UnsupportedDM
 DATAMANAGER_PATTERNS[r"^RetypedArrayEngine<"] = _UnsupportedDM
 
 Base.open(::Type{_UnsupportedDM}, ::Table, dm::DataManagerInfo) = error(
-    "data manager \"$(dm.name)\" is not supported -- RetypedArrayEngine needs the " *
-    "C++ source-type class, ForwardColumnIndexedRowEngine is unimplemented. " *
-    "Neither occurs in a standard Measurement Set.")
+    "data manager \"$(dm.name)\" is not supported -- RetypedArrayEngine is a C++ " *
+    "class TEMPLATE (`RetypedArrayEngine<S,T>`): the virtual type `S` (e.g. a " *
+    "\"StokesVector\" struct) is compiled into whatever third-party program " *
+    "created the table, with its own get/set conversion functions and no fixed " *
+    "wire format to decode -- there is no generic implementation to write " *
+    "(confirmed against the casacore source: it has zero real callers anywhere " *
+    "in casacore itself, including every Measurement Set-related file -- only " *
+    "its own demo/test code instantiates it). ForwardColumnIndexedRowEngine is " *
+    "unimplemented. Neither occurs in a standard Measurement Set.")
