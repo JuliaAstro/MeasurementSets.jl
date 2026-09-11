@@ -352,6 +352,74 @@ end
     @test !MSv2._mssel_is_blength("0 & 1")     # a real antenna-id spec, not a length
 end
 
+# Phase 115: `;`-separated list of several `&`-baseline-pair terms
+# (OR'd) sharing one `mscal.baseline` spec. A `[..]`/`{..}` bracketed
+# antenna-name LIST -- the plan's original "blregexlist" characterization
+# -- was investigated and found NOT to exist in real casacore (`'[0,1]&2'`
+# and `'{0,1}&2'` are both flatly rejected by `tableCommand`); a plain
+# comma already extends one antenna-set list across `&` with no code
+# change needed (`'ea01,ea02&ea03'` == `'ea01&ea03;ea02&ea03'`, verified
+# live). `;` as the genuine multi-pair-term separator, and its
+# deliberately-unsupported interaction with `!`, are both cross-checked
+# below -- see `_mssel_baseline_pred`'s docstring comment for the
+# specific probes that ruled out replicating the `!`+`;` combination.
+@testset "TaQL-lite — mscal.baseline() `;`-separated multi-term specs" begin
+    n2i = Dict("ea01" => [0], "ea02" => [1], "ea03" => [2], "ea04" => [3], "ea05" => [4])
+
+    main = readtable(SAMPLE_MS)
+    a1 = Int.(column(main, "ANTENNA1")[:])
+    a2 = Int.(column(main, "ANTENNA2")[:])
+    nb(pred) = count(i -> pred(a1[i], a2[i]), 1:nrow(main))
+
+    # OR of two disjoint pair-terms
+    r1 = nrow(query(main, "mscal.baseline('ea01&ea02;ea01&ea03')"))
+    @test r1 == nb((x, y) -> (x, y) in ((0, 1), (1, 0)) || (x, y) in ((0, 2), (2, 0)))
+
+    # a comma-extended antenna list on one side of `&`, combined with a
+    # second `;`-term
+    r2 = nrow(query(main, "mscal.baseline('ea01,ea02&ea03;ea04&ea05')"))
+    @test r2 == nb((x, y) -> (x in (0, 1) && y == 2) || (y in (0, 1) && x == 2) ||
+                            (x, y) in ((3, 4), (4, 3)))
+
+    # duplicate terms don't double-count (a genuine OR, not a sum)
+    @test nrow(query(main, "mscal.baseline('ea01&ea02;ea01&ea02')")) ==
+          nrow(query(main, "mscal.baseline('ea01&ea02')"))
+
+    # `&&&`/`&&` terms compose with `;` too
+    r3 = nrow(query(main, "mscal.baseline('ea01 &&& ; ea02 &&&')"))
+    @test r3 == 0   # the sample MS is cross-correlation-only
+
+    # `!` combined with `;` is refused, not silently wrong (real
+    # casacore's own behaviour there is not a well-defined negation --
+    # see the comment on `_mssel_baseline_pred`)
+    @test_throws ArgumentError query(main, "mscal.baseline('!ea01&ea02;ea01&ea03')")
+    @test_throws ArgumentError query(main, "mscal.baseline('ea01&ea02;!ea01&ea03')")
+    # a `;`-free leading `!` is unaffected
+    @test nrow(query(main, "mscal.baseline('!ea01&ea02')")) ==
+          nb((x, y) -> !((x, y) in ((0, 1), (1, 0))))
+
+    # `_mssel_baseline_pred` unit: the truth table directly
+    pred = MSv2._mssel_baseline_pred("ea01&ea02;ea01&ea03", n2i, 0:9)
+    @test pred(0, 1) && pred(0, 2) && !pred(0, 3) && !pred(1, 2)
+
+    @testset "vs real TaQL" begin
+        for spec in ("ea01&ea02;ea01&ea03", "ea01,ea02&ea03;ea04&ea05",
+                     "ea01&ea02;ea01&ea02", "ea01 &&& ; ea02 &&&",
+                     "ea01&ea02;ea03&ea04;ea05")
+            rdir = joinpath(mktempdir(), "sel")
+            ok = try
+                _taqlcmd("SELECT FROM \$1 WHERE mscal.baseline('$spec') GIVING '$rdir'",
+                         CCT.Table(SAMPLE_MS))
+                true
+            catch
+                false
+            end
+            ok || continue
+            @test nrow(query(main, "mscal.baseline('$spec')")) == nrow(readtable(rdir))
+        end
+    end
+end
+
 @testset "TaQL-lite — mscal.spw channel selection + mscal.chan" begin
     main = readtable(SAMPLE_MS)
     N = nrow(main)

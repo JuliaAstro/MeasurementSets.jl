@@ -2487,3 +2487,46 @@ taql(t, "INSERT INTO t (A, V) VALUES (9, [[1.0,2.0],[3.0,4.0]])")
   cell-for-cell against our own reader's output for the same insert).
   Closes the remaining half of the Phase 31 non-goal (the row-copying
   `INSERT ... SELECT ... FROM` half closed in Phase 113).
+
+### Phase 115 — `mscal.baseline()` `;`-separated multi-term specs
+
+```julia
+query(main, "mscal.baseline('DA01&DV01;DA02&DV02')")
+```
+
+- Investigated the standing Phase 80 non-goal ("baseline regex lists,
+  `blregexlist`") against real casacore and found the plan's own
+  characterization **did not hold**: `mscal.baseline('[0,1]&2')` and
+  `'{0,1}&2'` are both flatly *rejected* by real `tableCommand`
+  ("mismatched [ and ]" / parse error near `{`) — no bracketed
+  antenna-name-list syntax exists in this casacore build. A first
+  implementation attempt (splitting the whole spec on every top-level
+  comma into separate OR'd pair-terms, with `[...]` grouping antenna
+  names within one term) was built, then **discarded before being
+  committed** once live cross-checking showed real casacore does the
+  opposite: a plain comma *extends* one antenna-set list — even across
+  `&` — rather than separating whole pair-terms (`'DA01,DA02&DV01'` is
+  one pair-term with a 2-antenna LHS, not two terms; this already
+  worked with zero code changes, since the pre-Phase-115 code only ever
+  split on the *first* `&`, leaving every comma inside each side to
+  `_mssel_idset`'s own union logic).
+- The genuine gap, found instead: `;` **is** casacore's real
+  multiple-baseline-pair-term separator (`'DA01&DV01;DA02&DV02'`, OR'd)
+  — confirmed live across 7+ combinations (single/multi-antenna sides,
+  duplicate terms, `&&`/`&&&` terms, 2–3 terms), every one matching a
+  plain OR of each term's own match set exactly.
+- **`!` negation combined with `;` is deliberately NOT implemented**: 4
+  further live probes (`'!A&B;C&D'`, `'A&B;!C&D'`, and their variants)
+  showed the *second* half of a `;`-list is silently dropped whichever
+  term carries the `!` — not a reproducible boolean combination, almost
+  certainly a real casacore parser limitation rather than a defined
+  feature. Replicating a bug isn't useful, so combining `!` with `;`
+  raises a clear `ArgumentError` instead of a silent wrong answer; a
+  `;`-free leading `!` (already supported before this phase) is
+  unaffected.
+- `_mssel_baseline_pred` split into `_mssel_baseline_term_pred` (one
+  `&`-pair term, unchanged logic) + a thin wrapper doing the `;`-split
+  + `!`-combination guard + OR.
+- Real-TaQL cross-check testset (5 multi-term specs, all matching);
+  docs updated (the Phase 80 comment block, `_mssel_baseline_pred`'s
+  own docstring-comment recording the specific probes).
