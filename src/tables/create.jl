@@ -908,6 +908,18 @@ function _synth_col(sc::StdColumn, n, nchan, ncorr, nrec)
     return [zeros(juliatype(T), shp) for _ in 1:n]
 end
 
+# casacore's `MeasurementSet` constructor (`MeasurementSet.cc:89-99`)
+# requires `FLAG_CATEGORY` to carry a `CATEGORY` (`TpArrayString`)
+# keyword -- on a writable table it self-heals by adding an empty one,
+# but on a READ-ONLY open (every real-TaQL cross-check in this test
+# suite, and any external reader that opens R/O) it throws
+# "Missing CATEGORY keyword in FLAG_CATEGORY column" instead. Found
+# investigating Phase 121 (`mscal.time`, whose `derivedmscal` case
+# unconditionally constructs a full `MeasurementSet` even though it
+# never touches FLAG_CATEGORY) -- stamped on every FLAG_CATEGORY column
+# this package writes, matching casacore's own default (empty list).
+_flag_category_kw() = _set_kw(Record(), "CATEGORY", TpArrayString, String[])
+
 # build (descs, data) for one standard table
 function _synth_table(tbl, nrows, nchan, ncorr, nrec)
     std = SCHEMAVER2[tbl]
@@ -919,7 +931,8 @@ function _synth_table(tbl, nrows, nchan, ncorr, nrec)
         shape = sc.shape isa Dims ? sc.shape :
                 sc.shape isa VariableDims ? VariableDims() :
                 VariableShape()
-        push!(descs, _mkdesc(sc.name, sc.type, shape))
+        kw = sc.name == "FLAG_CATEGORY" ? _flag_category_kw() : Record()
+        push!(descs, _mkdesc(sc.name, sc.type, shape; keywords = kw))
         push!(data, vals)
     end
     descs, data

@@ -7,9 +7,10 @@ CurrentModule = MeasurementSets
 ```@index
 ```
 
-`join`, `delete!` and `insert!` below are methods added to `Base.join` /
-`Base.delete!` / `Base.insert!` (an N:1 lookup join and the `DELETE` /
-`INSERT` write commands); they are not exported.
+This API reference spans three pages — this one, [part 2](api-2.md)
+(writing / editing / concurrency / the query engine / primary beams),
+and [Measures](api-measures.md) — split apart to stay under
+Documenter's HTML size limit; the search index above covers all three.
 
 `BFloat16` is re-exported from
 [`BFloat16s.jl`](https://github.com/JuliaMath/BFloat16s.jl) so that
@@ -61,91 +62,10 @@ UNITS_NO_JULIA_COUNTERPART
 
 `import SOFA` (and optionally `EarthOrientation`) activates
 [`measconvert`](@ref); see [Concepts](concepts.md#Reference-frames-(measures)).
-
-```@docs
-measinfo
-MeasInfo
-measure
-measconvert
-observatory
-MeasFrame
-MEpoch
-MDirection
-MPosition
-MFrequency
-MRadialVelocity
-MDoppler
-MBaseline
-MuvW
-MEarthMagnetic
-earthfield
-EarthMagneticMachine
-emm_lineofsight
-rotation_measure
-faraday_rotation
-derotate_angle
-RM_IONOSPHERE
-Ephemeris
-open_ephemeris
-field_ephemeris
-ephemeris_direction
-ephemeris_radvel
-ephemeris_distance
-ephemeris_diskpos
-doppler
-frequency
-radialvelocity
-restfrequency
-shiftfreq
-reftype
-RefFrame
-DopplerType
-```
-
-```@docs
-UTC
-TAI
-TT
-TDB
-UT1
-J2000
-ICRS
-B1950
-APP
-GALACTIC
-ECLIPTIC
-HADEC
-AZEL
-AZELGEO
-ITRF
-WGS84
-TOPO
-REST
-LSRK
-LSRD
-BARY
-GEO
-GALACTO
-LGROUP
-CMB
-MERCURY
-VENUS
-MARS
-JUPITER
-SATURN
-URANUS
-NEPTUNE
-SUN
-MOON
-IGRF
-RADIO
-OPTICAL
-RATIO
-BETA
-GAMMA
-Z
-RELATIVISTIC
-```
+Split onto its own page — [Measures](api-measures.md) — since this
+category alone (measure types, `measconvert`, and ~50 reference-frame
+singleton types) is large enough to push the combined API page past
+Documenter's HTML size limit.
 
 ## Schema and metadata
 
@@ -174,69 +94,6 @@ stdcolumns
 validate
 ```
 
-## Writing tables
-
-```@docs
-write_table
-write_ms
-copyms
-copytable
-create_ms
-reference_copy
-write_reftable
-write_concattable
-```
-
-## Editing in place
-
-```@docs
-edit
-addrows!
-removerows!
-addcolumn!
-removecolumn!
-setcell!
-setcolumn!
-```
-
-## Concurrency
-
-```@docs
-resync
-is_stale
-is_multiused
-```
-
-## Query engine
-
-```@docs
-query
-groupby
-GroupSlice
-update!
-taql
-```
-
-```@docs
-Base.join(::MeasurementSets.AbstractTable, ::MeasurementSets.AbstractTable)
-Base.delete!(::Union{AbstractString, MeasurementSets.AbstractTable})
-Base.insert!(::Union{AbstractString, MeasurementSets.AbstractTable})
-```
-
-## Primary beams
-
-```@docs
-PrimaryBeam
-GaussianBeam
-AiryBeam
-PolynomialBeam
-EllipticalGaussianBeam
-SquintBeam
-power_response
-voltage_response
-attenuate
-correct_flux
-angular_separation
-pointing_offset
-reffreq
-```
+Writing / editing / concurrency / the query engine / primary beams are
+on a second page — [API reference (part 2)](api-2.md) — split off to
+stay under Documenter's HTML size limit.

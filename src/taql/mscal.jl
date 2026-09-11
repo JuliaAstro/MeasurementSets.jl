@@ -702,11 +702,16 @@ end
 # `AutoCorrAlso` / `AutoCorrOnly`), a physical baseline-length range
 # (`'100~500m'` / `'<200m'` / `'>1km'`, from `ANTENNA.POSITION`, no `&`
 # involved), a `;`-separated list of SEVERAL such `L & R` baseline-pair
-# terms (OR'd — `'DA01&DV01;DA02&DV02'`; a plain comma instead *extends*
-# one antenna-set list, even across `&` — `'DA01,DA02&DV01'` is ONE
-# pair-term with a 2-antenna LHS, not two terms — both verified live
-# against real casacore, see `_mssel_baseline_pred`), and a whole-spec
-# `!` negation (NOT combinable with a `;`-list — see there).
+# terms — each independently optionally `!`-negated, combined via a
+# running accumulator (a positive term UNIONS in, a negated term
+# INTERSECTS — see `_mssel_baseline_pred`'s own comment for the exact
+# rule, read out of `MSAntennaParse::setTEN` and cross-checked live) —
+# and casacore's real "blregexlist" — `/pattern/[,/pattern/...]` where
+# each `pattern`'s body contains a literal `&`, FULL-matched against
+# the whole `"name_i&name_j"` string per ordered antenna-index pair
+# (see `_mssel_blregex_pred`). A plain comma instead *extends* one
+# antenna-set list, even across `&` — `'DA01,DA02&DV01'` is ONE
+# pair-term with a 2-antenna LHS, not two terms (verified live).
 #
 # Threading mirrors `mscal.*`: a `TQLMSSel` node, a `"::mssel::<fn>::<spec>"`
 # sentinel split by `_mssel_split` in `_tql_cols` / `_vtq_prepare!`.
@@ -809,9 +814,63 @@ function _mssel_idset(spec::AbstractString, allids, n2i::AbstractDict)
     return setdiff(base, neg)
 end
 
+# A regex baseline-pair LIST (casacore's real "blregexlist", Phase 119
+# — the Phase 80 non-goal, misidentified as a `[name1,name2]` bracket
+# form in Phase 115 and discarded there since real casacore rejects
+# that; the actual mechanism, found by reading `MSAntennaGram.yy`/`.ll`
+# + `MSAntennaParse::selectBLRegex`, is a `/…/`-delimited regex whose
+# body contains a literal `&` — the lexer's own discriminator between a
+# per-name `REGEX` and a `BLREGEX` — FULL-matched against the whole
+# `"name_i&name_j"` string for every ORDERED pair (i,j) of antenna
+# indices (self-pairs `i==j` included), one or more comma-separated
+# such patterns OR'd together, each optionally negated by a LITERAL
+# leading `^` inside the slashes (stripped before compiling — this is
+# NOT the regex anchor; a real anchor isn't expressible here). VERIFIED
+# live against real casacore: `/DA01&DV01/` matches only that exact
+# ordered pair (the reverse `/DV01&DA01/` matches nothing on data
+# stored the other way round); `/DA0[12]&DV01/` and `/.*&DV01/` both
+# glob/wildcard the whole baseline string; `/^DA01&DV01/` negates just
+# that one pattern; a comma list ORs multiple patterns (a negated one
+# mixed with a plain one still ORs, not intersects); and the outer `!`
+# this file already supports negates the WHOLE list's result — e.g.
+# `!/DA01&DV01/,/DA01&DV02/` matches `NOT (A ∪ B)`, not `NOT A ∪ B` —
+# confirmed by an exact row-count match to that arithmetic. Composes
+# cleanly with the `;`-multi-term machinery below (no interaction with
+# the Phase 115 `!`+`;` refusal, which is about a DIFFERENT ambiguity —
+# `;`-joined whole `baseline` terms, not a single blregexlist's own
+# internal comma list).
+_mssel_is_regex_elem(p::AbstractString) =
+    length(p) >= 2 && startswith(p, "/") && endswith(p, "/") && occursin('&', p[2:end-1])
+
+function _mssel_is_blregexlist(spec::AbstractString)
+    parts = _mssel_commas(spec)
+    !isempty(parts) && all(p -> _mssel_is_regex_elem(strip(p)), parts)
+end
+
+function _mssel_blregex_pred(spec::AbstractString, names::Vector{String})
+    n = length(names)
+    match = falses(n, n)
+    for raw in _mssel_commas(spec)
+        inner = strip(raw)[2:end-1]              # strip the /.../ delimiters
+        neg = startswith(inner, "^")
+        re = Regex("^(?:" * (neg ? inner[2:end] : inner) * ")\$")
+        for j in 1:n, i in 1:n
+            (occursin(re, names[i] * "&" * names[j]) != neg) && (match[i, j] = true)
+        end
+    end
+    return (a1, a2) -> (0 <= a1 < n && 0 <= a2 < n) && match[a1 + 1, a2 + 1]
+end
+
 # one `&`-joined (or bare) baseline-pair term -- no leading `!`, no `;`
 # (both handled by `_mssel_baseline_pred`, below).
-function _mssel_baseline_term_pred(spec::AbstractString, n2i::AbstractDict, allants)
+function _mssel_baseline_term_pred(spec::AbstractString, n2i::AbstractDict, allants;
+                                   names::Union{Nothing,Vector{String}} = nothing)
+    if _mssel_is_blregexlist(spec)
+        names === nothing && throw(ArgumentError(
+            "mscal.baseline: a regex baseline-pair list (\"$spec\") needs antenna " *
+            "names, which aren't available here (no ANTENNA name table)"))
+        return _mssel_blregex_pred(spec, names)
+    end
     # count leading ampersands after the left antenna list to distinguish
     # `&` / `&&` / `&&&` (checked longest-first: `&&&` also contains `&&`)
     if occursin("&&&", spec)
@@ -834,48 +893,63 @@ function _mssel_baseline_term_pred(spec::AbstractString, n2i::AbstractDict, alla
     end
 end
 
-# the full spec: an optional whole-spec `!` negation, OR a `;`-separated
-# list of several `&`-baseline-pair terms OR'd together (casacore's own
-# baseline-pair-list separator — NOT a comma, which instead *extends*
-# one antenna-set list, even across `&`: `'DA01,DA02&DV01'` is ONE
-# pair-term with a 2-antenna LHS, confirmed live to give the same row
-# count as writing the union out by hand).
+# the full spec: a `;`-separated list of `&`-baseline-pair terms, each
+# independently optionally `!`-negated (casacore's own baseline-pair-
+# list separator — NOT a comma, which instead *extends* one antenna-set
+# list, even across `&`: `'DA01,DA02&DV01'` is ONE pair-term with a
+# 2-antenna LHS, confirmed live to give the same row count as writing
+# the union out by hand).
 #
-# VERIFIED against real casacore (`tableCommand`, this session): every
-# un-negated `;`-list combination tried (single/multi-antenna sides,
-# duplicate terms, `&&`/`&&&` terms, 2-3 terms) matches a plain OR of
-# each term's own match set exactly. A `!` negation combined with a
-# `;`-list does NOT behave as a well-defined boolean combination —
-# `'!A&B;C&D'` (leading negation) gave exactly `'!A&B'` alone's row
-# count, silently dropping the `;C&D` term entirely; `'A&B;!C&D'` gave
-# exactly `'A&B'` alone's count, silently dropping the negated term
-# instead. This looks like a genuine casacore parser limitation, not a
-# reproducible feature, so it is deliberately NOT replicated here —
-# combining `!` with `;` is a clear error instead of a silent wrong
-# answer; negate a `;`-free spec, or negate each baseline pair by
-# writing its complement out explicitly.
-function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants)
+# Phase 120 (revisiting the Phase 115 refusal, now correctly): read
+# `MSAntennaParse::setTEN` (`MSAntennaParse.cc:80-96`) in full — it
+# maintains a running accumulator (`node_p`) across every `;`-joined
+# term, evaluated left to right:
+#   cond = <term's own match predicate>, negated first if the TERM
+#          itself has a leading `!` (each term's `!` is entirely its
+#          own — there is no separate "whole-spec" negation distinct
+#          from the first term's own optional `!`, since casacore's
+#          grammar only ever attaches `NOT` to ONE `baseline`
+#          nonterminal, never to a `;`-chain as a whole)
+#   1st term:      accumulator := cond
+#   later term:    accumulator := negated ? (accumulator AND cond)
+#                                          : (accumulator OR cond)
+# i.e. a positive term UNIONS into the running result, a negated term
+# INTERSECTS with it — genuinely well-defined, not a parser bug as
+# Phase 115 concluded from too little evidence. VERIFIED against real
+# casacore (`tableCommand`, this session) with 8+ combinations mixing
+# negated and plain terms in every position (2 and 3 terms) — every
+# predicted row count from the formula above matched exactly, including
+# the two cases (`'!A&B;C&D'` → `NOT(A)`; `'A&B;!C&D'` → `A`) that
+# Phase 115 mis-read as "the second term gets silently dropped" (both
+# are in fact `NOT(A) ∪ C&D = NOT(A)` and `A ∩ NOT(C&D) = A`
+# respectively, since the two clauses happen to be disjoint sets in
+# every spec tested — the "same as the first term alone" appearance was
+# coincidental algebra, not term-dropping).
+function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants;
+                              names::Union{Nothing,Vector{String}} = nothing)
     spec = strip(spec)
+    if occursin(';', spec)
+        terms = [t for t in strip.(split(spec, ';')) if !isempty(t)]
+        isempty(terms) && return (a1, a2) -> false
+        acc = nothing
+        for t in terms
+            tneg = startswith(t, "!")
+            tbody = tneg ? strip(t[2:end]) : t
+            raw = _mssel_baseline_term_pred(tbody, n2i, allants; names)
+            cond = tneg ? ((a1, a2) -> !raw(a1, a2)) : raw
+            acc = acc === nothing ? cond :
+                  tneg ? _mssel_and2(acc, cond) : _mssel_or2(acc, cond)
+        end
+        return acc
+    end
     neg = startswith(spec, "!")
     body = neg ? strip(spec[2:end]) : spec
-    if occursin(';', body)
-        neg && throw(ArgumentError(
-            "mscal.baseline: a leading `!` combined with a `;`-separated list " *
-            "of baseline-pair terms is not supported (real casacore's own " *
-            "behaviour there is inconsistent, not a well-defined negation) — " *
-            "negate a `;`-free spec instead"))
-        terms = [t for t in strip.(split(body, ';')) if !isempty(t)]
-        any(t -> startswith(t, "!"), terms) && throw(ArgumentError(
-            "mscal.baseline: a `!`-negated term inside a `;`-separated list " *
-            "is not supported (real casacore's own behaviour there is " *
-            "inconsistent, not a well-defined negation) — negate a `;`-free " *
-            "spec instead"))
-        preds = [_mssel_baseline_term_pred(t, n2i, allants) for t in terms]
-        return isempty(preds) ? ((a1, a2) -> false) : (a1, a2) -> any(p -> p(a1, a2), preds)
-    end
-    pred = _mssel_baseline_term_pred(body, n2i, allants)
+    pred = _mssel_baseline_term_pred(body, n2i, allants; names)
     return neg ? (a1, a2) -> !pred(a1, a2) : pred
 end
+
+_mssel_and2(p, q) = (a1, a2) -> p(a1, a2) && q(a1, a2)
+_mssel_or2(p, q) = (a1, a2) -> p(a1, a2) || q(a1, a2)
 
 # a bare baseline-length range/bound, no `&` involved (casacore's
 # `blengthlist` — `LT`/`GT`/`a-b`, unit `m`/`km`, default `m`).
@@ -947,8 +1021,9 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
             return Bool[(neg ? !lpred(blen(a1[i], a2[i])) : lpred(blen(a1[i], a2[i])))
                         for i in 1:n]
         end
-        n2i = _mssel_names_to_ids(column(readtable(subs["ANTENNA"]), "NAME")[:])
-        pred = _mssel_baseline_pred(spec, n2i, 0:(length(column(readtable(subs["ANTENNA"]), "NAME")) - 1))
+        antnames = String.(column(readtable(subs["ANTENNA"]), "NAME")[:])
+        n2i = _mssel_names_to_ids(antnames)
+        pred = _mssel_baseline_pred(spec, n2i, 0:(length(antnames) - 1); names = antnames)
         return Bool[pred(a1[i], a2[i]) for i in 1:n]
     elseif fn == "field"
         _need("FIELD_ID")
@@ -1053,15 +1128,32 @@ _mssel_inany(x, ranges) = any(r -> r[1] <= x <= r[2], ranges)
 
 # --- MSSelection time grammar (casacore ms/MSSel/MSTimeParse) -----------
 # A comma-list of:
-#   t0            single time  -> |TIME - t0| <= dT   (dT = EXPOSURE/2, or 1 s)
+#   t0            single time  -> |TIME - t0| <= dT
 #   t0~t1         range, exclusive edges
 #   [t0~t1]       range, edge-inclusive (|TIME-edge| < dT counts)
 #   N[t0~t1]      range, edge buffer N seconds
 #   t0+dur        range t0 .. t0+dur   (dur = a time string past the MJD epoch)
 #   >t0  <t1      open bounds
 # Each time is `[Y/[M/[D/]]][h:[m:[s]]]` with any component `*` (wildcard);
-# a missing / `*` component defaults to the first MAIN-row TIME (t1 of a
-# `~` range instead inherits from t0).  Bare number = MJD days.
+# a missing / `*` component defaults to the first UNFLAGGED (`FLAG_ROW`)
+# MAIN row's own TIME (t1 of a `~` range instead inherits from t0), or
+# row 1 if every row is flagged or there is no `FLAG_ROW` column (a
+# deliberate MeasurementSets extension — real casacore throws in that
+# case instead). Bare number = MJD days.
+#
+# Phase 121 (`mscal.time`, confirmed a direct pass-through to real
+# casacore's own `msTimeGramParseCommand`, `UDFMSCal.cc:479-491`, the
+# same discipline as Phases 119/120's `mscal.baseline`): read
+# `MSTimeGram.yy`/`.ll` in full — this grammar was ALREADY fully
+# implemented in Phase 94, no missing syntax found (every production —
+# single/range/edge-bracket/duration/bound/wildcard/comma-list — maps
+# to something above). Reading `MSTimeParse::getDefaults`
+# (`MSTimeParse.cc:114-168`) DID find two real bugs, now fixed: `dT`
+# (the tolerance in every form above) is `defaultExposure/2`, and
+# `defaultExposure` is the DEFAULT ROW's own `EXPOSURE`
+# (`exposure(firstLogicalRow,"s")`) — NOT a mean over every row's
+# `EXPOSURE`, which Phase 94 originally used; and the "default row"
+# itself is the FIRST UNFLAGGED row, not row 1 unconditionally.
 
 # parse one time token -> 6 fields (y,mo,d,h,mi,s), -1 = wildcard/missing;
 # or a bare Float64 (already MJD days) wrapped as `(:mjd, val)`.
@@ -1104,13 +1196,22 @@ function _mssel_time(t::AbstractTable, spec::AbstractString, cn::AbstractSet, n:
     "TIME" in cn || error("mscal.time: MAIN table has no TIME column")
     tm = Float64.(column(t, "TIME")[:])
     n == 0 && return Bool[]
-    d0 = MJD_EPOCH + Dates.Millisecond(round(Int, tm[1] * 1000))   # first-row time
+    # casacore's own "default row" (`MSTimeParse::getDefaults`) is the
+    # FIRST UNFLAGGED row (`FLAG_ROW`) -- falling back to row 1 if every
+    # row is flagged is a deliberate MeasurementSets extension: real
+    # casacore *throws* in that case ("No logical row zero found"),
+    # which would make `mscal.time` unusable on a fully-flagged MS (a
+    # real, common state -- the committed test fixture is one).
+    r0 = "FLAG_ROW" in cn ? something(findfirst(!, Bool.(column(t, "FLAG_ROW")[:])), 1) : 1
+    d0 = MJD_EPOCH + Dates.Millisecond(round(Int, tm[r0] * 1000))   # default row's time
     def = (Dates.year(d0), Dates.month(d0), Dates.day(d0),
            Dates.hour(d0), Dates.minute(d0), Dates.second(d0))
     epdef = (1858, 11, 17, 0, 0, 0.0)
-    dT = "EXPOSURE" in cn ?
-         (e = Float64.(column(t, "EXPOSURE")[:]); (isempty(e) ? 2.0 : sum(e) / length(e)) / 2) :
-         1.0
+    # dT = half the DEFAULT ROW's OWN EXPOSURE (casacore's
+    # `defaultExposure = exposure(firstLogicalRow,"s")` -- NOT a mean
+    # over all rows, verified by reading `MSTimeParse.cc:163-166`); the
+    # 0.1 s fallback matches casacore's own no-EXPOSURE-source case.
+    dT = ("EXPOSURE" in cn ? Float64(column(t, "EXPOSURE")[r0]) : 0.1) / 2
 
     _sec(tok, dfl) = begin
         k, v = _mstime_fields(tok)
