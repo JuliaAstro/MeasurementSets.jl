@@ -3138,3 +3138,39 @@ equivalence, per-field wildcards in both date and time position, the
 too-small and too-large buffer, the plain (non-bracket) range's
 "no buffer at all" exactness, and the `FNUMBER`-form fix
 (`.00001[...]`, `12.[...]`). 569 mscal tests standalone, all green.
+
+### Phase 129 — `edit(ct::ConcatTable)`: in-place edit through a ConcatTable view
+
+Parallel to Phase 125's RefTable investigation. Read `tables/Tables/
+ConcatColumn.cc` and found the exact same shape: `ConcatColumn::put`
+is a pure row-index translation — `refTabPtr_p->rows().mapRownr
+(tableNr, tabRownr, rownr); refColPtr_p[tableNr]->put(tabRownr,
+dataPtr)` — a `ConcatTable` has no storage of its own either; editing
+one in place IS editing whichever PART a row actually belongs to, at
+that part's own local row number (the identical `k =
+searchsortedlast(offsets, i-1); i - offsets[k]` split this package's
+own read-side `ConcatColumn` already does).
+
+New `src/tables/concatedit.jl`: `edit(ct::ConcatTable)` opens an
+`EditTable` for every part (each must be a plain `Table`) and returns
+a `ConcatEditTable`; `t[name][i] = v` translates `i` through `ct`'s
+cumulative offsets to (part, local row) and delegates straight to that
+part's own `EditTable`/`EditColumn` — the same fast-path/regen/tile-
+patch machinery every other `edit` session already uses, unchanged.
+`edit(f, ct::ConcatTable)` runs `f` then flushes every part.
+
+`ConcatTable::canRemoveRow`/`canRemoveColumn`/`canRenameColumn` are all
+hard-coded `false` in casacore and `removeRow` throws outright ("cannot
+remove rows") with no `addRow` override either — `removerows!`/
+`addrows!`/`removecolumn!` are deliberate non-goals, same reasoning as
+`RefEditTable`. `ConcatTable::addColumn` genuinely is supported by
+casacore (adds identically to every part) but not implemented here —
+left for a future phase, mirroring how `RefEditTable`'s own
+`addcolumn!`/`removecolumn!` came a phase later (126/127) after the
+core write-through (125).
+
+9 new tests in `test/edit_tests.jl` ("edit — through a ConcatTable
+view"): single-cell writes landing in the correct part, a whole-view-
+column write spanning both parts, a non-plain-Table-part guard, and a
+`_HAVE_CASACORE` cross-check. No new storage-format code, no new
+exports.
