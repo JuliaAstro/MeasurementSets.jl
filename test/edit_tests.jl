@@ -282,3 +282,68 @@ if isdir(SAMPLE_MS)
         end
     end
 end
+
+# Phase 125: edit(rt::RefTable) -- a thin write-through view: `rv[name][i]
+# = v` translates through rt.rows/rt.namemap and writes the *parent*
+# table's mapped row (casacore's own RefColumn::put is a pure row-index
+# translation to the parent's column -- no separate storage to edit).
+@testset "edit — through a RefTable view (Phase 125)" begin
+    dir = joinpath(mktempdir(), "re.tab")
+    n = 8
+    write_table(dir, "T",
+        ["K" => collect(Int32, 1:n), "V" => Float64.(1:n),
+         "A" => [Float64[i, i + 1, i + 2] for i in 1:n]];
+        nrow = n, tsm = [["A"]])
+
+    t0 = readtable(dir)
+    rt = query(t0, "K > 4")                      # rows 5,6,7,8
+    @test rt.rows == [5, 6, 7, 8]
+
+    edit(rt) do rv
+        rv["V"][1] = 100.0                        # -> parent row 5
+        rv[:V][4] = 400.0                          # -> parent row 8
+        rv["A"][2] = [9.0, 9.0, 9.0]               # tsm cell -> parent row 6
+    end
+
+    r2 = readtable(dir)
+    @test column(r2, "V")[:] == [1.0, 2.0, 3.0, 4.0, 100.0, 6.0, 7.0, 400.0]
+    @test column(r2, "A")[6] == [9.0, 9.0, 9.0]
+    @test column(r2, "A")[5] == [5.0, 6.0, 7.0]    # untouched sibling row
+
+    # whole-view-column assignment
+    rt2 = query(readtable(dir), "K <= 4")          # rows 1,2,3,4
+    edit(rt2) do rv
+        rv[:V][:] = [10.0, 20.0, 30.0, 40.0]
+    end
+    r3 = readtable(dir)
+    @test column(r3, "V")[1:4] == [10.0, 20.0, 30.0, 40.0]
+    @test column(r3, "V")[5:8] == [100.0, 6.0, 7.0, 400.0]   # unaffected
+
+    # errors: unknown column
+    rt3 = query(readtable(dir), "K > 4")
+    @test_throws ErrorException edit(rt3) do rv
+        rv[:NOPE]
+    end
+
+    # a RefTable of a RefTable flattens to the real (plain-Table) ancestor
+    # (Phase 22's `_flatten_query_parent`), so it's editable too -- the
+    # "only a plain Table parent" guard needs a genuinely non-Table
+    # ancestor, e.g. a ConcatTable.
+    rtnest = query(rt3, "K > 6")
+    @test rtnest.parent isa Table
+    edit(rtnest) do rv
+        rv[:V][1] = 700.0
+    end
+    @test column(readtable(dir), "V")[7] == 700.0
+
+    ccdir = joinpath(mktempdir(), "cc.tab")
+    write_concattable(ccdir, [readtable(dir), readtable(dir)])
+    rtcc = query(readtable(ccdir), "K > 4")
+    @test rtcc.parent isa MSv2.ConcatTable
+    @test_throws ErrorException edit(rtcc)
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:V][:] == [10.0, 20.0, 30.0, 40.0, 100.0, 6.0, 700.0, 400.0]
+    end
+end
