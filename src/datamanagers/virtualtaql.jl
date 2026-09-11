@@ -57,8 +57,7 @@ function _vtq_prepare!(v::VirtualTaQLColumn)
             "VirtualTaQLColumn column \"$(v.vdesc.name)\": cannot evaluate CALC " *
             "expression \"$(v.exprstr)\" — $(sprint(showerror, err)). TaQL-lite " *
             "supports arithmetic, comparisons, LIKE/regex, a function library, IN, " *
-            "unit literals (`1.4GHz`) and date/time functions; array indexing and " *
-            "measures functions are not."))
+            "unit literals (`1.4GHz`), date/time and measures functions."))
     end
     refs = Set{String}()
     _tqlrefs!(refs, ast)
@@ -66,6 +65,7 @@ function _vtq_prepare!(v::VirtualTaQLColumn)
     plain, mscal = _mscal_split(refs)
     plain, stokes = _stokes_split(plain)
     plain, mssel = _mssel_split(plain)
+    plain, measframe = _measframe_split(plain)
     if isempty(refs)
         v.const_value = _tql_result_strip(_tqleval(ast, Dict{String,AbstractVector}(), 1))
     elseif _has_qty(ast)
@@ -74,11 +74,13 @@ function _vtq_prepare!(v::VirtualTaQLColumn)
         isempty(mscal) || merge!(v.cols, _mscal_columns(v.table, mscal))
         isempty(stokes) || merge!(v.cols, _stokes_setups(v.table, stokes))
         isempty(mssel) || merge!(v.cols, _mssel_columns(v.table, mssel))
+        isempty(measframe) || merge!(v.cols, _measframe_cols(v.table, measframe))
     else
         v.cols = Dict{String,AbstractVector}(n => column(v.table, n) for n in plain)
         isempty(mscal) || merge!(v.cols, _mscal_columns(v.table, mscal))
         isempty(stokes) || merge!(v.cols, _stokes_setups(v.table, stokes))
         isempty(mssel) || merge!(v.cols, _mssel_columns(v.table, mssel))
+        isempty(measframe) || merge!(v.cols, _measframe_cols(v.table, measframe))
     end
     v.prepared = true
     return v

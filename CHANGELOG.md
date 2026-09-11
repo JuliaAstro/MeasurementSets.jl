@@ -2314,3 +2314,38 @@ query(main, "mscal.stokes(DATA, 'I,Ptotal')")                    # physical + ps
   pseudo type's value against the formula computed directly from the
   same I/Q/U/V; the `I==0` edge case (fractional forms → 0, not
   NaN/Inf) checked directly on `StokesSetup`.
+
+### Phase 110 — column-`MEASINFO`-driven `meas.<frame>()` direction argument
+
+```julia
+query(fld, "meas.azel('PHASE_DIR', TIME/86400, X, Y, Z)[2] > 0")   # was: ..., 'J2000', PHASE_DIR[1], PHASE_DIR[2], ...
+```
+
+- `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` gains a second
+  form: `meas.<frame>('COLNAME', mjd[, x, y, z])` — instead of a
+  literal `'SRC'` frame name plus two explicit `lon`/`lat` expressions,
+  a single string names a **direction column**, and the source frame is
+  read from that column's own `MEASINFO` (`measinfo(t, colname)`,
+  fixed `Ref` only — a per-row `VarRefCol` column raises a clear error
+  pointing at `measure(t, col, row)` instead). Closes the one remaining
+  `meas.*` non-goal from Phase 97.
+- Disambiguated from the existing numeric form **at parse time**, not
+  by argument count: the first string literal is a column name iff it
+  is *not* a recognized frame name (`_MEAS_DIR_FRAMES` — j2000/b1950/
+  app/galactic/gal/ecliptic/ecl/azel/hadec/itrf/icrs) — so
+  `meas.b1950('J2000', RA, DEC)` (existing) and `meas.b1950('PHASE_DIR',
+  TIME/86400)` (new) both parse to the right form with no new syntax.
+- New AST node `TQLMeasColDir` (`src/taql/functions.jl`) threads
+  through the query engine the same way `mscal.*`/`mscal.stokes` do: a
+  `"::measframe::COLNAME"` sentinel resolved once per table (not per
+  row) by a new `_measframe_split`/`_measframe_cols` pair, wired into
+  both `_tql_cols` (`query`/`groupby`/`join`) and `_vtq_prepare!`
+  (`VirtualTaQLColumn` — also fixed a stale docstring there that
+  incorrectly claimed measures functions weren't supported in CALC
+  expressions at all).
+- No casacore/CASA oracle (a MeasurementSets-only convenience over the
+  existing `measconvert` machinery) — verified against `measconvert`
+  called directly on the same column value, and against the equivalent
+  explicit-`'SRC'`-plus-`lon,lat` numeric form on the same data; error
+  paths (no `MEASINFO`, a non-direction `MEASINFO`, a `VarRefCol`
+  column) each checked.

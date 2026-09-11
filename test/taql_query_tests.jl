@@ -2213,6 +2213,54 @@ end
     @test all(x -> 0 <= x < 2pi, collect(l.last))
 end
 
+@testset "Phase 110 — meas.<frame>() column-MEASINFO-driven direction argument" begin
+    # parser (no SOFA needed) -- disambiguation: a recognized frame name
+    # is still the existing numeric form; anything else is a colname
+    p(s) = MSv2._taqllite_parse(s, Set(["DIR", "T"]))
+    @test p("meas.galactic('DIR', T)") isa MSv2.TQLMeasColDir         # colname form
+    @test p("meas.galactic('DIR', T)").colname == "DIR"
+    @test p("meas.galactic('J2000', T, T)") isa MSv2.TQLFunc          # still the numeric form
+    @test_throws ArgumentError p("meas.galactic('DIR')")              # wrong arity (needs mjd)
+    @test_throws ArgumentError p("meas.azel('DIR', T)")               # azel needs mjd, x, y, z
+
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    ext === nothing && return
+    d = mktempdir()
+    write_table(joinpath(d, "T"), "T", Pair{String,Any}[
+        "DIR" => [[2.0, 0.5], [2.1, 0.4]],
+        "TIME" => [60454.42 * 86400, 60454.43 * 86400]]; nrow = 2,
+        measures = Dict("DIR" => (; kind = :direction, ref = "J2000")))
+    t = readtable(joinpath(d, "T"))
+
+    ref = measconvert(MDirection{J2000}(2.0, 0.5), GALACTIC)
+    gt = query(t, "TIME > 0"; select = ["l" => "meas.galactic('DIR', TIME/86400.0)[1]",
+                                        "b" => "meas.galactic('DIR', TIME/86400.0)[2]"])
+    @test collect(gt.l)[1] ≈ ref.lon
+    @test collect(gt.b)[1] ≈ ref.lat
+    # agrees with the plain numeric form given the same lon/lat directly
+    gt2 = query(t, "TIME > 0"; select = ["l" => "meas.galactic('J2000', DIR[1], DIR[2])[1]"])
+    @test collect(gt2.l)[1] ≈ ref.lon
+
+    # a frame needing position too (azel)
+    az = query(t, "TIME > 0"; select = ["el" =>
+        "meas.azel('DIR', TIME/86400.0, -1601185.0, -5041977.0, 3554876.0)[2]"])
+    @test all(x -> -pi/2 <= x <= pi/2, collect(az.el))
+
+    # errors: no MEASINFO, and a VarRefCol (per-row) frame
+    d2 = mktempdir()
+    write_table(joinpath(d2, "T2"), "T2", Pair{String,Any}["X" => [1.0, 2.0]]; nrow = 2)
+    t2 = readtable(joinpath(d2, "T2"))
+    @test_throws ErrorException query(t2, "X > 0"; select = ["z" => "meas.j2000('X', 1.0)"])
+
+    d3 = mktempdir()
+    write_table(joinpath(d3, "T3"), "T3", Pair{String,Any}[
+        "DIR" => [[1.0, 0.5]], "REFC" => Int32[0]]; nrow = 1,
+        measures = Dict("DIR" => (; kind = :direction, varrefcol = "REFC",
+                                   tabtypes = ["J2000"], tabcodes = [0])))
+    t3 = readtable(joinpath(d3, "T3"))
+    @test_throws ErrorException query(t3, "REFC >= 0"; select = ["z" => "meas.galactic('DIR', 1.0)"])
+end
+
 @testset "Phase 104 — meas.freq() / meas.rv() / meas.doppler() / meas.riseset()" begin
     # parser (no SOFA needed)
     p(s) = MSv2._taqllite_parse(s, Set(["RA", "DEC", "T"]))

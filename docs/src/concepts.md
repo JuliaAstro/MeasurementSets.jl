@@ -142,8 +142,11 @@ subset of casacore's `libmeas` UDFs) does measure
 conversions on ordinary expressions:
 `meas.<frame>(['SRC', ]lon, lat[, mjd[, x, y, z]])` →
 `[lon, lat]` in `j2000` / `b1950` / `app` / `galactic` / `ecliptic` /
-`azel` / `hadec` / `itrf`; `meas.epoch('TAI', mjd)` converts a time
-scale; `meas.last(mjd, x, y, z)` is the local apparent sidereal time.
+`azel` / `hadec` / `itrf` — or `meas.<frame>('COLNAME', mjd[, x, y, z])`
+to take the source frame from column `COLNAME`'s own `MEASINFO`
+instead of a literal `'SRC'` (fixed `Ref` only); `meas.epoch('TAI',
+mjd)` converts a time scale; `meas.last(mjd, x, y, z)` is the local
+apparent sidereal time.
 `meas.freq('TOPO', 'LSRK', freq, mjd, x, y, z, ra, dec)` /
 `meas.rv('TOPO', 'LSRK', v, mjd, x, y, z, ra, dec)` convert a
 frequency / radial velocity between spectral frames

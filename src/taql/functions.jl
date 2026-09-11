@@ -424,13 +424,103 @@ function _meas_dir_convert(target::DataType, sref::AbstractString, lon, lat, mjd
     Float64[d.lon, d.lat]
 end
 
+# Phase 110: `meas.<frame>('COLNAME', mjd[, x, y, z])` -- infer the
+# source reference frame from column `COLNAME`'s own `MEASINFO`
+# keyword (a fixed `Ref` only -- a `VarRefCol` column varies per row and
+# needs `measure(t, col, row)` directly, not this single-frame form),
+# instead of requiring an explicit `'SRC'` string literal. Disambiguated
+# from the existing numeric `meas.<frame>(['SRC',] lon, lat, ...)` form
+# at parse time: the first string literal is a COLNAME iff it is *not*
+# a recognized frame name (`_MEAS_DIR_FRAMES`).
+#
+# Threading mirrors `mscal.*`/`mscal.stokes`: `_tqlrefs!` pushes both
+# the plain column name (so `_tql_cols` loads its raw `[lon,lat]` cell
+# data) and a `"::measframe::COLNAME"` sentinel; `_measframe_split` /
+# `_measframe_cols` (called from `_tql_cols` / `_vtq_prepare!`) resolve
+# the sentinel to the column's fixed source-frame name, once per table.
+struct TQLMeasColDir <: TQLExpr
+    target::DataType
+    colname::String
+    mjd::TQLExpr
+    xyz::Union{Nothing,NTuple{3,TQLExpr}}
+end
+
+_measframe_key(colname::AbstractString) = "::measframe::" * colname
+
+function _tqleval(e::TQLMeasColDir, cols, i)
+    lonlat = cols[e.colname][i]
+    sref = cols[_measframe_key(e.colname)][1]
+    mjd = _tqleval(e.mjd, cols, i)
+    xyz = e.xyz === nothing ? nothing :
+          (_tqleval(e.xyz[1], cols, i), _tqleval(e.xyz[2], cols, i), _tqleval(e.xyz[3], cols, i))
+    _meas_dir_convert(e.target, sref, lonlat[1], lonlat[2], mjd, xyz)
+end
+function _geval(e::TQLMeasColDir, cols, g)
+    lonlat = cols[e.colname][g[1]]
+    sref = cols[_measframe_key(e.colname)][1]
+    mjd = _geval(e.mjd, cols, g)
+    xyz = e.xyz === nothing ? nothing :
+          (_geval(e.xyz[1], cols, g), _geval(e.xyz[2], cols, g), _geval(e.xyz[3], cols, g))
+    _meas_dir_convert(e.target, sref, lonlat[1], lonlat[2], mjd, xyz)
+end
+function _tqlrefs!(seen, e::TQLMeasColDir)
+    push!(seen, e.colname)
+    push!(seen, _measframe_key(e.colname))
+    _tqlrefs!(seen, e.mjd)
+    e.xyz === nothing || foreach(x -> _tqlrefs!(seen, x), e.xyz)
+end
+_has_aggr(e::TQLMeasColDir) = _has_aggr(e.mjd) || (e.xyz !== nothing && any(_has_aggr, e.xyz))
+_has_qty(e::TQLMeasColDir) = _has_qty(e.mjd) || (e.xyz !== nothing && any(_has_qty, e.xyz))
+
+function _measframe_split(names)
+    rest = String[]
+    keys = String[]
+    for n in names
+        s = String(n)
+        startswith(s, "::measframe::") ? push!(keys, s) : push!(rest, s)
+    end
+    return rest, keys
+end
+
+function _measframe_cols(t::AbstractTable, keys::AbstractVector{<:AbstractString})
+    isempty(keys) && return Dict{String,AbstractVector}()
+    d = Dict{String,AbstractVector}()
+    for k in keys
+        colname = k[(length("::measframe::") + 1):end]
+        mi = measinfo(t, colname)
+        mi === nothing && error(
+            "meas.<frame>: column \"$colname\" has no MEASINFO keyword")
+        mi.kind === :direction || error(
+            "meas.<frame>: column \"$colname\" is a \"$(mi.kind)\" measure, not a direction")
+        mi.fixedref === nothing && error(
+            "meas.<frame>: column \"$colname\" has a per-row VarRefCol frame, not a fixed " *
+            "Ref -- use `measure(t, \"$colname\", row)` directly instead")
+        d[k] = Any[mi.fixedref]
+    end
+    return d
+end
+
 function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
     R = get(_MEAS_DIR_FRAMES, fn, nothing)
     if R !== nothing
-        has_sref = !isempty(args) && args[1] isa TQLLit && args[1].value isa AbstractString
-        sref = has_sref ? String(args[1].value) : "J2000"
-        rest = has_sref ? args[2:end] : args
+        has_str1 = !isempty(args) && args[1] isa TQLLit && args[1].value isa AbstractString
         need_ep = _meas_dir_needs_epoch(R); need_p = _meas_dir_needs_pos(R)
+        is_frame1 = has_str1 &&
+            haskey(_MEAS_DIR_FRAMES, lowercase(strip(String(args[1].value))))
+        if has_str1 && !is_frame1
+            # Phase 110: meas.<frame>('COLNAME', mjd[, x, y, z]) -- the source
+            # frame comes from COLNAME's own MEASINFO, not a literal
+            colname = String(args[1].value)
+            rest = args[2:end]
+            wantc = 1 + (need_p ? 3 : 0)
+            length(rest) == wantc || throw(ArgumentError(
+                "TaQL-lite: meas.$fn('COLNAME', mjd" * (need_p ? ", x, y, z" : "") *
+                ") in \"$src\""))
+            xyz = need_p ? (rest[2], rest[3], rest[4]) : nothing
+            return TQLMeasColDir(R, colname, rest[1], xyz)
+        end
+        sref = is_frame1 ? String(args[1].value) : "J2000"
+        rest = is_frame1 ? args[2:end] : args
         want = 2 + (need_ep ? 1 : 0) + (need_p ? 3 : 0)
         length(rest) == want || throw(ArgumentError(
             "TaQL-lite: meas.$fn(['SRC', ]lon, lat" *
