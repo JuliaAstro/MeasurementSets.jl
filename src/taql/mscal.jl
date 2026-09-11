@@ -705,8 +705,12 @@ end
 # terms (OR'd — `'DA01&DV01;DA02&DV02'`; a plain comma instead *extends*
 # one antenna-set list, even across `&` — `'DA01,DA02&DV01'` is ONE
 # pair-term with a 2-antenna LHS, not two terms — both verified live
-# against real casacore, see `_mssel_baseline_pred`), and a whole-spec
-# `!` negation (NOT combinable with a `;`-list — see there).
+# against real casacore, see `_mssel_baseline_pred`), a whole-spec `!`
+# negation (NOT combinable with a `;`-list — see there), and casacore's
+# real "blregexlist" — `/pattern/[,/pattern/...]` where each `pattern`'s
+# body contains a literal `&`, FULL-matched against the whole
+# `"name_i&name_j"` string per ordered antenna-index pair (see
+# `_mssel_blregex_pred`).
 #
 # Threading mirrors `mscal.*`: a `TQLMSSel` node, a `"::mssel::<fn>::<spec>"`
 # sentinel split by `_mssel_split` in `_tql_cols` / `_vtq_prepare!`.
@@ -809,9 +813,63 @@ function _mssel_idset(spec::AbstractString, allids, n2i::AbstractDict)
     return setdiff(base, neg)
 end
 
+# A regex baseline-pair LIST (casacore's real "blregexlist", Phase 119
+# — the Phase 80 non-goal, misidentified as a `[name1,name2]` bracket
+# form in Phase 115 and discarded there since real casacore rejects
+# that; the actual mechanism, found by reading `MSAntennaGram.yy`/`.ll`
+# + `MSAntennaParse::selectBLRegex`, is a `/…/`-delimited regex whose
+# body contains a literal `&` — the lexer's own discriminator between a
+# per-name `REGEX` and a `BLREGEX` — FULL-matched against the whole
+# `"name_i&name_j"` string for every ORDERED pair (i,j) of antenna
+# indices (self-pairs `i==j` included), one or more comma-separated
+# such patterns OR'd together, each optionally negated by a LITERAL
+# leading `^` inside the slashes (stripped before compiling — this is
+# NOT the regex anchor; a real anchor isn't expressible here). VERIFIED
+# live against real casacore: `/DA01&DV01/` matches only that exact
+# ordered pair (the reverse `/DV01&DA01/` matches nothing on data
+# stored the other way round); `/DA0[12]&DV01/` and `/.*&DV01/` both
+# glob/wildcard the whole baseline string; `/^DA01&DV01/` negates just
+# that one pattern; a comma list ORs multiple patterns (a negated one
+# mixed with a plain one still ORs, not intersects); and the outer `!`
+# this file already supports negates the WHOLE list's result — e.g.
+# `!/DA01&DV01/,/DA01&DV02/` matches `NOT (A ∪ B)`, not `NOT A ∪ B` —
+# confirmed by an exact row-count match to that arithmetic. Composes
+# cleanly with the `;`-multi-term machinery below (no interaction with
+# the Phase 115 `!`+`;` refusal, which is about a DIFFERENT ambiguity —
+# `;`-joined whole `baseline` terms, not a single blregexlist's own
+# internal comma list).
+_mssel_is_regex_elem(p::AbstractString) =
+    length(p) >= 2 && startswith(p, "/") && endswith(p, "/") && occursin('&', p[2:end-1])
+
+function _mssel_is_blregexlist(spec::AbstractString)
+    parts = _mssel_commas(spec)
+    !isempty(parts) && all(p -> _mssel_is_regex_elem(strip(p)), parts)
+end
+
+function _mssel_blregex_pred(spec::AbstractString, names::Vector{String})
+    n = length(names)
+    match = falses(n, n)
+    for raw in _mssel_commas(spec)
+        inner = strip(raw)[2:end-1]              # strip the /.../ delimiters
+        neg = startswith(inner, "^")
+        re = Regex("^(?:" * (neg ? inner[2:end] : inner) * ")\$")
+        for j in 1:n, i in 1:n
+            (occursin(re, names[i] * "&" * names[j]) != neg) && (match[i, j] = true)
+        end
+    end
+    return (a1, a2) -> (0 <= a1 < n && 0 <= a2 < n) && match[a1 + 1, a2 + 1]
+end
+
 # one `&`-joined (or bare) baseline-pair term -- no leading `!`, no `;`
 # (both handled by `_mssel_baseline_pred`, below).
-function _mssel_baseline_term_pred(spec::AbstractString, n2i::AbstractDict, allants)
+function _mssel_baseline_term_pred(spec::AbstractString, n2i::AbstractDict, allants;
+                                   names::Union{Nothing,Vector{String}} = nothing)
+    if _mssel_is_blregexlist(spec)
+        names === nothing && throw(ArgumentError(
+            "mscal.baseline: a regex baseline-pair list (\"$spec\") needs antenna " *
+            "names, which aren't available here (no ANTENNA name table)"))
+        return _mssel_blregex_pred(spec, names)
+    end
     # count leading ampersands after the left antenna list to distinguish
     # `&` / `&&` / `&&&` (checked longest-first: `&&&` also contains `&&`)
     if occursin("&&&", spec)
@@ -854,7 +912,8 @@ end
 # combining `!` with `;` is a clear error instead of a silent wrong
 # answer; negate a `;`-free spec, or negate each baseline pair by
 # writing its complement out explicitly.
-function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants)
+function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants;
+                              names::Union{Nothing,Vector{String}} = nothing)
     spec = strip(spec)
     neg = startswith(spec, "!")
     body = neg ? strip(spec[2:end]) : spec
@@ -870,10 +929,10 @@ function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants)
             "is not supported (real casacore's own behaviour there is " *
             "inconsistent, not a well-defined negation) — negate a `;`-free " *
             "spec instead"))
-        preds = [_mssel_baseline_term_pred(t, n2i, allants) for t in terms]
+        preds = [_mssel_baseline_term_pred(t, n2i, allants; names) for t in terms]
         return isempty(preds) ? ((a1, a2) -> false) : (a1, a2) -> any(p -> p(a1, a2), preds)
     end
-    pred = _mssel_baseline_term_pred(body, n2i, allants)
+    pred = _mssel_baseline_term_pred(body, n2i, allants; names)
     return neg ? (a1, a2) -> !pred(a1, a2) : pred
 end
 
@@ -947,8 +1006,9 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
             return Bool[(neg ? !lpred(blen(a1[i], a2[i])) : lpred(blen(a1[i], a2[i])))
                         for i in 1:n]
         end
-        n2i = _mssel_names_to_ids(column(readtable(subs["ANTENNA"]), "NAME")[:])
-        pred = _mssel_baseline_pred(spec, n2i, 0:(length(column(readtable(subs["ANTENNA"]), "NAME")) - 1))
+        antnames = String.(column(readtable(subs["ANTENNA"]), "NAME")[:])
+        n2i = _mssel_names_to_ids(antnames)
+        pred = _mssel_baseline_pred(spec, n2i, 0:(length(antnames) - 1); names = antnames)
         return Bool[pred(a1[i], a2[i]) for i in 1:n]
     elseif fn == "field"
         _need("FIELD_ID")

@@ -420,6 +420,87 @@ end
     end
 end
 
+# Phase 119: the REAL casacore "blregexlist" mechanism -- found by
+# reading `MSAntennaGram.yy`/`.ll` + `MSAntennaParse::selectBLRegex`
+# while investigating Phase 118's diameter/mount question. A `/…/`
+# regex whose body contains a literal `&` (the lexer's own
+# discriminator) is FULL-matched against the whole `"name_i&name_j"`
+# string for every ORDERED pair of antenna indices; a leading `^`
+# inside the slashes negates just that one pattern; a comma list ORs
+# several patterns; the outer `!` negates the whole list's result.
+# Totally different from — and NOT the — `[name1,name2]` bracket form
+# Phase 115 tried and discarded (real casacore rejects that outright).
+@testset "TaQL-lite — mscal.baseline() regex pair lists (BLREGEX)" begin
+    n2i = Dict("ea01" => [0], "ea02" => [1], "ea03" => [2])
+
+    # unit: the discriminator + the truth table directly
+    @test MSv2._mssel_is_regex_elem("/ea01&ea02/")
+    @test !MSv2._mssel_is_regex_elem("/ea01/")              # no '&' inside -> a plain per-name regex
+    @test !MSv2._mssel_is_regex_elem("ea01&ea02")           # not slash-delimited
+    @test MSv2._mssel_is_blregexlist("/ea01&ea02/,/ea01&ea03/")
+    @test !MSv2._mssel_is_blregexlist("ea01&ea02")
+
+    names = ["ea01", "ea02", "ea03"]
+    pred = MSv2._mssel_blregex_pred("/ea01&ea02/", names)
+    @test pred(0, 1) && !pred(1, 0) && !pred(0, 2)          # ordered, not symmetric
+    predneg = MSv2._mssel_blregex_pred("/^ea01&ea02/", names)
+    @test !predneg(0, 1) && predneg(0, 2) && predneg(1, 0)  # '^' negates just this one pattern
+
+    main = readtable(SAMPLE_MS)
+    a1 = Int.(column(main, "ANTENNA1")[:])
+    a2 = Int.(column(main, "ANTENNA2")[:])
+    nb(pred) = count(i -> pred(a1[i], a2[i]), 1:nrow(main))
+
+    # ordered exact match: only the stored direction, not its reverse
+    @test nrow(query(main, "mscal.baseline('/ea01&ea02/')")) ==
+          nb((x, y) -> (x, y) == (0, 1))
+    @test nrow(query(main, "mscal.baseline('/ea02&ea01/')")) == 0
+
+    # glob/wildcard inside the regex
+    @test nrow(query(main, "mscal.baseline('/ea0[12]&ea03/')")) ==
+          nb((x, y) -> (x, y) in ((0, 2), (1, 2)))
+    @test nrow(query(main, "mscal.baseline('/.*&ea03/')")) ==
+          nb((x, y) -> y == 2)
+
+    # leading '^' negates just that one pattern
+    r_exact = nrow(query(main, "mscal.baseline('/ea01&ea02/')"))
+    @test nrow(query(main, "mscal.baseline('/^ea01&ea02/')")) == nrow(main) - r_exact
+
+    # comma list ORs patterns (a negated one mixed with a plain one still
+    # ORs -- confirmed against real casacore, see the CHANGELOG)
+    @test nrow(query(main, "mscal.baseline('/ea01&ea02/,/^ea01&ea03/')")) ==
+          nb((x, y) -> (x, y) == (0, 1) || (x, y) != (0, 2))
+
+    # the outer `!` negates the WHOLE list's OR, not the first element
+    r_union = nrow(query(main, "mscal.baseline('/ea01&ea02/,/ea01&ea03/')"))
+    @test nrow(query(main, "mscal.baseline('!/ea01&ea02/,/ea01&ea03/')")) == nrow(main) - r_union
+
+    # composes with the `;`-multi-term machinery (Phase 115), either order
+    @test nrow(query(main, "mscal.baseline('/ea01&ea02/;ea01&ea03')")) ==
+          nb((x, y) -> (x, y) == (0, 1) || (x, y) in ((0, 2), (2, 0)))
+
+    # mscal.feed has no antenna-name table -> a clear error, not a silent misparse
+    @test_throws ArgumentError query(main, "mscal.feed('/0&1/')")
+
+    @testset "vs real TaQL" begin
+        for spec in ("/ea01&ea02/", "/ea02&ea01/", "/ea0[12]&ea03/", "/.*&ea03/",
+                     "/^ea01&ea02/", "/ea01&ea02/,/ea01&ea03/",
+                     "/ea01&ea02/,/^ea01&ea03/", "!/ea01&ea02/",
+                     "!/ea01&ea02/,/ea01&ea03/", "/ea01&ea02/;ea01&ea03")
+            rdir = joinpath(mktempdir(), "sel")
+            ok = try
+                _taqlcmd("SELECT FROM \$1 WHERE mscal.baseline('$spec') GIVING '$rdir'",
+                         CCT.Table(SAMPLE_MS))
+                true
+            catch
+                false
+            end
+            ok || continue
+            @test nrow(query(main, "mscal.baseline('$spec')")) == nrow(readtable(rdir))
+        end
+    end
+end
+
 @testset "TaQL-lite — mscal.spw channel selection + mscal.chan" begin
     main = readtable(SAMPLE_MS)
     N = nrow(main)

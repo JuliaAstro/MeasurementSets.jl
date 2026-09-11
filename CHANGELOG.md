@@ -2636,3 +2636,53 @@ EllipticalGaussianBeam(0.005, 0.02, 0, 1.4e9)  # ArgumentError: hpbw_major >= hp
   `;`-joined terms (rather than being a bug) — worth revisiting with
   this grammar-level context before either implementing real
   `BLREGEX` support or reconsidering the Phase 115 `!`+`;` refusal.
+
+### Phase 119 — `mscal.baseline()` real BLREGEX support
+
+```julia
+query(main, "mscal.baseline('/DA01&DV.*/')")            # DA01 as ANTENNA1, any DV* as ANTENNA2
+query(main, "mscal.baseline('/^DA01&DV01/')")            # NOT that exact ordered pair
+```
+
+- Implements the real "blregexlist" mechanism found while investigating
+  Phase 118, closing the Phase 80 non-goal correctly this time (Phase
+  115's `[name1,name2]`-bracket guess was a different, real-casacore-
+  rejected idea). Confirmed by reading `MSAntennaGram.yy`/`.ll` +
+  `MSAntennaParse::selectBLRegex` in full: a spec element is a `/…/`
+  regex whose body contains a literal `&` — the real lexer's own
+  discriminator between a per-name `REGEX` and a `BLREGEX` — FULL-
+  matched against the whole `"name_i&name_j"` string for every
+  **ordered** pair of antenna indices (self-pairs included); a literal
+  leading `^` inside the slashes negates just that one pattern (NOT the
+  regex anchor — casacore repurposes the character); several
+  comma-separated patterns OR their match sets; the outer `!` this
+  package already supports negates the **whole list's result**, not
+  the first element.
+- **Every one of the above was live-verified against real Casacore.jl
+  before writing any code or tests** (this session's established
+  discipline, since a bracket-list guess was wrong once already): 10
+  representative specs run through both `mscal.baseline` and real
+  `tableCommand`, all row counts matching exactly — including the
+  subtle "negated pattern OR'd with a plain one still unions, doesn't
+  intersect" case and the "outer `!` distributes over the whole list,
+  not just the first pattern" case (`!/A&B/,/C&D/` = `NOT(A∪C&D)`, not
+  `NOT(A)∪C&D`).
+- New `_mssel_is_regex_elem` / `_mssel_is_blregexlist` (the detection —
+  checked *before* the existing `&&&`/`&&`/`&` counting logic in
+  `_mssel_baseline_term_pred`, since a BLREGEX pattern's literal `&`
+  would otherwise misfire that counting) and `_mssel_blregex_pred` (the
+  match-matrix builder, a direct port of `selectBLRegex`'s nested loop —
+  trivial cost, `O(n_antennas²)`). `_mssel_baseline_pred` /
+  `_mssel_baseline_term_pred` gain an optional `names::Vector{String}`
+  kwarg, threaded from `mscal.baseline`'s own call site (which already
+  reads `ANTENNA.NAME`); `mscal.feed` (no name table — feed ids are
+  bare integers) passes `nothing`, so a BLREGEX-shaped feed spec now
+  raises a clear error instead of silently misparsing the pattern's `&`
+  as an ordinary L&R split.
+- Composes cleanly with the Phase 115 `;`-multi-term machinery (no
+  interaction with that phase's `!`+`;` refusal, which is about a
+  different ambiguity — `;`-joined *whole* `baseline` terms, not one
+  blregexlist's own internal comma list).
+- 26 new tests (`test/taql_mscal_tests.jl`, "mscal.baseline() regex
+  pair lists (BLREGEX)"), including the real-TaQL cross-check above;
+  full existing mscal suite (500 tests) unchanged.
