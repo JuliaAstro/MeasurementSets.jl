@@ -246,7 +246,13 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `round`, `sign`, `int`, `pow`, `fmod`), complex parts (`real`, `imag`,
   `arg`/`phase`, `conj`, `norm`), array-cell reductions (`mean`/`avg`,
   `sum`, `product`, `median`, `variance`, `stddev`, `rms`, `min`/`max`,
-  `any`, `all`, `ntrue`/`nfalse`, `nelements`/`count`, `ndim`), string
+  `any`, `all`, `ntrue`/`nfalse`, `nelements`/`count`, `ndim`),
+  `running<X>(arr, hwidth)` / `boxed<X>(arr, bwidth)` (`X` ∈ `average`/
+  `mean`, `median`, `min`/`max`, `variance`, `stddev`, `sum` — sliding-
+  window array-cell smoothing: `running` is a centred window (SAME
+  shape, shrinking half-windows at the edges), `boxed` is non-
+  overlapping bins (SMALLER shape); the width is a scalar or a
+  `ndims(arr)`-element array, one per axis), string
   ops (`strlength`/`len`, `upper`/`lower`, `trim`/`ltrim`/`rtrim`),
   `isnan`/`isinf`/`isfinite`/`nonfinite`, masked arrays
   (`marray(d, m)`, `arraydata`, `arraymask`; `V[boolexpr]` yields a

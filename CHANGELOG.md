@@ -2239,3 +2239,41 @@ ERROR: Method overwriting is not permitted during Module precompilation.
   `_COMMON_UNITS` fallback set — now resolves `true`); the full
   `units_tests.jl` + `taql_query_tests.jl` standalone run is unchanged
   (760 tests, no count change — a pure precompile-hygiene fix).
+
+### Phase 108 — `running*` / `boxed*` sliding-window array reductions
+
+```julia
+query(main, "runningmedian(DATA, 2)[1,1] > 0")            # 5-channel median smooth
+query(cat, "boxedaverage(SPECTRUM, 4) > threshold")        # 4-channel block average
+```
+
+- `running<X>(arr, hwidth)` / `boxed<X>(arr, bwidth)`, `X` ∈ `average`
+  (`mean`)/`median`/`min`/`max`/`variance`/`stddev`/`sum` — array-*cell*
+  sliding-window smoothing (one MAIN row's own array, reduced along its
+  own axis/axes), the last item on the Phase 25 "not yet in TaQL-lite"
+  list. `running` is a **centred** window (`[i−h, i+h]` per axis,
+  shrinking at the edges — output the **same** shape as the input);
+  `boxed` is **non-overlapping bins** of size `bwidth` (output shape
+  `cld(n, b)` per axis, a partial trailing bin if `bwidth` doesn't
+  divide evenly). The width argument is a scalar (same on every axis)
+  or an array literal (`ndims(arr)` elements, one per axis) —
+  `runningaverage(V, [1,3])` smooths axis 1 with half-width 1 and axis
+  2 with half-width 3.
+- Shared generic engine (`src/taql/functions.jl`): `_tql_window_widths`
+  (scalar-or-per-axis-array → an `Int` tuple, arity-checked),
+  `_running_reduce`/`_boxed_reduce` (a plain `CartesianIndices` loop —
+  no attempt at a separable/incremental-sum fast path; these operate on
+  one row's small array cell, not a bulk column). `min`/`max`/`sum`
+  keep the input's element type; `average`/`median`/`variance`/`stddev`
+  promote to `Float64` (matching the plain, non-running `mean`/`median`/
+  etc. reductions already in the function library).
+- Masked-array (`TQLMArray`) input is a documented non-goal — pass
+  `arraydata(...)` first; a non-array (scalar) first argument raises a
+  clear `ArgumentError` rather than silently treating it as a 1-element
+  window.
+- No casacore/CASA oracle for this phase (self-contained numerical
+  routines) — verified by hand-computed 1-D and 2-D references (edge-
+  window shrinking, partial trailing bins, per-axis widths), agreement
+  with a direct `Statistics.var`/`std`/`median` call on the same
+  explicit window, and a query-string round-trip against the same
+  functions called directly on each row's array.
