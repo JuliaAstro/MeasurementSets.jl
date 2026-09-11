@@ -1583,6 +1583,34 @@ query(main, "mscal.uvdist('20~200klambda') AND NOT mscal.uvdist('<50m')")
   `[...]` edge buffers, MS-derived field defaults); the `:P%`
   percent-tolerance on a uvdist value.
 
+### Phase 99 — analytic primary-beam models
+
+```julia
+pb = GaussianBeam(1.4e9; diameter = 25.0)          # HPBW = 1.02λ/D
+θ = angular_separation(pointing, source)            # both MDirection, same frame
+correct_flux(pb, apparent_flux, θ)                  # -> true flux
+power_response(AiryBeam(25.0; blockage=2.5), θ, 1.4e9)
+```
+
+- New `src/beam/beam.jl` — `PrimaryBeam` abstract type;
+  `GaussianBeam(freq; diameter, k=1.02)` (HPBW power pattern, freq
+  scaling); `AiryBeam(diameter; blockage=0.0)` (uniformly illuminated
+  circular aperture, optional central obstruction — the standard
+  two-term closed form via `SpecialFunctions.besselj1`, already a
+  dependency); `PolynomialBeam(coeffs, maxrad, reffreq)` (CASA
+  `PBMath1DPoly` form `pb = 1 + Σcₖ·(ν[GHz]·θ[arcmin])^(2k)`, `0` beyond
+  `maxrad` — no coefficient table is bundled, none is vendored on this
+  machine; supply your own).
+- `power_response(beam, θ, freq=reffreq(beam))` is the one method each
+  subtype implements; `voltage_response`, `attenuate`, `correct_flux`
+  are generic over it. `angular_separation(d1::MDirection,
+  d2::MDirection)` (great-circle, both directions in the same frame) —
+  the `θ` input.
+- Standalone Julia feature, not a TaQL-lite integration and not a
+  casacore port (Gaussian/Airy are textbook optics; no CASA oracle) —
+  verified by half-power-point, Airy-null, and dish-scaling sanity
+  checks, not a cross-check.
+
 ### Phase 98 — `mscal.baseline` `&&&` + physical baseline-length selection
 
 ```julia
