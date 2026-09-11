@@ -254,8 +254,15 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `iif(cond, a, b)`, `rownumber()` (1-based),
   `observatory('VLA')` (a telescope's ITRF `[x,y,z]`),
   `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` /
-  `meas.epoch('TAI', mjd)` / `meas.last(mjd, x, y, z)` (measure
-  conversions -- needs `import SOFA`),
+  `meas.epoch('TAI', mjd)` / `meas.last(mjd, x, y, z)` /
+  `meas.freq('SSCALE', 'TSCALE', freq, mjd, x, y, z, ra, dec)` /
+  `meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec)` (frequency /
+  radial-velocity frame conversion, SSCALE/TSCALE ∈ topo/geo/bary/
+  lsrk/lsrd/galacto/lgroup/cmb) /
+  `meas.doppler('SCONV', 'TCONV', value)` (Doppler-convention algebra,
+  SCONV/TCONV ∈ radio/optical/ratio/beta/gamma -- no frame needed) /
+  `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` → `[rise_mjd, set_mjd]`
+  (measure conversions -- all but `meas.doppler` need `import SOFA`),
   `pbgaussian(θ, hpbw)` / `pbairy(θ, diameter, freq[, blockage])` /
   `pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` (primary-beam
   power response, see `src/beam/beam.jl`), `pi`, `e`;

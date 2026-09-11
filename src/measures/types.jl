@@ -319,3 +319,16 @@ east longitude.  Real method in `ext/SOFAExt.jl`.
 """
 _lst(args...) = error(
     "MeasurementSets: local sidereal time needs SOFA.jl — run `import SOFA`")
+
+"""
+    _riseset(ra, dec, mjd, x, y, z, elev0=0.0) -> (rise_mjd, set_mjd)
+
+Rise/set UTC MJD of a J2000 `(ra, dec)` direction (rad), for the UTC day
+containing `mjd`, observed from ITRF position `(x, y, z)` (m) at
+elevation `elev0` (rad; a small negative value adds standard
+atmospheric refraction, e.g. `deg2rad(-34 / 60)`). `(NaN, NaN)` if the
+source never reaches `elev0` that day; `(floor(mjd), floor(mjd) + 1)` if
+it never sets (circumpolar). Real method in `ext/SOFAExt.jl`.
+"""
+_riseset(args...) = error(
+    "MeasurementSets: rise/set times need SOFA.jl — run `import SOFA`")

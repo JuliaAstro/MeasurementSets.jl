@@ -2168,6 +2168,73 @@ end
     @test all(x -> 0 <= x < 2pi, collect(l.last))
 end
 
+@testset "Phase 104 — meas.freq() / meas.rv() / meas.doppler() / meas.riseset()" begin
+    # parser (no SOFA needed)
+    p(s) = MSv2._taqllite_parse(s, Set(["RA", "DEC", "T"]))
+    @test p("meas.freq('TOPO', 'LSRK', T, T, T, T, T, RA, DEC)") isa MSv2.TQLFunc
+    @test p("meas.rv('TOPO', 'LSRK', T, T, T, T, T, RA, DEC)") isa MSv2.TQLFunc
+    @test p("meas.doppler('RADIO', 'BETA', T)") isa MSv2.TQLFunc
+    @test p("meas.riseset(RA, DEC, T, T, T, T)") isa MSv2.TQLFunc
+    @test p("meas.riseset(RA, DEC, T, T, T, T, T)") isa MSv2.TQLFunc
+    @test_throws ArgumentError p("meas.freq('BOGUS', 'LSRK', T, T, T, T, T, RA, DEC)")
+    @test_throws ArgumentError p("meas.rv('TOPO', 'BOGUS', T, T, T, T, T, RA, DEC)")
+    @test_throws ArgumentError p("meas.doppler('BOGUS', 'BETA', T)")
+    @test_throws ArgumentError p("meas.doppler('RADIO', 'BETA', T, T)")   # wrong arity
+    @test_throws ArgumentError p("meas.freq('TOPO', 'LSRK', T)")          # wrong arity
+    @test_throws ArgumentError p("meas.riseset(RA, DEC, T)")              # too few
+
+    # meas.doppler is pure algebra -- works with no SOFA loaded
+    @test MSv2._tqleval(p("meas.doppler('RADIO', 'BETA', 0.01)"), Dict{String,AbstractVector}(), 1) ≈
+          measconvert(MDoppler{RADIO}(0.01), BETA).d
+
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    ext === nothing && return
+    d = mktempdir()
+    write_table(joinpath(d, "T"), "T", Pair{String,Any}[
+        "RA" => [2.0, 2.1], "DEC" => [0.5, 0.4],
+        "TIME" => [60454.42 * 86400, 60454.43 * 86400]]; nrow = 2)
+    t = readtable(joinpath(d, "T"))
+    xyz = "-1601185.0, -5041977.0, 3554876.0"
+
+    # meas.freq / meas.rv match measconvert exactly
+    fr0 = MeasFrame(epoch = MEpoch{UTC}(60454.42), position = MPosition{ITRF}(-1601185.0, -5041977.0, 3554876.0),
+                    direction = MDirection{J2000}(2.0, 0.5))
+    reffreq = measconvert(MFrequency{TOPO}(1.4e9), LSRK; frame = fr0).hz
+    refrv = measconvert(MRadialVelocity{TOPO}(20_000.0), LSRK; frame = fr0).mps
+    fq = query(t, "TIME > 0"; select = ["f" =>
+        "meas.freq('TOPO', 'LSRK', 1.4e9, TIME/86400.0, $xyz, RA, DEC)"])
+    @test collect(fq.f)[1] ≈ reffreq
+    rv = query(t, "TIME > 0"; select = ["v" =>
+        "meas.rv('TOPO', 'LSRK', 20000.0, TIME/86400.0, $xyz, RA, DEC)"])
+    @test collect(rv.v)[1] ≈ refrv
+    # BARY identity short-circuit still routes through the same path
+    id = query(t, "TIME > 0"; select = ["f" =>
+        "meas.freq('BARY', 'BARY', 1.4e9, TIME/86400.0, $xyz, RA, DEC)"])
+    @test collect(id.f)[1] == 1.4e9
+
+    # meas.riseset: for a source below the horizon at midnight (RA=5.5,
+    # DEC=0.5 at this site), rise precedes set the same UTC day, and the
+    # source is above `elev0` at their midpoint
+    rs = query(t, "TIME > 0"; select = ["rs" =>
+        "meas.riseset(5.5, 0.5, TIME/86400.0, $xyz)"])
+    rise, set = collect(rs.rs)[1]
+    @test isfinite(rise) && isfinite(set) && rise < set
+    mid = (rise + set) / 2
+    midfr = MeasFrame(epoch = MEpoch{UTC}(mid), position = MPosition{ITRF}(-1601185.0, -5041977.0, 3554876.0))
+    elmid = measconvert(MDirection{J2000}(5.5, 0.5), AZEL; frame = midfr).lat
+    @test elmid > 0
+    # an elevation cutoff moves rise later / set earlier (a smaller window)
+    rs2 = query(t, "TIME > 0"; select = ["rs" =>
+        "meas.riseset(5.5, 0.5, TIME/86400.0, $xyz, 0.2)"])
+    rise2, set2 = collect(rs2.rs)[1]
+    @test rise2 > rise && set2 < set
+    # a circumpolar-like source (near the visible pole for this latitude)
+    # or a never-rises one both return sentinel pairs, not a crash
+    circ = query(t, "TIME > 0"; select = ["rs" => "meas.riseset(0.0, 1.5, TIME/86400.0, $xyz)"])
+    r3, s3 = collect(circ.rs)[1]
+    @test (isnan(r3) && isnan(s3)) || (isfinite(r3) && isfinite(s3) && s3 - r3 ≈ 1.0)
+end
+
 @testset "Phase 69 — date/time functions" begin
     f(n) = MSv2._TQL_FUNCS[n][1]
     @test MSv2._tql_datetime("2020-02-12") ≈ 58891.0

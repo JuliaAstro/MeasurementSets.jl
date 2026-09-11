@@ -151,6 +151,39 @@ function MS._lst(frame::MeasFrame)
     mod2pi(SOFA.gst06a(uta, utb, tta, ttb) + elong)
 end
 
+# mean sidereal rate, rad per UT1 day (IAU 1982): LST is close enough to
+# linear in UT1 over one day that a couple of Newton steps against the
+# real (SOFA) sidereal-time relation converge to sub-second precision.
+const _SIDEREAL_RATE = 2π * 1.00273781191135448
+
+function _mjd_for_lst(lst_target::Real, mjd0::Real, pos::MPosition)
+    fr(m) = MeasFrame(epoch = MEpoch{UTC}(m), position = pos)
+    lst0 = MS._lst(fr(mjd0))
+    m = mjd0 + mod(lst_target - lst0, 2π) / _SIDEREAL_RATE
+    for _ in 1:3
+        diff = rem2pi(lst_target - MS._lst(fr(m)), RoundNearest)
+        m += diff / _SIDEREAL_RATE
+    end
+    m
+end
+
+# see the docstring on the core stub, `src/measures/types.jl`.
+function MS._riseset(ra::Real, dec::Real, mjd::Real, x::Real, y::Real, z::Real,
+                     elev0::Real = 0.0)
+    pos = MPosition{ITRF}(float(x), float(y), float(z))
+    d0 = floor(float(mjd))
+    noon = MeasFrame(epoch = MEpoch{UTC}(d0 + 0.5), position = pos)
+    dapp = MS.measconvert(MDirection{J2000}(float(ra), float(dec)), APP; frame = noon)
+    _, lat, _ = _frame_site(noon)
+    c = (sin(elev0) - sin(lat) * sin(dapp.lat)) / (cos(lat) * cos(dapp.lat))
+    c > 1 && return (NaN, NaN)                      # never reaches elev0
+    c < -1 && return (d0, d0 + 1.0)                 # circumpolar -- up all day
+    h0 = acos(c)
+    rise_lst = mod2pi(dapp.lon - h0)
+    set_lst  = mod2pi(dapp.lon + h0)
+    (_mjd_for_lst(rise_lst, d0, pos), _mjd_for_lst(set_lst, d0, pos))
+end
+
 # ======================================================================
 # direction  (hub = ICRS; J2000 ≈ ICRS)
 # ======================================================================

@@ -140,6 +140,16 @@ conversions on ordinary expressions:
 `[lon, lat]` in `j2000` / `b1950` / `app` / `galactic` / `ecliptic` /
 `azel` / `hadec` / `itrf`; `meas.epoch('TAI', mjd)` converts a time
 scale; `meas.last(mjd, x, y, z)` is the local apparent sidereal time.
+`meas.freq('TOPO', 'LSRK', freq, mjd, x, y, z, ra, dec)` /
+`meas.rv('TOPO', 'LSRK', v, mjd, x, y, z, ra, dec)` convert a
+frequency / radial velocity between spectral frames
+(`topo`/`geo`/`bary`/`lsrk`/`lsrd`/`galacto`/`lgroup`/`cmb`);
+`meas.doppler('RADIO', 'BETA', value)` converts between Doppler
+conventions (pure algebra — the only `meas.*` function that needs no
+`import SOFA`); `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` gives
+`[rise_mjd, set_mjd]` for the UTC day containing `mjd` (a standard-
+formula computation, not a byte-exact port of casacore's own rise/set
+search).
 
 ## Physical units
 

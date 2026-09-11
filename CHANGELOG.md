@@ -2086,3 +2086,53 @@ update!(ms; set = ["DATA" =>
   (each antenna's own response, still direction-aware); an
   Observatories-array-centre (suffix-less) per-baseline response
   (baseline responses are inherently per-antenna-pair).
+
+### Phase 104 — complete the `meas.*` TaQL UDF subset
+
+```julia
+query(main, "meas.freq('TOPO', 'LSRK', 1.4e9, TIME/86400, X, Y, Z, RA, DEC) > 1.399e9")
+query(main, "meas.doppler('RADIO', 'BETA', 0.01) > 0.009")          # no SOFA needed
+query(fld, "meas.riseset(RA, DEC, TIME/86400, X, Y, Z)[1] < TIME/86400")
+```
+
+- `meas.freq('SSCALE', 'TSCALE', freq, mjd, x, y, z, ra, dec)` /
+  `meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec)` — frequency /
+  radial-velocity frame conversion (`topo`/`geo`/`bary`/`lsrk`/`lsrd`/
+  `galacto`/`lgroup`/`cmb`), built on the existing `MFrequency`/
+  `MRadialVelocity` `measconvert` machinery (Phases 66/71/88) via a new
+  `_meas_full_frame(mjd,x,y,z,ra,dec)` helper (epoch + ITRF position +
+  J2000 source direction — the full frame a spectral conversion needs).
+- `meas.doppler('SCONV', 'TCONV', value)` — Doppler-convention algebra
+  (`radio`/`optical`(`z`)/`ratio`/`beta`(`true`,`relativistic`)/`gamma`),
+  a thin wrapper over the Phase 72 `MDoppler` `measconvert` — pure
+  arithmetic, the only new `meas.*` function that needs **no**
+  `import SOFA`.
+- `meas.riseset(ra, dec, mjd, x, y, z[, elev0])` → `[rise_mjd, set_mjd]`
+  — the rise/set UTC MJD of a J2000 direction for the day containing
+  `mjd`, from the standard hour-angle-at-elevation formula
+  (`cos H₀ = (sin elev₀ − sin φ·sin δ) / (cos φ·cos δ)`, apparent place
+  at local noon) plus a Newton inversion of the sidereal-time relation
+  (`_mjd_for_lst`, 3 iterations against the real SOFA `gst06a` — the
+  mean sidereal rate makes LST close enough to linear in UT1 over a day
+  that this converges to sub-second precision). `(NaN, NaN)` if the
+  source never reaches `elev0` that day; `(⌊mjd⌋, ⌊mjd⌋+1)` if
+  circumpolar. New core stub `_riseset` (`src/measures/types.jl`,
+  mirrors `_lst`'s stub/ext split) + the real implementation in
+  `ext/SOFAExt.jl`. Not a byte-exact port of casacore's own iterative
+  `Rise`/`Set` search — an independently-derived, documented
+  approximation (no casacore/CASA oracle for a MeasurementSets-only
+  convenience wrapper).
+- `_meas_two_scale_args` factors the "first two arguments are string
+  literal frame/convention names" validation shared by `meas.freq`/
+  `meas.rv`/`meas.doppler`.
+- Verified: `meas.freq`/`meas.rv` cross-checked directly against
+  `measconvert` on an equivalent `MeasFrame`; `meas.doppler` against
+  `measconvert(MDoppler{...}, ...)`; `meas.riseset` checked for
+  rise-before-set + positive elevation at the rise/set midpoint (for a
+  source below the horizon at the UTC-day boundary), a tighter
+  elevation cutoff narrowing the window, and the NaN/circumpolar
+  sentinel paths.
+- This closes the last item in Phase 97's `meas.*` non-goals list
+  (`meas.riseset`, `meas.freq`/`meas.doppler`/`meas.rv`); the
+  column-MEASINFO-driven direction-argument form and
+  `meas.pos`/`meas.itrfxyz`/`meas.wgs` position UDFs remain non-goals.
