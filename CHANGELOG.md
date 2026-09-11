@@ -3210,3 +3210,46 @@ ConcatTable view"): data split correctly across both parts, the
 no-data standard-schema form, a wrong-length error, and a
 `_HAVE_CASACORE` cross-check. 261 edit tests standalone, all green. No
 new storage-format code, no new exports.
+
+### Phase 131 — found and fixed a real `meas.riseset()` rise/set-ordering bug
+
+Swept another Phase-109-era formula (`_riseset`, Phase 104) for a
+Phase-122-style bug — one implemented from a textbook rise/set formula
+and cross-checked against `measconvert` for self-consistency, but never
+checked against a genuinely independent fact. First re-verified two
+other formulas from the same investigative lineage against real source
+(`mscal.pa1()`'s `_position_angle` against `MVDirection::positionAngle`,
+and the IGRF `_earthfield_itrf` spherical-harmonic synthesis against
+`EarthField::calcField`) — both matched their casacore source
+line-for-line, no bug found. `_riseset` was the one with a real issue.
+
+**The bug**: `rise_lst`/`set_lst` were each reduced `mod2pi` independently,
+then each independently searched forward from midnight (`d0`) for the
+first matching sidereal time. When `rise_lst` landed near `2π` and
+`set_lst` (which is always `rise_lst + 2·h0`, physically *later*)
+wrapped back down near `0`, the two independent forward-searches
+decoupled: `set`'s search found an occurrence in an *earlier* sidereal
+cycle than `rise`'s, silently returning `set < rise` (a negative day
+length) instead of the correct rise/set pair.
+
+**How it was found**: a genuinely independent sanity check — for a
+source on the celestial equator (declination 0), the sidereal
+hour-angle span between rise and set is exactly `π` radians regardless
+of site latitude or right ascension, a textbook fact with no dependence
+on any casacore/CASA oracle. `RA=0, DEC=0` at an arbitrary site/date was
+the very first case tried and immediately produced `daylen ≈ -12h`.
+
+**Fix** (`ext/SOFAExt.jl`): compute `rise` first, then search for `set`
+starting from `rise` (not independently from `d0`) — guaranteed
+`set >= rise` by construction (`_mjd_for_lst`'s own `mod(..., 2π)` step
+is never negative), and physically correct since `set_lst` is always
+within `2·h0 <= 2π` sidereal radians of `rise_lst`.
+
+48 new assertions in `test/taql_query_tests.jl` ("Phase 104 —
+meas.riseset()"): a sweep over 8 right ascensions × 3 declinations
+asserting `rise < set` always, plus an independent analytic check
+(`(set - rise) * siderealRate ≈ 2·acos(-tan(lat)·tan(dec_apparent))`,
+re-derived from the same apparent direction/site the function itself
+uses — checks the Newton LST solver, not `h0`'s own formula, so it
+isn't circular). 1008 tests standalone in `taql_query_tests.jl`, all
+green.

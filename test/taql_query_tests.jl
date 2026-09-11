@@ -2326,6 +2326,37 @@ end
     circ = query(t, "TIME > 0"; select = ["rs" => "meas.riseset(0.0, 1.5, TIME/86400.0, $xyz)"])
     r3, s3 = collect(circ.rs)[1]
     @test (isnan(r3) && isnan(s3)) || (isfinite(r3) && isfinite(s3) && s3 - r3 ≈ 1.0)
+
+    # Phase 131: `_riseset` computed `rise_lst`/`set_lst` each mod2pi'd
+    # independently, then searched forward from `d0` for each
+    # separately -- when `rise_lst` landed near 2π and `set_lst` wrapped
+    # down near 0 (RA=0, DEC=0 at this site/date is exactly such a
+    # case), the independent searches decoupled and resolved `set` to
+    # an *earlier* sidereal cycle than `rise`, giving `set < rise` (a
+    # NEGATIVE day length) -- caught by a genuinely independent sanity
+    # check (day length must equal `2*acos(c)/siderealRate`, a fact
+    # that doesn't depend on any casacore/CASA oracle), not by any
+    # cross-check this package already had. Fixed by searching for
+    # `set` starting from `rise` instead of independently from `d0`.
+    x131, y131, z131 = -1601185.0, -5041977.0, 3554876.0
+    pos131 = MPosition{ITRF}(x131, y131, z131)
+    sid_rate = 2pi * 1.00273781191135448
+    for ra131 in (0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0), dec131 in (-0.3, 0.0, 0.3)
+        rise131, set131 = MSv2._riseset(ra131, dec131, 60000.0, x131, y131, z131)
+        isnan(rise131) && continue                  # never-rises sentinel
+        @test rise131 < set131
+        # independent analytic check: the sidereal hour-angle span
+        # between rise and set is exactly `2*h0` -- re-derive `h0` from
+        # the SAME apparent direction/site the function itself uses
+        # (this checks the Newton LST solver, not `h0`'s own formula,
+        # so it isn't circular)
+        noon131 = MeasFrame(epoch = MEpoch{UTC}(60000.5), position = pos131)
+        dapp131 = measconvert(MDirection{J2000}(ra131, dec131), MSv2.APP; frame = noon131)
+        elong131, lat131, _ = ext._frame_site(noon131)
+        c131 = -tan(lat131) * tan(dapp131.lat)
+        h0_131 = acos(clamp(c131, -1.0, 1.0))
+        @test (set131 - rise131) * sid_rate ≈ 2 * h0_131 atol = 1e-6
+    end
 end
 
 @testset "Phase 106 — meas.pos() / meas.itrfxyz() / meas.wgs()" begin
