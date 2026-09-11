@@ -347,3 +347,47 @@ end
         @test ct[:V][:] == [10.0, 20.0, 30.0, 40.0, 100.0, 6.0, 700.0, 400.0]
     end
 end
+
+# Phase 126: addcolumn! through a RefTable view -- matches
+# RefTable::addColumn(addToParent=true): the column lands on the
+# PARENT's schema (every parent row gets a default), and only the
+# view's own mapped rows get the given data.
+@testset "edit — addcolumn! through a RefTable view (Phase 126)" begin
+    dir = joinpath(mktempdir(), "rac.tab")
+    n = 6
+    write_table(dir, "T", ["K" => collect(Int32, 1:n), "V" => Float64.(1:n)]; nrow = n)
+
+    rt = query(readtable(dir), "K > 3")           # rows 4,5,6
+    edit(rt) do rv
+        addcolumn!(rv, "W", [10.0, 20.0, 30.0])   # one value per view row
+    end
+    r2 = readtable(dir)
+    @test "W" in columnnames(r2)
+    @test column(r2, "W")[:] == [0.0, 0.0, 0.0, 10.0, 20.0, 30.0]   # rest defaulted
+
+    # standard-schema no-data form (every parent row gets the default)
+    rt2 = query(readtable(dir), "K <= 2")
+    edit(rt2) do rv
+        addcolumn!(rv, "SCAN_NUMBER")
+        rv[:SCAN_NUMBER][1] = Int32(99)
+    end
+    r3 = readtable(dir)
+    @test "SCAN_NUMBER" in columnnames(r3)
+    @test column(r3, "SCAN_NUMBER")[1] == 99
+    @test column(r3, "SCAN_NUMBER")[3] == 0
+
+    # errors: duplicate name, wrong length
+    rt3 = query(readtable(dir), "K > 3")
+    @test_throws ErrorException edit(rt3) do rv
+        addcolumn!(rv, "V", [1.0, 2.0, 3.0])       # "V" already exists
+    end
+    rt4 = query(readtable(dir), "K > 3")
+    @test_throws ErrorException edit(rt4) do rv
+        addcolumn!(rv, "X", [1.0, 2.0])            # wrong length (3 rows, not 2)
+    end
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:W][:] == [0.0, 0.0, 0.0, 10.0, 20.0, 30.0]
+    end
+end

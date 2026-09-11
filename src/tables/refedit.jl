@@ -18,10 +18,25 @@
 # an I/O operation at all and needs no analogue here (filter with
 # `query`/build a fresh `RefTable` instead). `RefTable` has no `addRow`
 # in casacore either (a selection's row set is fixed at query time).
-# Both are therefore deliberate non-goals for `RefEditTable`, along with
-# `addcolumn!`/`removecolumn!` (casacore's `RefTable::addColumn` can add
-# a column straight to the parent's schema — a real capability, but a
-# separate, larger future phase, not attempted here).
+# Both are deliberate non-goals for `RefEditTable`.
+#
+# Phase 126 — `addcolumn!`, verified against `RefTable::addColumn`
+# (`RefTable.cc:761-802`): with `addToParent=true` (casacore's normal
+# case — `addToParent=false` requires the column to already exist on the
+# parent), it calls straight through to `baseTabPtr_p->addColumn(...)`
+# — the new column is added to the PARENT's schema, sized to the
+# parent's FULL row count (defaulted everywhere) — then registers the
+# name in the RefTable's own `nameMap_p` so it's visible through the
+# view too. Our `addcolumn!(::RefEditTable, ...)` mirrors this exactly:
+# it delegates to the already-tested `addcolumn!(::EditTable, ...)`,
+# then extends `namemap`/`order` so the new column is reachable through
+# the view — no new persist format, same reuse as the read/write path.
+# `RefTable::removeColumn` (also read) is a genuinely different shape —
+# it only edits the RefTable's OWN descriptor/name map, never touching
+# the parent (a pure view-level "hide this column", unlike our
+# `EditTable`'s `removecolumn!`, which always drops real storage) — a
+# distinct semantic deserving its own design, left a deliberate non-goal
+# here rather than rushed in alongside `addcolumn!`.
 
 """
     RefEditTable
@@ -56,19 +71,21 @@ write goes through the exact same fast/regen machinery as editing the
 parent directly. `rt.parent` must be a plain `Table` (not another
 RefTable/ConcatTable — matches [`copytable`](@ref)'s own restriction).
 
-Row/column *count* changes have no RefTable analogue in casacore
-itself (a selection's rows are fixed at query time, and removing a
-RefTable row only shrinks the in-memory selection, never touching the
-parent) — `addrows!`/`removerows!`/`addcolumn!`/`removecolumn!` are not
-supported on a `RefEditTable`; build a new `RefTable` via `query`
-instead.
+Row-*count* changes have no RefTable analogue in casacore itself (a
+selection's rows are fixed at query time, and removing a RefTable row
+only shrinks the in-memory selection, never touching the parent) —
+`addrows!`/`removerows!` are not supported on a `RefEditTable`; build a
+new `RefTable` via `query` instead. `addcolumn!` IS supported (it adds
+to the parent's schema, matching `RefTable::addColumn`); `removecolumn!`
+is not (casacore's own version is a pure view-level hide, a different
+shape from ours — a future phase).
 """
 function edit(rt::RefTable)
     rt.parent isa Table || error(
         "edit(::RefTable): the parent is a $(typeof(rt.parent)) — only a " *
         "RefTable over a plain Table is supported")
     p = edit(rt.parent.path)
-    RefEditTable(p, rt.rows, rt.namemap, rt.order)
+    RefEditTable(p, copy(rt.rows), copy(rt.namemap), copy(rt.order))
 end
 function edit(f::Function, rt::RefTable)
     t = edit(rt)
@@ -117,3 +134,43 @@ setcell!(t::RefEditTable, name, i::Integer, v) = (t[name][Int(i)] = v; t)
     setcolumn!(t::RefEditTable, name, vals) -> t
 """
 setcolumn!(t::RefEditTable, name, vals) = (t[name][:] = vals; t)
+
+"""
+    addcolumn!(t::RefEditTable, name; kind=:ssm)
+    addcolumn!(t::RefEditTable, name, data; kind=:ssm, type=nothing, shape=nothing)
+
+Add a column, visible through this view — matches `RefTable::addColumn`
+(`addToParent=true`): the column is added to the *parent*'s schema,
+sized to the parent's full row count. With no `data`, the column comes
+from the standard MS v2 schema and every parent row (not just this
+view's) gets the default cell — identical to `addcolumn!(::EditTable,
+name)`. With `data` (length `length(t)`, one value per row of *this
+view*), the parent's other rows get the column's default cell and only
+this view's mapped rows get `data`'s values — mirroring what a real
+`RefTable::addColumn` + a follow-up `put` on just the selected rows
+does in casacore.
+"""
+function addcolumn!(t::RefEditTable, name::AbstractString; kind::Symbol=:ssm)
+    haskey(t.namemap, name) && error("addcolumn!: \"$name\" already exists in this view")
+    addcolumn!(t.parent, name; kind)
+    t.namemap[name] = name
+    push!(t.order, name)
+    return t
+end
+
+function addcolumn!(t::RefEditTable, name::AbstractString, data::AbstractVector;
+                    kind::Symbol=:ssm, type::Union{CasaType,Nothing}=nothing, shape=nothing)
+    haskey(t.namemap, name) && error("addcolumn!: \"$name\" already exists in this view")
+    _check_new_col(t.parent, name)
+    length(data) == length(t.rows) ||
+        error("addcolumn!: expected $(length(t.rows)) values (one per RefTable row), got $(length(data))")
+    desc, vals = _addcol_desc(name, data; type, shape)
+    full = Any[_default_cell(desc, t.parent) for _ in 1:length(t.parent.rowmap)]
+    for (i, r) in enumerate(t.rows)
+        full[r] = vals[i]
+    end
+    push!(t.parent.addcols, (desc, kind, full))
+    t.namemap[name] = name
+    push!(t.order, name)
+    return t
+end

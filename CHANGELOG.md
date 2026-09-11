@@ -3028,3 +3028,40 @@ the ConcatTable-parent guard, an unknown-column error, and a
 `_HAVE_CASACORE` cross-check of the final on-disk values. No production
 storage-format code touched, no new exports (`edit`/`setcell!`/
 `setcolumn!` already exported, each gains one new method).
+
+### Phase 126 — `addcolumn!` through a RefTable view
+
+Natural continuation of Phase 125. Read `RefTable::addColumn`
+(`RefTable.cc:761-802`): with `addToParent=true` (casacore's normal
+case), it delegates straight to `baseTabPtr_p->addColumn(...)` — the
+new column lands on the *parent*'s schema, sized to the parent's full
+row count (defaulted everywhere), then the name is registered in the
+RefTable's own `nameMap_p` so it's visible through the view too.
+
+`addcolumn!(t::RefEditTable, name; kind)` and `addcolumn!(t::
+RefEditTable, name, data; kind, type, shape)` mirror this: they
+delegate to the already-tested `addcolumn!(::EditTable, ...)` machinery
+(a new `_addcol_desc` helper factored out of it, shared, zero behaviour
+change to the existing method) to build the column, size it to the
+parent's full row count with default cells, then overwrite just the
+view's own mapped rows with the given data (one value per view row,
+not per parent row — matches what a real `RefTable::addColumn` +
+follow-up `put` on the selected rows does in casacore) — and extend the
+view's `namemap`/`order` so the new column reads back through it. Fixed
+a latent aliasing bug while at it: `edit(rt::RefTable)` previously
+shared `rt.namemap`/`rt.order`/`rt.rows` directly with the caller's own
+`RefTable` object — now copies them, so mutating a view's column list
+never mutates the `RefTable` the caller still holds.
+
+`RefTable::removeColumn` was also read for symmetry, and found to be a
+genuinely different shape — it only edits the RefTable's own
+descriptor, never touching the parent (a pure view-level "hide this
+column", unlike `EditTable`'s `removecolumn!`, which always drops real
+storage) — left a deliberate non-goal, not rushed in alongside
+`addcolumn!`.
+
+8 new assertions in `test/edit_tests.jl` ("edit — addcolumn! through a
+RefTable view"): data-per-view-row with the rest of the parent
+defaulted, the no-data standard-schema form, duplicate-name and
+wrong-length errors, and a `_HAVE_CASACORE` cross-check. No new
+storage-format code, no new exports.
