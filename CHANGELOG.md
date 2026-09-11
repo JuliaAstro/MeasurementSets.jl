@@ -2530,3 +2530,109 @@ query(main, "mscal.baseline('DA01&DV01;DA02&DV02')")
 - Real-TaQL cross-check testset (5 multi-term specs, all matching);
   docs updated (the Phase 80 comment block, `_mssel_baseline_pred`'s
   own docstring-comment recording the specific probes).
+
+### Phase 116 — `RetypedArrayEngine` feasibility investigation
+
+- Investigated the one remaining unsupported data manager's Phase 40
+  hand-wave ("needs the C++ source-type class") by reading `casacore/
+  tables/DataMan/RetypedArrayEngine.{h,tcc}` end to end. **Confirmed
+  genuinely infeasible, not just under-scoped**: `S` in
+  `RetypedArrayEngine<S,T>` is a C++ class template parameter — its
+  `dataTypeId()`/`set()`/`get()` conversion functions and binary layout
+  are arbitrary code compiled into whatever third-party program created
+  the table, with no fixed wire format to target; the on-disk DM type
+  string itself (`className()`) is built from `S::dataTypeId()`, and
+  `registerClass()` must be called explicitly per instantiation by that
+  program (casacore's own `libcasa_tables` never auto-registers any,
+  unlike Dysco / BitFlags / ForwardColumn). `grep -rl
+  RetypedArrayEngine` across the *entire* casacore source tree turns up
+  zero real callers anywhere in casacore itself — including every
+  Measurement Set-related file — only its own demo/test code
+  (`DataMan/test/dRetypedArrayEngine.{cc,h}`).
+- **Outcome: still unsupported, as before — the original assessment was
+  correct.** The only change is a clearer, investigation-backed error
+  message + header comment in `src/datamanagers/forwardcol.jl`'s
+  `_UnsupportedDM` (cites the specific finding instead of the terser
+  original text), so a future reader hitting it understands it's a
+  structural dead end rather than a missing feature to file. No
+  behavior/test change (the existing `engine_tests.jl` dispatch test —
+  `_dmtype("RetypedArrayEngine<Float>") === _UnsupportedDM` — already
+  covers the unchanged code path).
+
+### Phase 117 — primary-beam width-parameter validation
+
+```julia
+GaussianBeam(-1.0, 1.4e9)                   # ArgumentError: hpbw must be finite positive
+AiryBeam(25.0; blockage = 25.0)             # ArgumentError: 0 <= blockage < diameter
+EllipticalGaussianBeam(0.005, 0.02, 0, 1.4e9)  # ArgumentError: hpbw_major >= hpbw_minor
+```
+
+- Every `PrimaryBeam` constructor (`GaussianBeam`, `AiryBeam`,
+  `PolynomialBeam`, `EllipticalGaussianBeam`, `SquintBeam`) and every
+  `power_response` method's `freq`/offset argument now validates its
+  inputs — a non-positive/non-finite width, diameter, or frequency, a
+  `blockage` outside `[0, diameter)` (`blockage == diameter` is a `0/0`
+  singularity in the annular-Airy formula, `> diameter` is unphysical),
+  `hpbw_major < hpbw_minor` (silently unenforced before this phase
+  despite the docstring's `≥` claim), or a NaN/Inf offset/coefficient
+  now raises a clear `ArgumentError` immediately instead of silently
+  propagating to a NaN/Inf power response several calls downstream.
+- New shared helpers `_pb_finite`/`_pb_positive`/`_pb_check_freq`/
+  `_pb_check_offset` (`src/beam/beam.jl`); every constructor gained (or
+  kept, for `PolynomialBeam`'s pre-existing default one) an inner
+  constructor doing the check-then-convert; `power_response` methods
+  check `freq` and the `θ`/`(dlon,dlat)` offset at entry. `SquintBeam`'s
+  own `power_response` delegates its `freq` check to the wrapped base
+  beam (no duplicate check) but validates its own offset before
+  subtracting the squint.
+- A useful side effect: `mscal.pbresponse('ellipse:HMIN:HMAJ:PA')` (a
+  transposed hmaj/hmin typo in a spec string) now raises a clear error
+  at parse time instead of silently computing a rotated-wrong beam.
+- 41 new tests (`test/beam_tests.jl`, "Phase 117 parameter validation");
+  full existing beam + `mscal.pbresponse`/`pbcorr`/`pbatten` test suites
+  (104 + 500 tests) pass unchanged — no valid existing usage anywhere
+  in the codebase violated any of the new invariants.
+
+### Phase 118 — `mscal.baseline()` antenna diameter/mount selection investigation
+
+- Investigated whether real casacore's baseline-selection surface has
+  any selection-by-physical-property (`DISH_DIAMETER`, `MOUNT`) syntax
+  beyond name/id/glob/regex. Traced `mscal.baseline(spec)`
+  (`derivedmscal/DerivedMC/UDFMSCal.cc:445-465`, the `BASELINE` case of
+  `UDFMSCal::getDataNode`) to confirm it is a **direct pass-through to
+  real casacore's own `MSAntennaGram`/`MSAntennaParse`**
+  (`msAntennaGramParseCommand`) — not a separate mini-grammar, so its
+  full syntax surface is exactly whatever the real MSSelection antenna
+  grammar supports. `grep -rin "diameter|mount"` across every file in
+  `ms/MSSel/` (all grammar `.yy`/`.ll` files, every `*Parse.cc`) and a
+  direct read of `MSAntennaIndex.h`'s public interface (`matchAntennaName`
+  / `matchAntennaRegexOrPattern` / `matchStationName` /
+  `matchAntennaNameAndStation` / `matchId` — id, name, and station only)
+  both confirm **zero** diameter/mount selection anywhere in casacore's
+  own antenna-selection machinery. **Confirmed absent, not missing** —
+  matches the earlier (correct) assumption; no code change needed.
+  Achievable today anyway via a plain `WHERE`/`join` on
+  `ANTENNA.DISH_DIAMETER` / `ANTENNA.MOUNT` (already fully general),
+  just not through `mscal.baseline`'s own spec-string syntax (which
+  real casacore doesn't have either).
+- **Incidental discovery, flagged for a future phase, not implemented
+  here** (out of this phase's chosen scope): reading `MSAntennaGram.yy`/
+  `.ll` end to end while investigating turned up the *real* form of
+  the Phase 80 non-goal "blregexlist" — Phase 115 investigated and
+  discarded a `[name1,name2]`-bracket-list guess (real casacore
+  rejects it). The actual grammar production is `blregexlist: BLREGEX
+  (COMMA BLREGEX)*`, where a `BLREGEX` token is a `/…/`-delimited regex
+  whose body contains a literal `&` (the lexer's own discriminator,
+  `MSAntennaGram.ll:76-86`: a `/…/` regex containing `&` becomes
+  `BLREGEX` instead of a plain per-name `REGEX`) — matched via
+  `MSAntennaParse::selectBLRegex` against the whole `"name1&name2"`
+  baseline string, not against each antenna name separately. Separately,
+  `MSAntennaGram.yy:150-163` shows `gbaseline: NOT baseline | baseline`
+  and `indexcombexpr: gbaseline | indexcombexpr SEMICOLON gbaseline` —
+  each `;`-joined term can syntactically carry its own independent
+  `NOT`, which suggests Phase 115's live-probed "`!` combined with `;`
+  silently drops the other term" finding may have a real, traceable
+  explanation in how `MSAntennaParse` *accumulates* results across
+  `;`-joined terms (rather than being a bug) — worth revisiting with
+  this grammar-level context before either implementing real
+  `BLREGEX` support or reconsidering the Phase 115 `!`+`;` refusal.
