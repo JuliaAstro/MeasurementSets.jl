@@ -2,6 +2,7 @@
 /docs/Manifest.toml
 /docs/build/
 /docs/src/changelog.md
+/docs/src/changelog-*.md
 
 # regenerated on every test run
 test/data/**/table.lock
