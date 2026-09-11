@@ -6,6 +6,13 @@
 # the WHERE / SET expressions.  `taql(target, "...")` is a string-command
 # dispatcher on top of the Julia functions.
 
+# `limit >= 0` -> the first `limit` rows; `limit < 0` -> the last
+# `|limit|` rows (TaQL's UPDATE/DELETE `ORDER BY ... LIMIT n` form).
+function _apply_limit(rows::Vector{Int}, limit::Integer)
+    n = length(rows)
+    limit >= 0 ? rows[1:min(limit, n)] : rows[max(1, n + limit + 1):n]
+end
+
 _cmd_path(x::AbstractString) = String(rstrip(x, '/'))
 function _cmd_path(t::AbstractTable)
     t isa Table ||
@@ -37,9 +44,17 @@ array flagging where `dexpr`'s result is non-finite.
 to `M` instead. Either name may be a slice / mask target.
 
 `where` is a TaQL-lite WHERE string, a `row -> Bool` closure, or
-`nothing` (every row). Returns the number of rows changed.
+`nothing` (every row). `orderby` (like [`query`](@ref)'s — a bare
+column name/`Symbol`, ascending, or a `name => :asc`/`name => :desc`
+pair) sorts the matched rows before `limit` (an `Integer`) keeps only
+the first `limit` of them (`limit < 0` keeps the *last* `|limit|`
+instead) — TaQL's "update the N oldest/newest rows matching a
+condition" form, e.g. `update!(t; set=[...], where="...",
+orderby=["TIME"], limit=10)`. Returns the number of rows changed.
 """
-function update!(target; set::AbstractVector{<:Pair}, where=nothing)
+function update!(target; set::AbstractVector{<:Pair}, where=nothing,
+                 orderby::Union{Nothing,AbstractVector}=nothing,
+                 limit::Union{Nothing,Integer}=nothing)
     path = _cmd_path(target)
     rd = readtable(path)
     vn = Set(columnnames(rd))
@@ -67,10 +82,15 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
         end
     end
 
+    orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(rd, o) for o in orderby]
+
     needed = Set{String}(s[1] for s in specs)
     for (_, levels, a) in specs
         _tqlrefs!(needed, a)
         levels === nothing || foreach(ax -> _axes_refs!(needed, ax), levels)
+    end
+    for k in orderkeys
+        push!(needed, k.name)
     end
     whereast = nothing
     if where isa AbstractString
@@ -87,6 +107,10 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
 
     rows = _where_rows(rd, where, cols)
     isempty(rows) && return 0
+    rows = _apply_orderby(rows, orderkeys, cols)
+    limit === nothing || (rows = _apply_limit(rows, limit))
+    isempty(rows) && return 0
+    limited = orderby !== nothing || limit !== nothing
     nr = nrow(rd)
 
     sliced = Set(s[1] for s in specs if s[2] !== nothing)
@@ -111,7 +135,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing)
             u = colunit(c)
             if length(ops) == 1 && ops[1][1] === nothing
                 a = ops[1][2]
-                if where === nothing
+                if where === nothing && !limited
                     t[c][:] = [_tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u) for i in 1:nr]
                 else
                     ec = t[c]
@@ -203,22 +227,33 @@ function _axes_refs!(seen, axes)
 end
 
 """
-    delete!(target; where=nothing) -> Int
+    delete!(target; where=nothing, orderby=nothing, limit=nothing) -> Int
 
 Remove rows from the CTDS table at `target` (a path or an open `Table`).
 `where` is a TaQL-lite WHERE string, a `row -> Bool` closure, or
-`nothing` (**every row** — leaves a 0-row table). Returns the number of
-rows removed. Extends `Base.delete!`.
+`nothing` (**every row** — leaves a 0-row table). `orderby`/`limit` — see
+[`update!`](@ref) — sort the matched rows then keep only `limit` of them
+(`limit < 0` keeps the *last* `|limit|`) before deleting, e.g. "delete
+the 10 oldest rows matching a condition":
+`delete!(t; where="...", orderby=["TIME"], limit=10)`. Returns the
+number of rows removed. Extends `Base.delete!`.
 """
-function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing)
+function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing,
+                      orderby::Union{Nothing,AbstractVector}=nothing,
+                      limit::Union{Nothing,Integer}=nothing)
     path = _cmd_path(target)
     rd = readtable(path)
+    orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(rd, o) for o in orderby]
     names =
         where isa Function ? columnnames(rd) :
         where isa AbstractString ? collect(_tql_where_refs(where, rd)) :
         String[]
+    names = union(names, (k.name for k in orderkeys))
     cols = Dict{String,AbstractVector}(n => _load_col(column(rd, n)) for n in names)
     rows = _where_rows(rd, where, cols)
+    isempty(rows) && return 0
+    rows = _apply_orderby(rows, orderkeys, cols)
+    limit === nothing || (rows = _apply_limit(rows, limit))
     isempty(rows) && return 0
     edit(path) do t
         removerows!(t, rows)
@@ -302,6 +337,22 @@ end
 
 # --- taql() string-command dispatcher --------------------------------
 
+# "K1 DESC, K2, K3 ASC" -> ["K1"=>:desc, "K2", "K3"=>:asc], for update!'s
+# / delete!'s `orderby=` kwarg (Phase 111's UPDATE/DELETE ORDER BY).
+function _taql_orderby_list(s::AbstractString)
+    out = Any[]
+    for tok in split(s, ',')
+        t = strip(tok)
+        om = match(r"^(\w+)\s*(ASC|DESC)?$"i, t)
+        om === nothing && throw(ArgumentError("taql: malformed ORDER BY term \"$t\""))
+        name = String(om.captures[1])
+        dir = om.captures[2]
+        push!(out, dir === nothing ? name :
+              (uppercase(dir) == "DESC" ? name => :desc : name => :asc))
+    end
+    return out
+end
+
 # paren-aware comma split (so `iif(a, b, c)` survives)
 function _split_commas(s::AbstractString)
     out = String[]
@@ -328,8 +379,10 @@ end
 Run one TaQL-lite write / select command against `target` (a path or an
 open `Table`):
 
-* `UPDATE [t] SET c1 = e1, c2 = e2 [WHERE cond]`  → [`update!`](@ref), returns `Int`
-* `DELETE [FROM t] [WHERE cond]`                  → [`delete!`](@ref), returns `Int`
+* `UPDATE [t] SET c1 = e1, c2 = e2 [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
+  → [`update!`](@ref), returns `Int`
+* `DELETE [FROM t] [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
+  → [`delete!`](@ref), returns `Int`
 * `SELECT [*|col [AS a], …] [WHERE cond] (INTO|GIVING) 'path'`  → [`copytable`](@ref), returns the path
 * `SELECT …` with no `INTO`/`GIVING`              → [`query`](@ref), returns the result
 * `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…) [LIMIT n]`  → [`insert!`](@ref), returns `Int`
@@ -346,7 +399,9 @@ function taql(target, command::AbstractString)
     cmd = strip(command)
     kw = uppercase(String(first(split(cmd; limit=2))))
     if kw == "UPDATE"
-        m = match(r"^UPDATE\s+(?:\S+\s+)?SET\s+(.+?)(?:\s+WHERE\s+(.+))?\s*$"is, cmd)
+        m = match(Regex("^UPDATE\\s+(?:\\S+\\s+)?SET\\s+(.+?)(?:\\s+WHERE\\s+(.+?))?" *
+                        "(?:\\s+ORDER\\s+BY\\s+(.+?))?(?:\\s+LIMIT\\s+(-?\\d+))?\\s*\$",
+                        "is"), cmd)
         m === nothing && throw(ArgumentError("taql: malformed UPDATE command"))
         set = Pair{String,String}[]
         for piece in _split_commas(m.captures[1])
@@ -354,11 +409,19 @@ function taql(target, command::AbstractString)
             am === nothing && throw(ArgumentError("taql: malformed SET assignment \"$piece\""))
             push!(set, String(strip(am.captures[1])) => String(strip(am.captures[2])))
         end
-        return update!(target; set, where=m.captures[2] === nothing ? nothing : String(strip(m.captures[2])))
+        return update!(target; set,
+            where = m.captures[2] === nothing ? nothing : String(strip(m.captures[2])),
+            orderby = m.captures[3] === nothing ? nothing : _taql_orderby_list(m.captures[3]),
+            limit = m.captures[4] === nothing ? nothing : parse(Int, m.captures[4]))
     elseif kw == "DELETE"
-        m = match(r"^DELETE\s+(?:FROM\s+\S+\s*)?(?:WHERE\s+(.+))?\s*$"is, cmd)
+        m = match(Regex("^DELETE\\s+(?:FROM\\s+\\S+\\s*)?(?:WHERE\\s+(.+?))?" *
+                        "(?:\\s+ORDER\\s+BY\\s+(.+?))?(?:\\s+LIMIT\\s+(-?\\d+))?\\s*\$",
+                        "is"), cmd)
         m === nothing && throw(ArgumentError("taql: malformed DELETE command"))
-        return delete!(target; where=m.captures[1] === nothing ? nothing : String(strip(m.captures[1])))
+        return delete!(target;
+            where = m.captures[1] === nothing ? nothing : String(strip(m.captures[1])),
+            orderby = m.captures[2] === nothing ? nothing : _taql_orderby_list(m.captures[2]),
+            limit = m.captures[3] === nothing ? nothing : parse(Int, m.captures[3]))
     elseif kw == "SELECT"
         into = match(r"^(.*?)\s+(?:INTO|GIVING)\s+'([^']+)'\s*$"is, cmd)
         body = into === nothing ? cmd : String(strip(into.captures[1]))

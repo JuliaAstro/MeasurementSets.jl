@@ -82,6 +82,53 @@ end
     @test nrow(readtable(p3)) == 0
 end
 
+# Phase 111: UPDATE/DELETE ORDER BY + LIMIT ("update/delete the N
+# oldest/newest rows matching a condition").
+@testset "update!/delete! -- ORDER BY + LIMIT" begin
+    dir = mktempdir()
+    A = collect(Int32, 1:10)
+    T = Float64.(10:-1:1)                          # descending: row i has TIME = 11-i
+    mk(name) = (p = joinpath(dir, name);
+                write_table(p, name, Pair{String,Any}["A" => copy(A), "T" => copy(T)];
+                    nrow=10); p)
+
+    # update! -- the 3 matched rows with the smallest T ("oldest")
+    p1 = mk("u1")
+    @test update!(p1; set=["A" => "A + 100"], where="A > 3", orderby=["T"], limit=3) == 3
+    a1 = column(readtable(p1), "A")[:]
+    # A>3 candidates are A=4..10 (T=7,6,5,4,3,2,1); smallest-T 3 are A=8,9,10
+    @test a1 == Int32[1, 2, 3, 4, 5, 6, 7, 108, 109, 110]
+
+    # orderby entry as a `name => :desc` pair (largest T first == "newest");
+    # among A>3 (rows 4..10), T decreases as A increases, so the 2 largest-T
+    # rows are A=4 (T=7) and A=5 (T=6)
+    p2 = mk("u2")
+    @test update!(p2; set=["A" => "A + 100"], where="A > 3", orderby=["T" => :desc], limit=2) == 2
+    a2 = column(readtable(p2), "A")[:]
+    @test a2 == Int32[1, 2, 3, 104, 105, 6, 7, 8, 9, 10]
+
+    # negative limit -> the LAST |limit| of the ordered set; with no WHERE,
+    # ascending-T order is rows [10,9,...,1] (T is the exact row-reverse
+    # here), so the last 3 of that order are rows 3,2,1 (A=3,2,1)
+    p3 = mk("u3")
+    @test update!(p3; set=["A" => "A + 100"], orderby=["T"], limit=-3) == 3
+    @test column(readtable(p3), "A")[:] == Int32[101, 102, 103, 4, 5, 6, 7, 8, 9, 10]
+
+    # delete! -- the 2 matched rows with the largest T ("newest"); same
+    # A>3 / T-decreasing-with-A geometry as p2 above -> A=4,5 removed
+    p4 = mk("d1")
+    @test delete!(p4; where="A > 3", orderby=["T" => :desc], limit=2) == 2
+    @test column(readtable(p4), "A")[:] == Int32[1, 2, 3, 6, 7, 8, 9, 10]
+
+    # taql string form: ORDER BY / LIMIT parsed out of the command string
+    p5 = mk("t1")
+    @test taql(p5, "UPDATE t SET A = A + 100 WHERE A > 3 ORDER BY T LIMIT 3") == 3
+    @test column(readtable(p5), "A")[:] == a1
+    p6 = mk("t2")
+    @test taql(p6, "DELETE FROM t WHERE A > 3 ORDER BY T DESC LIMIT 2") == 2
+    @test column(readtable(p6), "A")[:] == column(readtable(p4), "A")[:]
+end
+
 @testset "SELECT INTO -- copytable of a query result" begin
     dir = mktempdir()
     A = collect(Int32, 1:12)
@@ -465,6 +512,31 @@ if _HAVE_TAQL
             vr = column(readtable(joinpath(d, "ref")), "V")
             @test all(vo[i] ≈ vr[i] for i in 1:5)
         end
+    end
+
+    @testset "update!/delete! -- ORDER BY + LIMIT real TaQL cross-check" begin
+        d = mktempdir()
+        A = collect(Int32, 1:10)
+        T = Float64.(10:-1:1)
+        for nm in ("ours", "ref")
+            write_table(joinpath(d, nm), nm, Pair{String,Any}["A" => copy(A), "T" => copy(T)];
+                       nrow = 10)
+        end
+        update!(joinpath(d, "ours"); set = ["A" => "A + 100"], where = "A > 3",
+               orderby = ["T"], limit = 3)
+        _taqlcmd("UPDATE \$1 SET A = A + 100 WHERE A > 3 ORDER BY T LIMIT 3", joinpath(d, "ref"))
+        @test column(readtable(joinpath(d, "ours")), "A")[:] ==
+              column(readtable(joinpath(d, "ref")), "A")[:]
+
+        d2 = mktempdir()
+        for nm in ("ours", "ref")
+            write_table(joinpath(d2, nm), nm, Pair{String,Any}["A" => copy(A), "T" => copy(T)];
+                       nrow = 10)
+        end
+        delete!(joinpath(d2, "ours"); where = "A > 3", orderby = ["T" => :desc], limit = 2)
+        _taqlcmd("DELETE FROM \$1 WHERE A > 3 ORDER BY T DESC LIMIT 2", joinpath(d2, "ref"))
+        @test column(readtable(joinpath(d2, "ours")), "A")[:] ==
+              column(readtable(joinpath(d2, "ref")), "A")[:]
     end
 end
 

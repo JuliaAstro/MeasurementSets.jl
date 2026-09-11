@@ -2349,3 +2349,33 @@ query(fld, "meas.azel('PHASE_DIR', TIME/86400, X, Y, Z)[2] > 0")   # was: ..., '
   explicit-`'SRC'`-plus-`lon,lat` numeric form on the same data; error
   paths (no `MEASINFO`, a non-direction `MEASINFO`, a `VarRefCol`
   column) each checked.
+
+### Phase 111 — `UPDATE`/`DELETE` `ORDER BY` + `LIMIT`
+
+```julia
+update!(t; set=["FLAG" => "true"], where="SNR < 3", orderby=["TIME"], limit=100)  # the 100 oldest
+delete!(t; where="SCAN_NUMBER == 5", orderby=["TIME" => :desc], limit=20)         # the 20 newest
+taql(t, "DELETE FROM t WHERE A > 3 ORDER BY TIME DESC LIMIT 2")
+```
+
+- `update!`/`delete!` gain `orderby`/`limit` kwargs — TaQL's "update/
+  delete the N oldest/newest rows matching a condition" form. `orderby`
+  is the same shape as [`query`](@ref)'s do-block form (a bare column
+  name/`Symbol`, ascending, or `name => :asc`/`name => :desc`); the
+  matched rows are sorted by it (reusing the existing `TQLOrderKey`/
+  `_apply_orderby` machinery from `ORDER BY`), then `limit` (an
+  `Integer`) keeps only the first `limit` of them — or, for `limit < 0`,
+  the *last* `|limit|` — before the mutation runs.
+- `taql()`'s `UPDATE`/`DELETE` string forms parse a trailing
+  `ORDER BY k [ASC|DESC], … [LIMIT n]` clause (new `_taql_orderby_list`
+  helper) and pass it through to `update!`/`delete!`.
+- `update!`'s whole-column fast path (`t[c][:] = [...]`, used when
+  `where === nothing`) is now also gated on `orderby`/`limit` being
+  unset — a `orderby`/`limit`-restricted update always goes through the
+  per-matched-row path, even with no `where`.
+- Closes the Phase 30 non-goal ("`DELETE`/`UPDATE` `ORDER BY`+`LIMIT`
+  … chain `query` then `delete!` by the selected condition instead").
+- Verified via hand-computed row selections (ascending/descending,
+  positive/negative limit, the Julia and `taql` string forms agreeing)
+  and a real-TaQL cross-check of both `update!` and `delete!` against
+  `tableCommand`.
