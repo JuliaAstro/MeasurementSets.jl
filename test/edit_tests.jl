@@ -520,3 +520,34 @@ end
         @test CCT.Table(dir2)[:W][:] == [40.0, 50.0, 60.0]
     end
 end
+
+# Phase 133: addrows!/removerows! (and removecolumn! for ConcatEditTable)
+# on a RefEditTable/ConcatEditTable give clear, actionable errors instead
+# of a raw MethodError -- confirmed genuinely unsupported by casacore
+# itself: `BaseTable::canAddRow()`/`canRemoveRow()` are hard-`false` and
+# unoverridden by either RefTable or ConcatTable (both inherit the base
+# class's throwing addRow/removeRow); RefTable::removeColumn has its own
+# distinct view-level-hide semantic (Phase 127), but ConcatTable::
+# removeColumn throws unconditionally too (Phase 130).
+@testset "edit — clear errors for unsupported row/column ops (Phase 133)" begin
+    dir = joinpath(mktempdir(), "e133.tab")
+    write_table(dir, "T", ["K" => collect(Int32, 1:4), "V" => Float64.(1:4)]; nrow = 4)
+
+    rt = query(readtable(dir), "K > 2")
+    edit(rt) do rv
+        @test_throws ErrorException addrows!(rv, 2)
+        @test_throws ErrorException removerows!(rv, [1])
+    end
+
+    dir1 = joinpath(mktempdir(), "e133a.tab")
+    dir2 = joinpath(mktempdir(), "e133b.tab")
+    write_table(dir1, "T", ["K" => collect(Int32, 1:2)]; nrow = 2)
+    write_table(dir2, "T", ["K" => collect(Int32, 3:4)]; nrow = 2)
+    ccdir = joinpath(mktempdir(), "e133c.tab")
+    write_concattable(ccdir, [readtable(dir1), readtable(dir2)])
+    edit(readtable(ccdir)) do cv
+        @test_throws ErrorException addrows!(cv, 1)
+        @test_throws ErrorException removerows!(cv, [1])
+        @test_throws ErrorException removecolumn!(cv, "K")
+    end
+end

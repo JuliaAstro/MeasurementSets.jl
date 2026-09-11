@@ -3210,3 +3210,139 @@ ConcatTable view"): data split correctly across both parts, the
 no-data standard-schema form, a wrong-length error, and a
 `_HAVE_CASACORE` cross-check. 261 edit tests standalone, all green. No
 new storage-format code, no new exports.
+
+### Phase 131 — found and fixed a real `meas.riseset()` rise/set-ordering bug
+
+Swept another Phase-109-era formula (`_riseset`, Phase 104) for a
+Phase-122-style bug — one implemented from a textbook rise/set formula
+and cross-checked against `measconvert` for self-consistency, but never
+checked against a genuinely independent fact. First re-verified two
+other formulas from the same investigative lineage against real source
+(`mscal.pa1()`'s `_position_angle` against `MVDirection::positionAngle`,
+and the IGRF `_earthfield_itrf` spherical-harmonic synthesis against
+`EarthField::calcField`) — both matched their casacore source
+line-for-line, no bug found. `_riseset` was the one with a real issue.
+
+**The bug**: `rise_lst`/`set_lst` were each reduced `mod2pi` independently,
+then each independently searched forward from midnight (`d0`) for the
+first matching sidereal time. When `rise_lst` landed near `2π` and
+`set_lst` (which is always `rise_lst + 2·h0`, physically *later*)
+wrapped back down near `0`, the two independent forward-searches
+decoupled: `set`'s search found an occurrence in an *earlier* sidereal
+cycle than `rise`'s, silently returning `set < rise` (a negative day
+length) instead of the correct rise/set pair.
+
+**How it was found**: a genuinely independent sanity check — for a
+source on the celestial equator (declination 0), the sidereal
+hour-angle span between rise and set is exactly `π` radians regardless
+of site latitude or right ascension, a textbook fact with no dependence
+on any casacore/CASA oracle. `RA=0, DEC=0` at an arbitrary site/date was
+the very first case tried and immediately produced `daylen ≈ -12h`.
+
+**Fix** (`ext/SOFAExt.jl`): compute `rise` first, then search for `set`
+starting from `rise` (not independently from `d0`) — guaranteed
+`set >= rise` by construction (`_mjd_for_lst`'s own `mod(..., 2π)` step
+is never negative), and physically correct since `set_lst` is always
+within `2·h0 <= 2π` sidereal radians of `rise_lst`.
+
+48 new assertions in `test/taql_query_tests.jl` ("Phase 104 —
+meas.riseset()"): a sweep over 8 right ascensions × 3 declinations
+asserting `rise < set` always, plus an independent analytic check
+(`(set - rise) * siderealRate ≈ 2·acos(-tan(lat)·tan(dec_apparent))`,
+re-derived from the same apparent direction/site the function itself
+uses — checks the Newton LST solver, not `h0`'s own formula, so it
+isn't circular). 1008 tests standalone in `taql_query_tests.jl`, all
+green.
+
+### Phase 132 — found and fixed a real `write_reftable` bug: a RefTable parent wasn't flattened to its root
+
+Investigated the risk Phase 15's own plan had flagged and left
+unverified: "`_strip_directory`'s two-case simplification is only
+exercised by paths our own writer or tests produce" — specifically,
+what `write_reftable` does when its `parent` argument is itself another
+(already-persisted, on-disk) `RefTable`.
+
+**Read casacore's own `RefTable` writer** (`RefTable::RefTable
+(BaseTable*, Vector<rownr_t>)`, `RefTable.cc:77-98`) and found the real
+invariant: a constructed `RefTable` **always** points its `baseTabPtr_p`
+at `btp->root()` — the true, non-RefTable root — never at an
+intermediate RefTable. Building a new RefTable off an existing one
+calls `adjustRownrs` (`RefTable.cc:241-259`), which **translates** the
+given row indices through the existing RefTable's own row map
+(`rownrs[i] = rows[rownrs[i]]`) and (critically) computes the
+`rowOrder` flag against those **translated, absolute root-row indices**
+— not against the row list as given relative to the intermediate.
+
+**Confirmed this package's `write_reftable` did neither**: given a
+`parent` that was itself a persisted `RefTable`, it wrote the
+intermediate's own path as `parentstored` (producing a genuine two-
+level on-disk chain real casacore's own writer never produces) and
+computed the `rowOrder` flag on the rows *as given* — relative to the
+intermediate, not the root. Live-verified the flag consequence: rows
+`[1, 3, 5]` of an already-persisted, fully-reversed selection are
+ascending relative to that intermediate, but resolve to absolute root
+rows `[10, 8, 6]` — genuinely descending. **Why this matters**:
+`BaseTable::logicRows()` (`BaseTable.cc:983-993` — used by table
+boolean/set-algebra operators, e.g. combining two row selections)
+*trusts* the stored `rowOrder` flag to skip re-sorting; a wrong flag
+would make a real casacore consumer silently treat an unsorted root
+selection as sorted in that code path. (Value *reads* through the
+chain were already correct in both readers, live-verified before the
+fix, since neither reader's plain cell/column access consults the flag
+at all — only `logicRows()`-based table-algebra operations would be
+affected.)
+
+**Fix** (`src/tables/table.jl`): new `_flatten_to_root` — recursively
+unwraps a `RefTable` parent chain (translating rows and the column
+name map at each level) before writing, exactly mirroring casacore's
+own `adjustRownrs`. `write_reftable`'s general form now flattens
+before computing `parentstored`/`rowOrder`/`parentnrow`; the
+`write_reftable(dir, rt::RefTable)` convenience form inherits the fix
+automatically (it delegates to the general form).
+
+Also confirmed, incidentally: real casacore's *other* RefTable
+constructor form (used for its own `select(...)` machinery) has
+`BaseTable::adjustRownrs`'s base-class default **unconditionally return
+`true`** for a plain-Table parent, regardless of the actual row order —
+a real casacore quirk. This package's existing choice to compute the
+flag *honestly* even for a plain-Table parent is therefore not a
+divergence to "fix" — if anything it's safer than what casacore's own
+writer does in that specific case, and was left unchanged.
+
+13 new tests in `test/reftable_tests.jl` ("write_reftable — flattens a
+RefTable parent to its root"): a two-level chain with a deliberately
+order-reversing composition (ascending-relative-to-intermediate,
+descending-relative-to-root), a three-level chain, a `_HAVE_CASACORE`
+cross-check that real casacore still opens and reads the flattened
+output correctly, and `select=` renaming resolving against the true
+root's column names after flattening. 257 tests standalone in
+`reftable_tests.jl`, all green.
+
+### Phase 133 — confirmed ConcatTable's addRow/removeColumn are genuinely unsupported; clear errors for the whole edit-session non-goal set
+
+Investigated the last uncertainty in the `RefEditTable`/`ConcatEditTable`
+feature set: Phase 129/130 assumed `ConcatTable` has no `addRow`
+analogue based on there being no override in `ConcatTable.h`, without
+confirming what the inherited `BaseTable` default actually does.
+Confirmed cleanly: `BaseTable::canAddRow()`/`canRemoveRow()` are both
+hard-coded `false` and unoverridden by either `RefTable` or
+`ConcatTable`; the inherited `BaseTable::addRow` throws a clear
+`TableInvOper("Table: cannot add a row to table ...")` — not a crash,
+not silently wrong. No surprises for either table kind.
+
+**Fixed a real (if minor) UX gap found while confirming this**:
+`addrows!`/`removerows!` had no methods at all for `RefEditTable`/
+`ConcatEditTable` (nor did `removecolumn!` for `ConcatEditTable`) —
+calling any of them produced a raw, unhelpful `MethodError` instead of
+an actionable message, unlike every other documented non-goal in this
+package. Added clear-error methods for all five combinations
+(`addrows!`/`removerows!` on both view types, plus `removecolumn!` on
+`ConcatEditTable` — `RefEditTable`'s own `removecolumn!` already exists
+with real view-level-hide semantics since Phase 127), each naming the
+specific casacore behaviour that makes it unsupported and pointing at
+the right alternative (`query`/`write_concattable`/editing a part
+directly).
+
+5 new tests in `test/edit_tests.jl` ("edit — clear errors for
+unsupported row/column ops"). 266 tests standalone, all green. No
+behaviour change beyond the error message quality.

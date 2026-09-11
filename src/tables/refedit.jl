@@ -199,3 +199,19 @@ function removecolumn!(t::RefEditTable, name::AbstractString)
     filter!(!=(name), t.order)
     return t
 end
+
+# Phase 133: clear, actionable errors instead of a raw MethodError for
+# the two row-count operations `RefEditTable` deliberately doesn't
+# support (see this file's header comment — `RefTable` has no `addRow`
+# in casacore at all, and `removeRow` only shrinks the in-memory
+# selection, never touching the parent, so there's no I/O for
+# `removerows!` to do here).
+addrows!(::RefEditTable, ::Integer) = error(
+    "addrows!: a RefTable view has no row-count analogue in casacore " *
+    "(a selection's rows are fixed at query time) — build a new " *
+    "RefTable via `query` instead, or `edit` the parent directly")
+removerows!(::RefEditTable, rows) = error(
+    "removerows!: a RefTable view has no row-count analogue in casacore " *
+    "(`RefTable::removeRow` only shrinks the in-memory selection, never " *
+    "touching the parent — there is no I/O for this to do) — build a " *
+    "new RefTable via `query` instead")

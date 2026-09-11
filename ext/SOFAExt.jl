@@ -181,7 +181,22 @@ function MS._riseset(ra::Real, dec::Real, mjd::Real, x::Real, y::Real, z::Real,
     h0 = acos(c)
     rise_lst = mod2pi(dapp.lon - h0)
     set_lst  = mod2pi(dapp.lon + h0)
-    (_mjd_for_lst(rise_lst, d0, pos), _mjd_for_lst(set_lst, d0, pos))
+    rise = _mjd_for_lst(rise_lst, d0, pos)
+    # search for `set` starting from `rise`, not independently from `d0`:
+    # `rise_lst`/`set_lst` are each reduced mod 2π on their own, so an
+    # independent "first occurrence at/after d0" search for each can
+    # decouple them across the 0/2π wrap (e.g. rise_lst near 2π,
+    # set_lst wrapped down near 0) and resolve `set` to an *earlier*
+    # sidereal cycle than `rise` -- found live via a dec=0 sanity check
+    # (day length must be exactly 12h at any latitude/RA, a fact
+    # independent of any casacore/CASA oracle) giving a NEGATIVE day
+    # length before this fix. Searching forward from `rise` instead
+    # guarantees `set >= rise` by construction (`_mjd_for_lst`'s own
+    # `mod(..., 2π)` step is never negative), and is physically correct
+    # since `set_lst` is always within `2*h0 <= 2π` sidereal radians of
+    # `rise_lst`.
+    set = _mjd_for_lst(set_lst, rise, pos)
+    (rise, set)
 end
 
 # ======================================================================
