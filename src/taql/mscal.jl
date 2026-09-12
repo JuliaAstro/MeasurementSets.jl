@@ -1248,10 +1248,24 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         # (`'<N'`/`'>N'`) or name/pattern spec (`'3C286'`) DOES (routes
         # through `MSFieldIndex::matchFieldIDLT/GT/GTAndLT`/
         # `matchFieldNameRegexOrPattern`, which check `!flagRow`,
-        # `MSFieldIndex.cc:103,224`). `MSStateIndex.cc` has the
-        # identical structure (`.cc:104,130`) -- inferred by symmetry
-        # for STATE, not independently live-tested. `_mssel_idset`'s
-        # `flagged` kwarg implements exactly this per-term-form split;
+        # `MSFieldIndex.cc:103,224`). Phase 153: `MSStateIndex.cc`'s
+        # structure was CONFIRMED IDENTICAL by directly reading
+        # `MSStateGram.yy`/`MSStateParse.cc`/`MSStateIndex.cc` (not just
+        # inferred by symmetry, since `mscal.state()` itself can never
+        # be live-tested -- Phase 147's crash bug): the grammar's bare-
+        # id/`~`-range production (`stateidrange`, `MSStateGram.yy:
+        # 194-210`) builds a raw id list with no index-table lookup at
+        # all, which `MSStateParse::selectStateIds` (`MSStateParse.cc:
+        # 65-73`) turns into a plain `TEN.in(stateIds)` -- no `FLAG_ROW`
+        # check, exactly like `MSFieldParse::selectFieldIds`; the `<`/
+        # `>`/`<>&<>` bound forms (`stateidbounds`, `.yy:214-243`) and
+        # the name/regex/pattern form both route through
+        # `MSStateIndex::matchStateIDLT/GT/GTAndLT` (`MSStateIndex.cc:
+        # 216-251`) / `matchStateObsModeRegexOrPattern` (`.cc:68-104`),
+        # each of which builds its mask as
+        # `... && !flagRow().getColumn()` -- byte-for-byte the same
+        # split as `MSFieldIndex`. `_mssel_idset`'s `flagged` kwarg
+        # implements exactly this per-term-form split;
         # baseline/spw/scan/array/obs pass no `flagged` (Phases 118-119
         # confirmed those never filter by `FLAG_ROW` in real casacore).
         _need("FIELD_ID")

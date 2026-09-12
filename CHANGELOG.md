@@ -4095,3 +4095,30 @@ project's own standing discipline (mscal.corr()'s own comment, Phase
 question in `src/taql/mscal.jl`, not implemented as a behaviour change
 with no way to test it. No production behaviour changed; standalone
 mscal suite green (666/666, unchanged).
+
+### Phase 153 — upgraded `mscal.state()` vs `FLAG_ROW`'s "inferred by symmetry" note to a confirmed source-read match (no bug)
+
+Phases 145/146 found `mscal.field()`'s `FLAG_ROW` filtering is
+spec-form-dependent (a bare id/`~`-range spec never filters, a
+comparison/name spec does) and applied the same fix to `mscal.state()`
+"by symmetry" — `MSStateIndex.cc` was never actually read directly,
+since `mscal.state()` itself can't be live-tested at all (Phase 147's
+crash bug). This phase closes that gap: read `MSStateGram.yy` +
+`MSStateParse.cc` + `MSStateIndex.cc` directly. Confirmed byte-for-byte
+the same structure as `MSFieldParse`/`MSFieldIndex`: the grammar's
+bare-id/`~`-range production (`stateidrange`, `MSStateGram.yy:194-210`)
+builds a raw id list with no index-table lookup at all, which
+`MSStateParse::selectStateIds` (`MSStateParse.cc:65-73`) turns into a
+plain `TEN.in(stateIds)` — no `FLAG_ROW` check; the `<`/`>`/`<>&<>`
+bound forms (`stateidbounds`, `.yy:214-243`) and the `OBS_MODE`
+name/regex/pattern form both route through `MSStateIndex::
+matchStateIDLT/GT/GTAndLT` (`MSStateIndex.cc:216-251`) /
+`matchStateObsModeRegexOrPattern` (`.cc:68-104`), each of which builds
+its selection mask as `... && !flagRow().getColumn()`. This package's
+existing `_mssel_idset`'s `flagged` kwarg (already applied to both
+`field` and `state`, Phase 146) implements exactly this per-term-form
+split — confirmed correct via direct source reading, not just symmetry
+with a sibling function. No production behaviour changed (comment-only
+— replaced the "inferred by symmetry, not independently tested" hedge
+with the confirmed citations); standalone mscal suite green (666/666,
+unchanged).
