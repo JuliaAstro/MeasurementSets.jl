@@ -1410,3 +1410,49 @@ if _HAVE_TAQL
         end
     end
 end
+
+@testset "TaQL-lite — mscal.* array-centre: one lookup per engine, not per OBSERVATION_ID (Phase 144)" begin
+    # Found while sweeping `MSCalEngine.cc` for another Phase-136-style
+    # bug (post Phase 143): `MSCalEngine::attachColumns` resolves the
+    # array centre used by every suffix-less `mscal.ha()`/`azel()`/`pa()`/
+    # `itrf()`/`delay()` ONCE for the whole table, from OBSERVATION
+    # ROW 0's TELESCOPE_NAME (`MSCalEngine.cc:330-349`) -- never per
+    # MAIN row via that row's own `OBSERVATION_ID`. This package
+    # previously looked it up per row. Live-verified against real
+    # `tableCommand` on a synthetic 2-observation ("VLA"/"ALMA") MS:
+    # real casacore's `mscal.ha()` is bit-identical across the
+    # OBSERVATION_ID split; before this fix, ours jumped by ~0.7 rad at
+    # the boundary. Also fixed the no-telescope-found fallback to match
+    # source exactly: the MIDDLE antenna (`itsAntPos[0][nant/2]`,
+    # 0-based), not antenna 0.
+    tmp = mktempdir()
+    p = joinpath(tmp, "obs2.ms")
+    copyms(SAMPLE_MS, p; rows = 1:20)
+    edit(joinpath(p, "OBSERVATION")) do t
+        addrows!(t, 1)
+        t[:TELESCOPE_NAME][1] = "VLA"
+        t[:TELESCOPE_NAME][2] = "ALMA"
+    end
+    edit(p) do t
+        n = length(t.rowmap)
+        oid = Int32.(vcat(zeros(Int, n ÷ 2), ones(Int, n - n ÷ 2)))
+        t[:OBSERVATION_ID][:] = oid
+    end
+    main = readtable(p)
+    obsids = column(main, "OBSERVATION_ID")[:]
+    @test length(unique(obsids)) == 2
+
+    ha = column(query(main, "rownumber() >= 1"; select = ["h" => "mscal.ha()"]), "h")[:]
+    # every row uses OBSERVATION row 0's telescope ("VLA"), regardless
+    # of its own OBSERVATION_ID -- no jump at the id-1 boundary.
+    @test all(x -> x ≈ ha[1], ha)
+
+    if _HAVE_TAQL
+        res = _taqlcmd("SELECT mscal.ha() AS H FROM \$1", p)
+        ha_real = res[:H][:]
+        @test all(x -> isapprox(x, ha_real[1]; atol = 1e-6), ha_real)   # sanity: real casacore too
+        @test ha[1] ≈ ha_real[1] atol = 1e-4                  # SOFA vs casacore ephemeris
+    else
+        @info "real TaQL unavailable; skipping mscal array-centre cross-check"
+    end
+end

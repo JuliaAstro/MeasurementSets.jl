@@ -205,26 +205,41 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
                   _altaz6.(String.(column(ant, "MOUNT")[:])) : trues(nrow(ant))
 
     # array-centre position for a suffix-less `mscal.ha()`/`azel()`/… --
-    # OBSERVATION.TELESCOPE_NAME -> the bundled Observatories table, else
-    # a one-time warn + antenna 0.
-    obsid = "OBSERVATION_ID" in cn ? Int.(column(t, "OBSERVATION_ID")[:]) :
-            zeros(Int, n)
+    # Phase 144 fix (found while sweeping `MSCalEngine.cc` for another
+    # bug after Phase 143): `MSCalEngine::attachColumns` computes this
+    # ONCE for the whole engine, from OBSERVATION *row 0*'s
+    # TELESCOPE_NAME -- NOT per MAIN row via `OBSERVATION_ID` as this
+    # package previously did (a real, live-verified divergence: on a
+    # 2-observation synthetic MS with different telescopes, real
+    # casacore's `mscal.ha()` is IDENTICAL across the OBSERVATION_ID
+    # split -- ours jumped by ~0.7 rad at the boundary before this fix).
+    # Fallback chain, also verified against source
+    # (`MSCalEngine.cc:330-349`): OBSERVATION row 0 -> table keyword
+    # `TELESCOPE_NAME` -> the MIDDLE antenna (`itsAntPos[0][nant/2]`,
+    # 0-based -- NOT antenna 0, a second latent bug this fix also
+    # corrects, though harder to observe live since any MS with a
+    # recognised telescope never reaches it).
     telname = haskey(subs, "OBSERVATION") ?
               String.(column(readtable(subs["OBSERVATION"]), "TELESCOPE_NAME")[:]) :
               String[]
-    _warned_obs = Ref(false)
-    _centrepos(oi) = begin
-        p = (1 <= oi + 1 <= length(telname)) ? observatory(telname[oi + 1]) : nothing
+    centrepos = let p = !isempty(telname) ? observatory(telname[1]) : nothing
         if p === nothing
-            _warned_obs[] || (@warn "mscal.*: no Observatories entry for " *
-                "telescope $(get(telname, oi + 1, "?")); using antenna 0 as the array centre";
-                _warned_obs[] = true)
-            antpos[1]
-        else
-            p
+            kwtel = get(keywords(t), "TELESCOPE_NAME", nothing)
+            p = kwtel === nothing ? nothing : observatory(String(kwtel))
         end
+        if p === nothing
+            nant = nrow(ant)
+            if nant > 0
+                @warn "mscal.*: no Observatories entry for the array's " *
+                    "telescope; using the middle antenna as the array centre"
+                p = antpos[nant ÷ 2 + 1]
+            else
+                error("mscal.*: cannot determine an array centre (no " *
+                      "Observatories entry, no antennas)")
+            end
+        end
+        p
     end
-    centrepos = Dict{Int,Any}(o => _centrepos(o) for o in unique(obsid))
     fdir = Dict{Int,Any}()                            # static field id -> J2000 direction
     fdir_t = Dict{Tuple{Int,Float64},Any}()           # (moving field, TIME) -> J2000
     feph = Dict{Int,Any}()                            # field id -> Ephemeris | nothing
@@ -362,9 +377,9 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     memo = Dict{Tuple{Int,Any,Float64},NamedTuple}()
     function _cache(antid::Int, dir::AbstractString, i::Int)
         dj, dkey = _djfor(dir, i)
-        pkey = antid >= 0 ? antid : -obsid[i] - 1
+        pkey = antid >= 0 ? antid : -1
         get!(memo, (pkey, dkey, tsec[i])) do
-            pos = antid >= 0 ? antpos[antid + 1] : centrepos[obsid[i]]
+            pos = antid >= 0 ? antpos[antid + 1] : centrepos
             fr = MeasFrame(epoch = epochs[i], position = pos, direction = dj)
             hd = measconvert(dj, HADEC; frame = fr)
             ae = measconvert(dj, AZEL; frame = fr)
@@ -385,10 +400,10 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     risememo = Dict{Tuple{Int,Any,Float64,Float64},Vector{Float64}}()
     function _riseset_for(antid::Int, dir::AbstractString, elev0::Float64, i::Int)
         dj, dkey = _djfor(dir, i)
-        pkey = antid >= 0 ? antid : -obsid[i] - 1
+        pkey = antid >= 0 ? antid : -1
         day = floor(tsec[i] / 86400.0)
         get!(risememo, (pkey, dkey, day, elev0)) do
-            pos = antid >= 0 ? antpos[antid + 1] : centrepos[obsid[i]]
+            pos = antid >= 0 ? antpos[antid + 1] : centrepos
             mjd = tsec[i] / 86400.0
             collect(Float64, _riseset(dj.lon, dj.lat, mjd, _pvec(pos)..., elev0))
         end
@@ -436,7 +451,7 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
             v = Vector{Float64}(undef, n)
             for i in 1:n
                 x = _cache(-1, dir, i).itrf_xyz
-                d = _pvec(antpos[aidx[i] + 1]) .- _pvec(centrepos[obsid[i]])
+                d = _pvec(antpos[aidx[i] + 1]) .- _pvec(centrepos)
                 v[i] = (x[1]*d[1] + x[2]*d[2] + x[3]*d[3]) / C_LIGHT
             end
             out[_mscal_key(spec)] = v

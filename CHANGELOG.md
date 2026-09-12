@@ -3728,3 +3728,38 @@ deliberate choice, not a divergence to fix; replicating casacore's
 destructive behaviour would be a regression. Documented in a comment
 above `mscal.corr`'s implementation (`src/taql/mscal.jl`) for anyone
 reading the source later. No production behaviour changed.
+
+### Phase 144 — found a real bug: `mscal.*`'s array centre was looked up per row via `OBSERVATION_ID` instead of once for the whole engine
+
+Continuing the sweep of `MSCalEngine.cc` for real bugs (following
+Phases 136-143), re-read `MSCalEngine::attachColumns`'s array-centre
+resolution in full. Real casacore computes the array centre used by
+every suffix-less `mscal.ha()` / `azel()` / `pa()` / `itrf()` /
+`delay()` **once for the whole engine**, from **OBSERVATION row 0's**
+`TELESCOPE_NAME` (falling back to a table-level `TELESCOPE_NAME`
+keyword, then to the *middle* antenna's position,
+`itsAntPos[0][nant/2]`, 0-based) — never per MAIN row via that row's
+own `OBSERVATION_ID`.
+
+This package (since Phase 90) looked the telescope up **per row**,
+indexed by `OBSERVATION_ID` into the `OBSERVATION` subtable — a real
+divergence for any MS with more than one `OBSERVATION` row (rare, but
+real — e.g. a concatenated/combined dataset). Live-verified against
+real `tableCommand` on a synthetic two-observation MS ("VLA" row 0,
+"ALMA" row 1, half the MAIN rows tagged `OBSERVATION_ID=1`): real
+casacore's `mscal.ha()` was bit-identical across the `OBSERVATION_ID`
+split (as expected — it never looks at the per-row id at all); this
+package's own output jumped by ~0.7 rad at the boundary before the fix.
+The same read also caught a second, harder-to-observe divergence in
+the no-telescope-found fallback: this package fell back to antenna 0,
+casacore falls back to the *middle* antenna — both fixed together.
+
+Fixed in `src/taql/mscal.jl`: `centrepos` is now a single `MPosition`
+resolved once (OBSERVATION row 0 → the bundled Observatories table →
+a table keyword `TELESCOPE_NAME` → the middle antenna), not a
+`Dict{Int,Any}` keyed by `OBSERVATION_ID`. New testset
+`test/taql_mscal_tests.jl` "mscal.* array-centre: one lookup per
+engine, not per OBSERVATION_ID (Phase 144)" — the synthetic
+two-observation cross-check above, plus a same-value-across-the-split
+assertion on our own output. Full mscal suite green (510/510,
+standalone).
