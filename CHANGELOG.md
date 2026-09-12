@@ -4271,3 +4271,43 @@ formula — `cos(H₀) = (sin(elev₀) − sin(lat)·sin(dec)) / (cos(lat)·cos(
 handled correctly since `cos(lat)`/`cos(dec)` are always non-negative
 for any valid latitude/declination (no sign-flip edge case to miss).
 No bug found in either area; no production code changed.
+
+### Phase 158 — closed a real test-coverage gap: `container_mmap`'s non-contiguous-block fallback had never actually been exercised
+
+Following up on Phase 156's finding (a bug hiding in an optional-key
+lookup that no test happened to exercise), searched for other
+`Dict`/`Record`-style lookups fed by on-disk data across `src/` —
+`_engine_spec_from_source`, the `_MEAS_FRAMES`/`_ref_from_code`
+family, and every other `get(kw, ...)` site in `src/datamanagers/
+virtual.jl` already use safe `get`-with-default or raise a deliberate,
+correct `ArgumentError` for genuinely invalid data (not analogous to
+Phase 156's "casacore silently tolerates this, we didn't" case) — no
+new bug found there. Also independently re-derived `mscal.stokes()`'s
+per-code rescale `factor()` values (`0.5` for codes `RR..YY`,
+`√2/4` for `RX..YL`) directly against `StokesConverter.cc`'s own
+`Vector<Float> factor` setup — exact match, confirming the
+`_stokes_factor`/`cmat[o,j] = base[...] * factor(in)/factor(out)`
+composition Phase 78 already had right.
+
+The concrete finding: `container_mmap`'s own header comment
+(`src/datamanagers/container.jl`) already documented, as a known risk
+since Phase 20, that its non-contiguous-block fallback path (a
+`MultiFileContainer` virtual file whose physical blocks aren't laid
+out sequentially — never produced by this package's own writer, which
+always allocates contiguously) had no test exercising it — searched
+`test/container_tests.jl` and confirmed: zero references to
+`container_mmap` at all, so BOTH branches of that function (the
+zero-copy `mmap` fast path AND the materializing fallback) were
+completely untested, not just the fallback. Added a direct unit test
+that fabricates a `MultiFileContainer` with one virtual file laid out
+contiguously (exercises the `mmap`/`SubArray` fast path) and one
+laid out deliberately out of order (exercises the fallback,
+`container_read`) — both produce the correct bytes, and the fallback
+result matches an independent `container_read` call exactly. Inspected
+the fallback code itself (`container_read`) during this work and
+confirmed it's correct by construction (walks `blocknrs` in given
+order with no contiguity assumption) — this was a coverage gap, not a
+live bug, but a real one worth closing given it's the exact kind of
+"never-executed branch" risk this session's own discipline exists to
+catch. No production code changed. Standalone container suite green
+(290/290, all passing including the new test).
