@@ -929,35 +929,60 @@ _mssel_names_to_ids(namevec) = begin
     d
 end
 
-function _mssel_resolve(term::AbstractString, allids, n2i::AbstractDict)
+# Phase 146: `flagged` (0-based-id-indexed, `nothing` = no filtering)
+# implements the spec-form-dependent `FLAG_ROW` exclusion found live
+# against real casacore for FIELD/STATE selection (Phase 145): a bare
+# id or `~`-range term is NEVER `FLAG_ROW`-filtered (real casacore
+# routes it through `MSFieldParse::selectFieldIds`, a plain
+# `TEN.in(ids)` with no `FLAG_ROW` check at all); a comparison
+# (`<`/`>`/`<=`/`>=`) or name/regex/glob term IS (real casacore routes
+# it through `MSFieldIndex`'s `matchFieldIDLT/GT/GTAndLT`/
+# `matchFieldNameRegexOrPattern`, which check `!flagRow`). Only the
+# `field`/`state` call sites pass a real `flagged` vector; every other
+# `_mssel_idset` caller (baseline/spw/scan/array/obs) keeps the
+# default `nothing` — confirmed (Phases 118-119) that antenna/spw
+# selection never filters by `FLAG_ROW` in real casacore either (the
+# equivalent check is commented out in `MSAntennaIndex.cc`/
+# `MSSpwIndex.cc`).
+_mssel_notflagged(s, ::Nothing) = s
+_mssel_notflagged(s, flagged::AbstractVector{Bool}) =
+    Set{Int}(i for i in s if !(1 <= i + 1 <= length(flagged) && flagged[i + 1]))
+
+function _mssel_resolve(term::AbstractString, allids, n2i::AbstractDict;
+                        flagged::Union{Nothing,AbstractVector{Bool}} = nothing)
     m = match(r"^(\d+)\s*~\s*(\d+)$", term)
     m !== nothing && return Set{Int}(parse(Int, m[1]):parse(Int, m[2]))
     m = match(r"^(>=|<=|>|<)\s*(-?\d+)$", term)
     if m !== nothing
         v = parse(Int, m[2]); op = m[1]
-        return Set{Int}(i for i in allids if op == ">" ? i > v :
+        s = Set{Int}(i for i in allids if op == ">" ? i > v :
                         op == ">=" ? i >= v : op == "<" ? i < v : i <= v)
+        return _mssel_notflagged(s, flagged)
     end
     occursin(r"^-?\d+$", term) && return Set{Int}([parse(Int, term)])
     if length(term) >= 2 && startswith(term, "/") && endswith(term, "/")
         re = Regex(term[2:end-1])
-        return Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        s = Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        return _mssel_notflagged(s, flagged)
     end
     if occursin(r"[*?\[\]]", term)
         re = _glob_regex(term, false)
-        return Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        s = Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        return _mssel_notflagged(s, flagged)
     end
-    return haskey(n2i, term) ? Set{Int}(n2i[term]) : Set{Int}()
+    s = haskey(n2i, term) ? Set{Int}(n2i[term]) : Set{Int}()
+    return _mssel_notflagged(s, flagged)
 end
 
-function _mssel_idset(spec::AbstractString, allids, n2i::AbstractDict)
+function _mssel_idset(spec::AbstractString, allids, n2i::AbstractDict;
+                      flagged::Union{Nothing,AbstractVector{Bool}} = nothing)
     pos = Set{Int}(); neg = Set{Int}(); anypos = false
     for raw in _mssel_commas(spec)
         term = strip(raw)
         isempty(term) && continue
         isneg = startswith(term, "!")
         isneg && (term = strip(term[2:end]))
-        s = _mssel_resolve(term, allids, n2i)
+        s = _mssel_resolve(term, allids, n2i; flagged)
         isneg ? union!(neg, s) : (union!(pos, s); anypos = true)
     end
     base = anypos ? pos : Set{Int}(allids)
@@ -1176,45 +1201,30 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         pred = _mssel_baseline_pred(spec, n2i, 0:(length(antnames) - 1); names = antnames)
         return Bool[pred(a1[i], a2[i]) for i in 1:n]
     elseif fn == "field"
-        # Phase 145 investigation (redoing a Phase 144 hypothesis lost
-        # before it was committed): does `mscal.field()`/`mscal.state()`
-        # exclude `FLAG_ROW`-flagged rows, per the LIVE (not commented)
-        # `!flagRow(...)` checks in `MSFieldIndex.cc`/`MSStateIndex.cc`
-        # (contrast `MSAntennaIndex.cc`/`MSSpwIndex.cc`, where the
-        # equivalent check is neutered/commented out -- confirmed those
-        # two genuinely don't filter)?
-        #
-        # The answer is SPEC-FORM-DEPENDENT, confirmed against real
-        # `tableCommand` on a FIELD-row-0-flagged fixture:
-        #   - a bare id (`'0'`) or `~`-range (`'0~0'`) spec does NOT
-        #     exclude a flagged field -- both return every row, flagged
-        #     field included. Source: real casacore's grammar routes a
-        #     bare-number/range spec through `MSFieldParse::
-        #     selectFieldIds` (`MSFieldParse.cc:68-79`), which builds the
-        #     condition as a plain `columnAsTEN_p.in(fieldIds)` --
-        #     `FLAG_ROW` is never consulted on this path.
-        #   - a comparison spec (`'<N'`/`'>N'`) OR a name/pattern spec
-        #     (`'3C286'`) DOES exclude it -- confirmed live: an
-        #     unflagged fixture accepts both specs; the SAME specs on
-        #     the flagged fixture fail with "No field ID found <1" /
-        #     "No match found for name". Source: these route through
-        #     `MSFieldIndex::matchFieldIDLT/GT/GTAndLT` and
-        #     `matchFieldNameRegexOrPattern`, which DO check `!flagRow`
-        #     (`MSFieldIndex.cc:103,224`). `MSStateIndex.cc` has the
-        #     identical structure (`matchStateIDLT`/`matchStateObsMode`,
-        #     `.cc:104,130`) -- not independently live-tested, inferred
-        #     by the confirmed structural symmetry with FIELD.
-        #
-        # This package does not filter by `FLAG_ROW` for ANY spec form
-        # (matches real casacore only for the bare id/range case; a
-        # genuine, confirmed divergence for comparison and name specs --
-        # not yet fixed, since the fix requires spec-form-aware routing
-        # this function doesn't have. Left as a documented follow-up
-        # rather than rushed in alongside this investigation.)
+        # Phase 145/146: `mscal.field()`/`mscal.state()` vs `FLAG_ROW`
+        # is SPEC-FORM-DEPENDENT in real casacore, confirmed live
+        # against real `tableCommand` on a FIELD-row-0-flagged fixture
+        # (see the Phase 145 CHANGELOG entry for the full writeup): a
+        # bare id (`'0'`) or `~`-range (`'0~0'`) spec does NOT exclude
+        # a flagged field (routes through `MSFieldParse::
+        # selectFieldIds`, `MSFieldParse.cc:68-79` -- a plain
+        # `TEN.in(ids)`, no `FLAG_ROW` check); a comparison
+        # (`'<N'`/`'>N'`) or name/pattern spec (`'3C286'`) DOES (routes
+        # through `MSFieldIndex::matchFieldIDLT/GT/GTAndLT`/
+        # `matchFieldNameRegexOrPattern`, which check `!flagRow`,
+        # `MSFieldIndex.cc:103,224`). `MSStateIndex.cc` has the
+        # identical structure (`.cc:104,130`) -- inferred by symmetry
+        # for STATE, not independently live-tested. `_mssel_idset`'s
+        # `flagged` kwarg implements exactly this per-term-form split;
+        # baseline/spw/scan/array/obs pass no `flagged` (Phases 118-119
+        # confirmed those never filter by `FLAG_ROW` in real casacore).
         _need("FIELD_ID")
         fid = Int.(column(t, "FIELD_ID")[:])
-        nf = haskey(subs, "FIELD") ? nrow(readtable(subs["FIELD"])) : maximum(fid; init = -1) + 1
-        S = _mssel_idset(spec, 0:(nf - 1), _sub("FIELD", "NAME"))
+        fldtab = haskey(subs, "FIELD") ? readtable(subs["FIELD"]) : nothing
+        nf = fldtab === nothing ? maximum(fid; init = -1) + 1 : nrow(fldtab)
+        flagged = fldtab !== nothing && "FLAG_ROW" in Set(columnnames(fldtab)) ?
+                  Bool.(column(fldtab, "FLAG_ROW")[:]) : nothing
+        S = _mssel_idset(spec, 0:(nf - 1), _sub("FIELD", "NAME"); flagged)
         return Bool[f in S for f in fid]
     elseif fn == "spw" || fn == "chan"
         _need("DATA_DESC_ID")
@@ -1252,13 +1262,15 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
               fn == "array" ? "ARRAY_ID" : "OBSERVATION_ID"
         _need(col)
         ids = Int.(column(t, col)[:])
-        n2i = fn == "state" ?
-              (haskey(subs, "STATE") &&
-               "OBS_MODE" in Set(columnnames(readtable(subs["STATE"]))) ?
-               _mssel_names_to_ids(column(readtable(subs["STATE"]), "OBS_MODE")[:]) :
-               Dict{String,Vector{Int}}()) :
-              Dict{String,Vector{Int}}()
-        S = _mssel_idset(spec, sort(unique(ids)), n2i)
+        statetab = fn == "state" && haskey(subs, "STATE") ? readtable(subs["STATE"]) : nothing
+        n2i = statetab !== nothing && "OBS_MODE" in Set(columnnames(statetab)) ?
+              _mssel_names_to_ids(column(statetab, "OBS_MODE")[:]) : Dict{String,Vector{Int}}()
+        # Phase 145/146: STATE has the identical FLAG_ROW structure as
+        # FIELD (see the `field` branch's comment above) -- inferred by
+        # source symmetry, applied here too.
+        flagged = statetab !== nothing && "FLAG_ROW" in Set(columnnames(statetab)) ?
+                  Bool.(column(statetab, "FLAG_ROW")[:]) : nothing
+        S = _mssel_idset(spec, sort(unique(ids)), n2i; flagged)
         return Bool[x in S for x in ids]
     end
 end

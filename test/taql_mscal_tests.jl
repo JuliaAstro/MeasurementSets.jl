@@ -1456,3 +1456,51 @@ end
         @info "real TaQL unavailable; skipping mscal array-centre cross-check"
     end
 end
+
+@testset "TaQL-lite — mscal.field()/mscal.state() FLAG_ROW: spec-form-dependent (Phase 146)" begin
+    # Fixes the Phase 145 finding: a bare id (`'0'`) / `~`-range
+    # (`'0~0'`) spec must NOT exclude a flagged field/state (matches
+    # real casacore's `MSFieldParse::selectFieldIds`, no `FLAG_ROW`
+    # check), while a comparison (`'<N'`/`'>N'`) or name/pattern spec
+    # MUST (matches `MSFieldIndex`'s flagRow-checking matchers).
+    tmp = mktempdir()
+    p = joinpath(tmp, "flagrow.ms")
+    copyms(SAMPLE_MS, p; rows = 1:20)
+    edit(joinpath(p, "FIELD")) do t
+        t[:FLAG_ROW][1] = true
+    end
+    edit(joinpath(p, "STATE")) do t
+        t[:FLAG_ROW][1] = true
+    end
+    main = readtable(p)
+    fid = column(main, "FIELD_ID")[:]
+    sid = column(main, "STATE_ID")[:]
+    @test count(==(0), fid) > 0
+    @test count(==(0), sid) > 0
+    fldname = String(column(subtable(MeasurementSet(p), "FIELD"), "NAME")[1])
+
+    # bare id / range: flagged row still selected (unfiltered)
+    @test nrow(query(main, "mscal.field('0')")) == count(==(0), fid)
+    @test nrow(query(main, "mscal.field('0~0')")) == count(==(0), fid)
+    @test nrow(query(main, "mscal.state('0')")) == count(==(0), sid)
+    @test nrow(query(main, "mscal.state('0~0')")) == count(==(0), sid)
+
+    # comparison / name specs: flagged row excluded
+    @test nrow(query(main, "mscal.field('<1')")) == 0
+    @test nrow(query(main, "mscal.field('$fldname')")) == 0
+    @test nrow(query(main, "mscal.field('>0')")) == count(!=(0), fid)   # nothing to exclude here
+
+    if _HAVE_TAQL
+        for spec in ("0", "0~0")
+            tc = try
+                _taqlcmd("SELECT FROM \$1 WHERE mscal.field('$spec') GIVING '$(joinpath(mktempdir(), "r"))'", p)
+            catch
+                nothing
+            end
+            tc === nothing && continue
+            @test size(tc, 1) == count(==(0), fid)   # bare id/range: not excluded, matches real TaQL
+        end
+    else
+        @info "real TaQL unavailable; skipping mscal.field()/state() FLAG_ROW cross-check"
+    end
+end

@@ -3800,3 +3800,34 @@ this phase** — documented as a comment above the `field`/`state`
 handling in `src/taql/mscal.jl` (Phase 145) for a scoped follow-up,
 since a correct fix needs spec-form-aware routing this function
 doesn't currently have. No production behaviour changed.
+
+### Phase 146 — fixed `mscal.field()`/`mscal.state()` to respect `FLAG_ROW` for comparison and name specs (per the Phase 145 finding)
+
+Implements the Phase 145 finding: real casacore's `FLAG_ROW` exclusion
+for `mscal.field()`/`mscal.state()` is spec-form-dependent — a bare id
+(`'0'`) or `~`-range (`'0~0'`) spec never checks `FLAG_ROW`
+(`MSFieldParse::selectFieldIds`), while a comparison (`'<N'`/`'>N'`) or
+name/pattern spec does (`MSFieldIndex`'s `matchFieldIDLT/GT/GTAndLT`/
+`matchFieldNameRegexOrPattern`).
+
+`_mssel_resolve`/`_mssel_idset` (`src/taql/mscal.jl`) gain an optional
+`flagged` vector (0-based-id-indexed, `nothing` = no filtering,
+default everywhere): a bare-id or `~`-range term ignores it entirely;
+a comparison, regex, glob, or exact-name term intersects its match set
+with the unflagged ids. Only the `field`/`state` branches of
+`_mssel_one` now build and pass a real `flagged` vector (from that
+subtable's own `FLAG_ROW` column); `baseline`/`spw`/`scan`/`array`/
+`obs` keep the default `nothing` (Phases 118-119 confirmed those never
+filter by `FLAG_ROW` in real casacore either).
+
+Live-verified against real `tableCommand` on a FIELD-row-0-flagged
+fixture: `mscal.field('0')`/`'0~0'` are unaffected (still select the
+flagged field, matching real casacore exactly); `mscal.field('<1')`/
+a name spec on the flagged field now correctly exclude it (real
+casacore instead raises a grammar error in this degenerate
+all-excluded case — an acceptable, pre-existing difference in error-
+handling style, not a semantic one — this package returns an empty
+result rather than erroring, consistent with how `'>0'` already
+behaves). New testset `test/taql_mscal_tests.jl` "mscal.field()/
+mscal.state() FLAG_ROW: spec-form-dependent (Phase 146)". Full mscal
+suite green (521/521, standalone).
