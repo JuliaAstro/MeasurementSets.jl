@@ -3476,3 +3476,120 @@ Fixed in `src/taql/functions.jl` (`_make_func`'s zero-arg delay-family
 default) and `src/taql/mscal.jl` (the new `delay1`/`delay2` branch,
 `_MSCAL_FUNCS`/`_MSCAL_DIR_FUNCS` entries, the `need2` condition). 17
 new tests in `test/taql_mscal_tests.jl` ("mscal.delay1()/delay2()").
+
+### Phase 137 — found `mscal.uvw_j2000()` computed the WRONG uvw entirely (antipodal, since Phase 79); fixed to match `getNewUVW` exactly
+
+While investigating `mscal.delay()` for Phase 136, read `MSCalEngine::
+getNewUVW` in full and found it does something completely different
+from what `mscal.uvw_j2000()` (Phase 79) had implemented since day
+one.
+
+**Real casacore recomputes uvw fresh from the antenna positions.**
+`getNewUVW` rotates each antenna's ITRF baseline to J2000 via a pure
+`MBaseline` rotation, then constructs the uvw via `MVuvw`'s OWN
+constructor (`casa/Quanta/MVuvw.cc:83-91`, `xyz = R·pos` with `R =
+Rx(dir.lat-π/2)·Rz(-dir.lon-π/2)`) — it never transforms the *stored*
+`UVW` column at all. This package's implementation did the opposite:
+rotate the stored `UVW` via `MCuvw`'s `toPole`/`fromPole` (Phase 75,
+`R = Ry(-π/2+lat)·Rz(-lon)`) — a genuinely different rotation basis
+from `MVuvw`'s own constructor. Confirmed by direct numeric comparison
+that these two matrices are related by `R_mvuvw = Rz(-π/2)·R_mcuvw` —
+not equal, not a simple transpose, a real structural difference.
+
+**Live comparison against the sample MS confirmed the consequence**:
+the old implementation's output was the *exact antipode* (all three
+components negated) of what `getNewUVW`'s real algorithm gives for the
+identical baseline and epoch. Tracing the root cause further: the
+sample MS's stored `UVW` column follows the `ANTENNA1-ANTENNA2` sign
+convention (confirmed directly — its `w` component exactly equals
+`dot(direction, ap1-ap2)`, matching `mscal.delay()`'s own
+already-verified formula), while `NewMSSimulator`'s own source
+(`ms/MSOper/NewMSSimulator.cc:1600,1625-1627`, an explicit code comment
+plus the actual `uvwvec(i) = x2[i]-x1[i]` assignment) computes and
+stores the opposite `ANTENNA2-ANTENNA1` convention. This is a real,
+longstanding split within casacore itself between real observed data
+and its own simulator's synthetic output — not a bug on either side of
+that split, and not something this port introduced.
+
+**The fix**: since `mscal.uvw_j2000()` must match what real casacore's
+`getNewUVW` actually computes to be correct — and `getNewUVW` always
+uses `ANTENNA2-ANTENNA1` via a fresh from-antenna-positions
+reconstruction, regardless of what convention the stored column
+happens to follow — the implementation now discards the stored `UVW`
+column entirely and recomputes it exactly the way casacore does. A new
+`_mvuvw_construct` helper (pure trigonometry, no `SOFA` call beyond the
+existing `MBaseline` rotation) ports `MVuvw`'s constructor directly.
+The antenna-0 baseline origin `getNewUVW` uses per-antenna cancels
+exactly in the final `ant2-ant1` difference by linearity (both the
+`MBaseline` rotation and `MVuvw`'s construction are linear maps), so
+the whole per-antenna two-step collapses to one combined linear map,
+memoized per `(field, TIME)` — the same memoization trick the old
+(buggy) implementation already used, just applied to the correct
+formula. `measconvert(::MuvW, ...)` itself (Phase 75's general uvw
+frame-conversion machinery) is untouched by this fix — the bug was
+specific to `mscal.uvw_j2000()` using the wrong algorithm for the job,
+not a defect in the general conversion function itself.
+
+8 new/updated tests in `test/taql_mscal_tests.jl`, including a
+dedicated regression test pinning the sign relationship between
+`mscal.uvw_j2000()`'s `w` component and `mscal.delay()`'s already-
+verified value, and a rewritten hand-computation in the main mscal
+testset matching `getNewUVW`'s exact algorithm instead of the old
+(wrong) stored-UVW-rotation approach.
+
+### Phase 138 — found `mscal.pa*()` was missing a real mount-type check
+
+While re-reading `MSCalEngine.cc` in full for Phase 137, found that
+`MSCalEngine::getPA` returns a hard `0.0` unless the relevant antenna's
+`MOUNT` starts with `"alt-az"` (case-insensitive) — an equatorially- or
+otherwise-mounted antenna, or the suffix-less array-centre form (which
+has no real antenna's `MOUNT` to consult at all — `setData`'s `mount`
+stays its `0` default), has no well-defined parallactic angle in
+casacore's own model and the function simply returns 0 rather than
+computing a meaningless value.
+
+This package's `mscal.pa()`/`pa1()`/`pa2()` had no mount check at all —
+it always computed the geometric parallactic angle regardless of
+antenna mount, and the bare `mscal.pa()` form would return a nonzero
+value it should never return. Not observable on the committed
+`sample.ms` fixture (every antenna's `MOUNT` is `"ALT-AZ"`), so
+verified with a synthetic patch setting `MOUNT` to `"EQUATORIAL"`.
+
+Fixed in `src/taql/mscal.jl`: reads `ANTENNA.MOUNT` once (defaulting to
+"every antenna is alt-az" if the column is absent, a graceful
+fallback), and the `pa*` branch returns `0.0` whenever the relevant
+antenna id is `-1` (the suffix-less form) or that antenna's own mount
+isn't alt-az. 8 new tests in `test/taql_mscal_tests.jl`
+("mscal.pa*() mount-type check").
+
+### Phase 139 — documented a real, deliberate divergence: `mscal.*` interpolates a moving-target FIELD direction, real casacore never does
+
+Continuing the `MSCalEngine.cc` read-through from Phases 137-138, found
+`MSCalEngine::fillFieldDir` (the function that populates the per-field
+direction cache every `mscal.*` direction function ultimately reads)
+caches `dirCol(i).data()[0]` — the direction array cell's FIRST element
+— **once per field**, and reuses that exact same value for every row
+regardless of `TIME`. A grep across the entire file confirms
+`NUM_POLY` and `EPHEMERIS_ID` are never read anywhere in
+`MSCalEngine.cc` — real casacore's `derivedmscal` UDFs are completely
+unaware that a `FIELD` row can be a moving target at all.
+
+This package's `mscal.*` functions do the opposite by design (Phases
+82/93): they interpolate the polynomial or ephemeris-driven direction
+at each row's own `TIME`, giving a physically meaningful time-varying
+direction for a genuinely moving target. This is a deliberate,
+intentional improvement — not a bug to fix — but it does mean this
+package's `mscal.*` output for a moving-target field will **not**
+numerically match real casacore's UDFs for such a field (a real MS
+essentially never has one in practice; `PHASE_DIR` is overwhelmingly a
+fixed-position `Dims` column). Documented explicitly in `src/taql/
+mscal.jl`, the `query.jl` docstring, and `docs/src/concepts.md`.
+
+Extended the existing "mscal.* with an ephemeris FIELD" test
+(`test/taql_mscal_tests.jl`) with a direct check that the underlying
+`ephemeris_direction` interpolation genuinely varies across the
+ephemeris table's own time grid (the fixture's real MAIN rows span too
+few seconds for the ramp to show up row-to-row on that MS, so the
+grid's own wider span is used to exercise the machinery directly). No
+production behaviour changed — comment/doc-only, plus the one new test
+assertion.

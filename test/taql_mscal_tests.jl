@@ -72,15 +72,21 @@ end
         @test column(q, "it")[i] ≈ [it.lon, it.lat]
         @test 0.0 <= column(q, "last")[i] < 2pi
         @test -pi <= column(q, "pa")[i] <= pi
-        # uvw_j2000 is a pure rotation of the stored UVW -> length preserved
-        @test hypot(column(q, "uj")[i]...) ≈ hypot(column(main, "UVW")[i]...) rtol = 1e-9
-        # ... and the (ant, field, TIME)-memo'd 3x3 matches a direct convert
-        let a1 = column(main, "ANTENNA1")[i], fi = column(main, "FIELD_ID")[i],
-            ep = measure(main, "TIME", i)
+        # Phase 137: uvw_j2000() recomputes from antenna positions
+        # (matching `MSCalEngine::getNewUVW`) rather than transforming
+        # the stored UVW column -- a pure rotation of the antenna
+        # baseline (length preserved) using `MVuvw`'s own construction
+        # convention, `ant2 - ant1`.
+        let a1i = column(main, "ANTENNA1")[i], a2i = column(main, "ANTENNA2")[i],
+            fi = column(main, "FIELD_ID")[i], ep = measure(main, "TIME", i)
             dj = measconvert(measure(fld, "PHASE_DIR", fi + 1), J2000; frame = MeasFrame(epoch = ep))
-            fr = MeasFrame(epoch = ep, position = measure(ant, "POSITION", a1 + 1), direction = dj)
-            w = measconvert(MuvW{ITRF}(column(main, "UVW")[i]...), J2000; frame = fr)
-            @test column(q, "uj")[i] ≈ [w.u, w.v, w.w] rtol = 1e-9
+            p1 = measure(ant, "POSITION", a1i + 1)
+            fr = MeasFrame(epoch = ep, position = p1, direction = dj)
+            p2 = measure(ant, "POSITION", a2i + 1)
+            bas = measconvert(MeasurementSets.MBaseline{ITRF}(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z), J2000; frame = fr)
+            want = collect(MSv2._mvuvw_construct((bas.x, bas.y, bas.z), dj))
+            @test column(q, "uj")[i] ≈ want rtol = 1e-9
+            @test hypot(column(q, "uj")[i]...) ≈ hypot(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z) rtol = 1e-9
         end
         # delay magnitude bounded by (max baseline)/c
         @test abs(column(q, "d")[i]) < 1e-4
@@ -196,6 +202,62 @@ end
     main2 = readtable(dir)
     qp = query(main2, "rownumber() >= 1"; select = ["d0" => "mscal.delay()", "dpd" => "mscal.delay('PHASE_DIR')"])
     @test any(column(qp, "d0")[i] != column(qp, "dpd")[i] for i in 1:nrow(main2))
+end
+
+@testset "TaQL-lite — mscal.uvw_j2000() fixed to match getNewUVW (Phase 137)" begin
+    # Found while re-verifying `mscal.uvw_j2000()` for Phase 136: real
+    # `MSCalEngine::getNewUVW` recomputes uvw fresh from antenna
+    # positions (via a pure `MBaseline` rotation + `MVuvw`'s OWN
+    # construction convention) -- it never transforms the *stored* UVW
+    # column at all. The old implementation here did the opposite
+    # (rotate the stored UVW via `MCuvw`'s toPole/fromPole, a genuinely
+    # DIFFERENT pole-rotation basis than `MVuvw`'s constructor) and gave
+    # a result that was the exact antipode of casacore's real algorithm
+    # for this MS -- confirmed directly: this MS's stored UVW follows
+    # ANTENNA1-ANTENNA2 (w == dot(dir, ap1-ap2), matching mscal.delay()),
+    # while getNewUVW always computes ANTENNA2-ANTENNA1, a real,
+    # longstanding casacore convention split, not a bug in this package.
+    main = readtable(SAMPLE_MS)
+    q = query(main, "rownumber() >= 1"; select = [
+        "d" => "mscal.delay()", "uj" => "mscal.uvw_j2000()"])
+    for i in (3, 17, 250, 599)
+        # mscal.delay()'s w equivalent = dot(dir, ap1-ap2)/c (ANTENNA1-
+        # ANTENNA2, matching the stored UVW's own convention); the fixed
+        # uvw_j2000()'s w corresponds to ANTENNA2-ANTENNA1 -- so, up to
+        # the (small) J2000-vs-ITRF frame difference, uj[3] ≈ -c*delay.
+        @test column(q, "uj")[i][3] ≈ -MSv2.C_LIGHT * column(q, "d")[i] rtol = 1e-6
+    end
+end
+
+@testset "TaQL-lite — mscal.pa*() mount-type check (Phase 138)" begin
+    # Found while re-reading `MSCalEngine.cc` for Phase 137:
+    # `MSCalEngine::getPA` returns a hard 0.0 unless the antenna's
+    # `MOUNT` starts with "alt-az" (case-insensitive) -- an
+    # equatorially/other-mounted antenna, or the suffix-less array-
+    # centre form (which has no real antenna's MOUNT at all), has no
+    # well-defined parallactic angle in casacore's own model. Missing
+    # entirely here; not observable on the fixture (every antenna is
+    # "ALT-AZ") so verified with a synthetic MOUNT patch.
+    main = readtable(SAMPLE_MS)
+    q0 = query(main, "rownumber() >= 1"; select = ["p" => "mscal.pa1()", "pb" => "mscal.pa()"])
+    for i in (3, 250, 599)
+        @test column(q0, "p")[i] != 0.0                # every real antenna is ALT-AZ
+        @test column(q0, "pb")[i] == 0.0                # suffix-less form always 0
+    end
+
+    tmp = mktempdir()
+    dir = joinpath(tmp, "patched.ms")
+    copyms(SAMPLE_MS, dir; rows = 1:20)
+    ant2 = joinpath(dir, "ANTENNA")
+    edit(ant2) do t
+        t[:MOUNT][:] = fill("EQUATORIAL", nrow(readtable(ant2)))
+    end
+    main2 = readtable(dir)
+    qp = query(main2, "rownumber() >= 1"; select = ["p1" => "mscal.pa1()", "p2" => "mscal.pa2()"])
+    for i in 1:nrow(main2)
+        @test column(qp, "p1")[i] == 0.0
+        @test column(qp, "p2")[i] == 0.0
+    end
 end
 
 @testset "TaQL-lite — mscal.* error cases" begin
@@ -686,6 +748,22 @@ end
     for i in (10, 300, 590)
         @test hypot(column(q, "uj")[i]...) ≈ hypot(column(main, "UVW")[i]...) rtol = 1e-9
     end
+
+    # Phase 139: confirmed real casacore's own `mscal.*` UDFs would NOT
+    # do this at all -- `MSCalEngine::fillFieldDir` caches the direction
+    # column's FIRST element ONCE per field and reuses it for every row
+    # regardless of `TIME` (`NUM_POLY`/`EPHEMERIS_ID` never read at all,
+    # confirmed by grep across `MSCalEngine.cc`). This package
+    # deliberately interpolates the moving-target direction at each
+    # row's own `TIME` instead -- a genuine, intentional divergence from
+    # real casacore, not a bug. The fixture's own MAIN rows span only a
+    # few seconds (too short for the ramp to show up row-to-row on this
+    # MS), so exercise the underlying interpolation machinery directly
+    # across the ephemeris grid's own (much wider) time span instead:
+    e = field_ephemeris(subtable(MeasurementSet(tmp), "FIELD"), 0)
+    d_lo = ephemeris_direction(e, grid[2])       # first non-edge grid point
+    d_hi = ephemeris_direction(e, grid[end - 1]) # last non-edge grid point
+    @test abs(rad2deg(d_hi.lat) - rad2deg(d_lo.lat)) > 0.05   # DEC ramps across the grid
 end
 
 # Phase 101: `mscal.pbresponse()` -- primary-beam attenuation from the

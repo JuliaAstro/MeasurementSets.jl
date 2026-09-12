@@ -90,8 +90,12 @@ carries a `QuantumUnits` keyword; needs the Unitful extension),
 `angdist`/`angdistx` — dates are an MJD
 `Float64`). With `import SOFA`, **`mscal.*` derived-MS functions** —
 `mscal.ha1()` / `mscal.hadec1()` / `mscal.azel1()` / `mscal.az1()` /
-`mscal.el1()` / `mscal.pa1()` (parallactic angle) / `mscal.last1()`
-(local sidereal time) / `mscal.itrf()` / `mscal.uvw_j2000()` /
+`mscal.el1()` / `mscal.pa1()` (parallactic angle — `0.0` for a
+non-alt-az-mounted antenna, matching `getPA`) / `mscal.last1()`
+(local sidereal time) / `mscal.itrf()` / `mscal.uvw_j2000()` (recomputed
+fresh from the antenna positions, `ANTENNA2 - ANTENNA1`, exactly like
+casacore's `getNewUVW` — not a rotation of the stored `UVW` column,
+which usually follows the opposite sign convention) /
 `mscal.delay()` / `mscal.delay1()` / `mscal.delay2()` (baseline delay vs.
 one antenna's delay relative to the array centre — defaults to
 `FIELD.DELAY_DIR`, not `PHASE_DIR`) / `mscal.riseset[1|2]([elev0][, dir])` (rise/set MJD for
@@ -102,7 +106,11 @@ wired in automatically) — computed per MAIN row from `TIME` + the
 The direction functions take an optional direction argument — a body
 name (`mscal.el1('SUN')`), a FIELD direction column
 (`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000 pair (radians), or a
-sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
+sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`). For a
+moving-target field (polynomial `PHASE_DIR` or `EPHEMERIS_ID`), these
+interpolate at each row's `TIME` — a deliberate improvement over real
+casacore, whose own UDFs always use the field's static first-element
+direction regardless of `TIME`.
 `mscal.stokes(col [, 'types'] [, rescale])` converts a `DATA` / `FLAG` /
 `WEIGHT` array cell between correlation bases (`'IQUV'` / `'CIRC'` /
 `'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`; `types` also

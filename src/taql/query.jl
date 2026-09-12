@@ -307,9 +307,17 @@ A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 MAIN table with `ANTENNA` / `FIELD` subtables): `mscal.ha1()` /
 `ha2()` / `ha()` (hour angle, rad), `mscal.hadec1()` (`[ha, dec]`),
 `mscal.azel1()` (`[az, el]`), `mscal.az1()` / `el1()` (scalar),
-`mscal.pa1()` (parallactic angle), `mscal.last1()` (local apparent
+`mscal.pa1()` (parallactic angle — `0.0` unless that antenna's own
+`ANTENNA.MOUNT` starts with `"alt-az"`, case-insensitive; the
+suffix-less `mscal.pa()` always returns `0.0`, matching `MSCalEngine::
+getPA` exactly, Phase 138), `mscal.last1()` (local apparent
 sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
-ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000),
+ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the baseline's `ANTENNA2 -
+ANTENNA1` uvw in J2000, recomputed fresh from the `ANTENNA` positions
+exactly like casacore's `getNewUVW`, **not** a transform of the stored
+`UVW` column; Phase 137 — a real MS's stored `UVW` usually follows the
+*opposite* `ANTENNA1 - ANTENNA2` convention, a genuine, longstanding
+casacore quirk, not a bug here),
 `mscal.delay()` (baseline geometric delay `ap1-ap2`, s), `mscal.delay1()`
 / `delay2()` (Phase 136 — that one antenna's delay relative to the array
 centre; genuinely different from the bare form, not implemented until
@@ -330,6 +338,14 @@ instead of `FIELD.PHASE_DIR` — a body name (`mscal.el1('SUN')`), a
 FIELD direction column (`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000
 pair in radians (`mscal.hadec1([2.0, 0.5])`), or a sexagesimal
 `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
+
+Note (Phase 139): for a moving-target `FIELD` (a polynomial `PHASE_DIR`
+or an `EPHEMERIS_ID`), these functions interpolate the direction at
+each row's own `TIME` — real casacore's `derivedmscal` UDFs do NOT
+(`MSCalEngine::fillFieldDir` always uses the FIRST element of the
+direction cell, ignoring `TIME` entirely); this package's behaviour is
+a deliberate improvement, not a divergence to fix, but the two won't
+numerically agree for such a field.
 
 `mscal.stokes(col [, 'types'] [, rescale])` (Phase 78) converts a
 `DATA` / `FLAG` / `WEIGHT` array cell between correlation bases. `types`
