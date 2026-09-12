@@ -3437,3 +3437,42 @@ No production code behaviour changed (comment-only in
 for a small, ephemeris-realistic separation, and the large-separation
 divergence together with a check that `_slerp_lonlat` still lands
 exactly on the correct fractional great-circle arc length.
+
+### Phase 136 — found `mscal.delay1()`/`delay2()` entirely missing, and a real `mscal.delay*()` direction-default bug, while re-verifying `MSCalEngine::getDelay` against source
+
+Re-verified `mscal.delay()` (Phase 77) against
+`derivedmscal/DerivedMC/MSCalEngine.cc`'s actual `getDelay` and
+`UDFMSCal.cc`'s function-name registration, and found two real gaps.
+
+**`mscal.delay1()`/`mscal.delay2()` didn't exist at all.** casacore
+registers three delay UDFs (`makeDelay`/`makeDelay1`/`makeDelay2` →
+`UDFMSCal(DELAY, -1/0/1)`), exactly parallel to the `ha`/`ha1`/`ha2`
+family — but only the bare `mscal.delay()` had been implemented. Read
+`getDelay(antnr)` directly: `antnr == 0` returns `d1/c` (one antenna's
+delay relative to the **array centre**), `antnr == 1` returns `d2/c`
+(the other antenna's), and the "else" branch (the bare form) returns
+`(d1-d2)/c` — which algebraically simplifies to `dot(itrf, ap1-ap2)/c`
+since the centre cancels, confirming the existing bare-form
+implementation was already correct, but `delay1`/`delay2` genuinely
+compute a *different* per-antenna quantity, not either half of that
+difference. Implemented both, reusing the Phase 90 array-centre
+(`OBSERVATION.TELESCOPE_NAME` → the bundled Observatories table, else
+antenna 0).
+
+**The whole delay family defaults to the wrong FIELD direction
+column.** `UDFMSCal::UDFMSCal(ColType, Int)` calls `itsEngine.
+setDirColName("DELAY_DIR")` specifically for `DELAY`-type functions —
+every other direction function (`ha`/`azel`/`itrf`/…) defaults to
+`PHASE_DIR` via `MSCalEngine`'s own field initializer. This package's
+`mscal.delay()` was defaulting to `PHASE_DIR` like everything else, a
+genuine divergence from casacore's documented and source-confirmed
+behaviour (an explicit direction argument still overrides it, as
+before). Not observable on the committed `sample.ms` fixture — its
+`DELAY_DIR` happens to equal its `PHASE_DIR`, as is typical for a real
+MS — so the fix is verified with a synthetic patch giving `DELAY_DIR`
+a genuinely different value and confirming `mscal.delay()` tracks it.
+
+Fixed in `src/taql/functions.jl` (`_make_func`'s zero-arg delay-family
+default) and `src/taql/mscal.jl` (the new `delay1`/`delay2` branch,
+`_MSCAL_FUNCS`/`_MSCAL_DIR_FUNCS` entries, the `need2` condition). 17
+new tests in `test/taql_mscal_tests.jl` ("mscal.delay1()/delay2()").

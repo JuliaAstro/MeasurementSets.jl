@@ -15,7 +15,9 @@
 
 struct TQLMScal <: TQLExpr
     fn::String        # "ha"/"ha1"/"ha2" "hadec*" "azel*" "az*"/"el*"
-                      # "pa*" "last*" "itrf" "uvw_j2000" "delay"
+                      # "pa*" "last*" "itrf" "uvw_j2000"
+                      # "delay"/"delay1"/"delay2" (delay* defaults to
+                      # FIELD.DELAY_DIR, everything else to PHASE_DIR)
                       # "riseset[1|2]:<elev0>" (Phase 105)
     dir::String       # "" (use FIELD.PHASE_DIR) | a body name ("SUN") |
                       # a FIELD direction column ("DELAY_DIR") | "[ra,dec]"
@@ -29,13 +31,13 @@ _mscal_key(e::TQLMScal) = "mscal." * e.fn * (isempty(e.dir) ? "" : "::" * e.dir)
 const _MSCAL_DIR_FUNCS = Set([
     "ha", "ha1", "ha2", "hadec", "hadec1", "hadec2",
     "azel", "azel1", "azel2", "az1", "az2", "el1", "el2",
-    "pa", "pa1", "pa2", "itrf", "delay"])
+    "pa", "pa1", "pa2", "itrf", "delay", "delay1", "delay2"])
 
 const _MSCAL_FUNCS = Set([
     "ha", "ha1", "ha2", "hadec", "hadec1", "hadec2",
     "azel", "azel1", "azel2", "az1", "az2", "el1", "el2",
     "pa", "pa1", "pa2", "last", "last1", "last2",
-    "itrf", "uvw_j2000", "delay"])
+    "itrf", "uvw_j2000", "delay", "delay1", "delay2"])
 
 _tqleval(e::TQLMScal, cols, i) = cols[_mscal_key(e)][i]
 _geval(e::TQLMScal, cols, g)   = cols[_mscal_key(e)][g[1]]
@@ -152,8 +154,8 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     all(c -> c in cn, ("ANTENNA1", "FIELD_ID", "TIME")) || error(
         "mscal.* needs a MAIN table with ANTENNA1, FIELD_ID and TIME columns")
     bases = [first(_mscal_split_dir(f)) for f in fns]
-    need2 = any(f -> endswith(f, "2") || f == "delay" || startswith(f, "pbresponsebl:") ||
-                     startswith(f, "riseset2:"), bases)
+    need2 = any(f -> endswith(f, "2") || startswith(f, "delay") ||
+                     startswith(f, "pbresponsebl:") || startswith(f, "riseset2:"), bases)
     (need2 && !("ANTENNA2" in cn)) && error(
         "mscal.* needs an ANTENNA2 column for a `*2` / delay function")
 
@@ -347,10 +349,29 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
                 respfn(_pb_offset(_pointing_azel(a1[i], i), _cache(a1[i], dir, i).azel))
                 for i in 1:n]
         elseif f == "delay"
+            # bare form: (dot(itrf,ap1-centre) - dot(itrf,ap2-centre))/c
+            # = dot(itrf, ap1-ap2)/c (the array centre cancels) -- matches
+            # `MSCalEngine::getDelay`'s `antnr` "else" branch exactly.
             v = Vector{Float64}(undef, n)
             for i in 1:n
                 x = _cache(-1, dir, i).itrf_xyz
                 d = _pvec(antpos[a1[i] + 1]) .- _pvec(antpos[a2[i] + 1])
+                v[i] = (x[1]*d[1] + x[2]*d[2] + x[3]*d[3]) / C_LIGHT
+            end
+            out[_mscal_key(spec)] = v
+        elseif f == "delay1" || f == "delay2"
+            # Phase 136: casacore's `mscal.delay1()`/`delay2()` (antnr 0/1
+            # in `getDelay`) return ONE antenna's delay relative to the
+            # array centre -- genuinely different from the bare form's
+            # baseline difference, not `(ap1-ap2)` for either antenna
+            # alone. Found missing from this package entirely (only the
+            # bare `mscal.delay()` was implemented) while re-verifying
+            # `getDelay` against source for Phase 136.
+            aidx = f == "delay1" ? a1 : a2
+            v = Vector{Float64}(undef, n)
+            for i in 1:n
+                x = _cache(-1, dir, i).itrf_xyz
+                d = _pvec(antpos[aidx[i] + 1]) .- _pvec(centrepos[obsid[i]])
                 v[i] = (x[1]*d[1] + x[2]*d[2] + x[3]*d[3]) / C_LIGHT
             end
             out[_mscal_key(spec)] = v

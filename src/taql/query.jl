@@ -310,7 +310,12 @@ MAIN table with `ANTENNA` / `FIELD` subtables): `mscal.ha1()` /
 `mscal.pa1()` (parallactic angle), `mscal.last1()` (local apparent
 sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
 ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000),
-`mscal.delay()` (geometric delay, s),
+`mscal.delay()` (baseline geometric delay `ap1-ap2`, s), `mscal.delay1()`
+/ `delay2()` (Phase 136 — that one antenna's delay relative to the array
+centre; genuinely different from the bare form, not implemented until
+this phase) — the delay family defaults its direction to
+`FIELD.DELAY_DIR`, not `PHASE_DIR` (matches `derivedmscal`'s own default
+exactly; an explicit direction argument overrides it as usual),
 `mscal.riseset[1|2]([elev0][, dir])` (Phase 105) → `[rise_mjd, set_mjd]`
 for that antenna's own ITRF position and `dir` (default
 `FIELD.PHASE_DIR`), for the UTC day of the row's `TIME` — the same
