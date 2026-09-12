@@ -359,7 +359,11 @@ result is a `(nOut, nchan)` matrix. `types` also accepts the derived
 **pseudo types** `Ptotal` (`√(Q²+U²+V²)`), `Plinear` (`√(Q²+U²)`),
 `Pangle` (`½·atan2(U,Q)`, rad), `PFtotal`/`PFlinear` (the same divided
 by `I`) (Phase 109) — non-linear, so they need a complex (`DATA`-like)
-input; `Bool`/real (`FLAG`/`WEIGHT`) input raises a clear error.
+input; `Bool`/real (`FLAG`/`WEIGHT`) input raises a clear error. A
+`WEIGHT`-like conversion matches casacore's own quirk exactly (Phase
+142): if ANY input correlation's weight is exactly `0`, the whole
+output is `0` too — even a correlation with no coefficient at all for
+that particular output.
 
 `mscal.<sel>('spec')` (Phase 80) — MSSelection-lite row selection,
 returning a per-row `Bool`. `<sel>` ∈ `baseline` / `field` / `spw` /

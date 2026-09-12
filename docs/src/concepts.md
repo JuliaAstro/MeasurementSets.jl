@@ -117,7 +117,9 @@ direction regardless of `TIME`.
 `WEIGHT` array cell between correlation bases (`'IQUV'` / `'CIRC'` /
 `'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`; `types` also
 accepts the derived pseudo types `Ptotal`/`Plinear`/`Pangle`/`PFtotal`/
-`PFlinear` (need complex `DATA`-like input).
+`PFlinear` (need complex `DATA`-like input). A `WEIGHT` conversion
+matches casacore's own quirk: any zero input correlation zeroes the
+whole output, even one with no coefficient for that output at all.
 `mscal.<sel>('spec')` (`baseline` / `field` / `spw` / `scan` / `state` /
 `array` / `obs`) is MSSelection-lite row selection — a comma-list of
 ids / `N~M` ranges / name globs, `!` to subtract, `L & R` (cross only) /

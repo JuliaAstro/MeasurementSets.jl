@@ -3658,3 +3658,33 @@ its negative result, so the same "fix" isn't re-attempted without
 re-testing against the live oracle. No production behaviour changed;
 no new tests (the existing CASA cross-check already caught the
 regression during development, which is exactly what caught this).
+
+### Phase 142 — found `mscal.stokes()`'s WEIGHT conversion was missing a real casacore quirk: any zero input poisons the whole output
+
+Re-verified `mscal.stokes`'s rescale-factor logic (Phase 78 — `0.5` for
+codes 5-12, `√2/4` for codes 13-20) and its `FLAG` conversion against
+`ms/MeasurementSets/StokesConverter.cc` directly — both confirmed exact
+matches, no bug. The `WEIGHT`/`SIGMA` conversion (`StokesConverter::
+convert(Array<Float>&, ...)`, `.cc:395-414`) turned up a real, previously
+unported behaviour: casacore loops over **every** input correlation
+regardless of whether its conversion coefficient is zero (a harmless
+`0/x` no-op when it is), but if **any** input's weight is exactly `0` —
+even one with no coefficient at all for the output in question — the
+entire output for that (output, channel) is forced to `0` and the loop
+stops (`else { outMat(i,j)=0; break; }`).
+
+This package's implementation instead *skipped* a non-contributing or
+zero-weight correlation individually and computed a value from whatever
+nonzero terms remained — a real, meaningfully different result whenever
+any input correlation's weight is exactly `0`, which is the ordinary
+convention for an invalid/flagged visibility in a real MS, not a rare
+edge case.
+
+Fixed in `src/taql/mscal.jl`'s `_stokes_convert` (the `AbstractMatrix{
+<:Real}` / `WEIGHT`-shaped method) to iterate over every input
+correlation and zero the whole output on any zero input, exactly
+mirroring casacore's own loop. New unit tests plus a live cross-check
+against real casacore (`test/taql_mscal_tests.jl`, "mscal.stokes(WEIGHT)
+zero-poisoning vs real TaQL") confirmed the fix — the WEIGHT column
+naturally has no zero cells on the committed `sample.ms` fixture, so the
+cross-check patches a copy to introduce one.

@@ -757,11 +757,25 @@ function _stokes_convert(s::StokesSetup, x::AbstractMatrix{<:Real})
     nI == size(s.cmat, 2) || throw(ArgumentError(
         "mscal.stokes: WEIGHT cell has $nI correlations, expected $(size(s.cmat, 2))"))
     out = zeros(Float64, size(s.cmat, 1), nch)
+    # Phase 142 fix: ported `StokesConverter::convert(Array<Float>&,...)`
+    # (`ms/MeasurementSets/StokesConverter.cc:395-414`) exactly, not the
+    # "skip a zero/non-contributing input" logic this had before. Real
+    # casacore loops over EVERY input correlation regardless of whether
+    # its conversion coefficient is zero (a no-op `0/x` term when it
+    # is), but if ANY input weight is exactly 0 -- even one that has NO
+    # coefficient for this particular output -- it zeroes the WHOLE
+    # output for that (output, channel) and stops, per the source's own
+    # `else { outMat(i,j)=0; break; }`. A weight of exactly 0 is the
+    # ordinary convention for an invalid/flagged visibility in a real
+    # MS, so this is not a rare edge case in practice.
     @inbounds for ch in 1:nch, o in axes(out, 1)
         acc = 0.0
         for j in 1:nI
+            if x[j, ch] == 0
+                acc = 0.0
+                break
+            end
             w = s.wmat[o, j]
-            (w == 0 || x[j, ch] == 0) && continue
             acc += w * w / x[j, ch]
         end
         out[o, ch] = acc == 0 ? 0.0 : 1.0 / acc
