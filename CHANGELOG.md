@@ -4122,3 +4122,39 @@ with a sibling function. No production behaviour changed (comment-only
 — replaced the "inferred by symmetry, not independently tested" hedge
 with the confirmed citations); standalone mscal suite green (666/666,
 unchanged).
+
+### Phase 154 — fixed a mis-citation for baseline/spw/scan/array/obs's "never filter by `FLAG_ROW`" claim; independently re-confirmed it via direct source reading
+
+Investigated `mscal.array()`/`mscal.obs()` (can't be live-tested,
+Phase 147's crash bug) by reading `MSArrayParse.cc`/
+`MSObservationParse.cc` directly: both build their `WHERE` condition
+from a plain comparison against `columnAsTEN_p` (MAIN's own
+`ARRAY_ID`/`OBSERVATION_ID` column) with no subtable `Index` class and
+no `FLAG_ROW` column anywhere in the code path at all — genuinely
+cannot filter by `FLAG_ROW`, structurally, not merely "doesn't happen
+to". `MSScanParse.cc` is byte-for-byte the same shape.
+
+While re-deriving this, noticed the existing comment above
+`_mssel_notflagged` (`src/taql/mscal.jl`, introduced in Phase 146 per
+`git log -S`) attributes this "never filters" claim to "Phases
+118-119" — checked, and that citation is **wrong**: Phase 118 was
+`mscal.baseline()`'s antenna diameter/mount investigation and Phase
+119 was its BLREGEX grammar support; neither touched `FLAG_ROW` at
+all. The comment's *technical content* was already correct (it also
+independently notes the check is "commented out in
+`MSAntennaIndex.cc`/`MSSpwIndex.cc`") — only the phase attribution was
+wrong. Independently re-verified that technical claim directly rather
+than trusting the old comment: `MSAntennaIndex::
+matchAntennaRegexOrPattern` (baseline name/glob matching) and
+`MSSpwIndex.cc`'s equivalent both have their `!flagRow()` term
+DELIBERATELY commented out of the active mask expression — e.g.
+`MSAntennaIndex.cc`: `maskArray(i) = ((ret>0) != negate); //&&
+!msAntennaCols_p.flagRow().getColumn()(i));` — the check was written
+and then disabled, not simply never implemented.
+
+Fixed both citations in `src/taql/mscal.jl` to point at this
+investigation instead, with the specific evidence (the commented-out
+mask term for baseline/spw, and the no-Index-class structure for
+scan/array/obs) rather than a phase-number pointer alone. No
+production behaviour changed; standalone mscal suite green
+(666/666, unchanged).

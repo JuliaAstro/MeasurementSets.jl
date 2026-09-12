@@ -940,10 +940,22 @@ end
 # `matchFieldNameRegexOrPattern`, which check `!flagRow`). Only the
 # `field`/`state` call sites pass a real `flagged` vector; every other
 # `_mssel_idset` caller (baseline/spw/scan/array/obs) keeps the
-# default `nothing` — confirmed (Phases 118-119) that antenna/spw
-# selection never filters by `FLAG_ROW` in real casacore either (the
-# equivalent check is commented out in `MSAntennaIndex.cc`/
-# `MSSpwIndex.cc`).
+# default `nothing`. Phase 154: this line originally (mis-)cited
+# "Phases 118-119" for that claim -- those phases were actually about
+# `mscal.baseline()`'s antenna diameter/mount investigation and its
+# BLREGEX grammar, never FLAG_ROW at all (confirmed via `git log -S` on
+# this comment, introduced in Phase 146). Re-verified the underlying
+# claim directly instead: `MSAntennaIndex.cc`'s
+# `matchAntennaRegexOrPattern` (baseline name/glob matching) and
+# `MSSpwIndex.cc`'s equivalent both have the `!flagRow()` term
+# DELIBERATELY commented out of their active mask expression (not
+# merely absent -- the code is written and then disabled, e.g.
+# `MSAntennaIndex.cc`: `maskArray(i) = ((ret>0) != negate); //&&
+# !msAntennaCols_p.flagRow().getColumn()(i));`); `scan`/`array`/`obs`
+# (`MSScanParse.cc`/`MSArrayParse.cc`/`MSObservationParse.cc`) never
+# even have the possibility -- they compare `columnAsTEN_p` (MAIN's own
+# `SCAN_NUMBER`/`ARRAY_ID`/`OBSERVATION_ID` column) directly, with no
+# subtable `Index` class or `FLAG_ROW` column in the loop at all.
 _mssel_notflagged(s, ::Nothing) = s
 _mssel_notflagged(s, flagged::AbstractVector{Bool}) =
     Set{Int}(i for i in s if !(1 <= i + 1 <= length(flagged) && flagged[i + 1]))
@@ -1266,8 +1278,10 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         # `... && !flagRow().getColumn()` -- byte-for-byte the same
         # split as `MSFieldIndex`. `_mssel_idset`'s `flagged` kwarg
         # implements exactly this per-term-form split;
-        # baseline/spw/scan/array/obs pass no `flagged` (Phases 118-119
-        # confirmed those never filter by `FLAG_ROW` in real casacore).
+        # baseline/spw/scan/array/obs pass no `flagged` (Phase 154
+        # confirmed via direct source reading that those never filter
+        # by `FLAG_ROW` in real casacore -- see the comment above
+        # `_mssel_notflagged`).
         _need("FIELD_ID")
         fid = Int.(column(t, "FIELD_ID")[:])
         fldtab = haskey(subs, "FIELD") ? readtable(subs["FIELD"]) : nothing
