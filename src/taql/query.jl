@@ -334,8 +334,11 @@ picks `ANTENNA1` / `ANTENNA2`; no suffix uses the array centre —
 `OBSERVATION.TELESCOPE_NAME` looked up in the bundled Observatories
 table, falling back to antenna 0. The direction functions (`ha` / `hadec` / `azel` / `az` /
 `el` / `pa` / `itrf` / `delay`) take an optional direction argument
-instead of `FIELD.PHASE_DIR` — a body name (`mscal.el1('SUN')`), a
-FIELD direction column (`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000
+instead of `FIELD.PHASE_DIR` — a body name (`mscal.el1('SUN')`), any
+real direction-valued column of the FIELD subtable
+(`mscal.az1('DELAY_DIR')`, or a custom one — Phase 140, matching
+casacore's own precedence: a body/frame name is tried first, then the
+string is looked up as a FIELD column), a `[ra, dec]` J2000
 pair in radians (`mscal.hadec1([2.0, 0.5])`), or a sexagesimal
 `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
 
@@ -356,7 +359,11 @@ result is a `(nOut, nchan)` matrix. `types` also accepts the derived
 **pseudo types** `Ptotal` (`√(Q²+U²+V²)`), `Plinear` (`√(Q²+U²)`),
 `Pangle` (`½·atan2(U,Q)`, rad), `PFtotal`/`PFlinear` (the same divided
 by `I`) (Phase 109) — non-linear, so they need a complex (`DATA`-like)
-input; `Bool`/real (`FLAG`/`WEIGHT`) input raises a clear error.
+input; `Bool`/real (`FLAG`/`WEIGHT`) input raises a clear error. A
+`WEIGHT`-like conversion matches casacore's own quirk exactly (Phase
+142): if ANY input correlation's weight is exactly `0`, the whole
+output is `0` too — even a correlation with no coefficient at all for
+that particular output.
 
 `mscal.<sel>('spec')` (Phase 80) — MSSelection-lite row selection,
 returning a per-row `Bool`. `<sel>` ∈ `baseline` / `field` / `spw` /

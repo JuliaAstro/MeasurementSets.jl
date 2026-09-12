@@ -260,6 +260,49 @@ end
     end
 end
 
+@testset "TaQL-lite — mscal.* direction argument: any FIELD column, body-name precedence (Phase 140)" begin
+    # Found while reading `UDFMSCal::setupHA` et al.
+    # (`derivedmscal/DerivedMC/UDFMSCal.cc:288-308`): real casacore
+    # tries a string direction argument as a body/frame name FIRST
+    # (`MDirection::makeMDirection`), falling back to
+    # `itsEngine.setDirColName(str)` -- an ARBITRARY FIELD column name,
+    # not a fixed set -- only if that fails. This package previously
+    # checked a hard-coded whitelist of exactly 3 column names
+    # (PHASE_DIR/DELAY_DIR/REFERENCE_DIR) BEFORE the body/frame lookup,
+    # so a real MS with some other custom FIELD direction column would
+    # wrongly error "unknown direction" instead of being read. Fixed to
+    # match casacore's actual precedence and genericity.
+    main = readtable(SAMPLE_MS)
+    tmp = mktempdir()
+    dir = joinpath(tmp, "customdir.ms")
+    copyms(SAMPLE_MS, dir; rows = 1:20)
+    fldpath = joinpath(dir, "FIELD")
+    edit(fldpath) do t
+        addcolumn!(t, "MY_CUSTOM_DIR",
+            [MDirection{J2000}(1.1, 0.4) for _ in 1:nrow(readtable(fldpath))];
+            kind = :ssm)
+    end
+    main2 = readtable(dir)
+    q = query(main2, "rownumber() >= 1"; select = ["e" => "mscal.el1('MY_CUSTOM_DIR')"])
+    # hand reference: az/el of the fixed [1.1, 0.4] J2000 direction seen
+    # from ANTENNA1 at that row's TIME (same recipe as the PHASE_DIR test)
+    ant = subtable(MeasurementSet(dir), "ANTENNA")
+    for i in (3, 15)
+        a1 = column(main2, "ANTENNA1")[i]
+        ep = measure(main2, "TIME", i)
+        dj = MDirection{J2000}(1.1, 0.4)
+        fr = MeasFrame(epoch = ep, position = measure(ant, "POSITION", a1 + 1), direction = dj)
+        ae = measconvert(dj, AZEL; frame = fr)
+        @test column(q, "e")[i] ≈ ae.lat
+    end
+    # a body name still resolves as a body, not (incorrectly) a column
+    # search — precedence unaffected by the fix
+    qs = query(main, "rownumber() >= 1"; select = ["e" => "mscal.el1('SUN')"])
+    @test -pi/2 <= column(qs, "e")[3] <= pi/2
+    # a name that is neither a body/frame nor a real column still errors
+    @test_throws ErrorException query(main, "mscal.el1('NO_SUCH_THING') > 0")
+end
+
 @testset "TaQL-lite — mscal.* error cases" begin
     dir = joinpath(mktempdir(), "notms")
     write_table(dir, "T", Pair{String,Any}["A" => collect(1.0:4.0)]; nrow = 4)
@@ -322,6 +365,21 @@ end
     sr = MSv2._stokes_setup([5, 6, 7, 8], [1], true)      # rescale halves RR/LL
     @test sr.cmat ≈ ComplexF64[0.5 0 0 0.5]
     @test_throws Exception MSv2._stokes_setup([5, 9, 7, 8], [1], false)  # mixed frame
+
+    # Phase 142: weight conversion's "any zero input poisons the whole
+    # output" quirk, ported from `StokesConverter::convert(Array<Float>&,
+    # ...)` (`ms/MeasurementSets/StokesConverter.cc:395-414`) --
+    # confirmed real casacore loops over EVERY input correlation and
+    # forces the output to 0 if ANY of them is exactly 0, even one with
+    # no coefficient for that particular output.
+    si = MSv2._stokes_setup([5, 6, 7, 8], [1], false)      # I = RR + LL (coeffs on RL/LR are 0)
+    # Wout = 1/(1²/RR + 0²/RL + 0²/LR + 1²/LL) = 1/(1/1 + 1/4) = 0.8
+    @test MSv2._stokes_convert(si, reshape([1.0, 2.0, 3.0, 4.0], :, 1))[1] ≈ 0.8
+    # LR (weight input 3, zero coefficient for I) is exactly 0 -> I's
+    # weight is forced to 0 too, even though LR doesn't contribute to I.
+    @test MSv2._stokes_convert(si, reshape([1.0, 2.0, 0.0, 4.0], :, 1))[1] == 0.0
+    # a zero weight on a correlation that DOES contribute also zeroes it
+    @test MSv2._stokes_convert(si, reshape([0.0, 2.0, 3.0, 4.0], :, 1))[1] == 0.0
 end
 
 @testset "TaQL-lite query — mscal.stokes()" begin
@@ -1297,6 +1355,34 @@ if _HAVE_TAQL
                     @test real(column(q, "pfl")[i][1, 1]) == 0.0
                 end
             end
+        else
+            @info "mscal.stokes UDF not available in this casacore build; skipping"
+        end
+    end
+
+    @testset "TaQL-lite — mscal.stokes(WEIGHT) zero-poisoning vs real TaQL (Phase 142)" begin
+        # Patch a copy so one row's WEIGHT genuinely has a zero
+        # correlation (never happens naturally on the fixture) and
+        # cross-check the "any zero input poisons the whole output"
+        # behaviour directly against real casacore.
+        tmp = joinpath(mktempdir(), "wz.ms")
+        copyms(SAMPLE_MS, tmp; rows = 1:5)
+        edit(tmp) do t
+            w = t[:WEIGHT][1]
+            w[2] = 0.0                # zero a correlation with no coefficient for I
+            t[:WEIGHT][1] = w
+        end
+        ts = try
+            _taqlcmd("SELECT mscal.stokes(WEIGHT, 'I') AS WI FROM \$1", CCT.Table(tmp))
+        catch
+            nothing
+        end
+        if ts !== nothing
+            main = readtable(tmp)
+            q = query(main, "rownumber() >= 1"; select = ["wi" => "mscal.stokes(WEIGHT, 'I')"])
+            @test column(q, "wi")[1][1] ≈ ts[:WI][1][1] rtol = 1e-6
+            @test column(q, "wi")[1][1] == 0.0    # the poisoned row
+            @test column(q, "wi")[2][1] != 0.0    # an untouched row, for contrast
         else
             @info "mscal.stokes UDF not available in this casacore build; skipping"
         end

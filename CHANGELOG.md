@@ -3593,3 +3593,98 @@ few seconds for the ramp to show up row-to-row on that MS, so the
 grid's own wider span is used to exercise the machinery directly). No
 production behaviour changed — comment/doc-only, plus the one new test
 assertion.
+
+### Phase 140 — found `mscal.*`'s direction argument only accepted a hard-coded whitelist of 3 FIELD column names
+
+Continuing the `MSCalEngine.cc`/`UDFMSCal.cc` read-through, read
+`UDFMSCal`'s actual string-direction-argument dispatch
+(`derivedmscal/DerivedMC/UDFMSCal.cc:288-308`): real casacore tries the
+string as a solar-system body/frame name FIRST
+(`MDirection::makeMDirection`), and only if that fails does it fall
+back to `itsEngine.setDirColName(str)` — accepting **any** FIELD
+column name, not a fixed set.
+
+This package's direction-argument resolver (`_djfor`, Phase 85) did
+the opposite: it checked a hard-coded whitelist of exactly three
+column names (`PHASE_DIR`, `DELAY_DIR`, `REFERENCE_DIR`) *before*
+trying a body/frame lookup, and any string outside that whitelist went
+straight to the body/frame branch, erroring "unknown direction" if it
+wasn't a recognized name. A real (if unusual) MS with some other
+custom FIELD direction column — anything other than those three exact
+names — would be unreadable via `mscal.*`'s direction argument, even
+though the underlying column-read machinery was already fully generic
+(it calls `measure(fld, dir, ...)` with whatever name was given).
+
+Fixed in `src/taql/mscal.jl`: `_djfor` now tries a body/frame name
+first (matching casacore's actual precedence), then falls back to
+checking whether the string names any real column of the FIELD
+subtable (`fieldcols = Set(columnnames(fld))`, computed once) — not a
+fixed list. Removed the now-dead `_MSCAL_DIR_COLS` constant. New tests
+in `test/taql_mscal_tests.jl` covering a genuinely custom direction
+column, confirming body-name precedence is unaffected, and confirming
+a name that is neither a body nor a real column still errors clearly.
+
+### Phase 141 — investigated a real source divergence in the GEO/TOPO frequency/RV hop; the "obvious" fix empirically made agreement with real CASA worse
+
+Read `measures/Measures/MCFrequency.cc` and `MCRadialVelocity.cc` in
+full to re-verify the GEO/BARY/TOPO/LSRK velocity-composition machinery
+built in Phases 66/71. Found a real, textual divergence: casacore's own
+`GEO_TOPO`/`TOPO_GEO` hop (the diurnal-aberration term) projects onto
+the frame's **apparent** direction (`frameDirection(...).getApp(...)`),
+while every other hop (`LSRK_BARY`/`BARY_GEO`/`GEO_BARY`) uses the
+plain **J2000** direction (`.getJ2000(...)`). This package's `_n_hat`
+supplies one uniform J2000 direction to every hop, including the
+diurnal-aberration term — textually not what casacore's own source
+does.
+
+Implemented the "obvious" fix — a separate apparent-direction vector
+threaded into just the TOPO↔GEO dot product — and tested it live
+against the real CASA oracle (`measures_tests.jl`'s casatools
+cross-check). The result was the opposite of the expected improvement:
+the frequency residual grew from comfortably within the test's
+`rtol=2e-9` tolerance to about `6e-9` (failing), and the GEO/TOPO
+radial-velocity residual grew from the already-documented ~0.2 m/s
+(Phase 71) to ~1.8 m/s — an order of magnitude larger than the small
+arcsec-level correction should plausibly produce, and enough to exceed
+the test's own `atol=0.5` m/s tolerance.
+
+Reverted the code change — the existing uniform-J2000 implementation
+demonstrably agrees with real CASA *better* than the textually more
+faithful apparent-direction port, likely because some other SOFA-
+vs-casacore residual in the apparent-place computation swamps the
+intended correction rather than the two cancelling as hoped. Left a
+detailed comment in `ext/SOFAExt.jl` recording the investigation and
+its negative result, so the same "fix" isn't re-attempted without
+re-testing against the live oracle. No production behaviour changed;
+no new tests (the existing CASA cross-check already caught the
+regression during development, which is exactly what caught this).
+
+### Phase 142 — found `mscal.stokes()`'s WEIGHT conversion was missing a real casacore quirk: any zero input poisons the whole output
+
+Re-verified `mscal.stokes`'s rescale-factor logic (Phase 78 — `0.5` for
+codes 5-12, `√2/4` for codes 13-20) and its `FLAG` conversion against
+`ms/MeasurementSets/StokesConverter.cc` directly — both confirmed exact
+matches, no bug. The `WEIGHT`/`SIGMA` conversion (`StokesConverter::
+convert(Array<Float>&, ...)`, `.cc:395-414`) turned up a real, previously
+unported behaviour: casacore loops over **every** input correlation
+regardless of whether its conversion coefficient is zero (a harmless
+`0/x` no-op when it is), but if **any** input's weight is exactly `0` —
+even one with no coefficient at all for the output in question — the
+entire output for that (output, channel) is forced to `0` and the loop
+stops (`else { outMat(i,j)=0; break; }`).
+
+This package's implementation instead *skipped* a non-contributing or
+zero-weight correlation individually and computed a value from whatever
+nonzero terms remained — a real, meaningfully different result whenever
+any input correlation's weight is exactly `0`, which is the ordinary
+convention for an invalid/flagged visibility in a real MS, not a rare
+edge case.
+
+Fixed in `src/taql/mscal.jl`'s `_stokes_convert` (the `AbstractMatrix{
+<:Real}` / `WEIGHT`-shaped method) to iterate over every input
+correlation and zero the whole output on any zero input, exactly
+mirroring casacore's own loop. New unit tests plus a live cross-check
+against real casacore (`test/taql_mscal_tests.jl`, "mscal.stokes(WEIGHT)
+zero-poisoning vs real TaQL") confirmed the fix — the WEIGHT column
+naturally has no zero cells on the committed `sample.ms` fixture, so the
+cross-check patches a copy to introduce one.
