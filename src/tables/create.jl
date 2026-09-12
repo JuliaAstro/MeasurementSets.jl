@@ -569,6 +569,21 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
             push!(skipped, outname); continue
         end
         oc = outname == srcname ? sc : _rename_columndesc(sc, outname)
+        # Phase 147: a source's `FLAG_CATEGORY` column commonly has no
+        # `CATEGORY` keyword (real MSes rarely write it) -- casacore's
+        # `MeasurementSet` constructor self-heals this on a WRITABLE
+        # open but throws "Missing CATEGORY keyword" on a read-only one
+        # (Phase 121). A `copyms`/`copytable` output is a fresh table
+        # most callers then open read-only, so stamp the same empty
+        # `_flag_category_kw()` `create_ms`/`addcolumn!` already use,
+        # exactly when the source lacks it -- a source that DOES have a
+        # real one keeps its own value untouched.
+        if outname == "FLAG_CATEGORY" && !haskey(oc.keywords, "CATEGORY")
+            oc = ColumnDesc(oc.name, oc.comment, oc.manager, oc.group, oc.type,
+                            oc.classname, oc.shape, oc.option, oc.maxlength,
+                            _set_kw(oc.keywords, "CATEGORY", TpArrayString, String[]),
+                            oc.default, oc.sequ)
+        end
         dm = _source_dm(dmsrc, sc)
         # --- VirtualTaQLColumn: preserve the CALC expression rather than
         #     materialise it (it re-evaluates on read).  `vals` above is

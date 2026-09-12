@@ -3831,3 +3831,103 @@ result rather than erroring, consistent with how `'>0'` already
 behaves). New testset `test/taql_mscal_tests.jl` "mscal.field()/
 mscal.state() FLAG_ROW: spec-form-dependent (Phase 146)". Full mscal
 suite green (521/521, standalone).
+
+### Phase 147 — fixed a real `copyms` gap (missing `FLAG_CATEGORY` `CATEGORY` keyword); found a severe, pre-existing crash bug in this environment's linked casacore for `mscal.state()`/`scan()`/`array()`/`obs()`
+
+Started by investigating whether `mscal.field()`/`mscal.spw()` (which
+this package accepts `>=`/`<=` comparisons for, uniformly across every
+`mscal.<sel>()` function) actually support that syntax in real
+casacore. Reading `MSFieldGram.yy`/`MSSpwGram.yy`/`MSStateGram.yy`
+confirmed those three grammars declare `GE`/`LE` tokens but never
+reduce them in a production — live-verified against real `tableCommand`
+with a clean "Parse error at or near '=0'" for all three. This
+package's uniform acceptance of `>=`/`<=` for `field`/`spw`/`state` is
+therefore a benign, minor over-permissiveness (extra accepted syntax,
+still semantically correct) — not a bug, left as-is.
+
+`MSScanGram.yy`/`MSArrayGram.yy`/`MSObservationGram.yy`, by contrast,
+DO have real `GE INT`/`LE INT` (and `GE INT & LE INT`) productions
+wired to `selectRangeGEAndLE`-style calls — so the natural next step
+was to confirm those three (and `state`, sharing the same
+`UDFMSCal::setupSelection` `MeasurementSet ms(table)` construction
+pattern) actually accept `>=`/`<=` live. That attempt uncovered two
+separate things:
+
+1. **A real, fixed bug**: every one of `mscal.state()`/`scan()`/
+   `array()`/`obs()` threw "Missing CATEGORY keyword in FLAG_CATEGORY
+   column" against a `copyms` of the committed sample fixture — because
+   `UDFMSCal::setupSelection` constructs a full `MeasurementSet ms
+   (table)` for these four (not `field`/`spw`, which don't), and
+   `MeasurementSet`'s C++ constructor requires a `CATEGORY` keyword on
+   `FLAG_CATEGORY` that it self-heals on a writable open but throws on
+   read-only (the exact Phase 121 finding, previously fixed only for
+   `create_ms`/`addcolumn!`, never for `copyms`). The committed sample
+   fixture's own `FLAG_CATEGORY` lacks it (real MSes commonly don't
+   write it), and `copyms` faithfully carried the gap forward. Fixed:
+   `_copy_table_cols` (`src/tables/create.jl`) now stamps the same
+   empty `_flag_category_kw()` whenever the source column lacks
+   `CATEGORY`, leaving a source that already has a real value
+   untouched. New test in `test/writer_tests.jl`.
+
+2. **A severe, pre-existing crash bug — NOT in this package, in the
+   linked casacore build itself**: once the `CATEGORY` gap was fixed,
+   invoking `mscal.scan()` (bare id `'1'`, and separately `'>=1'`)
+   through real `tableCommand` **segfaults the whole Julia process**
+   (`TableExprNodeBinary::getCommonTypes`, reached via
+   `MSScanParse::selectScanIds`/`selectScanIdsGTEQ` → `TableExprNode::
+   newEQ`/`newGE`) — for essentially any spec, not just the
+   comparison forms. A segfault cannot be caught by `try`/`catch`, so
+   this is a real operational hazard: **no test in this suite has ever
+   exercised `mscal.state()`/`scan()`/`array()`/`obs()` against real
+   `tableCommand`** (confirmed by grep — every existing
+   `mscal.<sel>() vs real TaQL` cross-check only tries
+   `baseline`/`field`/`spw`/`corr`/`feed`/`uvdist`), so nothing was
+   silently crashing full-suite runs before now. Documented prominently
+   in `test/writer_tests.jl` as a standing hazard — **never call
+   `_taqlcmd`/`tableCommand` with `mscal.state`/`scan`/`array`/`obs` in
+   this environment**. Not a MeasurementSets.jl bug and not something
+   this package can fix; no further live-testing of these four
+   functions was attempted once the crash was confirmed, to avoid
+   repeat crashes.
+
+Full suite standalone: mscal (521/521), writer+edit+schema (219/219,
++4 new).
+
+### Phase 148 — swept three more leads (ECLIPTIC frame, ICRS approximation, `mscal.corr()`'s selection condition); no confirmed bug, no code behaviour change
+
+Continuing the sweep discipline, three leads investigated this phase:
+
+1. **`ECLIPTIC` frame epoch-handling** — re-checked `MDirection.h`'s
+   frame documentation directly: casacore's plain `ECLIPTIC` (as
+   opposed to `MECLIPTIC`/`TECLIPTIC`) is explicitly listed among the
+   handful of epoch-*independent* frames (fixed at the J2000 mean
+   ecliptic/equinox, paired one-to-one with `J2000` in the conversion
+   table, `MCDirection.cc:77-78`) — confirmed this package's
+   `ECLIPTIC` implementation (a fixed-epoch `SOFA.eceq06`/`eqec06` call,
+   no frame epoch needed) matches exactly. No bug.
+2. **ICRS≈J2000 approximation** — re-confirmed as an already-documented,
+   deliberate design choice (~0.02″), not a new finding.
+3. **`mscal.corr()`'s selection condition** — re-reading `ms/MSSel/
+   MSCorrParse.cc` more closely than the Phase 143 pass found a real
+   discrepancy with that phase's own "confirming the core selection
+   logic here is correct" claim: `selectCorrType`'s `corrtype` argument
+   to `MSPolarizationIndex::matchCorrType` is the WHOLE, unfiltered
+   `POLARIZATION.CORR_TYPE` column (flattened across every row), never
+   actually narrowed to the requested correlation-type string's own
+   code — which, per `matchCorrType`'s own matching semantics
+   (`MSPolIndex.cc:105-138`), looks like it would make the real
+   selection non-selective for any MS with more than one distinct
+   polarization setup (masked by the sample fixture's single setup).
+   **Not independently confirmed live**: `mscal.corr()`/`mscal.feed()`
+   are not registered as callable TaQL UDFs in this environment's
+   casacore build at all (same limitation Phase 84 already
+   documented). Per this project's standing discipline, an unverified
+   source-reading hunch is recorded as an open question, not treated as
+   an established bug — the correction is now in
+   `src/taql/mscal.jl`'s comment above `_parse_corr_types`, alongside
+   the original Phase 143 note. This package's own `mscal.corr()` is
+   unaffected either way (it correctly filters by the requested type
+   regardless of what real casacore's condition actually computes).
+
+No production behaviour changed; full mscal suite green (521/521,
+standalone, unchanged).
