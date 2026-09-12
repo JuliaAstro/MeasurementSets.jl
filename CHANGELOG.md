@@ -3623,3 +3623,38 @@ fixed list. Removed the now-dead `_MSCAL_DIR_COLS` constant. New tests
 in `test/taql_mscal_tests.jl` covering a genuinely custom direction
 column, confirming body-name precedence is unaffected, and confirming
 a name that is neither a body nor a real column still errors clearly.
+
+### Phase 141 — investigated a real source divergence in the GEO/TOPO frequency/RV hop; the "obvious" fix empirically made agreement with real CASA worse
+
+Read `measures/Measures/MCFrequency.cc` and `MCRadialVelocity.cc` in
+full to re-verify the GEO/BARY/TOPO/LSRK velocity-composition machinery
+built in Phases 66/71. Found a real, textual divergence: casacore's own
+`GEO_TOPO`/`TOPO_GEO` hop (the diurnal-aberration term) projects onto
+the frame's **apparent** direction (`frameDirection(...).getApp(...)`),
+while every other hop (`LSRK_BARY`/`BARY_GEO`/`GEO_BARY`) uses the
+plain **J2000** direction (`.getJ2000(...)`). This package's `_n_hat`
+supplies one uniform J2000 direction to every hop, including the
+diurnal-aberration term — textually not what casacore's own source
+does.
+
+Implemented the "obvious" fix — a separate apparent-direction vector
+threaded into just the TOPO↔GEO dot product — and tested it live
+against the real CASA oracle (`measures_tests.jl`'s casatools
+cross-check). The result was the opposite of the expected improvement:
+the frequency residual grew from comfortably within the test's
+`rtol=2e-9` tolerance to about `6e-9` (failing), and the GEO/TOPO
+radial-velocity residual grew from the already-documented ~0.2 m/s
+(Phase 71) to ~1.8 m/s — an order of magnitude larger than the small
+arcsec-level correction should plausibly produce, and enough to exceed
+the test's own `atol=0.5` m/s tolerance.
+
+Reverted the code change — the existing uniform-J2000 implementation
+demonstrably agrees with real CASA *better* than the textually more
+faithful apparent-direction port, likely because some other SOFA-
+vs-casacore residual in the apparent-place computation swamps the
+intended correction rather than the two cancelling as hoped. Left a
+detailed comment in `ext/SOFAExt.jl` recording the investigation and
+its negative result, so the same "fix" isn't re-attempted without
+re-testing against the live oracle. No production behaviour changed;
+no new tests (the existing CASA cross-check already caught the
+regression during development, which is exactly what caught this).

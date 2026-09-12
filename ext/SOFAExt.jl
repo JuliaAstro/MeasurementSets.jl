@@ -408,6 +408,27 @@ end
 _dopp(f, beta, sign) = sign > 0 ? f * sqrt((1 + beta) / (1 - beta)) :
                                   f * sqrt((1 - beta) / (1 + beta))
 
+# Phase 141 investigated-and-rejected finding, recorded so it isn't
+# re-attempted without re-testing: casacore's own `MCFrequency`/
+# `MCRadialVelocity` GEO<->TOPO hop (`case GEO_TOPO`/`case TOPO_GEO` in
+# `measures/Measures/MCFrequency.cc` and `MCRadialVelocity.cc`) projects
+# the diurnal-aberration term onto the frame's APPARENT direction
+# (`frameDirection(...).getApp(...)`), not the plain J2000 direction
+# every other hop uses (`LSRK_BARY`/`BARY_GEO`/`GEO_BARY` all call
+# `.getJ2000(...)`) -- confirmed directly from source. The "obvious" fix
+# (thread a separate apparent-direction vector into just the TOPO<->GEO
+# diurnal-aberration dot product) was implemented and tested live
+# against the real CASA oracle (`measures_tests.jl`'s casatools cross-
+# check): it made agreement WORSE, not better -- the frequency residual
+# grew from within `rtol=2e-9` to ~6e-9, and the GEO/TOPO radial-
+# velocity residual grew from ~0.2 m/s (already-documented, Phase 71) to
+# ~1.8 m/s, exceeding the test's own tolerance. Reverted; `_n_hat`'s
+# uniform J2000 direction is kept for every hop, since it demonstrably
+# agrees with real CASA better than the textually-more-faithful
+# apparent-direction port does (an SOFA-vs-casacore residual elsewhere
+# in the apparent-place computation likely swamps the intended arcsec-
+# level correction). A reminder that a source-read finding still needs
+# live-oracle verification before it's treated as a fix.
 function _n_hat(frame::MeasFrame)
     d = frame.direction
     d === nothing && error(
