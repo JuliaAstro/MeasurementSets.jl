@@ -3688,3 +3688,43 @@ against real casacore (`test/taql_mscal_tests.jl`, "mscal.stokes(WEIGHT)
 zero-poisoning vs real TaQL") confirmed the fix — the WEIGHT column
 naturally has no zero cells on the committed `sample.ms` fixture, so the
 cross-check patches a copy to introduce one.
+
+### Phase 143 — verified `mscal.uvdist()` (no bug) and confirmed a real casacore MS-mutation bug in `mscal.corr()`'s underlying grammar (not replicated here)
+
+Re-verified two more `mscal.*` selection functions against their real
+casacore source, following Phases 80/81/83/84's original convention-
+and-live-TaQL-based build.
+
+**`mscal.uvdist()`**: `ms/MSSel/MSUvDistParse.cc` has two code paths —
+a "slow" one (explicitly commented "here for testing — should
+ultimately be removed") using the full 3-D `√(u²+v²+w²)` uv-distance,
+and the actual default "fast" path (`doSlow=false`, ~60× faster per its
+own comment) using `SQUARE(UVW[1]) + SQUARE(UVW[2])` — the 2-D
+projection only. This package's Phase 81 implementation already uses
+the 2-D form, matching the real, actually-used default path exactly.
+The wavelength-unit scaling (`uvDist_lambda = uvDist_m · refFreq /
+c`) also matches the slow path's own formula (the fast path scales the
+*bound* the other algebraic way, but the two are mathematically
+identical). No bug found.
+
+**`mscal.corr()`**: reading `MSCorrParse::selectCorrType` (what
+`msCorrGramParseCommand`, hence `mscal.corr()`, actually calls) found
+the core selection logic matches this package's implementation exactly
+(`DATA_DESC_ID IN` the set of data-desc ids whose `POLARIZATION.
+CORR_TYPE` contains the requested code). But the real function also has
+a genuinely alarming, undocumented side effect along the way: it
+reopens the very MS being queried in **writable** mode and
+unconditionally adds (replacing any existing one) a `SELECTED_DATA`
+column, copying a slice of `DATA` into it — as a side effect of
+evaluating what should be a read-only WHERE-clause predicate. Using
+`mscal.corr()` (or a native `WHERE CORR = 'RR'` selection) against a
+real, writable MS in real casacore genuinely mutates that MS on disk.
+`MSFeedParse.cc` (the `mscal.feed()` counterpart) has no such pattern —
+this is specific to `MSCorrParse`.
+
+This package's `mscal.corr()` is a pure, read-only, in-memory `Bool`
+computation with no such side effect — confirmed as the correct,
+deliberate choice, not a divergence to fix; replicating casacore's
+destructive behaviour would be a regression. Documented in a comment
+above `mscal.corr`'s implementation (`src/taql/mscal.jl`) for anyone
+reading the source later. No production behaviour changed.

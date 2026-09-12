@@ -1590,6 +1590,28 @@ end
 # feed: the antenna-grammar form on FEED1 / FEED2 -- `L & R` feed-pair
 #   selection, comma-lists of ids / `N~M` ranges, `!` negation -- exactly
 #   like `mscal.baseline` but with numeric feed ids only.
+#
+# Phase 143 finding: read `ms/MSSel/MSCorrParse.cc` (the code
+# `msCorrGramParseCommand`/`mscal.corr()` actually calls,
+# `derivedmscal/DerivedMC/UDFMSCal.cc:470-474`) to re-verify this
+# against source. `MSCorrParse::selectCorrType` builds the SAME
+# selection condition this package computes (`DATA_DESC_ID IN` the set
+# of data-desc ids whose `POLARIZATION.CORR_TYPE` contains the
+# requested code, via `MSDataDescIndex::matchPolId`/
+# `MSPolarizationIndex::matchCorrType`) -- confirming the core
+# selection logic here is correct. But the real function has a genuinely
+# alarming, undocumented SIDE EFFECT along the way: it reopens the very
+# MS being queried in `Table::Update` (writable) mode and unconditionally
+# `addColumn`s (removing any existing one first) a `"SELECTED_DATA"`
+# column, then copies a slice of `DATA` into it — as a side effect of
+# evaluating what should be a read-only WHERE-clause predicate. This
+# means `mscal.corr()` / a native `WHERE CORR = 'RR'` selection against
+# a real, writable MS in real casacore genuinely MUTATES the MS on disk.
+# `MSFeedParse.cc` (the `mscal.feed()` counterpart) has no such pattern
+# — this is specific to `MSCorrParse`. This package's `mscal.corr()` is
+# a pure, read-only, in-memory `Bool` computation with no such side
+# effect — a deliberate and CORRECT divergence; replicating casacore's
+# destructive behaviour here would be a regression, not a fix.
 
 function _parse_corr_types(spec::AbstractString)
     out = Set{Int}()
