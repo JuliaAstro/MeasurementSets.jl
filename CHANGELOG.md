@@ -4387,3 +4387,44 @@ gains the two new exported names (keeps the `checkdocs = :exported`
 docs build clean). Standalone measures suite green (508/508, was 490
 before the 18 new assertions); standalone query suite unaffected
 (1008/1008, unchanged).
+
+### Phase 161 — swept `Record`-keyword indexing for a Phase-156-style unguarded-access bug; confirmed the ISM bucket-relative-row-0 invariant is real (no bug found)
+
+Continued sweeping for the class of bug Phase 156 found (`BitFlagsEngine`'s
+mask-key lookup indexing a `Record` directly instead of guarding with
+`haskey`). Grepped every `.keywords[...]` / `kw["..."]` access across
+`src/` and `ext/` — every remaining unguarded index (`_BaseMappedArrayEngine_Name`
+in `_engine_spec_from_source`, `mi["type"]` in `measinfo`, `kw["QuantumUnits"]`
+in `UnitfulExt`) is a keyword every real engine/MEASINFO writer emits
+unconditionally as part of constructing that record in the first place —
+categorically different from `BitFlagsEngine`'s `ReadMaskKeys`/
+`WriteMaskKeys`, which are user-supplied *lists* that may legitimately
+name a key absent from a particular table's `FLAGSETS`. No missing-key
+crash risk found.
+
+Redirected to a related but distinct question raised while reading
+`src/datamanagers/incremental.jl`'s reader: `_le_index` (the
+bucket-relative-row lookup used by `getcell`/`getcolumn`) returns index
+1 whenever the target row is *before* the first entry in that bucket's
+row index — silently falling back to that bucket's first stored value
+rather than correctly inheriting the previous bucket's last value. This
+would be a real bug if a valid on-disk ISM bucket could ever lack an
+entry at bucket-relative row 0. Read `~/Development/CASACORE/casacore/
+tables/DataMan/ISMBucket.cc`'s `getInterval` directly: when the binary
+search finds no exact match and the target precedes every index entry
+(`inx == 0`), it unconditionally does `inx--` on an *unsigned* `uInt`
+index with no underflow guard — which would wrap to a huge value and
+crash/corrupt on any bucket whose row index doesn't start at 0. This
+confirms "every bucket's row index starts at bucket-relative row 0" is
+a real invariant real casacore itself relies on for `getInterval`'s own
+correctness (an unsigned-underflow landmine, not merely a convention
+this package's own writer happens to follow) — so `_le_index`'s
+fallback-to-index-1 path is unreachable for any valid on-disk table,
+matching the existing Phase 8 plan note ("Every column has an entry at
+bucket-relative row 0") but now confirmed from the reader side too, not
+just the writer's own design choice.
+
+No source or test change — this phase closes out two investigation
+leads with no bug found, continuing the established discipline of
+verifying an assumption against real casacore source before trusting
+it. Standalone suite unaffected.
