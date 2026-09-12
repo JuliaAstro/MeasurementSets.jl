@@ -581,20 +581,29 @@ if _HAVE_MEAS_CASA
 
         # frequency: agrees to ~1e-9 relative (< 0.3 m/s line-of-sight) —
         # the residual is SOFA `epv00` vs casacore's own Earth ephemeris.
+        # Phase 159: LGROUP/CMB added -- Phase 88 assumed no `casatools`
+        # oracle existed for these two ("no casatools oracle for these
+        # two"), but `me.listcodes(me.frequency())` shows both ARE valid
+        # `me.measure(...)` target codes; live-verified they inherit
+        # exactly the same BARY-hub residual as the other frames here
+        # (their own step is a pure constant-vector addition, no new
+        # ephemeris error), so the same `rtol=2e-9` applies.
         f = MFrequency{TOPO}(ref.freq_hz)
         for (frame, T) in (("GEO", GEO), ("BARY", BARY), ("LSRK", LSRK),
-                           ("LSRD", LSRD), ("GALACTO", GALACTO))
+                           ("LSRD", LSRD), ("GALACTO", GALACTO),
+                           ("LGROUP", LGROUP), ("CMB", CMB))
             got = measconvert(f, T; frame = fr)
             @test got.hz ≈ getproperty(ref.frequency, Symbol(frame)) rtol = 2e-9
         end
 
-        # radial velocity: same physics as frequency. BARY/LSRD/GALACTO
-        # (constant `_VEL_*` only) match to < 1 mm/s; GEO/TOPO carry the
-        # SOFA `epv00` + `pvtob`-diurnal-aberration vs casacore-ephemeris
-        # residual (~0.25 m/s LOS, the same as the frequency test's
-        # `rtol=2e-9` == ~0.6 m/s at 100 GHz).
+        # radial velocity: same physics as frequency. BARY/LSRD/GALACTO/
+        # LGROUP/CMB (constant `_VEL_*` only) match to < 1 mm/s; GEO/TOPO
+        # carry the SOFA `epv00` + `pvtob`-diurnal-aberration vs
+        # casacore-ephemeris residual (~0.25 m/s LOS, the same as the
+        # frequency test's `rtol=2e-9` == ~0.6 m/s at 100 GHz).
         v = MRadialVelocity{LSRK}(ref.rv_mps)
-        for (frame, T) in (("BARY", BARY), ("LSRD", LSRD), ("GALACTO", GALACTO))
+        for (frame, T) in (("BARY", BARY), ("LSRD", LSRD), ("GALACTO", GALACTO),
+                           ("LGROUP", LGROUP), ("CMB", CMB))
             got = measconvert(v, T; frame = fr)
             @test got.mps ≈ getproperty(ref.radialvelocity, Symbol(frame)) atol = 1e-3
         end

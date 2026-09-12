@@ -4311,3 +4311,27 @@ live bug, but a real one worth closing given it's the exact kind of
 "never-executed branch" risk this session's own discipline exists to
 catch. No production code changed. Standalone container suite green
 (290/290, all passing including the new test).
+
+### Phase 159 — found `LGROUP`/`CMB` velocity frames DO have a real `casatools` oracle after all (Phase 88 was wrong that none existed); added the cross-check
+
+Phase 88's own writeup said the `VEL_LGROUP`/`VEL_CMB` constants were
+"copied verbatim from `MeasTable.cc` (no `casatools` oracle for these
+two)" and left them self-round-trip-tested only. That assumption was
+never actually checked — `me.listcodes(me.frequency())` (real
+`casatools`) shows `LGROUP` and `CMB` ARE valid `me.measure(...)`
+target codes, exactly like every other frequency/radial-velocity frame
+this package already cross-checks. Live-verified directly: converting
+a 100 GHz TOPO frequency and a 20 km/s LSRK radial velocity to LGROUP
+and CMB via real `casatools` matches this package's `measconvert`
+output to the SAME precision as the already-verified BARY/LSRD/GALACTO
+frames (~7.8e-10 relative for frequency, sub-mm/s for radial velocity)
+— expected, since the LGROUP/CMB step in this package's implementation
+is a pure constant-vector addition on top of the BARY hub, introducing
+no new ephemeris error beyond what BARY already carries. Added both to
+the permanent CASA-oracle fixture (`test/measures_fixture.py`) and
+cross-check test (`test/measures_tests.jl`), using the identical
+tolerance buckets as the frames they're structurally identical to.
+No production code changed — the implementation was already correct;
+this closes a real "we never actually checked" gap in test coverage,
+not a live bug. Standalone measures suite green (490/490, was 486
+before the 4 new assertions).
