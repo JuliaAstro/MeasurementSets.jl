@@ -133,6 +133,16 @@ end
 
 # `_BitFlagsEngine_<dir>Mask` (UInt), unless `<dir>MaskKeys` names bits in
 # the stored column's `FLAGSETS` record -- then the mask is `⋃ FLAGSETS[k]`.
+#
+# Phase 156 fix: `BFEngineMask::makeMask` (`BitFlagsEngine.cc:70-86`) only
+# OR's in a key that's actually `isDefined` in `FLAGSETS` -- it silently
+# skips any requested key that isn't there (and ends up with mask `0`,
+# not an error, if NONE of the requested keys are present). This
+# package's own `fs[k]` (a `Record` index that `throw`s `KeyError` on a
+# missing key, `src/tables/record.jl:28-32`) previously crashed instead
+# of skipping -- a real, confirmed divergence for a `ReadMaskKeys`/
+# `WriteMaskKeys` entry not present in that particular table's
+# `FLAGSETS` (e.g. a table where only some flag categories are defined).
 function _bfe_mask(table::Table, kw::Record, storedname::AbstractString, dir::AbstractString)
     default = dir == "Read" ? typemax(UInt32) : UInt32(1)
     mask = UInt32(get(kw, "_BitFlagsEngine_$(dir)Mask", default))
@@ -141,7 +151,7 @@ function _bfe_mask(table::Table, kw::Record, storedname::AbstractString, dir::Ab
     isempty(ks) && return mask
     fs = get(columndesc(table, storedname).keywords, "FLAGSETS", nothing)
     fs isa Record || return mask
-    return reduce(|, UInt32(fs[k]) for k in ks; init = UInt32(0))
+    return reduce(|, (UInt32(fs[k]) for k in ks if haskey(fs, k)); init = UInt32(0))
 end
 
 function VirtualEngine(table::Table, kind::ScaledKind, vdesc::ColumnDesc,

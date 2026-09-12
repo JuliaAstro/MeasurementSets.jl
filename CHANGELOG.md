@@ -4203,3 +4203,43 @@ identity" without noting it's this package's own convention, not real
 casacore's. No production behaviour changed (comment/docstring fixes +
 one new permanent test); standalone measures suite green (486/486,
 including the new geodetic cross-check), query suite green (1008/1008).
+
+### Phase 156 — found and fixed a real bug: `BitFlagsEngine`'s `ReadMaskKeys`/`WriteMaskKeys` crashed instead of silently skipping a key missing from `FLAGSETS`
+
+Re-verified `mscal.stokes()`'s Ptotal/Plinear/Pangle/PFtotal/PFlinear
+formulas once more, this time against the actual VALUE-computation code
+in `StokesConverter::convert(Array<Complex>&, ...)` (not just the
+weight/flag setup code checked in Phase 122) — confirmed byte-for-byte
+match to the already-fixed implementation (`sqrt(|Q|²+|U|²+|V|²)` for
+Ptotal, `/abs(I)` for the PF* fraction forms, `atan2(Re(U),Re(Q))/2`
+for Pangle using real parts only) — no third bug, Phase 122's fix was
+complete. Also independently re-derived `AiryBeam`'s annular-aperture
+voltage response formula (`_airy_voltage`) against the standard
+Born & Wolf obstructed-aperture diffraction formula
+(`A(x) = [2J₁(x)/x − ε²·2J₁(εx)/(εx)] / (1−ε²)`) — an exact match,
+confirming what Phase 99 had only checked as "textbook optics, not
+cross-checked" — no bug.
+
+The real find: reading `BitFlagsEngine.cc`'s `BFEngineMask::makeMask`
+(the function that recomputes a `ReadMaskKeys`/`WriteMaskKeys`-based
+mask from the stored column's `FLAGSETS` record, Phase 40) shows it
+silently SKIPS any requested key not `isDefined` in `FLAGSETS` —
+`for (key : itsMaskKeys) if (rec.isDefined(key)) mask |= rec.asuInt(key);`
+— and ends up with `mask == 0` (not an error) if NONE of the requested
+keys are found. This package's own `_bfe_mask`
+(`src/datamanagers/virtual.jl`) instead did `reduce(|, UInt32(fs[k]) for
+k in ks; ...)` — a plain `Record` index (`fs[k]`) that `throw`s a
+`KeyError` for a missing key — so reading a `BitFlagsEngine` column
+whose `ReadMaskKeys`/`WriteMaskKeys` named even ONE flag category not
+present in that particular table's `FLAGSETS` would CRASH instead of
+just ignoring it, exactly the scenario real casacore handles
+gracefully (a table where only some flag categories are defined, or a
+`ReadMaskKeys` list that's broader than what one particular MS
+actually stamped). Fixed: `for k in ks if haskey(fs, k)` — skip an
+absent key instead of indexing it. Two new regression tests (a key
+partially missing → the found key(s) alone form the mask; every key
+missing → mask `0`, matching casacore's `uInt mask = 0;` default, read
+back as all-unset rather than raising), both cross-checked against real
+Casacore.jl (auto-registers `BitFlagsEngine<Int>`) and agreeing exactly
+with this package's own reader. Full standalone engine suite green
+(255/255, was 253 before the two new tests).
