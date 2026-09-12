@@ -309,7 +309,12 @@ MAIN table with `ANTENNA` / `FIELD` subtables): `mscal.ha1()` /
 `mscal.azel1()` (`[az, el]`), `mscal.az1()` / `el1()` (scalar),
 `mscal.pa1()` (parallactic angle), `mscal.last1()` (local apparent
 sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
-ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the `UVW` column in J2000),
+ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the baseline's `ANTENNA2 -
+ANTENNA1` uvw in J2000, recomputed fresh from the `ANTENNA` positions
+exactly like casacore's `getNewUVW`, **not** a transform of the stored
+`UVW` column; Phase 137 — a real MS's stored `UVW` usually follows the
+*opposite* `ANTENNA1 - ANTENNA2` convention, a genuine, longstanding
+casacore quirk, not a bug here),
 `mscal.delay()` (baseline geometric delay `ap1-ap2`, s), `mscal.delay1()`
 / `delay2()` (Phase 136 — that one antenna's delay relative to the array
 centre; genuinely different from the bare form, not implemented until

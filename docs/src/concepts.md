@@ -91,7 +91,10 @@ carries a `QuantumUnits` keyword; needs the Unitful extension),
 `Float64`). With `import SOFA`, **`mscal.*` derived-MS functions** —
 `mscal.ha1()` / `mscal.hadec1()` / `mscal.azel1()` / `mscal.az1()` /
 `mscal.el1()` / `mscal.pa1()` (parallactic angle) / `mscal.last1()`
-(local sidereal time) / `mscal.itrf()` / `mscal.uvw_j2000()` /
+(local sidereal time) / `mscal.itrf()` / `mscal.uvw_j2000()` (recomputed
+fresh from the antenna positions, `ANTENNA2 - ANTENNA1`, exactly like
+casacore's `getNewUVW` — not a rotation of the stored `UVW` column,
+which usually follows the opposite sign convention) /
 `mscal.delay()` / `mscal.delay1()` / `mscal.delay2()` (baseline delay vs.
 one antenna's delay relative to the array centre — defaults to
 `FIELD.DELAY_DIR`, not `PHASE_DIR`) / `mscal.riseset[1|2]([elev0][, dir])` (rise/set MJD for

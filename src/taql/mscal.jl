@@ -71,6 +71,27 @@ end
 
 _pvec(p) = (p.x, p.y, p.z)
 
+# Phase 137: `MVuvw`'s own baseline->uvw construction (casacore
+# `casa/Quanta/MVuvw.cc:83-91`) -- `xyz = R*pos` with `R =
+# RotMatrix(Euler(dir.lat-π/2, 1u, -dir.lon-π/2, 3u))` = `Rx(dir.lat-π/2)
+# · Rz(-dir.lon-π/2)`. Pure trig, no SOFA needed. This is genuinely
+# NOT the same rotation basis as `MCuvw::toPole`/`fromPole` (which use
+# `Ry(-π/2+lat)·Rz(-lon)`, axes 2,3 not 1,3) -- confirmed by direct
+# numeric comparison; `mscal.uvw_j2000()` (`MSCalEngine::getNewUVW`)
+# always uses THIS constructor fresh from antenna positions, never
+# `Muvw::Convert`/`MCuvw`.
+function _mvuvw_construct(pos::NTuple{3,Float64}, dir)
+    a = dir.lat - pi / 2
+    b = -dir.lon - pi / 2
+    ca, sa = cos(a), sin(a)
+    cb, sb = cos(b), sin(b)
+    # R = Rx(a) * Rz(b)
+    x, y, z = pos
+    (cb * x - sb * y,
+     ca * sb * x + ca * cb * y - sa * z,
+     sa * sb * x + sa * cb * y + ca * z)
+end
+
 # Phase 101/103: parse a `mscal.pbresponse` beam spec into an
 # `offset::(dlon,dlat) -> power::Float64` closure (a scalar circular
 # beam ignores the offset direction via `power_response`'s generic
@@ -154,7 +175,7 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     all(c -> c in cn, ("ANTENNA1", "FIELD_ID", "TIME")) || error(
         "mscal.* needs a MAIN table with ANTENNA1, FIELD_ID and TIME columns")
     bases = [first(_mscal_split_dir(f)) for f in fns]
-    need2 = any(f -> endswith(f, "2") || startswith(f, "delay") ||
+    need2 = any(f -> endswith(f, "2") || startswith(f, "delay") || f == "uvw_j2000" ||
                      startswith(f, "pbresponsebl:") || startswith(f, "riseset2:"), bases)
     (need2 && !("ANTENNA2" in cn)) && error(
         "mscal.* needs an ANTENNA2 column for a `*2` / delay function")
@@ -165,8 +186,6 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     fid = Int.(column(t, "FIELD_ID")[:])
     tsec = Float64.(column(t, "TIME")[:])
     epochs = measure(t, "TIME")                       # Vector{MEpoch}
-    need_uvw = "uvw_j2000" in fns
-    uvw = need_uvw ? column(t, "UVW")[:] : nothing
 
     ant = readtable(subs["ANTENNA"])
     antpos = measure(ant, "POSITION")                 # Vector{MPosition{ITRF}}
@@ -376,26 +395,47 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
             end
             out[_mscal_key(spec)] = v
         elseif f == "uvw_j2000"
-            # The ITRF->J2000 uvw transform is a linear map (pole rotation
-            # + baseline rotation, all rotations) that depends only on the
-            # frame -- i.e. on (antenna, field, TIME). Memo the 3x3 as its
-            # three result columns (one measconvert per basis vector per
-            # key) and apply it to each row's stored UVW.
-            umemo = Dict{Tuple{Int,Int,Float64},NTuple{3,NTuple{3,Float64}}}()
+            # Phase 137 fix (found while re-verifying `mscal.delay()` for
+            # Phase 136): real casacore's `mscal.uvw_j2000()`
+            # (`MSCalEngine::getNewUVW`) does NOT transform the stored
+            # UVW column at all -- it recomputes uvw fresh from the
+            # ANTENNA POSITIONS: rotate each antenna's ITRF baseline
+            # (from an arbitrary common origin -- casacore uses antenna
+            # 0) to J2000 via a pure `MBaseline` rotation, construct a
+            # per-antenna uvw via `MVuvw`'s OWN convention
+            # (`_mvuvw_construct`, NOT `MCuvw::toPole`/`fromPole` --
+            # genuinely different rotation bases, confirmed by direct
+            # numeric comparison against `casa/Quanta/{RotMatrix,
+            # MVuvw}.cc`), then differences `ant2 - ant1`. Both the
+            # `MBaseline` rotation and the `MVuvw` construction are
+            # linear in the baseline vector, so the common origin
+            # cancels in the difference and this collapses to one
+            # combined linear map (memoized per (field,TIME), like the
+            # old code's 3x3-matrix trick) applied directly to
+            # `antpos[a2]-antpos[a1]`. **Note**: this genuinely differs
+            # in SIGN from the *stored* UVW column's own convention on a
+            # real MS (confirmed on the sample fixture: stored UVW's `w`
+            # matches `dot(dir, ap1-ap2)`, i.e. ANTENNA1-ANTENNA2, while
+            # `getNewUVW` computes ANTENNA2-ANTENNA1) -- a real,
+            # longstanding casacore convention split between observed
+            # data and `NewMSSimulator`'s simulated output, not a bug on
+            # either side; `mscal.uvw_j2000()` matches `getNewUVW`
+            # exactly, as it must to agree with real casacore.
+            umemo = Dict{Tuple{Int,Float64},NTuple{3,NTuple{3,Float64}}}()
+            refpos = antpos[1]
             v = Vector{Vector{Float64}}(undef, n)
             for i in 1:n
-                cols3 = get!(umemo, (a1[i], fid[i], tsec[i])) do
+                cols3 = get!(umemo, (fid[i], tsec[i])) do
                     dj = _fielddir(fid[i], i)
-                    fr = MeasFrame(epoch = epochs[i],
-                                   position = antpos[a1[i] + 1], direction = dj)
+                    fr = MeasFrame(epoch = epochs[i], position = refpos, direction = dj)
                     map(((x, y, z),) -> begin
-                            w = measconvert(MuvW{ITRF}(x, y, z), J2000; frame = fr)
-                            (w.u, w.v, w.w)
+                            bj = measconvert(MBaseline{ITRF}(x, y, z), J2000; frame = fr)
+                            _mvuvw_construct(_pvec(bj), dj)
                         end,
                         ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
                 end
-                u = uvw[i]
-                v[i] = [cols3[1][k] * u[1] + cols3[2][k] * u[2] + cols3[3][k] * u[3]
+                d = _pvec(antpos[a2[i] + 1]) .- _pvec(antpos[a1[i] + 1])
+                v[i] = [cols3[1][k] * d[1] + cols3[2][k] * d[2] + cols3[3][k] * d[3]
                         for k in 1:3]
             end
             out[_mscal_key(spec)] = v

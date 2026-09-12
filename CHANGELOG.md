@@ -3476,3 +3476,63 @@ Fixed in `src/taql/functions.jl` (`_make_func`'s zero-arg delay-family
 default) and `src/taql/mscal.jl` (the new `delay1`/`delay2` branch,
 `_MSCAL_FUNCS`/`_MSCAL_DIR_FUNCS` entries, the `need2` condition). 17
 new tests in `test/taql_mscal_tests.jl` ("mscal.delay1()/delay2()").
+
+### Phase 137 — found `mscal.uvw_j2000()` computed the WRONG uvw entirely (antipodal, since Phase 79); fixed to match `getNewUVW` exactly
+
+While investigating `mscal.delay()` for Phase 136, read `MSCalEngine::
+getNewUVW` in full and found it does something completely different
+from what `mscal.uvw_j2000()` (Phase 79) had implemented since day
+one.
+
+**Real casacore recomputes uvw fresh from the antenna positions.**
+`getNewUVW` rotates each antenna's ITRF baseline to J2000 via a pure
+`MBaseline` rotation, then constructs the uvw via `MVuvw`'s OWN
+constructor (`casa/Quanta/MVuvw.cc:83-91`, `xyz = R·pos` with `R =
+Rx(dir.lat-π/2)·Rz(-dir.lon-π/2)`) — it never transforms the *stored*
+`UVW` column at all. This package's implementation did the opposite:
+rotate the stored `UVW` via `MCuvw`'s `toPole`/`fromPole` (Phase 75,
+`R = Ry(-π/2+lat)·Rz(-lon)`) — a genuinely different rotation basis
+from `MVuvw`'s own constructor. Confirmed by direct numeric comparison
+that these two matrices are related by `R_mvuvw = Rz(-π/2)·R_mcuvw` —
+not equal, not a simple transpose, a real structural difference.
+
+**Live comparison against the sample MS confirmed the consequence**:
+the old implementation's output was the *exact antipode* (all three
+components negated) of what `getNewUVW`'s real algorithm gives for the
+identical baseline and epoch. Tracing the root cause further: the
+sample MS's stored `UVW` column follows the `ANTENNA1-ANTENNA2` sign
+convention (confirmed directly — its `w` component exactly equals
+`dot(direction, ap1-ap2)`, matching `mscal.delay()`'s own
+already-verified formula), while `NewMSSimulator`'s own source
+(`ms/MSOper/NewMSSimulator.cc:1600,1625-1627`, an explicit code comment
+plus the actual `uvwvec(i) = x2[i]-x1[i]` assignment) computes and
+stores the opposite `ANTENNA2-ANTENNA1` convention. This is a real,
+longstanding split within casacore itself between real observed data
+and its own simulator's synthetic output — not a bug on either side of
+that split, and not something this port introduced.
+
+**The fix**: since `mscal.uvw_j2000()` must match what real casacore's
+`getNewUVW` actually computes to be correct — and `getNewUVW` always
+uses `ANTENNA2-ANTENNA1` via a fresh from-antenna-positions
+reconstruction, regardless of what convention the stored column
+happens to follow — the implementation now discards the stored `UVW`
+column entirely and recomputes it exactly the way casacore does. A new
+`_mvuvw_construct` helper (pure trigonometry, no `SOFA` call beyond the
+existing `MBaseline` rotation) ports `MVuvw`'s constructor directly.
+The antenna-0 baseline origin `getNewUVW` uses per-antenna cancels
+exactly in the final `ant2-ant1` difference by linearity (both the
+`MBaseline` rotation and `MVuvw`'s construction are linear maps), so
+the whole per-antenna two-step collapses to one combined linear map,
+memoized per `(field, TIME)` — the same memoization trick the old
+(buggy) implementation already used, just applied to the correct
+formula. `measconvert(::MuvW, ...)` itself (Phase 75's general uvw
+frame-conversion machinery) is untouched by this fix — the bug was
+specific to `mscal.uvw_j2000()` using the wrong algorithm for the job,
+not a defect in the general conversion function itself.
+
+8 new/updated tests in `test/taql_mscal_tests.jl`, including a
+dedicated regression test pinning the sign relationship between
+`mscal.uvw_j2000()`'s `w` component and `mscal.delay()`'s already-
+verified value, and a rewritten hand-computation in the main mscal
+testset matching `getNewUVW`'s exact algorithm instead of the old
+(wrong) stored-UVW-rotation approach.
