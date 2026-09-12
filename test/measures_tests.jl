@@ -113,6 +113,19 @@ end
         @test rem2pi(b.lon - d.lon, RoundNearest) ≈ 0 atol=3e-6
         @test b.lat ≈ d.lat atol=3e-6
     end
+    # AZELSW/AZELSWGEO (Phase 160): azimuth = AZEL/AZELGEO's own azimuth
+    # + 180°, elevation unchanged; round-trips, and matches the AZEL/
+    # AZELGEO relationship directly (not just self-consistency)
+    for (SW, PLAIN) in ((AZELSW, AZEL), (AZELSWGEO, AZELGEO))
+        m = measconvert(d, SW; frame = fr)
+        @test m isa MDirection{SW}
+        p = measconvert(d, PLAIN; frame = fr)
+        @test rem2pi(m.lon - p.lon - pi, RoundNearest) ≈ 0 atol = 1e-9
+        @test m.lat ≈ p.lat atol = 1e-9
+        b = measconvert(m, J2000; frame = fr)
+        @test rem2pi(b.lon - d.lon, RoundNearest) ≈ 0 atol = 3e-6
+        @test b.lat ≈ d.lat atol = 3e-6
+    end
 end
 
 @testset "measures — frequency conversions (SOFA)" begin
@@ -386,6 +399,14 @@ end
 
     @test MSv2._frame_type(:direction, "SUN") === SUN
     @test MSv2._frame_type(:direction, "PLUTO") <: MSv2.OtherRef   # still parses
+    # Phase 160: AZELSW/AZELSWGEO were previously unrecognised (fell
+    # back to OtherRef) -- AZELNE/AZELNEGEO are real casacore *aliases*
+    # of AZEL/AZELGEO (`MDirection.h`'s own enum), so those two stay
+    # mapped to the same types; AZELSW/AZELSWGEO are genuinely distinct.
+    @test MSv2._frame_type(:direction, "AZELSW") === AZELSW
+    @test MSv2._frame_type(:direction, "AZELSWGEO") === AZELSWGEO
+    @test MSv2._frame_type(:direction, "AZELNE") === AZEL
+    @test MSv2._frame_type(:direction, "AZELNEGEO") === AZELGEO
 
     # convert (SOFA)
     fr = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
@@ -550,10 +571,18 @@ if _HAVE_MEAS_CASA
         end
 
         # direction (arcsec tolerance; APP/AZEL depend on EOP)
+        # Phase 160: AZELSW/AZELSWGEO added -- a genuinely distinct
+        # casacore enum value (not an alias like AZELNE/AZELNEGEO,
+        # confirmed in `MDirection.h`'s own enum), a "south through
+        # west" azimuth convention = AZEL/AZELGEO's own azimuth + 180°
+        # (`MeasMath::applyAZELtoAZELSW` negates the direction's
+        # Cartesian x/y). Was previously entirely unsupported by this
+        # package (`_frame_type` fell back to `OtherRef{:AZELSW}`).
         d = MDirection{J2000}(ref.src_ra, ref.src_dec)
         as = MSv2.ARCSEC
         for (frame, T) in (("B1950", B1950), ("GALACTIC", GALACTIC),
                            ("APP", APP), ("AZEL", AZEL), ("AZELGEO", AZELGEO),
+                           ("AZELSW", AZELSW), ("AZELSWGEO", AZELSWGEO),
                            ("HADEC", HADEC))
             got = measconvert(d, T; frame = fr)
             want = getproperty(ref.direction, Symbol(frame))

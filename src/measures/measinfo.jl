@@ -25,6 +25,14 @@ const _DIRECTION_FRAMES = Dict{String,DataType}(
     "HADEC" => HADEC,
     "AZEL" => AZEL, "AZELNE" => AZEL,
     "AZELGEO" => AZELGEO, "AZELNEGEO" => AZELGEO,
+    # AZELSW/AZELSWGEO are genuinely DISTINCT casacore enum values (not
+    # aliases like AZELNE/AZELNEGEO -- confirmed in `MDirection.h`'s own
+    # enum: `AZELNE=AZEL, AZELNEGEO=AZELGEO`, but `AZELSW`/`AZELSWGEO`
+    # are separate slots), a "south through west" azimuth-origin
+    # convention -- `MeasMath::applyAZELtoAZELSW` negates the Cartesian
+    # x/y of the direction (== azimuth + 180°, elevation unchanged),
+    # implemented in `ext/SOFAExt.jl`.
+    "AZELSW" => AZELSW, "AZELSWGEO" => AZELSWGEO,
     "ITRF" => ITRF, "TOPO" => TOPO,
     # solar-system bodies (casacore MDirection::Types codes >= 32)
     "MERCURY" => MERCURY, "VENUS" => VENUS, "MARS" => MARS,
@@ -169,7 +177,8 @@ const _FRAME_STRING = Dict{DataType,String}(
     UTC => "UTC", TAI => "TAI", TT => "TT", TDB => "TDB", UT1 => "UT1",
     J2000 => "J2000", ICRS => "ICRS", B1950 => "B1950", APP => "APP",
     GALACTIC => "GALACTIC", ECLIPTIC => "ECLIPTIC", HADEC => "HADEC",
-    AZEL => "AZEL", AZELGEO => "AZELGEO", ITRF => "ITRF", WGS84 => "WGS84",
+    AZEL => "AZEL", AZELGEO => "AZELGEO",
+    AZELSW => "AZELSW", AZELSWGEO => "AZELSWGEO", ITRF => "ITRF", WGS84 => "WGS84",
     TOPO => "TOPO", REST => "REST", LSRK => "LSRK", LSRD => "LSRD",
     BARY => "BARY", GEO => "GEO", GALACTO => "GALACTO",
     LGROUP => "LGROUP", CMB => "CMB",

@@ -239,7 +239,8 @@ measconvert(measure(main, "UVW", 1), J2000; frame = fr)   # uvw needs frame.dire
 
 - **Epoch**: `UTC` / `TAI` / `TT` / `TDB` / `UT1`.
 - **Direction**: `J2000` / `ICRS` / `B1950` / `APP` / `GALACTIC` /
-  `ECLIPTIC` / `AZEL` / `AZELGEO` / `HADEC` / `ITRF`.
+  `ECLIPTIC` / `AZEL` / `AZELGEO` / `AZELSW` / `AZELSWGEO` / `HADEC` /
+  `ITRF`.
 - **Frequency** and **radial velocity**: `TOPO` / `GEO` / `BARY` /
   `LSRK` / `LSRD` / `GALACTO` / `LGROUP` (Local Group, ~308 km/s) /
   `CMB` (CMB dipole, ~369.5 km/s).

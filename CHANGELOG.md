@@ -4335,3 +4335,55 @@ No production code changed — the implementation was already correct;
 this closes a real "we never actually checked" gap in test coverage,
 not a live bug. Standalone measures suite green (490/490, was 486
 before the 4 new assertions).
+
+### Phase 160 — found and fixed a real gap: `AZELSW`/`AZELSWGEO` direction frames were entirely unsupported (silently fell back to `OtherRef`)
+
+Continuing Phase 159's methodology (question an unverified assumption
+by actually calling `me.listcodes()`), ran it across every measure
+kind: `me.listcodes(me.direction())`, `.position()`, `.epoch()`,
+`.doppler()`, `.radialvelocity()`, `.earthmagnetic()`, `.baseline()`,
+`.uvw()`. All match this package's existing frame coverage exactly —
+**except** direction/baseline/uvw's code list includes `AZELSW` and
+`AZELSWGEO` alongside the already-supported `AZEL`/`AZELGEO`/`AZELNE`/
+`AZELNEGEO`.
+
+Read `MDirection.h`'s own enum directly: `AZELNE=AZEL` and
+`AZELNEGEO=AZELGEO` are literal C++ enum ALIASES (same integer value —
+this package's existing `"AZELNE" => AZEL` mapping was already exactly
+right), but `AZELSW`/`AZELSWGEO` are separate, DISTINCT enum slots — a
+genuinely different "azimuth measured south-through-west" convention
+(vs. `AZEL`'s north-through-east), used by some older telescope
+control systems. This package's `_DIRECTION_FRAMES` string→type map
+(`src/measures/measinfo.jl`) had no entry for either name at all, so a
+column or `measconvert` call naming `AZELSW`/`AZELSWGEO` would silently
+resolve to `OtherRef{:AZELSW}` (an unconvertible frame) instead of
+actually converting — note `_DIRECTION_ENUM` (the 0-based numeric-code
+fallback table, used for a bare `VarRefCol` integer code) already had
+both names in the right enum positions from the start, so only the
+*named*-frame lookup path was affected.
+
+Read `MCDirection.cc`'s `AZEL_AZELSW`/`AZELSW_AZEL` routes: both go
+through `MeasMath::applyAZELtoAZELSW`, which simply negates the
+direction's Cartesian x/y (z, i.e. elevation, unchanged) — equivalent
+to `azimuth += 180°` — and is its own inverse. Implemented as a thin
+wrapper around the existing `AZEL`/`AZELGEO` conversion machinery
+(`ext/SOFAExt.jl`): `AZELSW`/`AZELSWGEO` flip the azimuth by π on the
+way in and out, reusing every other conversion path unchanged. Added
+the two new `RefFrame` singleton types, wired them into
+`_DIRECTION_FRAMES`, `_FRAME_STRING` (write path), and `_OBS_FRAMES`
+(the solar-system-body topocentric-parallax dispatch list, since
+`AZELSW`/`AZELSWGEO` are observer frames exactly like `AZEL`/`AZELGEO`).
+
+Live-verified directly against real `casatools`: for a fixed J2000
+direction and frame, `me.measure(d, 'azelsw')`/`'azelswgeo'` match this
+package's `measconvert` output to the same ~7×10⁻⁷ rad residual already
+established for plain `AZEL`/`AZELGEO` (the standard SOFA-vs-casacore
+ephemeris/EOP difference) — confirming both the azimuth-flip relation
+and the underlying `AZEL`/`AZELGEO` machinery it reuses. Added a
+self-consistency unit test (the exact `azimuth = AZEL's azimuth + π`
+relationship, plus round-trip) and extended the permanent CASA-oracle
+fixture + cross-check test with both frames. `docs/src/api-measures.md`
+gains the two new exported names (keeps the `checkdocs = :exported`
+docs build clean). Standalone measures suite green (508/508, was 490
+before the 18 new assertions); standalone query suite unaffected
+(1008/1008, unchanged).
