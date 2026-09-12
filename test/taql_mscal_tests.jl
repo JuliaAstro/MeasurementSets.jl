@@ -717,6 +717,12 @@ end
     @test MSv2._parse_chan_elem("0~63^4") == (:idx, 0, 63, 4)
     @test MSv2._parse_chan_elem("8.0~8.05GHz")[1] === :freq
     @test_throws ArgumentError MSv2._parse_chan_elem("5~20foo")
+    # Phase 151: THz unit (MSSpwGram.ll's TERA prefix; MSSpwIndex::
+    # convertToMKS uses factor 1e12 for 't', matching `_CHAN_FREQ_UNIT`)
+    @test MSv2._parse_chan_elem("1~2THz") == (:freq, 1e12, 2e12)
+    let (kind, flo, fhi) = MSv2._parse_chan_elem("0.0079~0.0081thz")
+        @test kind === :freq && flo ≈ 7.9e9 && fhi ≈ 8.1e9
+    end
 
     # mscal.spw with a :chan part -- the sample has one spw (64 chan)
     @test nrow(query(main, "mscal.spw('0:5~20')")) == N          # nonempty -> all rows
@@ -724,6 +730,8 @@ end
     @test nrow(query(main, "mscal.spw('1:0~10')")) == 0          # no such spw
     @test nrow(query(main, "mscal.spw('0:8.0~8.05GHz')")) == N   # freq in band
     @test nrow(query(main, "mscal.spw('0:20~30GHz')")) == 0      # freq above band
+    # THz spanning the same 7.9-8.1 GHz window -> identical result to GHz
+    @test nrow(query(main, "mscal.spw('0:0.0079~0.0081thz')")) == N
 
     # mscal.chan -> a per-row BitVector
     q = query(main, "any(mscal.chan('0:5~20'))"; select = ["m" => "mscal.chan('0:5~20')"])
@@ -1396,7 +1404,8 @@ if _HAVE_TAQL
                            ("uvdist", "10~100klambda"), ("uvdist", ">1km"),
                            ("spw", "0:5~20"), ("corr", "RR"), ("feed", "0"),
                            ("baseline", "0 &&&"), ("baseline", "0 && 1"),
-                           ("baseline", "<1000m"), ("baseline", "0~1000m")]
+                           ("baseline", "<1000m"), ("baseline", "0~1000m"),
+                           ("spw", "0:0.0079~0.0081thz")]   # Phase 151: THz unit
             rdir = joinpath(mktempdir(), "sel")
             ok = try
                 _taqlcmd("SELECT FROM \$1 WHERE mscal.$fn('$spec') GIVING '$rdir'",

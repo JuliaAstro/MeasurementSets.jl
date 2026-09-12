@@ -1562,7 +1562,7 @@ end
 #   a          a single 0-based channel index
 #   a~b        an inclusive channel-index range
 #   a~b^s      ... with a step
-#   f1~f2GHz   a CHAN_FREQ range (Hz / kHz / MHz / GHz)
+#   f1~f2GHz   a CHAN_FREQ range (Hz / kHz / MHz / GHz / THz)
 #   <f / >f    a CHAN_FREQ bound
 #
 # `mscal.spw` returns a per-row `Bool`: the row's spw matches an item
@@ -1570,6 +1570,20 @@ end
 # channels is selected.  `mscal.chan` returns a per-row `BitVector`
 # (length = the spw's channel count) -- the OR of the matching items'
 # channel masks (a full mask for an item with no channel list).
+#
+# Phase 151 finding: read `ms/MSSel/MSSpwGram.{ll,yy}` +
+# `MSSpwIndex::convertToMKS` directly. The unit-to-MKS factors there
+# (`k`→1e3, `m`→1e6, `g`→1e9, `t`→1e12, keyed off the lowercased
+# unit's first letter) match this dict exactly for `hz`/`khz`/`mhz`/
+# `ghz` -- confirmed no bug -- but the grammar ALSO lexes `t<hz>` (THz,
+# `MSSpwGram.ll:58`'s `TERA` prefix) and this package was missing it, a
+# real small gap, now added. Separately: `MSSpwGram.yy:117-127` shows
+# real casacore's own *velocity*-unit channel selection
+# (`{km,m}/s` grammar in `MSSpwGram.ll:57`) unconditionally `throw`s
+# ("Velocity units support temporarily disabled") the moment the
+# parser reduces one -- so this package's own long-standing "velocity
+# units on a chan range" non-goal isn't a divergence from upstream at
+# all, real casacore doesn't support it either.
 
 struct _SpwItem
     spws::Set{Int}
@@ -1578,7 +1592,7 @@ end
 
 _spw_has_chan(spec::AbstractString) = occursin(':', spec)
 
-const _CHAN_FREQ_UNIT = Dict("hz" => 1.0, "khz" => 1e3, "mhz" => 1e6, "ghz" => 1e9)
+const _CHAN_FREQ_UNIT = Dict("hz" => 1.0, "khz" => 1e3, "mhz" => 1e6, "ghz" => 1e9, "thz" => 1e12)
 
 function _parse_chan_elem(s::AbstractString)
     s = strip(s)

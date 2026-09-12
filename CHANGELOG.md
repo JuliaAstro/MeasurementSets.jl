@@ -3931,3 +3931,131 @@ Continuing the sweep discipline, three leads investigated this phase:
 
 No production behaviour changed; full mscal suite green (521/521,
 standalone, unchanged).
+
+### Phase 149 — found and fixed a real bug: `update!`'s `SET` list evaluated every item against one pre-update snapshot instead of applying items in order (real casacore does NOT swap `SET A=B, B=A`)
+
+Investigated real casacore's `TableParseUpdate`/`doUpdate` after the
+Phase 30 plan's own claim that "all RHS are evaluated against the
+pre-update values (so `SET A = B, B = A` swaps)" had never actually
+been checked against real TaQL. It's wrong: reading
+`TableParseQuery::doUpdate` (`tables/TaQL/TableParseQuery.cc:575-614`)
+shows the real loop is row-outer, SET-item-inner —
+`for (row) { for (item) { item->updateColumn(...) } }` — and each
+`updateColumn` writes straight to the live, writable table column. Live-
+verified: `UPDATE t SET A = B, B = A` does **not** swap in real casacore
+— `A` takes `B`'s old value first, then `B`'s own item reads that
+*already-updated* `A`, so both columns end up equal to the old `B`.
+
+This package's `update!` computed every SET item's RHS from one shared,
+frozen `cols` snapshot loaded before any writes — genuine "swap"
+semantics, a real, confirmed divergence for any `SET` list where one
+item's RHS references a column an earlier item in the same call also
+targets (the classic swap idiom, but also any multi-column `SET` in
+general once a later item happens to reference an earlier target).
+
+Fixed in `src/taql/commands.jl`: `update!` now applies `specs` in their
+literal given order (dropped the previous "group by target column"
+step), and after every write — whole-column, per-row, sliced, or
+masked — immediately reflects the new value back into the live `cols`
+dict (and, for a sliced/masked write's full-precision continuation, a
+new `curval` cache) so a later item genuinely observes an earlier one's
+write, matching casacore exactly. Required materialising a SET target
+column into an owned, `Any`-typed `Vector` (previously an array-eltype
+column could be a lazy, non-`setindex!`-able `Column` view — safe since
+only actual write targets are touched, not every referenced column).
+The `(D, M) => ...` masked-array sugar (Phase 59) needed its own fix in
+tandem: its expansion now pushes the **mask** entry before the **data**
+entry, since the mask always re-evaluates the RHS expression from
+scratch and must see the pre-update data, not the data entry's own
+just-written result.
+
+Docstring updated to state the real (non-swap) semantics; the existing
+hand-computed swap test corrected to the real expected values, and a
+same-string real-TaQL cross-check for `SET A = B, B = A` added (passes).
+Full suite green: commands 241/241, broad query/groupby/join 867/867,
+writer+edit+schema 219/219, mscal 521/521 (all standalone, no
+regressions).
+
+### Phase 150 — verified `mscal.stokes()`'s hardcoded conversion matrices are byte-exact against casacore's own construction (no bug)
+
+Swept the six hardcoded 4×4 IQUV/circular/linear conversion matrices
+(`_M_LIN_FROM_IQUV`, `_M_IQUV_FROM_LIN`, `_M_CIRC_FROM_IQUV`,
+`_M_IQUV_FROM_CIRC`, and the composed `lin↔circ` pair) that
+`mscal.stokes()`'s `_STOKES_BASE` (Phase 78) has relied on since it was
+written — the Phase 78 plan asserted these are "standard" without ever
+independently re-deriving them from casacore's own construction.
+
+Read `ms/MeasurementSets/StokesConverter.cc::initConvMatrix` directly:
+casacore builds its IQUV→linear matrix from a literal `Slin[4][4]`, and
+IQUV→circular as `Scirc = kron(h, conj(h)) · Slinear` where
+`h = (1/√2)·[[1,i],[1,-i]]` (a Kronecker product via `directProduct`,
+whose exact operand order — `kron(A,B)` vs `kron(B,A)` — isn't stated
+in the header and had to be resolved empirically). Independently
+computed `Slin` and both candidate Kronecker orderings in a scratch
+Julia session (not the package under test) and compared:
+
+- `_M_LIN_FROM_IQUV` matches casacore's literal `Slin` array exactly,
+  element for element.
+- `kron(h, conj(h)) · Slinear` (the correct operand order, confirmed by
+  matching) is byte-identical to `_M_CIRC_FROM_IQUV`.
+- `_M_IQUV_FROM_CIRC` / `_M_IQUV_FROM_LIN` are exactly `inv(Mcirc)` /
+  `inv(Mlin)` computed independently.
+- The two composed matrices (`_m4mul(_M_CIRC_FROM_IQUV,
+  _M_IQUV_FROM_LIN)` for `lin→circ`, and the mirror for `circ→lin`)
+  match casacore's own `tmp = Scirc; tmp *= Slinear.inverse()` /
+  `tmp = Slinear; tmp *= Scirc.inverse()` composition order exactly —
+  confirmed the `(from, to)` key convention in `_STOKES_BASE`'s own
+  comment (`to_vec = M * from_vec`) lines up with which matrix is
+  multiplied by which inverse.
+
+Also confirmed, while re-reading `RefTable::root()`/`BaseTable::root()`
+for a different question (whether `write_reftable`'s Phase 132
+`_flatten_to_root` should also flatten through a `ConcatTable` parent):
+`ConcatTable` does not override `root()`, so real casacore's own
+`RefTable` constructor (`btp->root()`) stops at a `ConcatTable` parent
+exactly like this package's `_flatten_to_root` already does (only
+`RefTable` parents recurse) — confirmed correct, no change needed.
+
+Every one of the six Stokes matrices this package hardcodes is a
+genuine, byte-exact match to real casacore's derivation — no bug
+found. This is a stronger result than Phase 78's original "standard,
+can be verified independently" claim, which was never actually checked
+against the source until now. No production code changed. Standalone
+mscal suite green (521/521, unchanged).
+
+### Phase 151 — found a real small gap in `mscal.spw`'s channel-frequency units (missing THz); confirmed real casacore's own velocity-unit channel selection is disabled too
+
+Investigated whether `ms.msselect()` (real casacore's MSSelection C++
+library exposed via `casatools`, called directly rather than through
+the crash-prone `derivedmscal`/TaQL `UDFMSCal` wrapper — Phase 147's
+segfault hazard) could safely give a live oracle for `mscal.scan`/
+`array`/`obs`'s GE/LE grammar forms, since those functions can never be
+called via `tableCommand` at all. Confirmed `msselectedindices()`'s
+`'scan'` key returns the *interpreted range bounds* of the spec, not
+the actual matched row/scan values against the table's data — an
+unreliable oracle for this purpose, not pursued further (no working
+independent test path found for `mscal.scan`/`array`/`obs`/`state`'s
+GE/LE forms in this environment).
+
+Redirected to `mscal.spw`'s channel-frequency-range unit table
+(`_CHAN_FREQ_UNIT`, Phase 83), which had never been checked against
+casacore's own unit grammar. Read `ms/MSSel/MSSpwGram.{ll,yy}` and
+`MSSpwIndex::convertToMKS` directly: the MKS conversion factors there
+(`k`→1e3, `m`→1e6, `g`→1e9, `t`→1e12) match this package's
+`hz`/`khz`/`mhz`/`ghz` exactly — no bug — but real casacore's grammar
+also lexes a `t<hz>` (THz) prefix that this package was missing, a
+real small gap, now fixed (`_CHAN_FREQ_UNIT["thz"] = 1e12`). Separately
+confirmed something reassuring while reading the same grammar: real
+casacore's own *velocity*-unit (`km/s`, `m/s`) channel selection
+unconditionally `throw`s ("Velocity units support temporarily
+disabled") the moment the parser reduces one — this package's own
+long-standing "velocity units on a chan range" non-goal was never
+actually a divergence from upstream, since upstream doesn't support it
+either.
+
+New unit tests for `_parse_chan_elem`'s THz form, a `mscal.spw`/
+`mscal.chan` query test confirming a THz-unit range spanning the same
+window as an existing GHz test gives an identical result, and a new
+entry in the real-TaQL cross-check list (`mscal.spw('0:0.0079~0.0081thz')`,
+matching the 7.9–8.1 GHz window of an existing GHz spec) — passes.
+Standalone mscal suite green (666/666).
