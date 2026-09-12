@@ -650,6 +650,13 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         end
         fn in _MSCAL_FUNCS || throw(ArgumentError(
             "TaQL-lite: unknown mscal function \"$name\" in \"$src\""))
+        # Phase 136: casacore's own `mscal.delay[1|2]()` defaults to
+        # FIELD.DELAY_DIR, not PHASE_DIR (`UDFMSCal::UDFMSCal(ColType,Int)`
+        # calls `itsEngine.setDirColName("DELAY_DIR")` specifically for
+        # the DELAY type -- every other direction function defaults to
+        # PHASE_DIR via `MSCalEngine`'s own field initializer). An
+        # explicit direction argument still overrides it, as for ha/azel/…
+        n == 0 && startswith(fn, "delay") && return TQLMScal(fn, "DELAY_DIR")
         n == 0 && return TQLMScal(fn)
         (n == 1 && fn in _MSCAL_DIR_FUNCS) || throw(ArgumentError(
             "TaQL-lite: $name() takes no arguments" *

@@ -3346,3 +3346,133 @@ directly).
 5 new tests in `test/edit_tests.jl` ("edit — clear errors for
 unsupported row/column ops"). 266 tests standalone, all green. No
 behaviour change beyond the error message quality.
+
+### Phase 134 — verified `MCuvw`'s pole-rotation matrix + the AZEL/AZELGEO latitude choice against casacore source
+
+Investigated two formulas flagged (but not fully closed) by earlier
+phases as the riskiest un-cross-checked ports.
+
+**`MCuvw::toPole`/`fromPole`'s pole-rotation matrix** — Phase 75's own
+risk note called this "the one thing not fully nailed by the
+exploration," verified only by a round-trip test and a hand-derived
+origin case, not an independent source re-derivation. Read
+`RotMatrix::RotMatrix(const Euler&)` and `RotMatrix::applySingle`
+(`casa/Quanta/RotMatrix.cc`) directly: `applySingle(angle, which=2)`
+builds the standard `R_y(angle) = [[c,0,s],[0,1,0],[-s,0,c]]`, `which=3`
+builds `R_z(angle) = [[c,-s,0],[s,c,0],[0,0,1]]`, and the two-angle
+constructor (confirmed `operator*=` is `this = this * other` by reading
+its loop body directly) computes `R = R_y(a) · R_z(b)`. With `a =
+-π/2+lat, b = -lon` — `MCuvw`'s actual call — this matches
+`ext/SOFAExt.jl`'s existing `_uvw_pole_R` **exactly**, element for
+element. Phase 75's construction was already correct; this closes the
+documented uncertainty with a real source-derivation instead of only a
+round-trip tautology. Added a permanent regression test
+(`test/measures_tests.jl`, "MBaseline / MuvW") that builds `R_y`/`R_z`
+from scratch inline (not copied from the file under test) and compares
+to `_uvw_pole_R` over a lon/lat sweep.
+
+**AZEL vs AZELGEO's latitude choice** — read `MeasMath::
+applyHADECtoAZEL`/`applyHADECtoAZELGEO` (`measures/Measures/
+MeasMath.cc`) down to `MCFrame::getLat`/`getLatGeo` (`measures/
+Measures/MCFrame.cc`) and confirmed the *only* difference between the
+two conversions is `getLat` (geocentric spherical latitude of the ITRF
+Cartesian position, `asin(z/r)`) vs `getLatGeo` (true WGS84 geodetic
+latitude via `MPosition::Convert(..., WGS84)`). `ext/SOFAExt.jl`'s
+`_frame_site(frame; geodetic)` already implements exactly this split
+(`geodetic=false` → `asin(clamp(z/r,...))`; `geodetic=true` →
+`SOFA.gc2gd`), selected via `geodetic = A !== AZEL` at both call sites
+— matches casacore exactly. No bug found, no code change needed here.
+
+No production code changed — test-only addition (9 new assertions). A
+third candidate, the pseudo-Stokes `Ptotal`/`Plinear` formulas fixed in
+Phase 122, was also re-checked against the current source and
+confirmed still correct.
+
+### Phase 135 — found a real limitation in casacore's own `MVDirection::shiftAngle`; confirmed `ephemeris_direction`/`_slerp_lonlat` are correct (and, in one case, better)
+
+Swept two more ephemeris-related formulas from Phase 82/93 against
+casacore source, neither previously cross-checked against a live
+oracle.
+
+**`MeasComet::get`'s position interpolation** (used by
+`ephemeris_direction`/`ephemeris_distance`/`ephemeris_radvel`). Read
+`MeasComet::get`/`getRelPosition`/`fillMeas`
+(`measures/Measures/MeasComet.cc`) directly: casacore converts each
+bracketing row's `(Rho, RA, Dec)` to a Cartesian `MVPosition` first,
+then does a **plain linear interpolation of the Cartesian vector**
+(`p0 + f·(p1−p0)`) — not a separate radial/angular interpolation.
+Confirmed this package's `ephemeris_direction`/`_ephem_bracket` do
+exactly the same thing, including matching `fillMeas`'s bracket-index
+arithmetic (`ut = floor((mjd−mjd0)/dmjd) − 1`) and its choice to
+compute the interpolation fraction from the bracket row's *actual*
+stored MJD value, not the nominal `mjd0 + ut·dmjd`. No bug found.
+
+**`MeasComet::getDisk`'s sub-observer-point interpolation** (used by
+`ephemeris_diskpos`/`_slerp_lonlat`) — this one turned up a real,
+previously undocumented divergence. `_slerp_lonlat`'s own comment
+claimed to be "equivalent to casacore's `separation` + `positionAngle`
++ `shiftAngle`"; a direct, independent numeric comparison against a
+from-scratch port of those three functions (`casa/Quanta/
+MVDirection.cc`) found they agree for a realistic small angular
+separation but genuinely diverge (by over a radian at the interpolation
+midpoint, not floating-point noise) for a 172°-separated pair. Tracing
+it down: `MVDirection::shiftAngle`'s own longitude update is `nlng =
+asin(sin(off)·sin(pa) / cos(nlat))` — an `asin`, where the exact
+spherical "direct problem" needs an `atan2` — so casacore's own
+function is only valid while the shift stays within about a quarter
+circle of the start point, and silently returns an aliased longitude
+beyond that. This isn't hypothetical for `DiskLong`: a fast-rotating
+body (e.g. Jupiter, ~10 h rotation) sampled at typical ephemeris
+cadence can genuinely have its sub-observer longitude shift by more
+than 90° between two adjacent table rows. `_slerp_lonlat` computes the
+true great-circle interpolation directly (SLERP on the unit vectors),
+so it's unaffected — a deliberate, now-documented case where this
+package is *more* correct than a literal port would be, not a bug to
+fix. Rewrote the comment above `_slerp_lonlat` to state this precisely
+instead of the previous (only-approximately-true) "equivalent" claim.
+
+No production code behaviour changed (comment-only in
+`src/measures/ephemeris.jl`). New tests in `test/measures_tests.jl`
+("`_slerp_lonlat` vs casacore shiftAngle") pin both halves: agreement
+for a small, ephemeris-realistic separation, and the large-separation
+divergence together with a check that `_slerp_lonlat` still lands
+exactly on the correct fractional great-circle arc length.
+
+### Phase 136 — found `mscal.delay1()`/`delay2()` entirely missing, and a real `mscal.delay*()` direction-default bug, while re-verifying `MSCalEngine::getDelay` against source
+
+Re-verified `mscal.delay()` (Phase 77) against
+`derivedmscal/DerivedMC/MSCalEngine.cc`'s actual `getDelay` and
+`UDFMSCal.cc`'s function-name registration, and found two real gaps.
+
+**`mscal.delay1()`/`mscal.delay2()` didn't exist at all.** casacore
+registers three delay UDFs (`makeDelay`/`makeDelay1`/`makeDelay2` →
+`UDFMSCal(DELAY, -1/0/1)`), exactly parallel to the `ha`/`ha1`/`ha2`
+family — but only the bare `mscal.delay()` had been implemented. Read
+`getDelay(antnr)` directly: `antnr == 0` returns `d1/c` (one antenna's
+delay relative to the **array centre**), `antnr == 1` returns `d2/c`
+(the other antenna's), and the "else" branch (the bare form) returns
+`(d1-d2)/c` — which algebraically simplifies to `dot(itrf, ap1-ap2)/c`
+since the centre cancels, confirming the existing bare-form
+implementation was already correct, but `delay1`/`delay2` genuinely
+compute a *different* per-antenna quantity, not either half of that
+difference. Implemented both, reusing the Phase 90 array-centre
+(`OBSERVATION.TELESCOPE_NAME` → the bundled Observatories table, else
+antenna 0).
+
+**The whole delay family defaults to the wrong FIELD direction
+column.** `UDFMSCal::UDFMSCal(ColType, Int)` calls `itsEngine.
+setDirColName("DELAY_DIR")` specifically for `DELAY`-type functions —
+every other direction function (`ha`/`azel`/`itrf`/…) defaults to
+`PHASE_DIR` via `MSCalEngine`'s own field initializer. This package's
+`mscal.delay()` was defaulting to `PHASE_DIR` like everything else, a
+genuine divergence from casacore's documented and source-confirmed
+behaviour (an explicit direction argument still overrides it, as
+before). Not observable on the committed `sample.ms` fixture — its
+`DELAY_DIR` happens to equal its `PHASE_DIR`, as is typical for a real
+MS — so the fix is verified with a synthetic patch giving `DELAY_DIR`
+a genuinely different value and confirming `mscal.delay()` tracks it.
+
+Fixed in `src/taql/functions.jl` (`_make_func`'s zero-arg delay-family
+default) and `src/taql/mscal.jl` (the new `delay1`/`delay2` branch,
+`_MSCAL_FUNCS`/`_MSCAL_DIR_FUNCS` entries, the `need2` condition). 17
+new tests in `test/taql_mscal_tests.jl` ("mscal.delay1()/delay2()").

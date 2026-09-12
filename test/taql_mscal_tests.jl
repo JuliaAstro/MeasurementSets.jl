@@ -4,7 +4,7 @@ import SOFA
 import Statistics
 import Dates
 using MeasurementSets: measure, measconvert, MeasFrame, MDirection, MuvW, J2000,
-    AZEL, AZELGEO, HADEC, ITRF
+    AZEL, AZELGEO, HADEC, ITRF, observatory
 
 @testset "TaQL-lite parser — mscal unit" begin
     p(s) = MSv2._taqllite_parse(s, Set(["A"]))
@@ -134,6 +134,68 @@ end
         @test abs(column(qc, "ha")[i] - column(qc, "ha1")[i]) < deg2rad(0.1)
         @test length(column(qc, "el")[i]) == 2
     end
+end
+
+@testset "TaQL-lite — mscal.delay1()/delay2() (Phase 136)" begin
+    # Found missing entirely while re-verifying `MSCalEngine::getDelay`
+    # against source: casacore has THREE delay UDFs (`delay`/`delay1`/
+    # `delay2`), only the bare form existed here. `delay1`/`delay2` are
+    # ONE antenna's delay relative to the array centre -- not
+    # `ap1`/`ap2` alone -- and the whole delay family defaults its
+    # direction to FIELD.DELAY_DIR, not PHASE_DIR (confirmed via
+    # `UDFMSCal::UDFMSCal(ColType,Int)` calling `setDirColName
+    # ("DELAY_DIR")`).
+    main = readtable(SAMPLE_MS)
+    ms = MeasurementSet(SAMPLE_MS)
+    fld = subtable(ms, "FIELD")
+    ant = subtable(ms, "ANTENNA")
+
+    function _hand_delay(i; ddir = nothing)
+        a1 = column(main, "ANTENNA1")[i]
+        a2 = column(main, "ANTENNA2")[i]
+        fi = column(main, "FIELD_ID")[i]
+        ep = measure(main, "TIME", i)
+        pd = ddir === nothing ? measure(fld, "DELAY_DIR", fi + 1) : ddir
+        dj = measconvert(pd, J2000; frame = MeasFrame(epoch = ep))
+        p1 = measure(ant, "POSITION", a1 + 1)
+        centre = observatory("EVLA")   # this MS's OBSERVATION.TELESCOPE_NAME (Phase 90)
+        fr = MeasFrame(epoch = ep, position = p1, direction = dj)
+        itrf = measconvert(dj, ITRF; frame = fr)
+        p2 = measure(ant, "POSITION", a2 + 1)
+        (itrf, p1, p2, centre)
+    end
+
+    q = query(main, "rownumber() >= 1"; select = [
+        "d" => "mscal.delay()", "d1" => "mscal.delay1()", "d2" => "mscal.delay2()"])
+    for i in (3, 17, 250, 599)
+        itrf, p1, p2, centre = _hand_delay(i)
+        x = (cos(itrf.lat) * cos(itrf.lon), cos(itrf.lat) * sin(itrf.lon), sin(itrf.lat))
+        d1want = (x[1] * (p1.x - centre.x) + x[2] * (p1.y - centre.y) + x[3] * (p1.z - centre.z)) / MSv2.C_LIGHT
+        d2want = (x[1] * (p2.x - centre.x) + x[2] * (p2.y - centre.y) + x[3] * (p2.z - centre.z)) / MSv2.C_LIGHT
+        @test column(q, "d1")[i] ≈ d1want rtol = 1e-9
+        @test column(q, "d2")[i] ≈ d2want rtol = 1e-9
+        # bare form is the difference of the two, independent of centre
+        @test column(q, "d")[i] ≈ d1want - d2want rtol = 1e-9
+        @test column(q, "d")[i] ≈ column(q, "d1")[i] - column(q, "d2")[i] rtol = 1e-9
+    end
+
+    # DELAY_DIR default: patch a copy's DELAY_DIR to genuinely differ
+    # from PHASE_DIR and confirm mscal.delay() tracks DELAY_DIR, not
+    # PHASE_DIR (the sample fixture's own DELAY_DIR == PHASE_DIR, so
+    # this needs a synthetic divergence to actually exercise the fix).
+    tmp = mktempdir()
+    dir = joinpath(tmp, "patched.ms")
+    copyms(SAMPLE_MS, dir; rows = 1:20)
+    fld2 = joinpath(dir, "FIELD")
+    edit(fld2) do t
+        newdir = deg2rad.([100.0, -20.0])   # far from PHASE_DIR
+        for r in 1:nrow(readtable(fld2))
+            t[:DELAY_DIR][r] = reshape(newdir, 2, 1)
+        end
+    end
+    main2 = readtable(dir)
+    qp = query(main2, "rownumber() >= 1"; select = ["d0" => "mscal.delay()", "dpd" => "mscal.delay('PHASE_DIR')"])
+    @test any(column(qp, "d0")[i] != column(qp, "dpd")[i] for i in 1:nrow(main2))
 end
 
 @testset "TaQL-lite — mscal.* error cases" begin
