@@ -1176,6 +1176,42 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         have = [Set(Int.(c)) for c in polct]
         return Bool[!isempty(want ∩ have[dd2pol[d + 1] + 1]) for d in ddid]
     elseif fn == "feed"
+        # Phase 152 finding: read `ms/MSSel/MSFeedGram.{ll,yy}` +
+        # `MSFeedParse.cc`/`MSFeedIndex.cc` (what real `mscal.feed()`
+        # actually calls, `UDFMSCal.cc:528-550`) directly. The `&`/`&&`/
+        # `&&&`/`;`-negation grammar and its `setTEN` accumulator are
+        # BYTE-IDENTICAL to `MSAntennaParse::setTEN` (the baseline
+        # grammar this package already ported in Phases 80/115/119/120
+        # via `_mssel_baseline_pred`/`_mssel_and2`/`_mssel_or2`, reused
+        # here unchanged) -- confirmed no bug there, and the `~` range
+        # separator (lexed as a token literally named `DASH` but mapped
+        # to the `"~"` character, `MSFeedGram.ll:57` -- a misleading
+        # legacy name, not an actual `-`) also matches what this
+        # package already accepts.
+        #
+        # One real, UNCONFIRMED divergence found: `MSFeedIndex::
+        # matchFeedId` (`MSFeedIndex.cc:183-198`) intersects the
+        # requested feed id set against the FEED subtable's OWN
+        # `FEED_ID` column values and THROWS ("No match found for
+        # requested feeds") if that intersection is empty -- i.e. real
+        # casacore validates a requested feed id against the FEED
+        # subtable's actual content, not just against what appears in
+        # MAIN's `FEED1`/`FEED2`. This package's own implementation
+        # (below) derives its valid id range purely from
+        # `max(FEED1, FEED2)` observed in MAIN and never consults the
+        # FEED subtable at all -- a feed id that is in-range but was
+        # never actually assigned to any antenna (a gap in `FEED_ID`)
+        # would silently read as "matches nothing" here, where real
+        # casacore would raise an error. NOT independently confirmed
+        # live: `mscal.feed()` is not registered as a callable TaQL UDF
+        # in this environment's casacore build at all ("TaQL function
+        # mscal.feed (=derivedmscal.feed) is unknown" -- the identical
+        # gap Phase 84's own writeup already found for `mscal.corr()`/
+        # `mscal.feed()` both). Per this project's own standing
+        # discipline (see the `mscal.corr()` comment above), an
+        # unverified source-reading finding is recorded here as an open
+        # question, not implemented as a behaviour change with no way
+        # to test it.
         _need("FEED1")
         f1 = Int.(column(t, "FEED1")[:])
         f2 = "FEED2" in cn ? Int.(column(t, "FEED2")[:]) : f1

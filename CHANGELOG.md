@@ -4059,3 +4059,39 @@ window as an existing GHz test gives an identical result, and a new
 entry in the real-TaQL cross-check list (`mscal.spw('0:0.0079~0.0081thz')`,
 matching the 7.9–8.1 GHz window of an existing GHz spec) — passes.
 Standalone mscal suite green (666/666).
+
+### Phase 152 — investigated `mscal.feed()` against `MSFeedIndex.cc`; found an unconfirmed divergence (feed-id validation against the FEED subtable), documented rather than implemented
+
+Read `ms/MSSel/MSFeedGram.{ll,yy}` + `MSFeedParse.cc`/`MSFeedIndex.cc`
+(what real `mscal.feed()` calls, `UDFMSCal.cc:528-550`) directly. The
+`&`/`&&`/`&&&`/`;`-negation grammar and its `setTEN` accumulator turned
+out to be byte-identical to `MSAntennaParse::setTEN` (the baseline
+grammar already ported in Phases 80/115/119/120) — confirmed no bug,
+since `mscal.feed()` already reuses the same `_mssel_baseline_pred`
+machinery unchanged. The `~` range separator (lexed as a token named
+`DASH` but mapped to the literal `"~"` character — a misleading legacy
+name inherited from the antenna grammar, not an actual `-`) also
+matches what this package already accepts — an initial reading of the
+token name looked like a real divergence from `mscal.baseline`'s own
+`~` ranges until the lexer rule itself was checked.
+
+One real but UNCONFIRMED divergence found: `MSFeedIndex::matchFeedId`
+intersects the requested feed-id set against the FEED subtable's own
+`FEED_ID` column values and THROWS ("No match found for requested
+feeds") if the intersection is empty — i.e. real casacore validates a
+requested feed id against the subtable's actual content, not just
+against what appears in MAIN's `FEED1`/`FEED2`. This package's own
+`mscal.feed()` derives its valid id range purely from
+`max(FEED1, FEED2)` in MAIN and never consults the FEED subtable at
+all — an in-range-but-never-assigned feed id (a gap in `FEED_ID`) would
+silently read as "matches nothing" here, where real casacore raises an
+error. Attempted to live-verify via `_taqlcmd` and confirmed
+`mscal.feed()` is not registered as a callable TaQL UDF in this
+environment's casacore build at all ("TaQL function mscal.feed
+(=derivedmscal.feed) is unknown") — the identical gap Phase 84's own
+writeup already found for `mscal.corr()`/`mscal.feed()` both. Per this
+project's own standing discipline (mscal.corr()'s own comment, Phase
+148), an unverified source-reading finding is recorded as an open
+question in `src/taql/mscal.jl`, not implemented as a behaviour change
+with no way to test it. No production behaviour changed; standalone
+mscal suite green (666/666, unchanged).
