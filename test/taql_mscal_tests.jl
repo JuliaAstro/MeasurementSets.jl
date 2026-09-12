@@ -229,6 +229,37 @@ end
     end
 end
 
+@testset "TaQL-lite — mscal.pa*() mount-type check (Phase 138)" begin
+    # Found while re-reading `MSCalEngine.cc` for Phase 137:
+    # `MSCalEngine::getPA` returns a hard 0.0 unless the antenna's
+    # `MOUNT` starts with "alt-az" (case-insensitive) -- an
+    # equatorially/other-mounted antenna, or the suffix-less array-
+    # centre form (which has no real antenna's MOUNT at all), has no
+    # well-defined parallactic angle in casacore's own model. Missing
+    # entirely here; not observable on the fixture (every antenna is
+    # "ALT-AZ") so verified with a synthetic MOUNT patch.
+    main = readtable(SAMPLE_MS)
+    q0 = query(main, "rownumber() >= 1"; select = ["p" => "mscal.pa1()", "pb" => "mscal.pa()"])
+    for i in (3, 250, 599)
+        @test column(q0, "p")[i] != 0.0                # every real antenna is ALT-AZ
+        @test column(q0, "pb")[i] == 0.0                # suffix-less form always 0
+    end
+
+    tmp = mktempdir()
+    dir = joinpath(tmp, "patched.ms")
+    copyms(SAMPLE_MS, dir; rows = 1:20)
+    ant2 = joinpath(dir, "ANTENNA")
+    edit(ant2) do t
+        t[:MOUNT][:] = fill("EQUATORIAL", nrow(readtable(ant2)))
+    end
+    main2 = readtable(dir)
+    qp = query(main2, "rownumber() >= 1"; select = ["p1" => "mscal.pa1()", "p2" => "mscal.pa2()"])
+    for i in 1:nrow(main2)
+        @test column(qp, "p1")[i] == 0.0
+        @test column(qp, "p2")[i] == 0.0
+    end
+end
+
 @testset "TaQL-lite — mscal.* error cases" begin
     dir = joinpath(mktempdir(), "notms")
     write_table(dir, "T", Pair{String,Any}["A" => collect(1.0:4.0)]; nrow = 4)

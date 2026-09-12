@@ -307,7 +307,10 @@ A bare `"ORDER BY ..."` (no WHERE) matches every row, sorted.
 MAIN table with `ANTENNA` / `FIELD` subtables): `mscal.ha1()` /
 `ha2()` / `ha()` (hour angle, rad), `mscal.hadec1()` (`[ha, dec]`),
 `mscal.azel1()` (`[az, el]`), `mscal.az1()` / `el1()` (scalar),
-`mscal.pa1()` (parallactic angle), `mscal.last1()` (local apparent
+`mscal.pa1()` (parallactic angle — `0.0` unless that antenna's own
+`ANTENNA.MOUNT` starts with `"alt-az"`, case-insensitive; the
+suffix-less `mscal.pa()` always returns `0.0`, matching `MSCalEngine::
+getPA` exactly, Phase 138), `mscal.last1()` (local apparent
 sidereal time, rad), `mscal.itrf()` (`[lon, lat]` of `PHASE_DIR` in
 ITRF), `mscal.uvw_j2000()` (`[u, v, w]` m — the baseline's `ANTENNA2 -
 ANTENNA1` uvw in J2000, recomputed fresh from the `ANTENNA` positions

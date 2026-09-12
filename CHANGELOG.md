@@ -3536,3 +3536,28 @@ dedicated regression test pinning the sign relationship between
 verified value, and a rewritten hand-computation in the main mscal
 testset matching `getNewUVW`'s exact algorithm instead of the old
 (wrong) stored-UVW-rotation approach.
+
+### Phase 138 — found `mscal.pa*()` was missing a real mount-type check
+
+While re-reading `MSCalEngine.cc` in full for Phase 137, found that
+`MSCalEngine::getPA` returns a hard `0.0` unless the relevant antenna's
+`MOUNT` starts with `"alt-az"` (case-insensitive) — an equatorially- or
+otherwise-mounted antenna, or the suffix-less array-centre form (which
+has no real antenna's `MOUNT` to consult at all — `setData`'s `mount`
+stays its `0` default), has no well-defined parallactic angle in
+casacore's own model and the function simply returns 0 rather than
+computing a meaningless value.
+
+This package's `mscal.pa()`/`pa1()`/`pa2()` had no mount check at all —
+it always computed the geometric parallactic angle regardless of
+antenna mount, and the bare `mscal.pa()` form would return a nonzero
+value it should never return. Not observable on the committed
+`sample.ms` fixture (every antenna's `MOUNT` is `"ALT-AZ"`), so
+verified with a synthetic patch setting `MOUNT` to `"EQUATORIAL"`.
+
+Fixed in `src/taql/mscal.jl`: reads `ANTENNA.MOUNT` once (defaulting to
+"every antenna is alt-az" if the column is absent, a graceful
+fallback), and the `pa*` branch returns `0.0` whenever the relevant
+antenna id is `-1` (the suffix-less form) or that antenna's own mount
+isn't alt-az. 8 new tests in `test/taql_mscal_tests.jl`
+("mscal.pa*() mount-type check").

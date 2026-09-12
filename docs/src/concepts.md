@@ -90,7 +90,8 @@ carries a `QuantumUnits` keyword; needs the Unitful extension),
 `angdist`/`angdistx` — dates are an MJD
 `Float64`). With `import SOFA`, **`mscal.*` derived-MS functions** —
 `mscal.ha1()` / `mscal.hadec1()` / `mscal.azel1()` / `mscal.az1()` /
-`mscal.el1()` / `mscal.pa1()` (parallactic angle) / `mscal.last1()`
+`mscal.el1()` / `mscal.pa1()` (parallactic angle — `0.0` for a
+non-alt-az-mounted antenna, matching `getPA`) / `mscal.last1()`
 (local sidereal time) / `mscal.itrf()` / `mscal.uvw_j2000()` (recomputed
 fresh from the antenna positions, `ANTENNA2 - ANTENNA1`, exactly like
 casacore's `getNewUVW` — not a rotation of the stored `UVW` column,

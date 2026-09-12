@@ -191,6 +191,18 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     antpos = measure(ant, "POSITION")                 # Vector{MPosition{ITRF}}
     fld = readtable(subs["FIELD"])
 
+    # Phase 138: `mscal.pa*()` -- casacore's `MSCalEngine::getPA` returns
+    # a hard `0.0` unless the antenna's own `MOUNT` starts with "alt-az"
+    # (case-insensitive; `setData`'s `mount` also stays 0, i.e. "not
+    # alt-az", for the suffix-less array-centre form, which has no real
+    # antenna at all) -- an equatorially/other-mounted antenna has no
+    # well-defined parallactic angle in casacore's own model. Found
+    # missing entirely while re-reading `MSCalEngine.cc` for Phase 137;
+    # not observable on the sample fixture (every antenna is "ALT-AZ").
+    _altaz6(m) = length(m) >= 6 && lowercase(m[1:6]) == "alt-az"
+    mount_altaz = "MOUNT" in Set(columnnames(ant)) ?
+                  _altaz6.(String.(column(ant, "MOUNT")[:])) : trues(nrow(ant))
+
     # array-centre position for a suffix-less `mscal.ha()`/`azel()`/… --
     # OBSERVATION.TELESCOPE_NAME -> the bundled Observatories table, else
     # a one-time warn + antenna 0.
@@ -454,9 +466,16 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         elseif startswith(f, "last")
             out[_mscal_key(spec)] = Float64[mod2pi(_cache(_antid(f, i), dir, i).last) for i in 1:n]
         elseif startswith(f, "pa")
-            out[_mscal_key(spec)] = Float64[
-                (c = _cache(_antid(f, i), dir, i); _position_angle(c.azel, c.pole))
-                for i in 1:n]
+            _pa1(i) = begin
+                aid = _antid(f, i)
+                if aid >= 0 && mount_altaz[aid + 1]
+                    c = _cache(aid, dir, i)
+                    _position_angle(c.azel, c.pole)
+                else
+                    0.0
+                end
+            end
+            out[_mscal_key(spec)] = Float64[_pa1(i) for i in 1:n]
         else
             error("mscal.* internal: unhandled function \"$f\"")
         end
