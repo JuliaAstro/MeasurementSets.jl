@@ -231,6 +231,24 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     _fld_poly = "NUM_POLY" in Set(columnnames(fld)) &&
                 any(>(0), Int.(column(fld, "NUM_POLY")[:]))
 
+    # Phase 139 finding, worth stating explicitly: real casacore's
+    # `MSCalEngine::fillFieldDir` does NOT interpolate a polynomial
+    # `PHASE_DIR` or consult an ephemeris at all -- it caches
+    # `dirCol(i).data()[0]`, the array cell's FIRST element, once per
+    # field, and reuses that SAME (static) direction for every row
+    # regardless of `TIME` (`NUM_POLY`/`EPHEMERIS_ID` are never even
+    # read by `MSCalEngine.cc` -- confirmed by grep across the whole
+    # file). This package's `mscal.*` functions deliberately do the
+    # opposite (Phases 93/82): they interpolate the polynomial /
+    # ephemeris direction at each row's own `TIME`, giving a physically
+    # correct time-varying direction for a moving target. That is a
+    # genuine, intentional improvement, not a bug -- but it means this
+    # package's `mscal.*` output for a polynomial/ephemeris FIELD will
+    # NOT numerically match real casacore's `derivedmscal` UDFs for such
+    # a field (a real MS almost never has one -- `PHASE_DIR` is
+    # overwhelmingly a fixed-position `Dims` column in practice, so this
+    # only matters for genuinely moving-target observations).
+
     # suffix-less -> -1 (array centre); a `*1`/`*2` -> the antenna
     _antid(f, i) = endswith(f, "2") ? a2[i] : endswith(f, "1") ? a1[i] : -1
 

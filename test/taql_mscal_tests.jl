@@ -748,6 +748,22 @@ end
     for i in (10, 300, 590)
         @test hypot(column(q, "uj")[i]...) ≈ hypot(column(main, "UVW")[i]...) rtol = 1e-9
     end
+
+    # Phase 139: confirmed real casacore's own `mscal.*` UDFs would NOT
+    # do this at all -- `MSCalEngine::fillFieldDir` caches the direction
+    # column's FIRST element ONCE per field and reuses it for every row
+    # regardless of `TIME` (`NUM_POLY`/`EPHEMERIS_ID` never read at all,
+    # confirmed by grep across `MSCalEngine.cc`). This package
+    # deliberately interpolates the moving-target direction at each
+    # row's own `TIME` instead -- a genuine, intentional divergence from
+    # real casacore, not a bug. The fixture's own MAIN rows span only a
+    # few seconds (too short for the ramp to show up row-to-row on this
+    # MS), so exercise the underlying interpolation machinery directly
+    # across the ephemeris grid's own (much wider) time span instead:
+    e = field_ephemeris(subtable(MeasurementSet(tmp), "FIELD"), 0)
+    d_lo = ephemeris_direction(e, grid[2])       # first non-edge grid point
+    d_hi = ephemeris_direction(e, grid[end - 1]) # last non-edge grid point
+    @test abs(rad2deg(d_hi.lat) - rad2deg(d_lo.lat)) > 0.05   # DEC ramps across the grid
 end
 
 # Phase 101: `mscal.pbresponse()` -- primary-beam attenuation from the

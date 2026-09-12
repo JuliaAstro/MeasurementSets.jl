@@ -3561,3 +3561,35 @@ fallback), and the `pa*` branch returns `0.0` whenever the relevant
 antenna id is `-1` (the suffix-less form) or that antenna's own mount
 isn't alt-az. 8 new tests in `test/taql_mscal_tests.jl`
 ("mscal.pa*() mount-type check").
+
+### Phase 139 — documented a real, deliberate divergence: `mscal.*` interpolates a moving-target FIELD direction, real casacore never does
+
+Continuing the `MSCalEngine.cc` read-through from Phases 137-138, found
+`MSCalEngine::fillFieldDir` (the function that populates the per-field
+direction cache every `mscal.*` direction function ultimately reads)
+caches `dirCol(i).data()[0]` — the direction array cell's FIRST element
+— **once per field**, and reuses that exact same value for every row
+regardless of `TIME`. A grep across the entire file confirms
+`NUM_POLY` and `EPHEMERIS_ID` are never read anywhere in
+`MSCalEngine.cc` — real casacore's `derivedmscal` UDFs are completely
+unaware that a `FIELD` row can be a moving target at all.
+
+This package's `mscal.*` functions do the opposite by design (Phases
+82/93): they interpolate the polynomial or ephemeris-driven direction
+at each row's own `TIME`, giving a physically meaningful time-varying
+direction for a genuinely moving target. This is a deliberate,
+intentional improvement — not a bug to fix — but it does mean this
+package's `mscal.*` output for a moving-target field will **not**
+numerically match real casacore's UDFs for such a field (a real MS
+essentially never has one in practice; `PHASE_DIR` is overwhelmingly a
+fixed-position `Dims` column). Documented explicitly in `src/taql/
+mscal.jl`, the `query.jl` docstring, and `docs/src/concepts.md`.
+
+Extended the existing "mscal.* with an ephemeris FIELD" test
+(`test/taql_mscal_tests.jl`) with a direct check that the underlying
+`ephemeris_direction` interpolation genuinely varies across the
+ephemeris table's own time grid (the fixture's real MAIN rows span too
+few seconds for the ramp to show up row-to-row on that MS, so the
+grid's own wider span is used to exercise the machinery directly). No
+production behaviour changed — comment/doc-only, plus the one new test
+assertion.

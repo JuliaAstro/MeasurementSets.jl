@@ -106,7 +106,11 @@ wired in automatically) — computed per MAIN row from `TIME` + the
 The direction functions take an optional direction argument — a body
 name (`mscal.el1('SUN')`), a FIELD direction column
 (`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000 pair (radians), or a
-sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
+sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`). For a
+moving-target field (polynomial `PHASE_DIR` or `EPHEMERIS_ID`), these
+interpolate at each row's `TIME` — a deliberate improvement over real
+casacore, whose own UDFs always use the field's static first-element
+direction regardless of `TIME`.
 `mscal.stokes(col [, 'types'] [, rescale])` converts a `DATA` / `FLAG` /
 `WEIGHT` array cell between correlation bases (`'IQUV'` / `'CIRC'` /
 `'LIN'` / a comma-list), keyed by `POLARIZATION.CORR_TYPE`; `types` also

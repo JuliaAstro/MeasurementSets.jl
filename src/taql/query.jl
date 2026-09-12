@@ -339,6 +339,14 @@ FIELD direction column (`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000
 pair in radians (`mscal.hadec1([2.0, 0.5])`), or a sexagesimal
 `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`).
 
+Note (Phase 139): for a moving-target `FIELD` (a polynomial `PHASE_DIR`
+or an `EPHEMERIS_ID`), these functions interpolate the direction at
+each row's own `TIME` — real casacore's `derivedmscal` UDFs do NOT
+(`MSCalEngine::fillFieldDir` always uses the FIRST element of the
+direction cell, ignoring `TIME` entirely); this package's behaviour is
+a deliberate improvement, not a divergence to fix, but the two won't
+numerically agree for such a field.
+
 `mscal.stokes(col [, 'types'] [, rescale])` (Phase 78) converts a
 `DATA` / `FLAG` / `WEIGHT` array cell between correlation bases. `types`
 (default `'IQUV'`) is an alias (`IQUV` / `CIRC` / `LIN`) or a
