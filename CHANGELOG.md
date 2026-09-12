@@ -4243,3 +4243,31 @@ back as all-unset rather than raising), both cross-checked against real
 Casacore.jl (auto-registers `BitFlagsEngine<Int>`) and agreeing exactly
 with this package's own reader. Full standalone engine suite green
 (255/255, was 253 before the two new tests).
+
+### Phase 157 — swept TaQL-lite's LIKE/glob pattern matching and `_riseset`'s circumpolar formula against source; no bug found
+
+Read `casa/Utilities/Regex.cc`'s `fromPattern` (glob) and
+`fromSQLPattern` (SQL `LIKE`) directly — the two functions
+`_glob_regex`/`_sqlpattern_regex` (Phase 24) had been implemented from
+general convention, never checked line-by-line against casacore's own
+source. Confirmed exact matches: `fromSQLPattern`'s own comment
+("AFAIK there are no special escape characters") matches this
+package's documented "no SQL escape char" choice; `fromPattern`'s
+`*`→`.*`, `?`→`.`, `[!...]`/`[^...]` negation, and raw pass-through of
+bracket contents (no re-escaping inside `[...]`) all match
+`_glob_regex` exactly. One deliberate, correct divergence confirmed
+non-bug: this package's `_TQL_RE_SPECIAL` escape set additionally
+escapes `(`/`)`/`\`, which casacore's own (smaller) escape list
+doesn't — necessary and correct since this package targets Julia's
+PCRE-based `Regex` (where parens are metacharacters) rather than
+reproducing casacore's own regex engine's escaping bug-for-bug; the
+semantic behaviour (which strings match) is unaffected.
+
+Also re-verified `_riseset`'s (Phase 104/131) standard hour-angle
+formula — `cos(H₀) = (sin(elev₀) − sin(lat)·sin(dec)) / (cos(lat)·cos(dec))`
+— against the textbook astronomical formula (e.g. Meeus,
+*Astronomical Algorithms*): exact match, and the circumpolar
+(`c < -1`, source never sets) / never-rises (`c > 1`) edge cases are
+handled correctly since `cos(lat)`/`cos(dec)` are always non-negative
+for any valid latitude/declination (no sign-flip edge case to miss).
+No bug found in either area; no production code changed.
