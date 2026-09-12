@@ -940,10 +940,22 @@ end
 # `matchFieldNameRegexOrPattern`, which check `!flagRow`). Only the
 # `field`/`state` call sites pass a real `flagged` vector; every other
 # `_mssel_idset` caller (baseline/spw/scan/array/obs) keeps the
-# default `nothing` — confirmed (Phases 118-119) that antenna/spw
-# selection never filters by `FLAG_ROW` in real casacore either (the
-# equivalent check is commented out in `MSAntennaIndex.cc`/
-# `MSSpwIndex.cc`).
+# default `nothing`. Phase 154: this line originally (mis-)cited
+# "Phases 118-119" for that claim -- those phases were actually about
+# `mscal.baseline()`'s antenna diameter/mount investigation and its
+# BLREGEX grammar, never FLAG_ROW at all (confirmed via `git log -S` on
+# this comment, introduced in Phase 146). Re-verified the underlying
+# claim directly instead: `MSAntennaIndex.cc`'s
+# `matchAntennaRegexOrPattern` (baseline name/glob matching) and
+# `MSSpwIndex.cc`'s equivalent both have the `!flagRow()` term
+# DELIBERATELY commented out of their active mask expression (not
+# merely absent -- the code is written and then disabled, e.g.
+# `MSAntennaIndex.cc`: `maskArray(i) = ((ret>0) != negate); //&&
+# !msAntennaCols_p.flagRow().getColumn()(i));`); `scan`/`array`/`obs`
+# (`MSScanParse.cc`/`MSArrayParse.cc`/`MSObservationParse.cc`) never
+# even have the possibility -- they compare `columnAsTEN_p` (MAIN's own
+# `SCAN_NUMBER`/`ARRAY_ID`/`OBSERVATION_ID` column) directly, with no
+# subtable `Index` class or `FLAG_ROW` column in the loop at all.
 _mssel_notflagged(s, ::Nothing) = s
 _mssel_notflagged(s, flagged::AbstractVector{Bool}) =
     Set{Int}(i for i in s if !(1 <= i + 1 <= length(flagged) && flagged[i + 1]))
@@ -1176,6 +1188,42 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         have = [Set(Int.(c)) for c in polct]
         return Bool[!isempty(want ∩ have[dd2pol[d + 1] + 1]) for d in ddid]
     elseif fn == "feed"
+        # Phase 152 finding: read `ms/MSSel/MSFeedGram.{ll,yy}` +
+        # `MSFeedParse.cc`/`MSFeedIndex.cc` (what real `mscal.feed()`
+        # actually calls, `UDFMSCal.cc:528-550`) directly. The `&`/`&&`/
+        # `&&&`/`;`-negation grammar and its `setTEN` accumulator are
+        # BYTE-IDENTICAL to `MSAntennaParse::setTEN` (the baseline
+        # grammar this package already ported in Phases 80/115/119/120
+        # via `_mssel_baseline_pred`/`_mssel_and2`/`_mssel_or2`, reused
+        # here unchanged) -- confirmed no bug there, and the `~` range
+        # separator (lexed as a token literally named `DASH` but mapped
+        # to the `"~"` character, `MSFeedGram.ll:57` -- a misleading
+        # legacy name, not an actual `-`) also matches what this
+        # package already accepts.
+        #
+        # One real, UNCONFIRMED divergence found: `MSFeedIndex::
+        # matchFeedId` (`MSFeedIndex.cc:183-198`) intersects the
+        # requested feed id set against the FEED subtable's OWN
+        # `FEED_ID` column values and THROWS ("No match found for
+        # requested feeds") if that intersection is empty -- i.e. real
+        # casacore validates a requested feed id against the FEED
+        # subtable's actual content, not just against what appears in
+        # MAIN's `FEED1`/`FEED2`. This package's own implementation
+        # (below) derives its valid id range purely from
+        # `max(FEED1, FEED2)` observed in MAIN and never consults the
+        # FEED subtable at all -- a feed id that is in-range but was
+        # never actually assigned to any antenna (a gap in `FEED_ID`)
+        # would silently read as "matches nothing" here, where real
+        # casacore would raise an error. NOT independently confirmed
+        # live: `mscal.feed()` is not registered as a callable TaQL UDF
+        # in this environment's casacore build at all ("TaQL function
+        # mscal.feed (=derivedmscal.feed) is unknown" -- the identical
+        # gap Phase 84's own writeup already found for `mscal.corr()`/
+        # `mscal.feed()` both). Per this project's own standing
+        # discipline (see the `mscal.corr()` comment above), an
+        # unverified source-reading finding is recorded here as an open
+        # question, not implemented as a behaviour change with no way
+        # to test it.
         _need("FEED1")
         f1 = Int.(column(t, "FEED1")[:])
         f2 = "FEED2" in cn ? Int.(column(t, "FEED2")[:]) : f1
@@ -1212,12 +1260,28 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         # (`'<N'`/`'>N'`) or name/pattern spec (`'3C286'`) DOES (routes
         # through `MSFieldIndex::matchFieldIDLT/GT/GTAndLT`/
         # `matchFieldNameRegexOrPattern`, which check `!flagRow`,
-        # `MSFieldIndex.cc:103,224`). `MSStateIndex.cc` has the
-        # identical structure (`.cc:104,130`) -- inferred by symmetry
-        # for STATE, not independently live-tested. `_mssel_idset`'s
-        # `flagged` kwarg implements exactly this per-term-form split;
-        # baseline/spw/scan/array/obs pass no `flagged` (Phases 118-119
-        # confirmed those never filter by `FLAG_ROW` in real casacore).
+        # `MSFieldIndex.cc:103,224`). Phase 153: `MSStateIndex.cc`'s
+        # structure was CONFIRMED IDENTICAL by directly reading
+        # `MSStateGram.yy`/`MSStateParse.cc`/`MSStateIndex.cc` (not just
+        # inferred by symmetry, since `mscal.state()` itself can never
+        # be live-tested -- Phase 147's crash bug): the grammar's bare-
+        # id/`~`-range production (`stateidrange`, `MSStateGram.yy:
+        # 194-210`) builds a raw id list with no index-table lookup at
+        # all, which `MSStateParse::selectStateIds` (`MSStateParse.cc:
+        # 65-73`) turns into a plain `TEN.in(stateIds)` -- no `FLAG_ROW`
+        # check, exactly like `MSFieldParse::selectFieldIds`; the `<`/
+        # `>`/`<>&<>` bound forms (`stateidbounds`, `.yy:214-243`) and
+        # the name/regex/pattern form both route through
+        # `MSStateIndex::matchStateIDLT/GT/GTAndLT` (`MSStateIndex.cc:
+        # 216-251`) / `matchStateObsModeRegexOrPattern` (`.cc:68-104`),
+        # each of which builds its mask as
+        # `... && !flagRow().getColumn()` -- byte-for-byte the same
+        # split as `MSFieldIndex`. `_mssel_idset`'s `flagged` kwarg
+        # implements exactly this per-term-form split;
+        # baseline/spw/scan/array/obs pass no `flagged` (Phase 154
+        # confirmed via direct source reading that those never filter
+        # by `FLAG_ROW` in real casacore -- see the comment above
+        # `_mssel_notflagged`).
         _need("FIELD_ID")
         fid = Int.(column(t, "FIELD_ID")[:])
         fldtab = haskey(subs, "FIELD") ? readtable(subs["FIELD"]) : nothing

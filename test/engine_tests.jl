@@ -246,6 +246,36 @@ end
     inst = MSv2E._dm_instance(r4, columndesc(r4, "FLAG").sequ)
     @test inst.scale == UInt32(6)                              # 2 | 4, recomputed from FLAGSETS
     @test columndesc(r4, "FLAG_COMPRESSED").keywords["FLAGSETS"] isa MSv2E.Record
+
+    # Phase 156: a ReadMaskKeys entry NOT present in FLAGSETS must be
+    # silently skipped (`BFEngineMask::makeMask`, `isDefined` check),
+    # not raise -- confirmed against real casacore live below.
+    dir5 = joinpath(mktempdir(), "bfe5.tab")
+    write_table(dir5, "T", ["FLAG" => F]; nrow=3,
+        engines = Dict("FLAG" => (; kind=MSv2E.BitFlags(), stored_type=MSv2E.TpInt,
+                                   readmaskkeys=["CAL", "NOSUCHKEY"], flagsets=fs)))
+    r5 = readtable(dir5)
+    inst5 = MSv2E._dm_instance(r5, columndesc(r5, "FLAG").sequ)
+    @test inst5.scale == UInt32(2)                             # only "CAL" found, "NOSUCHKEY" skipped
+    # raw storage is always bit 0 (0/1); a mask of 2 (bit 1, "CAL") never
+    # matches it -- both readers must agree the column reads all-false
+    @test all(all(iszero, column(r5, "FLAG")[i]) for i in 1:3)
+
+    # every requested key missing -> mask is 0 (matches casacore's own
+    # `uInt mask = 0;` with no key ever OR'd in), not an error
+    dir6 = joinpath(mktempdir(), "bfe6.tab")
+    write_table(dir6, "T", ["FLAG" => F]; nrow=3,
+        engines = Dict("FLAG" => (; kind=MSv2E.BitFlags(), stored_type=MSv2E.TpInt,
+                                   readmaskkeys=["NOPE"], flagsets=fs)))
+    r6 = readtable(dir6)
+    @test all(all(iszero, column(r6, "FLAG")[i]) for i in 1:3)
+
+    if _HAVE_CASACORE
+        ct5 = CCT.Table(dir5)
+        @test all(all(iszero, Bool.(ct5[:FLAG][i])) for i in 1:3)
+        ct6 = CCT.Table(dir6)
+        @test all(all(iszero, Bool.(ct6[:FLAG][i])) for i in 1:3)
+    end
 end
 
 @testset "engine — ForwardColumnEngine / reference_copy" begin

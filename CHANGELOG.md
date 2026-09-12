@@ -4059,3 +4059,215 @@ window as an existing GHz test gives an identical result, and a new
 entry in the real-TaQL cross-check list (`mscal.spw('0:0.0079~0.0081thz')`,
 matching the 7.9–8.1 GHz window of an existing GHz spec) — passes.
 Standalone mscal suite green (666/666).
+
+### Phase 152 — investigated `mscal.feed()` against `MSFeedIndex.cc`; found an unconfirmed divergence (feed-id validation against the FEED subtable), documented rather than implemented
+
+Read `ms/MSSel/MSFeedGram.{ll,yy}` + `MSFeedParse.cc`/`MSFeedIndex.cc`
+(what real `mscal.feed()` calls, `UDFMSCal.cc:528-550`) directly. The
+`&`/`&&`/`&&&`/`;`-negation grammar and its `setTEN` accumulator turned
+out to be byte-identical to `MSAntennaParse::setTEN` (the baseline
+grammar already ported in Phases 80/115/119/120) — confirmed no bug,
+since `mscal.feed()` already reuses the same `_mssel_baseline_pred`
+machinery unchanged. The `~` range separator (lexed as a token named
+`DASH` but mapped to the literal `"~"` character — a misleading legacy
+name inherited from the antenna grammar, not an actual `-`) also
+matches what this package already accepts — an initial reading of the
+token name looked like a real divergence from `mscal.baseline`'s own
+`~` ranges until the lexer rule itself was checked.
+
+One real but UNCONFIRMED divergence found: `MSFeedIndex::matchFeedId`
+intersects the requested feed-id set against the FEED subtable's own
+`FEED_ID` column values and THROWS ("No match found for requested
+feeds") if the intersection is empty — i.e. real casacore validates a
+requested feed id against the subtable's actual content, not just
+against what appears in MAIN's `FEED1`/`FEED2`. This package's own
+`mscal.feed()` derives its valid id range purely from
+`max(FEED1, FEED2)` in MAIN and never consults the FEED subtable at
+all — an in-range-but-never-assigned feed id (a gap in `FEED_ID`) would
+silently read as "matches nothing" here, where real casacore raises an
+error. Attempted to live-verify via `_taqlcmd` and confirmed
+`mscal.feed()` is not registered as a callable TaQL UDF in this
+environment's casacore build at all ("TaQL function mscal.feed
+(=derivedmscal.feed) is unknown") — the identical gap Phase 84's own
+writeup already found for `mscal.corr()`/`mscal.feed()` both. Per this
+project's own standing discipline (mscal.corr()'s own comment, Phase
+148), an unverified source-reading finding is recorded as an open
+question in `src/taql/mscal.jl`, not implemented as a behaviour change
+with no way to test it. No production behaviour changed; standalone
+mscal suite green (666/666, unchanged).
+
+### Phase 153 — upgraded `mscal.state()` vs `FLAG_ROW`'s "inferred by symmetry" note to a confirmed source-read match (no bug)
+
+Phases 145/146 found `mscal.field()`'s `FLAG_ROW` filtering is
+spec-form-dependent (a bare id/`~`-range spec never filters, a
+comparison/name spec does) and applied the same fix to `mscal.state()`
+"by symmetry" — `MSStateIndex.cc` was never actually read directly,
+since `mscal.state()` itself can't be live-tested at all (Phase 147's
+crash bug). This phase closes that gap: read `MSStateGram.yy` +
+`MSStateParse.cc` + `MSStateIndex.cc` directly. Confirmed byte-for-byte
+the same structure as `MSFieldParse`/`MSFieldIndex`: the grammar's
+bare-id/`~`-range production (`stateidrange`, `MSStateGram.yy:194-210`)
+builds a raw id list with no index-table lookup at all, which
+`MSStateParse::selectStateIds` (`MSStateParse.cc:65-73`) turns into a
+plain `TEN.in(stateIds)` — no `FLAG_ROW` check; the `<`/`>`/`<>&<>`
+bound forms (`stateidbounds`, `.yy:214-243`) and the `OBS_MODE`
+name/regex/pattern form both route through `MSStateIndex::
+matchStateIDLT/GT/GTAndLT` (`MSStateIndex.cc:216-251`) /
+`matchStateObsModeRegexOrPattern` (`.cc:68-104`), each of which builds
+its selection mask as `... && !flagRow().getColumn()`. This package's
+existing `_mssel_idset`'s `flagged` kwarg (already applied to both
+`field` and `state`, Phase 146) implements exactly this per-term-form
+split — confirmed correct via direct source reading, not just symmetry
+with a sibling function. No production behaviour changed (comment-only
+— replaced the "inferred by symmetry, not independently tested" hedge
+with the confirmed citations); standalone mscal suite green (666/666,
+unchanged).
+
+### Phase 154 — fixed a mis-citation for baseline/spw/scan/array/obs's "never filter by `FLAG_ROW`" claim; independently re-confirmed it via direct source reading
+
+Investigated `mscal.array()`/`mscal.obs()` (can't be live-tested,
+Phase 147's crash bug) by reading `MSArrayParse.cc`/
+`MSObservationParse.cc` directly: both build their `WHERE` condition
+from a plain comparison against `columnAsTEN_p` (MAIN's own
+`ARRAY_ID`/`OBSERVATION_ID` column) with no subtable `Index` class and
+no `FLAG_ROW` column anywhere in the code path at all — genuinely
+cannot filter by `FLAG_ROW`, structurally, not merely "doesn't happen
+to". `MSScanParse.cc` is byte-for-byte the same shape.
+
+While re-deriving this, noticed the existing comment above
+`_mssel_notflagged` (`src/taql/mscal.jl`, introduced in Phase 146 per
+`git log -S`) attributes this "never filters" claim to "Phases
+118-119" — checked, and that citation is **wrong**: Phase 118 was
+`mscal.baseline()`'s antenna diameter/mount investigation and Phase
+119 was its BLREGEX grammar support; neither touched `FLAG_ROW` at
+all. The comment's *technical content* was already correct (it also
+independently notes the check is "commented out in
+`MSAntennaIndex.cc`/`MSSpwIndex.cc`") — only the phase attribution was
+wrong. Independently re-verified that technical claim directly rather
+than trusting the old comment: `MSAntennaIndex::
+matchAntennaRegexOrPattern` (baseline name/glob matching) and
+`MSSpwIndex.cc`'s equivalent both have their `!flagRow()` term
+DELIBERATELY commented out of the active mask expression — e.g.
+`MSAntennaIndex.cc`: `maskArray(i) = ((ret>0) != negate); //&&
+!msAntennaCols_p.flagRow().getColumn()(i));` — the check was written
+and then disabled, not simply never implemented.
+
+Fixed both citations in `src/taql/mscal.jl` to point at this
+investigation instead, with the specific evidence (the commented-out
+mask term for baseline/spw, and the no-Index-class structure for
+scan/array/obs) rather than a phase-number pointer alone. No
+production behaviour changed; standalone mscal suite green
+(666/666, unchanged).
+
+### Phase 155 — added a real CASA cross-check for `meas.wgs()`/`meas.itrfxyz()`'s geodetic transform; found and fixed a misleading comment about `MPosition{WGS84}`'s own semantics
+
+Investigated whether `meas.wgs()`/`meas.itrfxyz()` (Phase 106's
+geodetic ↔ Cartesian ellipsoidal transform, `_geodetic_to_itrf`/
+`_itrf_to_geodetic` in `ext/SOFAExt.jl`) had ever been checked against
+a real oracle — it hadn't, only self-round-trip. Live-verified against
+`casatools`: `me.position('WGS84', lon, lat, height)` →
+`me.measure(..., 'ITRF')` for a VLA-like site (-107.6°, 34.0°, 2124 m)
+matches this package's `_geodetic_to_itrf` to sub-micrometre precision
+(both use the identical WGS84 ellipsoid constants — `a=6378137 m`,
+`1/f=298.257223563`, confirmed identical to `SOFA.eform(:WGS84)`).
+Added this as a permanent cross-check (`test/measures_fixture.py` +
+`test/measures_tests.jl`), not just a scratch script.
+
+While setting this up, this same live test also proved something else:
+the code comment above `_mconv(::MPosition, ...)` (`ext/SOFAExt.jl`)
+claimed "casacore stores the SAME geocentric Cartesian vector under
+both [ITRF and WGS84] refs" as the justification for implementing that
+conversion as an identity on `(x,y,z)` — that claim is **false**. Real
+casacore's `MPosition::WGS84` genuinely represents a *geodetic*
+(longitude, latitude, height) position, and `MCPosition.cc`'s
+`ITRF_WGS84`/`WGS84_ITRF` cases perform a real ellipsoidal transform
+(confirmed in source: they use `MeasTable::WGS84(0)`/`(1)`, the
+ellipsoid semi-major axis and inverse flattening, in a Bowring-style
+iteration) — exactly the live-verified behaviour above, definitely not
+a passthrough. This package's own `MPosition{R}` is, by its own
+docstring, ALWAYS geocentric Cartesian metres regardless of `R` — so
+the identity behaviour for `measconvert(::MPosition{WGS84}, ITRF)` is
+still the correct thing for THIS package to do (no real MS `POSITION`
+column ever uses `MEASINFO Ref="WGS84"`, so nothing in this project
+actually depends on the real geodetic semantics through that path) —
+but the comment's stated REASON was wrong, and could mislead a future
+investigator into thinking this mirrors real casacore. Fixed the
+comment in `ext/SOFAExt.jl` and the `MPosition` docstring
+(`src/measures/types.jl`) to state the real, verified fact (casacore's
+conversion is a genuine ellipsoidal transform) and the actual reason
+this package diverges (a deliberate, documented scoping choice, not
+an accurate port), pointing to `meas.wgs()`/`meas.itrfxyz()` as the
+real geodetic transform. Also corrected a test comment
+(`test/taql_query_tests.jl`) that called the identity "a Cartesian
+identity" without noting it's this package's own convention, not real
+casacore's. No production behaviour changed (comment/docstring fixes +
+one new permanent test); standalone measures suite green (486/486,
+including the new geodetic cross-check), query suite green (1008/1008).
+
+### Phase 156 — found and fixed a real bug: `BitFlagsEngine`'s `ReadMaskKeys`/`WriteMaskKeys` crashed instead of silently skipping a key missing from `FLAGSETS`
+
+Re-verified `mscal.stokes()`'s Ptotal/Plinear/Pangle/PFtotal/PFlinear
+formulas once more, this time against the actual VALUE-computation code
+in `StokesConverter::convert(Array<Complex>&, ...)` (not just the
+weight/flag setup code checked in Phase 122) — confirmed byte-for-byte
+match to the already-fixed implementation (`sqrt(|Q|²+|U|²+|V|²)` for
+Ptotal, `/abs(I)` for the PF* fraction forms, `atan2(Re(U),Re(Q))/2`
+for Pangle using real parts only) — no third bug, Phase 122's fix was
+complete. Also independently re-derived `AiryBeam`'s annular-aperture
+voltage response formula (`_airy_voltage`) against the standard
+Born & Wolf obstructed-aperture diffraction formula
+(`A(x) = [2J₁(x)/x − ε²·2J₁(εx)/(εx)] / (1−ε²)`) — an exact match,
+confirming what Phase 99 had only checked as "textbook optics, not
+cross-checked" — no bug.
+
+The real find: reading `BitFlagsEngine.cc`'s `BFEngineMask::makeMask`
+(the function that recomputes a `ReadMaskKeys`/`WriteMaskKeys`-based
+mask from the stored column's `FLAGSETS` record, Phase 40) shows it
+silently SKIPS any requested key not `isDefined` in `FLAGSETS` —
+`for (key : itsMaskKeys) if (rec.isDefined(key)) mask |= rec.asuInt(key);`
+— and ends up with `mask == 0` (not an error) if NONE of the requested
+keys are found. This package's own `_bfe_mask`
+(`src/datamanagers/virtual.jl`) instead did `reduce(|, UInt32(fs[k]) for
+k in ks; ...)` — a plain `Record` index (`fs[k]`) that `throw`s a
+`KeyError` for a missing key — so reading a `BitFlagsEngine` column
+whose `ReadMaskKeys`/`WriteMaskKeys` named even ONE flag category not
+present in that particular table's `FLAGSETS` would CRASH instead of
+just ignoring it, exactly the scenario real casacore handles
+gracefully (a table where only some flag categories are defined, or a
+`ReadMaskKeys` list that's broader than what one particular MS
+actually stamped). Fixed: `for k in ks if haskey(fs, k)` — skip an
+absent key instead of indexing it. Two new regression tests (a key
+partially missing → the found key(s) alone form the mask; every key
+missing → mask `0`, matching casacore's `uInt mask = 0;` default, read
+back as all-unset rather than raising), both cross-checked against real
+Casacore.jl (auto-registers `BitFlagsEngine<Int>`) and agreeing exactly
+with this package's own reader. Full standalone engine suite green
+(255/255, was 253 before the two new tests).
+
+### Phase 157 — swept TaQL-lite's LIKE/glob pattern matching and `_riseset`'s circumpolar formula against source; no bug found
+
+Read `casa/Utilities/Regex.cc`'s `fromPattern` (glob) and
+`fromSQLPattern` (SQL `LIKE`) directly — the two functions
+`_glob_regex`/`_sqlpattern_regex` (Phase 24) had been implemented from
+general convention, never checked line-by-line against casacore's own
+source. Confirmed exact matches: `fromSQLPattern`'s own comment
+("AFAIK there are no special escape characters") matches this
+package's documented "no SQL escape char" choice; `fromPattern`'s
+`*`→`.*`, `?`→`.`, `[!...]`/`[^...]` negation, and raw pass-through of
+bracket contents (no re-escaping inside `[...]`) all match
+`_glob_regex` exactly. One deliberate, correct divergence confirmed
+non-bug: this package's `_TQL_RE_SPECIAL` escape set additionally
+escapes `(`/`)`/`\`, which casacore's own (smaller) escape list
+doesn't — necessary and correct since this package targets Julia's
+PCRE-based `Regex` (where parens are metacharacters) rather than
+reproducing casacore's own regex engine's escaping bug-for-bug; the
+semantic behaviour (which strings match) is unaffected.
+
+Also re-verified `_riseset`'s (Phase 104/131) standard hour-angle
+formula — `cos(H₀) = (sin(elev₀) − sin(lat)·sin(dec)) / (cos(lat)·cos(dec))`
+— against the textbook astronomical formula (e.g. Meeus,
+*Astronomical Algorithms*): exact match, and the circumpolar
+(`c < -1`, source never sets) / never-rises (`c > 1`) edge cases are
+handled correctly since `cos(lat)`/`cos(dec)` are always non-negative
+for any valid latitude/declination (no sign-flip edge case to miss).
+No bug found in either area; no production code changed.
