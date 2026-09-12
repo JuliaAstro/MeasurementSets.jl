@@ -1176,6 +1176,41 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         pred = _mssel_baseline_pred(spec, n2i, 0:(length(antnames) - 1); names = antnames)
         return Bool[pred(a1[i], a2[i]) for i in 1:n]
     elseif fn == "field"
+        # Phase 145 investigation (redoing a Phase 144 hypothesis lost
+        # before it was committed): does `mscal.field()`/`mscal.state()`
+        # exclude `FLAG_ROW`-flagged rows, per the LIVE (not commented)
+        # `!flagRow(...)` checks in `MSFieldIndex.cc`/`MSStateIndex.cc`
+        # (contrast `MSAntennaIndex.cc`/`MSSpwIndex.cc`, where the
+        # equivalent check is neutered/commented out -- confirmed those
+        # two genuinely don't filter)?
+        #
+        # The answer is SPEC-FORM-DEPENDENT, confirmed against real
+        # `tableCommand` on a FIELD-row-0-flagged fixture:
+        #   - a bare id (`'0'`) or `~`-range (`'0~0'`) spec does NOT
+        #     exclude a flagged field -- both return every row, flagged
+        #     field included. Source: real casacore's grammar routes a
+        #     bare-number/range spec through `MSFieldParse::
+        #     selectFieldIds` (`MSFieldParse.cc:68-79`), which builds the
+        #     condition as a plain `columnAsTEN_p.in(fieldIds)` --
+        #     `FLAG_ROW` is never consulted on this path.
+        #   - a comparison spec (`'<N'`/`'>N'`) OR a name/pattern spec
+        #     (`'3C286'`) DOES exclude it -- confirmed live: an
+        #     unflagged fixture accepts both specs; the SAME specs on
+        #     the flagged fixture fail with "No field ID found <1" /
+        #     "No match found for name". Source: these route through
+        #     `MSFieldIndex::matchFieldIDLT/GT/GTAndLT` and
+        #     `matchFieldNameRegexOrPattern`, which DO check `!flagRow`
+        #     (`MSFieldIndex.cc:103,224`). `MSStateIndex.cc` has the
+        #     identical structure (`matchStateIDLT`/`matchStateObsMode`,
+        #     `.cc:104,130`) -- not independently live-tested, inferred
+        #     by the confirmed structural symmetry with FIELD.
+        #
+        # This package does not filter by `FLAG_ROW` for ANY spec form
+        # (matches real casacore only for the bare id/range case; a
+        # genuine, confirmed divergence for comparison and name specs --
+        # not yet fixed, since the fix requires spec-form-aware routing
+        # this function doesn't have. Left as a documented follow-up
+        # rather than rushed in alongside this investigation.)
         _need("FIELD_ID")
         fid = Int.(column(t, "FIELD_ID")[:])
         nf = haskey(subs, "FIELD") ? nrow(readtable(subs["FIELD"])) : maximum(fid; init = -1) + 1

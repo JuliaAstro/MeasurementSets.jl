@@ -3763,3 +3763,40 @@ engine, not per OBSERVATION_ID (Phase 144)" — the synthetic
 two-observation cross-check above, plus a same-value-across-the-split
 assertion on our own output. Full mscal suite green (510/510,
 standalone).
+
+### Phase 145 — redid a lost investigation: `mscal.field()`/`mscal.state()` vs `FLAG_ROW` is spec-form-dependent, not a blanket "never filters"
+
+A Phase 144 investigation into whether `mscal.field()`/`mscal.state()`
+exclude `FLAG_ROW`-flagged rows was lost (never committed) before a
+context-summary cut. Redone from scratch, live-verified against real
+`tableCommand`, with a more complete result than the original: the
+original probes (`'0'`, `'0~0'`, `'>=0'` — a parse error, `'<1'` — also
+a parse error at the time) concluded "field/state selection never
+respects `FLAG_ROW`" and were about to revert a matching code change.
+Redoing it with a wider set of specs (and, critically, comparing a
+flagged fixture against an *unflagged* one for the same spec, rather
+than assuming a parse error meant "unsupported syntax") shows the real
+behaviour is **spec-form-dependent**:
+
+- A bare id (`'0'`) or `~`-range (`'0~0'`) spec does **not** exclude a
+  flagged field/state — confirmed live, both return every row. Real
+  casacore's grammar routes these through `MSFieldParse::
+  selectFieldIds` (`MSFieldParse.cc:68-79`), which is a plain
+  `columnAsTEN_p.in(fieldIds)` — `FLAG_ROW` is never consulted here.
+- A comparison spec (`'<N'`/`'>N'`) or a name/pattern spec (`'3C286'`)
+  **does** exclude it — confirmed live: the identical spec succeeds on
+  an unflagged fixture and fails ("No field ID found" / "No match
+  found for name") once the only matching field/state is flagged. These
+  route through `MSFieldIndex::matchFieldIDLT/GT/GTAndLT` and
+  `matchFieldNameRegexOrPattern` (`MSFieldIndex.cc:103,224`), which DO
+  check `!flagRow`. `MSStateIndex.cc` has the identical structure
+  (`.cc:104,130`) — inferred by symmetry, not independently re-tested.
+
+So this package's `mscal.field()`/`mscal.state()` (which never filter
+by `FLAG_ROW` at all, for any spec form) match real casacore only for
+the bare id/range case — a genuine, confirmed divergence for comparison
+and name specs remains, now precisely characterised. **Not fixed in
+this phase** — documented as a comment above the `field`/`state`
+handling in `src/taql/mscal.jl` (Phase 145) for a scoped follow-up,
+since a correct fix needs spec-form-aware routing this function
+doesn't currently have. No production behaviour changed.
