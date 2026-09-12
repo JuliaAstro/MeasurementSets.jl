@@ -155,8 +155,8 @@ represents a *geodetic* (longitude, latitude, height) position — here
 `WGS84` is only a frame label, and `measconvert` between `ITRF`/`WGS84`
 is an identity on `(x,y,z)` (no real MS `POSITION` column ever uses
 `MEASINFO Ref="WGS84"`). For the real geodetic ↔ Cartesian ellipsoidal
-transform, use [`_geodetic_to_itrf`](@ref)/[`_itrf_to_geodetic`](@ref)
-(exposed to TaQL-lite as `meas.wgs()`/`meas.itrfxyz()`).
+transform, use `_geodetic_to_itrf`/`_itrf_to_geodetic` (internal —
+exposed to TaQL-lite as `meas.wgs()`/`meas.itrfxyz()`).
 """
 struct MPosition{R<:RefFrame}
     x::Float64
@@ -356,7 +356,7 @@ _geodetic_to_itrf(args...) = error(
 """
     _itrf_to_geodetic(x, y, z) -> (lon, lat, height)
 
-The inverse of [`_geodetic_to_itrf`](@ref) — geocentric Cartesian ITRF
+The inverse of `_geodetic_to_itrf` — geocentric Cartesian ITRF
 `(x, y, z)` (m) → WGS84 geodetic `(lon, lat, height)` (rad, rad, m).
 Real method in `ext/SOFAExt.jl`.
 """

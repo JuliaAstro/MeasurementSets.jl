@@ -199,7 +199,7 @@ end
 """
     _dysco_pack(bits, syms) -> Vector{UInt8}
 
-The exact inverse of [`_dysco_unpack`](@ref): pack `syms` (each `< 2^bits`)
+The exact inverse of `_dysco_unpack`: pack `syms` (each `< 2^bits`)
 into a continuous LSB-first bitstream, `bufferSize(length(syms),bits) =
 cld(length(syms)*bits, 8)` bytes.
 """
@@ -536,7 +536,7 @@ _dy_put!(buf::Vector{UInt8}, off::Integer, x::T) where {T} =
     _dysco_encode_symbol(boundaries, value) -> UInt32
 
 Nearest-symbol quantization (no dithering): `boundaries` from
-[`_dysco_boundaries`](@ref).  Non-finite `value` -> the reserved
+`_dysco_boundaries`.  Non-finite `value` -> the reserved
 non-finite symbol (`length(boundaries)`, one past the largest real
 symbol).
 """
@@ -551,7 +551,7 @@ end
 
 Stochastic-rounding quantization (`EncodeWithDithering`,
 `stochasticencoder.h:103-123`): `dict` is the **decode** (centroid)
-dictionary from [`_dysco_dictionary`](@ref) (dithering searches
+dictionary from `_dysco_dictionary` (dithering searches
 centroids, not boundaries, per casacore).  `rng` supplies the dither
 draw (Julia `Random`, not `std::mt19937` -- see file header).
 """
