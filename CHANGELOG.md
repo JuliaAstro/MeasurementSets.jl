@@ -4022,3 +4022,40 @@ found. This is a stronger result than Phase 78's original "standard,
 can be verified independently" claim, which was never actually checked
 against the source until now. No production code changed. Standalone
 mscal suite green (521/521, unchanged).
+
+### Phase 151 — found a real small gap in `mscal.spw`'s channel-frequency units (missing THz); confirmed real casacore's own velocity-unit channel selection is disabled too
+
+Investigated whether `ms.msselect()` (real casacore's MSSelection C++
+library exposed via `casatools`, called directly rather than through
+the crash-prone `derivedmscal`/TaQL `UDFMSCal` wrapper — Phase 147's
+segfault hazard) could safely give a live oracle for `mscal.scan`/
+`array`/`obs`'s GE/LE grammar forms, since those functions can never be
+called via `tableCommand` at all. Confirmed `msselectedindices()`'s
+`'scan'` key returns the *interpreted range bounds* of the spec, not
+the actual matched row/scan values against the table's data — an
+unreliable oracle for this purpose, not pursued further (no working
+independent test path found for `mscal.scan`/`array`/`obs`/`state`'s
+GE/LE forms in this environment).
+
+Redirected to `mscal.spw`'s channel-frequency-range unit table
+(`_CHAN_FREQ_UNIT`, Phase 83), which had never been checked against
+casacore's own unit grammar. Read `ms/MSSel/MSSpwGram.{ll,yy}` and
+`MSSpwIndex::convertToMKS` directly: the MKS conversion factors there
+(`k`→1e3, `m`→1e6, `g`→1e9, `t`→1e12) match this package's
+`hz`/`khz`/`mhz`/`ghz` exactly — no bug — but real casacore's grammar
+also lexes a `t<hz>` (THz) prefix that this package was missing, a
+real small gap, now fixed (`_CHAN_FREQ_UNIT["thz"] = 1e12`). Separately
+confirmed something reassuring while reading the same grammar: real
+casacore's own *velocity*-unit (`km/s`, `m/s`) channel selection
+unconditionally `throw`s ("Velocity units support temporarily
+disabled") the moment the parser reduces one — this package's own
+long-standing "velocity units on a chan range" non-goal was never
+actually a divergence from upstream, since upstream doesn't support it
+either.
+
+New unit tests for `_parse_chan_elem`'s THz form, a `mscal.spw`/
+`mscal.chan` query test confirming a THz-unit range spanning the same
+window as an existing GHz test gives an identical result, and a new
+entry in the real-TaQL cross-check list (`mscal.spw('0:0.0079~0.0081thz')`,
+matching the 7.9–8.1 GHz window of an existing GHz spec) — passes.
+Standalone mscal suite green (666/666).
