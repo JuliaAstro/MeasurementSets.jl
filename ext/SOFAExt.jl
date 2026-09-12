@@ -19,7 +19,7 @@ using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocit
     MBaseline, MuvW, MEarthMagnetic, IGRF,
     RefFrame, MeasFrame, reftype,
     UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
-    HADEC, AZEL, AZELGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
+    HADEC, AZEL, AZELGEO, AZELSW, AZELSWGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
     LGROUP, CMB,
     MERCURY, VENUS, MARS, JUPITER, SATURN, URANUS, NEPTUNE, SUN, MOON,
     OtherRef, _dir_xyz, _xyz_dir
@@ -318,9 +318,15 @@ function _body_dir_icrs(::Type{P}, frame::MeasFrame, topo::Bool) where {P}
     (atan(g[2], g[1]), asin(clamp(g[3] / r, -1.0, 1.0)))
 end
 
+# `MeasMath::applyAZELtoAZELSW` negates the direction's Cartesian x/y
+# (z unchanged) -- azimuth += π, elevation unchanged; its own inverse.
+_azelsw_flip(lon::Real) = mod2pi(lon + pi)
+
 function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
     _is_icrsish(A) && return (m.lon, m.lat)
     _is_body(A) && return _body_dir_icrs(A, frame, false)
+    A === AZELSW && return _dir_to_icrs(MDirection{AZEL}(_azelsw_flip(m.lon), m.lat), frame)
+    A === AZELSWGEO && return _dir_to_icrs(MDirection{AZELGEO}(_azelsw_flip(m.lon), m.lat), frame)
     if A === B1950
         r = SOFA.fk425(m.lon, m.lat, 0.0, 0.0, 0.0, 0.0)
         return (r.ra, r.dec)
@@ -363,6 +369,13 @@ function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) w
     _is_body(B) && error(
         "MeasurementSets: cannot convert a direction *to* the solar-system-body " *
         "frame $(nameof(B)) (body frames are source-only)")
+    if B === AZELSW
+        d = _icrs_to_dir(lon, lat, AZEL, frame)
+        return MDirection{AZELSW}(_azelsw_flip(d.lon), d.lat)
+    elseif B === AZELSWGEO
+        d = _icrs_to_dir(lon, lat, AZELGEO, frame)
+        return MDirection{AZELSWGEO}(_azelsw_flip(d.lon), d.lat)
+    end
     if B === B1950
         r = SOFA.fk524(lon, lat, 0.0, 0.0, 0.0, 0.0)
         return MDirection{B}(r.ra, r.dec)
@@ -392,7 +405,7 @@ function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) w
     error("MeasurementSets: direction frame $(nameof(B)) is not supported")
 end
 
-const _OBS_FRAMES = (AZEL, AZELGEO, HADEC, APP, ITRF)
+const _OBS_FRAMES = (AZEL, AZELGEO, AZELSW, AZELSWGEO, HADEC, APP, ITRF)
 
 function MS._mconv(m::MDirection, ::Type{B}, frame::MeasFrame) where {B<:RefFrame}
     A = reftype(m)

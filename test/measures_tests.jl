@@ -113,6 +113,19 @@ end
         @test rem2pi(b.lon - d.lon, RoundNearest) ≈ 0 atol=3e-6
         @test b.lat ≈ d.lat atol=3e-6
     end
+    # AZELSW/AZELSWGEO (Phase 160): azimuth = AZEL/AZELGEO's own azimuth
+    # + 180°, elevation unchanged; round-trips, and matches the AZEL/
+    # AZELGEO relationship directly (not just self-consistency)
+    for (SW, PLAIN) in ((AZELSW, AZEL), (AZELSWGEO, AZELGEO))
+        m = measconvert(d, SW; frame = fr)
+        @test m isa MDirection{SW}
+        p = measconvert(d, PLAIN; frame = fr)
+        @test rem2pi(m.lon - p.lon - pi, RoundNearest) ≈ 0 atol = 1e-9
+        @test m.lat ≈ p.lat atol = 1e-9
+        b = measconvert(m, J2000; frame = fr)
+        @test rem2pi(b.lon - d.lon, RoundNearest) ≈ 0 atol = 3e-6
+        @test b.lat ≈ d.lat atol = 3e-6
+    end
 end
 
 @testset "measures — frequency conversions (SOFA)" begin
@@ -386,6 +399,14 @@ end
 
     @test MSv2._frame_type(:direction, "SUN") === SUN
     @test MSv2._frame_type(:direction, "PLUTO") <: MSv2.OtherRef   # still parses
+    # Phase 160: AZELSW/AZELSWGEO were previously unrecognised (fell
+    # back to OtherRef) -- AZELNE/AZELNEGEO are real casacore *aliases*
+    # of AZEL/AZELGEO (`MDirection.h`'s own enum), so those two stay
+    # mapped to the same types; AZELSW/AZELSWGEO are genuinely distinct.
+    @test MSv2._frame_type(:direction, "AZELSW") === AZELSW
+    @test MSv2._frame_type(:direction, "AZELSWGEO") === AZELSWGEO
+    @test MSv2._frame_type(:direction, "AZELNE") === AZEL
+    @test MSv2._frame_type(:direction, "AZELNEGEO") === AZELGEO
 
     # convert (SOFA)
     fr = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
@@ -550,10 +571,18 @@ if _HAVE_MEAS_CASA
         end
 
         # direction (arcsec tolerance; APP/AZEL depend on EOP)
+        # Phase 160: AZELSW/AZELSWGEO added -- a genuinely distinct
+        # casacore enum value (not an alias like AZELNE/AZELNEGEO,
+        # confirmed in `MDirection.h`'s own enum), a "south through
+        # west" azimuth convention = AZEL/AZELGEO's own azimuth + 180°
+        # (`MeasMath::applyAZELtoAZELSW` negates the direction's
+        # Cartesian x/y). Was previously entirely unsupported by this
+        # package (`_frame_type` fell back to `OtherRef{:AZELSW}`).
         d = MDirection{J2000}(ref.src_ra, ref.src_dec)
         as = MSv2.ARCSEC
         for (frame, T) in (("B1950", B1950), ("GALACTIC", GALACTIC),
                            ("APP", APP), ("AZEL", AZEL), ("AZELGEO", AZELGEO),
+                           ("AZELSW", AZELSW), ("AZELSWGEO", AZELSWGEO),
                            ("HADEC", HADEC))
             got = measconvert(d, T; frame = fr)
             want = getproperty(ref.direction, Symbol(frame))
@@ -581,20 +610,29 @@ if _HAVE_MEAS_CASA
 
         # frequency: agrees to ~1e-9 relative (< 0.3 m/s line-of-sight) —
         # the residual is SOFA `epv00` vs casacore's own Earth ephemeris.
+        # Phase 159: LGROUP/CMB added -- Phase 88 assumed no `casatools`
+        # oracle existed for these two ("no casatools oracle for these
+        # two"), but `me.listcodes(me.frequency())` shows both ARE valid
+        # `me.measure(...)` target codes; live-verified they inherit
+        # exactly the same BARY-hub residual as the other frames here
+        # (their own step is a pure constant-vector addition, no new
+        # ephemeris error), so the same `rtol=2e-9` applies.
         f = MFrequency{TOPO}(ref.freq_hz)
         for (frame, T) in (("GEO", GEO), ("BARY", BARY), ("LSRK", LSRK),
-                           ("LSRD", LSRD), ("GALACTO", GALACTO))
+                           ("LSRD", LSRD), ("GALACTO", GALACTO),
+                           ("LGROUP", LGROUP), ("CMB", CMB))
             got = measconvert(f, T; frame = fr)
             @test got.hz ≈ getproperty(ref.frequency, Symbol(frame)) rtol = 2e-9
         end
 
-        # radial velocity: same physics as frequency. BARY/LSRD/GALACTO
-        # (constant `_VEL_*` only) match to < 1 mm/s; GEO/TOPO carry the
-        # SOFA `epv00` + `pvtob`-diurnal-aberration vs casacore-ephemeris
-        # residual (~0.25 m/s LOS, the same as the frequency test's
-        # `rtol=2e-9` == ~0.6 m/s at 100 GHz).
+        # radial velocity: same physics as frequency. BARY/LSRD/GALACTO/
+        # LGROUP/CMB (constant `_VEL_*` only) match to < 1 mm/s; GEO/TOPO
+        # carry the SOFA `epv00` + `pvtob`-diurnal-aberration vs
+        # casacore-ephemeris residual (~0.25 m/s LOS, the same as the
+        # frequency test's `rtol=2e-9` == ~0.6 m/s at 100 GHz).
         v = MRadialVelocity{LSRK}(ref.rv_mps)
-        for (frame, T) in (("BARY", BARY), ("LSRD", LSRD), ("GALACTO", GALACTO))
+        for (frame, T) in (("BARY", BARY), ("LSRD", LSRD), ("GALACTO", GALACTO),
+                           ("LGROUP", LGROUP), ("CMB", CMB))
             got = measconvert(v, T; frame = fr)
             @test got.mps ≈ getproperty(ref.radialvelocity, Symbol(frame)) atol = 1e-3
         end

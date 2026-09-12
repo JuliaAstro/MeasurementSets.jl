@@ -319,3 +319,36 @@ end
     @test_throws ArgumentError write_table(dir, "T", ["A" => collect(1:5)]; nrow=5,
                                            storage=:nonsense)
 end
+
+@testset "container_mmap — non-contiguous block fallback (Phase 158)" begin
+    # A freshly-written container always allocates blocks sequentially
+    # (`MultiFile::extendVF`), so no test anywhere else in this file (or
+    # this package's own writer) ever produces a virtual file whose
+    # `blocknrs` are non-contiguous -- the `container_mmap` fallback to
+    # `container_read` (src/datamanagers/container.jl:326-332) has never
+    # actually been exercised by any test. Build a fabricated container
+    # directly to close that gap: two virtual files sharing one physical
+    # file, block 0 = "AAAA", block 1 = "BBBB", block 2 = "CCCC" (4-byte
+    # blocksize); "v1" is stored contiguously at blocks [0,1] (exercises
+    # the mmap fast path), "v2" is deliberately non-contiguous at
+    # blocks [2,0] (exercises the materializing fallback).
+    dir = mktempdir()
+    path = joinpath(dir, "raw.mf")
+    write(path, vcat(collect(codeunits("AAAA")), collect(codeunits("BBBB")),
+                     collect(codeunits("CCCC"))))
+    entries = Dict("v1" => MSv2.MultiFileEntry(8, Int64[0, 1]),
+                   "v2" => MSv2.MultiFileEntry(8, Int64[2, 0]))
+    c = MSv2.MultiFileContainer(path, 4, entries)
+
+    v1 = MSv2.container_mmap(c, "v1")
+    @test String(collect(v1)) == "AAAABBBB"
+    @test v1 isa SubArray                       # the contiguous fast path -> a real mmap view
+
+    v2 = MSv2.container_mmap(c, "v2")
+    @test String(collect(v2)) == "CCCCAAAA"     # block 2 then block 0, NOT a naive contiguous slice
+    @test v2 isa Vector{UInt8}                  # the fallback path -> a materialized copy
+
+    # `container_mmap`/`container_read` must agree exactly for the
+    # fallback case (the whole point of falling back is correctness)
+    @test v2 == MSv2.container_read(c, "v2")
+end

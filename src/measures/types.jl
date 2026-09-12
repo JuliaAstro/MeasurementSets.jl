@@ -27,7 +27,7 @@ subtypes, used as the type parameter of a measure value
 | group | frames |
 |---|---|
 | epoch (time scale) | `UTC` `TAI` `TT` `TDB` `UT1` |
-| direction | `J2000` `ICRS` `B1950` `APP` `GALACTIC` `ECLIPTIC` `HADEC` `AZEL` `AZELGEO` |
+| direction | `J2000` `ICRS` `B1950` `APP` `GALACTIC` `ECLIPTIC` `HADEC` `AZEL` `AZELGEO` `AZELSW` `AZELSWGEO` |
 | earth-fixed | `ITRF` `WGS84` `TOPO` |
 | frequency / radial velocity | `REST` `LSRK` `LSRD` `BARY` `GEO` `GALACTO` |
 
@@ -51,6 +51,8 @@ for (T, doc) in [
         (:HADEC,    "Topocentric hour angle / declination (direction)."),
         (:AZEL,     "Azimuth / elevation about the geocentric vertical, N=0 E=90 (direction)."),
         (:AZELGEO,  "Azimuth / elevation about the geodetic vertical (direction)."),
+        (:AZELSW,   "Azimuth / elevation about the geocentric vertical, S=0 W=90 -- azimuth = `AZEL`'s azimuth + 180° (direction)."),
+        (:AZELSWGEO, "Azimuth / elevation about the geodetic vertical, S=0 W=90 -- azimuth = `AZELGEO`'s azimuth + 180° (direction)."),
         (:ITRF,     "International Terrestrial Reference Frame (position / direction)."),
         (:WGS84,    "WGS84 geodetic datum (position)."),
         (:TOPO,     "Topocentric (frequency / direction)."),
@@ -153,8 +155,8 @@ represents a *geodetic* (longitude, latitude, height) position — here
 `WGS84` is only a frame label, and `measconvert` between `ITRF`/`WGS84`
 is an identity on `(x,y,z)` (no real MS `POSITION` column ever uses
 `MEASINFO Ref="WGS84"`). For the real geodetic ↔ Cartesian ellipsoidal
-transform, use [`_geodetic_to_itrf`](@ref)/[`_itrf_to_geodetic`](@ref)
-(exposed to TaQL-lite as `meas.wgs()`/`meas.itrfxyz()`).
+transform, use `_geodetic_to_itrf`/`_itrf_to_geodetic` (internal —
+exposed to TaQL-lite as `meas.wgs()`/`meas.itrfxyz()`).
 """
 struct MPosition{R<:RefFrame}
     x::Float64
@@ -354,7 +356,7 @@ _geodetic_to_itrf(args...) = error(
 """
     _itrf_to_geodetic(x, y, z) -> (lon, lat, height)
 
-The inverse of [`_geodetic_to_itrf`](@ref) — geocentric Cartesian ITRF
+The inverse of `_geodetic_to_itrf` — geocentric Cartesian ITRF
 `(x, y, z)` (m) → WGS84 geodetic `(lon, lat, height)` (rad, rad, m).
 Real method in `ext/SOFAExt.jl`.
 """

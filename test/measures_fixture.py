@@ -68,7 +68,7 @@ d = me.direction("J2000", qa.quantity(SRC_RA, "rad"), qa.quantity(SRC_DEC, "rad"
 me.doframe(e0)
 me.doframe(pos)
 dparts = []
-for frame in ("B1950", "GALACTIC", "APP", "AZEL", "AZELGEO", "HADEC"):
+for frame in ("B1950", "GALACTIC", "APP", "AZEL", "AZELGEO", "AZELSW", "AZELSWGEO", "HADEC"):
     m = me.measure(d, frame)
     dparts.append(f"{frame} = ({m['m0']['value']!r}, {m['m1']['value']!r})")
 L.append(f"  direction = ({', '.join(dparts)}),")
@@ -91,7 +91,7 @@ me.doframe(e0)
 me.doframe(pos)
 me.doframe(d)
 fparts = [f"{fr} = {me.measure(f, fr)['m0']['value']!r}"
-          for fr in ("GEO", "BARY", "LSRK", "LSRD", "GALACTO")]
+          for fr in ("GEO", "BARY", "LSRK", "LSRD", "GALACTO", "LGROUP", "CMB")]
 L.append(f"  frequency = ({', '.join(fparts)}),")
 
 # radial velocity: LSRK -> {...}
@@ -100,7 +100,7 @@ me.doframe(e0)
 me.doframe(pos)
 me.doframe(d)
 rvparts = [f"{fr} = {me.measure(rv, fr)['m0']['value']!r}"
-           for fr in ("BARY", "LSRD", "GEO", "TOPO", "GALACTO")]
+           for fr in ("BARY", "LSRD", "GEO", "TOPO", "GALACTO", "LGROUP", "CMB")]
 L.append(f"  radialvelocity = ({', '.join(rvparts)}),")
 
 # doppler: RADIO -> {OPTICAL, RATIO, TRUE, GAMMA}, and the bridges.

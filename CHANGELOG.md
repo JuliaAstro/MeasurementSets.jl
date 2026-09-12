@@ -4271,3 +4271,119 @@ formula — `cos(H₀) = (sin(elev₀) − sin(lat)·sin(dec)) / (cos(lat)·cos(
 handled correctly since `cos(lat)`/`cos(dec)` are always non-negative
 for any valid latitude/declination (no sign-flip edge case to miss).
 No bug found in either area; no production code changed.
+
+### Phase 158 — closed a real test-coverage gap: `container_mmap`'s non-contiguous-block fallback had never actually been exercised
+
+Following up on Phase 156's finding (a bug hiding in an optional-key
+lookup that no test happened to exercise), searched for other
+`Dict`/`Record`-style lookups fed by on-disk data across `src/` —
+`_engine_spec_from_source`, the `_MEAS_FRAMES`/`_ref_from_code`
+family, and every other `get(kw, ...)` site in `src/datamanagers/
+virtual.jl` already use safe `get`-with-default or raise a deliberate,
+correct `ArgumentError` for genuinely invalid data (not analogous to
+Phase 156's "casacore silently tolerates this, we didn't" case) — no
+new bug found there. Also independently re-derived `mscal.stokes()`'s
+per-code rescale `factor()` values (`0.5` for codes `RR..YY`,
+`√2/4` for `RX..YL`) directly against `StokesConverter.cc`'s own
+`Vector<Float> factor` setup — exact match, confirming the
+`_stokes_factor`/`cmat[o,j] = base[...] * factor(in)/factor(out)`
+composition Phase 78 already had right.
+
+The concrete finding: `container_mmap`'s own header comment
+(`src/datamanagers/container.jl`) already documented, as a known risk
+since Phase 20, that its non-contiguous-block fallback path (a
+`MultiFileContainer` virtual file whose physical blocks aren't laid
+out sequentially — never produced by this package's own writer, which
+always allocates contiguously) had no test exercising it — searched
+`test/container_tests.jl` and confirmed: zero references to
+`container_mmap` at all, so BOTH branches of that function (the
+zero-copy `mmap` fast path AND the materializing fallback) were
+completely untested, not just the fallback. Added a direct unit test
+that fabricates a `MultiFileContainer` with one virtual file laid out
+contiguously (exercises the `mmap`/`SubArray` fast path) and one
+laid out deliberately out of order (exercises the fallback,
+`container_read`) — both produce the correct bytes, and the fallback
+result matches an independent `container_read` call exactly. Inspected
+the fallback code itself (`container_read`) during this work and
+confirmed it's correct by construction (walks `blocknrs` in given
+order with no contiguity assumption) — this was a coverage gap, not a
+live bug, but a real one worth closing given it's the exact kind of
+"never-executed branch" risk this session's own discipline exists to
+catch. No production code changed. Standalone container suite green
+(290/290, all passing including the new test).
+
+### Phase 159 — found `LGROUP`/`CMB` velocity frames DO have a real `casatools` oracle after all (Phase 88 was wrong that none existed); added the cross-check
+
+Phase 88's own writeup said the `VEL_LGROUP`/`VEL_CMB` constants were
+"copied verbatim from `MeasTable.cc` (no `casatools` oracle for these
+two)" and left them self-round-trip-tested only. That assumption was
+never actually checked — `me.listcodes(me.frequency())` (real
+`casatools`) shows `LGROUP` and `CMB` ARE valid `me.measure(...)`
+target codes, exactly like every other frequency/radial-velocity frame
+this package already cross-checks. Live-verified directly: converting
+a 100 GHz TOPO frequency and a 20 km/s LSRK radial velocity to LGROUP
+and CMB via real `casatools` matches this package's `measconvert`
+output to the SAME precision as the already-verified BARY/LSRD/GALACTO
+frames (~7.8e-10 relative for frequency, sub-mm/s for radial velocity)
+— expected, since the LGROUP/CMB step in this package's implementation
+is a pure constant-vector addition on top of the BARY hub, introducing
+no new ephemeris error beyond what BARY already carries. Added both to
+the permanent CASA-oracle fixture (`test/measures_fixture.py`) and
+cross-check test (`test/measures_tests.jl`), using the identical
+tolerance buckets as the frames they're structurally identical to.
+No production code changed — the implementation was already correct;
+this closes a real "we never actually checked" gap in test coverage,
+not a live bug. Standalone measures suite green (490/490, was 486
+before the 4 new assertions).
+
+### Phase 160 — found and fixed a real gap: `AZELSW`/`AZELSWGEO` direction frames were entirely unsupported (silently fell back to `OtherRef`)
+
+Continuing Phase 159's methodology (question an unverified assumption
+by actually calling `me.listcodes()`), ran it across every measure
+kind: `me.listcodes(me.direction())`, `.position()`, `.epoch()`,
+`.doppler()`, `.radialvelocity()`, `.earthmagnetic()`, `.baseline()`,
+`.uvw()`. All match this package's existing frame coverage exactly —
+**except** direction/baseline/uvw's code list includes `AZELSW` and
+`AZELSWGEO` alongside the already-supported `AZEL`/`AZELGEO`/`AZELNE`/
+`AZELNEGEO`.
+
+Read `MDirection.h`'s own enum directly: `AZELNE=AZEL` and
+`AZELNEGEO=AZELGEO` are literal C++ enum ALIASES (same integer value —
+this package's existing `"AZELNE" => AZEL` mapping was already exactly
+right), but `AZELSW`/`AZELSWGEO` are separate, DISTINCT enum slots — a
+genuinely different "azimuth measured south-through-west" convention
+(vs. `AZEL`'s north-through-east), used by some older telescope
+control systems. This package's `_DIRECTION_FRAMES` string→type map
+(`src/measures/measinfo.jl`) had no entry for either name at all, so a
+column or `measconvert` call naming `AZELSW`/`AZELSWGEO` would silently
+resolve to `OtherRef{:AZELSW}` (an unconvertible frame) instead of
+actually converting — note `_DIRECTION_ENUM` (the 0-based numeric-code
+fallback table, used for a bare `VarRefCol` integer code) already had
+both names in the right enum positions from the start, so only the
+*named*-frame lookup path was affected.
+
+Read `MCDirection.cc`'s `AZEL_AZELSW`/`AZELSW_AZEL` routes: both go
+through `MeasMath::applyAZELtoAZELSW`, which simply negates the
+direction's Cartesian x/y (z, i.e. elevation, unchanged) — equivalent
+to `azimuth += 180°` — and is its own inverse. Implemented as a thin
+wrapper around the existing `AZEL`/`AZELGEO` conversion machinery
+(`ext/SOFAExt.jl`): `AZELSW`/`AZELSWGEO` flip the azimuth by π on the
+way in and out, reusing every other conversion path unchanged. Added
+the two new `RefFrame` singleton types, wired them into
+`_DIRECTION_FRAMES`, `_FRAME_STRING` (write path), and `_OBS_FRAMES`
+(the solar-system-body topocentric-parallax dispatch list, since
+`AZELSW`/`AZELSWGEO` are observer frames exactly like `AZEL`/`AZELGEO`).
+
+Live-verified directly against real `casatools`: for a fixed J2000
+direction and frame, `me.measure(d, 'azelsw')`/`'azelswgeo'` match this
+package's `measconvert` output to the same ~7×10⁻⁷ rad residual already
+established for plain `AZEL`/`AZELGEO` (the standard SOFA-vs-casacore
+ephemeris/EOP difference) — confirming both the azimuth-flip relation
+and the underlying `AZEL`/`AZELGEO` machinery it reuses. Added a
+self-consistency unit test (the exact `azimuth = AZEL's azimuth + π`
+relationship, plus round-trip) and extended the permanent CASA-oracle
+fixture + cross-check test with both frames. `docs/src/api-measures.md`
+gains the two new exported names (keeps the `checkdocs = :exported`
+docs build clean). Standalone measures suite green (508/508, was 490
+before the 18 new assertions); standalone query suite unaffected
+(1008/1008, unchanged).
