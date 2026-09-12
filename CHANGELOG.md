@@ -3975,3 +3975,50 @@ same-string real-TaQL cross-check for `SET A = B, B = A` added (passes).
 Full suite green: commands 241/241, broad query/groupby/join 867/867,
 writer+edit+schema 219/219, mscal 521/521 (all standalone, no
 regressions).
+
+### Phase 150 — verified `mscal.stokes()`'s hardcoded conversion matrices are byte-exact against casacore's own construction (no bug)
+
+Swept the six hardcoded 4×4 IQUV/circular/linear conversion matrices
+(`_M_LIN_FROM_IQUV`, `_M_IQUV_FROM_LIN`, `_M_CIRC_FROM_IQUV`,
+`_M_IQUV_FROM_CIRC`, and the composed `lin↔circ` pair) that
+`mscal.stokes()`'s `_STOKES_BASE` (Phase 78) has relied on since it was
+written — the Phase 78 plan asserted these are "standard" without ever
+independently re-deriving them from casacore's own construction.
+
+Read `ms/MeasurementSets/StokesConverter.cc::initConvMatrix` directly:
+casacore builds its IQUV→linear matrix from a literal `Slin[4][4]`, and
+IQUV→circular as `Scirc = kron(h, conj(h)) · Slinear` where
+`h = (1/√2)·[[1,i],[1,-i]]` (a Kronecker product via `directProduct`,
+whose exact operand order — `kron(A,B)` vs `kron(B,A)` — isn't stated
+in the header and had to be resolved empirically). Independently
+computed `Slin` and both candidate Kronecker orderings in a scratch
+Julia session (not the package under test) and compared:
+
+- `_M_LIN_FROM_IQUV` matches casacore's literal `Slin` array exactly,
+  element for element.
+- `kron(h, conj(h)) · Slinear` (the correct operand order, confirmed by
+  matching) is byte-identical to `_M_CIRC_FROM_IQUV`.
+- `_M_IQUV_FROM_CIRC` / `_M_IQUV_FROM_LIN` are exactly `inv(Mcirc)` /
+  `inv(Mlin)` computed independently.
+- The two composed matrices (`_m4mul(_M_CIRC_FROM_IQUV,
+  _M_IQUV_FROM_LIN)` for `lin→circ`, and the mirror for `circ→lin`)
+  match casacore's own `tmp = Scirc; tmp *= Slinear.inverse()` /
+  `tmp = Slinear; tmp *= Scirc.inverse()` composition order exactly —
+  confirmed the `(from, to)` key convention in `_STOKES_BASE`'s own
+  comment (`to_vec = M * from_vec`) lines up with which matrix is
+  multiplied by which inverse.
+
+Also confirmed, while re-reading `RefTable::root()`/`BaseTable::root()`
+for a different question (whether `write_reftable`'s Phase 132
+`_flatten_to_root` should also flatten through a `ConcatTable` parent):
+`ConcatTable` does not override `root()`, so real casacore's own
+`RefTable` constructor (`btp->root()`) stops at a `ConcatTable` parent
+exactly like this package's `_flatten_to_root` already does (only
+`RefTable` parents recurse) — confirmed correct, no change needed.
+
+Every one of the six Stokes matrices this package hardcodes is a
+genuine, byte-exact match to real casacore's derivation — no bug
+found. This is a stronger result than Phase 78's original "standard,
+can be verified independently" claim, which was never actually checked
+against the source until now. No production code changed. Standalone
+mscal suite green (521/521, unchanged).
