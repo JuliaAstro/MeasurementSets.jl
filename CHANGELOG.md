@@ -4428,3 +4428,35 @@ No source or test change — this phase closes out two investigation
 leads with no bug found, continuing the established discipline of
 verifying an assumption against real casacore source before trusting
 it. Standalone suite unaffected.
+
+### Phase 162 — swept the multi-column tiled tie-break sort + Dysco/Stokes read paths once more; no new bug (one false alarm resolved)
+
+Re-read `_tile_order` (`src/datamanagers/tiled.jl`) — its explicit
+`by = i -> (-_canon(types[i]), -i)` sort key initially looked backwards
+(a naive reading of "stable descending sort, ties keep binding order"
+from the Phase 11 plan text suggests ties should stay in *ascending*
+original-index order, which this key does not produce). Before
+"fixing" it, checked the existing test that specifically documents this
+case: `test/tsm_multicol_tests.jl`'s "tile-block order — equal-size
+types (casacore tie-break)" testset's own comment states real casacore
+was found, during Phase 11's implementation, to order equal-canonical-
+size columns by **descending** binding index, not ascending — and that
+testset cross-checks both directions (casacore-authored → our reader,
+and our writer → casacore reader) against real `CCT.Table`. The current
+`-i` tie-break key produces exactly that descending-index order. So the
+Phase 11 plan's own prose summary ("ties keep binding order") was an
+imprecise gloss on what was actually verified live; the code and its
+real-oracle test already agree with each other and with real casacore.
+No bug — a false alarm caught before any code was touched, by checking
+the test before "fixing" anything.
+
+Also re-verified, without finding an issue: `_dysco_spec_from_source`'s
+`antenna1`/`antenna2` row selection (`inst.ant1[rows]`) is correctly
+absolute-row-indexed since `DyscoStMan.ant1`/`.ant2` are populated as
+full-table-length vectors at open time; `mscal.stokes`'s Bool (FLAG)
+conversion path already matches casacore's `any(coefficient≠0 && flag)`
+per-output rule exactly (confirmed against the Phase 78/142 source
+citations already in the code); `_mf_pack_index`/`_mf_unpack_index`
+round-trip correctly for the empty- and single-block edge cases.
+
+No source or test change. Standalone suite unaffected.
