@@ -205,26 +205,41 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
                   _altaz6.(String.(column(ant, "MOUNT")[:])) : trues(nrow(ant))
 
     # array-centre position for a suffix-less `mscal.ha()`/`azel()`/… --
-    # OBSERVATION.TELESCOPE_NAME -> the bundled Observatories table, else
-    # a one-time warn + antenna 0.
-    obsid = "OBSERVATION_ID" in cn ? Int.(column(t, "OBSERVATION_ID")[:]) :
-            zeros(Int, n)
+    # Phase 144 fix (found while sweeping `MSCalEngine.cc` for another
+    # bug after Phase 143): `MSCalEngine::attachColumns` computes this
+    # ONCE for the whole engine, from OBSERVATION *row 0*'s
+    # TELESCOPE_NAME -- NOT per MAIN row via `OBSERVATION_ID` as this
+    # package previously did (a real, live-verified divergence: on a
+    # 2-observation synthetic MS with different telescopes, real
+    # casacore's `mscal.ha()` is IDENTICAL across the OBSERVATION_ID
+    # split -- ours jumped by ~0.7 rad at the boundary before this fix).
+    # Fallback chain, also verified against source
+    # (`MSCalEngine.cc:330-349`): OBSERVATION row 0 -> table keyword
+    # `TELESCOPE_NAME` -> the MIDDLE antenna (`itsAntPos[0][nant/2]`,
+    # 0-based -- NOT antenna 0, a second latent bug this fix also
+    # corrects, though harder to observe live since any MS with a
+    # recognised telescope never reaches it).
     telname = haskey(subs, "OBSERVATION") ?
               String.(column(readtable(subs["OBSERVATION"]), "TELESCOPE_NAME")[:]) :
               String[]
-    _warned_obs = Ref(false)
-    _centrepos(oi) = begin
-        p = (1 <= oi + 1 <= length(telname)) ? observatory(telname[oi + 1]) : nothing
+    centrepos = let p = !isempty(telname) ? observatory(telname[1]) : nothing
         if p === nothing
-            _warned_obs[] || (@warn "mscal.*: no Observatories entry for " *
-                "telescope $(get(telname, oi + 1, "?")); using antenna 0 as the array centre";
-                _warned_obs[] = true)
-            antpos[1]
-        else
-            p
+            kwtel = get(keywords(t), "TELESCOPE_NAME", nothing)
+            p = kwtel === nothing ? nothing : observatory(String(kwtel))
         end
+        if p === nothing
+            nant = nrow(ant)
+            if nant > 0
+                @warn "mscal.*: no Observatories entry for the array's " *
+                    "telescope; using the middle antenna as the array centre"
+                p = antpos[nant ÷ 2 + 1]
+            else
+                error("mscal.*: cannot determine an array centre (no " *
+                      "Observatories entry, no antennas)")
+            end
+        end
+        p
     end
-    centrepos = Dict{Int,Any}(o => _centrepos(o) for o in unique(obsid))
     fdir = Dict{Int,Any}()                            # static field id -> J2000 direction
     fdir_t = Dict{Tuple{Int,Float64},Any}()           # (moving field, TIME) -> J2000
     feph = Dict{Int,Any}()                            # field id -> Ephemeris | nothing
@@ -362,9 +377,9 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     memo = Dict{Tuple{Int,Any,Float64},NamedTuple}()
     function _cache(antid::Int, dir::AbstractString, i::Int)
         dj, dkey = _djfor(dir, i)
-        pkey = antid >= 0 ? antid : -obsid[i] - 1
+        pkey = antid >= 0 ? antid : -1
         get!(memo, (pkey, dkey, tsec[i])) do
-            pos = antid >= 0 ? antpos[antid + 1] : centrepos[obsid[i]]
+            pos = antid >= 0 ? antpos[antid + 1] : centrepos
             fr = MeasFrame(epoch = epochs[i], position = pos, direction = dj)
             hd = measconvert(dj, HADEC; frame = fr)
             ae = measconvert(dj, AZEL; frame = fr)
@@ -385,10 +400,10 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     risememo = Dict{Tuple{Int,Any,Float64,Float64},Vector{Float64}}()
     function _riseset_for(antid::Int, dir::AbstractString, elev0::Float64, i::Int)
         dj, dkey = _djfor(dir, i)
-        pkey = antid >= 0 ? antid : -obsid[i] - 1
+        pkey = antid >= 0 ? antid : -1
         day = floor(tsec[i] / 86400.0)
         get!(risememo, (pkey, dkey, day, elev0)) do
-            pos = antid >= 0 ? antpos[antid + 1] : centrepos[obsid[i]]
+            pos = antid >= 0 ? antpos[antid + 1] : centrepos
             mjd = tsec[i] / 86400.0
             collect(Float64, _riseset(dj.lon, dj.lat, mjd, _pvec(pos)..., elev0))
         end
@@ -436,7 +451,7 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
             v = Vector{Float64}(undef, n)
             for i in 1:n
                 x = _cache(-1, dir, i).itrf_xyz
-                d = _pvec(antpos[aidx[i] + 1]) .- _pvec(centrepos[obsid[i]])
+                d = _pvec(antpos[aidx[i] + 1]) .- _pvec(centrepos)
                 v[i] = (x[1]*d[1] + x[2]*d[2] + x[3]*d[3]) / C_LIGHT
             end
             out[_mscal_key(spec)] = v
@@ -914,35 +929,60 @@ _mssel_names_to_ids(namevec) = begin
     d
 end
 
-function _mssel_resolve(term::AbstractString, allids, n2i::AbstractDict)
+# Phase 146: `flagged` (0-based-id-indexed, `nothing` = no filtering)
+# implements the spec-form-dependent `FLAG_ROW` exclusion found live
+# against real casacore for FIELD/STATE selection (Phase 145): a bare
+# id or `~`-range term is NEVER `FLAG_ROW`-filtered (real casacore
+# routes it through `MSFieldParse::selectFieldIds`, a plain
+# `TEN.in(ids)` with no `FLAG_ROW` check at all); a comparison
+# (`<`/`>`/`<=`/`>=`) or name/regex/glob term IS (real casacore routes
+# it through `MSFieldIndex`'s `matchFieldIDLT/GT/GTAndLT`/
+# `matchFieldNameRegexOrPattern`, which check `!flagRow`). Only the
+# `field`/`state` call sites pass a real `flagged` vector; every other
+# `_mssel_idset` caller (baseline/spw/scan/array/obs) keeps the
+# default `nothing` — confirmed (Phases 118-119) that antenna/spw
+# selection never filters by `FLAG_ROW` in real casacore either (the
+# equivalent check is commented out in `MSAntennaIndex.cc`/
+# `MSSpwIndex.cc`).
+_mssel_notflagged(s, ::Nothing) = s
+_mssel_notflagged(s, flagged::AbstractVector{Bool}) =
+    Set{Int}(i for i in s if !(1 <= i + 1 <= length(flagged) && flagged[i + 1]))
+
+function _mssel_resolve(term::AbstractString, allids, n2i::AbstractDict;
+                        flagged::Union{Nothing,AbstractVector{Bool}} = nothing)
     m = match(r"^(\d+)\s*~\s*(\d+)$", term)
     m !== nothing && return Set{Int}(parse(Int, m[1]):parse(Int, m[2]))
     m = match(r"^(>=|<=|>|<)\s*(-?\d+)$", term)
     if m !== nothing
         v = parse(Int, m[2]); op = m[1]
-        return Set{Int}(i for i in allids if op == ">" ? i > v :
+        s = Set{Int}(i for i in allids if op == ">" ? i > v :
                         op == ">=" ? i >= v : op == "<" ? i < v : i <= v)
+        return _mssel_notflagged(s, flagged)
     end
     occursin(r"^-?\d+$", term) && return Set{Int}([parse(Int, term)])
     if length(term) >= 2 && startswith(term, "/") && endswith(term, "/")
         re = Regex(term[2:end-1])
-        return Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        s = Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        return _mssel_notflagged(s, flagged)
     end
     if occursin(r"[*?\[\]]", term)
         re = _glob_regex(term, false)
-        return Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        s = Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        return _mssel_notflagged(s, flagged)
     end
-    return haskey(n2i, term) ? Set{Int}(n2i[term]) : Set{Int}()
+    s = haskey(n2i, term) ? Set{Int}(n2i[term]) : Set{Int}()
+    return _mssel_notflagged(s, flagged)
 end
 
-function _mssel_idset(spec::AbstractString, allids, n2i::AbstractDict)
+function _mssel_idset(spec::AbstractString, allids, n2i::AbstractDict;
+                      flagged::Union{Nothing,AbstractVector{Bool}} = nothing)
     pos = Set{Int}(); neg = Set{Int}(); anypos = false
     for raw in _mssel_commas(spec)
         term = strip(raw)
         isempty(term) && continue
         isneg = startswith(term, "!")
         isneg && (term = strip(term[2:end]))
-        s = _mssel_resolve(term, allids, n2i)
+        s = _mssel_resolve(term, allids, n2i; flagged)
         isneg ? union!(neg, s) : (union!(pos, s); anypos = true)
     end
     base = anypos ? pos : Set{Int}(allids)
@@ -1161,10 +1201,30 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         pred = _mssel_baseline_pred(spec, n2i, 0:(length(antnames) - 1); names = antnames)
         return Bool[pred(a1[i], a2[i]) for i in 1:n]
     elseif fn == "field"
+        # Phase 145/146: `mscal.field()`/`mscal.state()` vs `FLAG_ROW`
+        # is SPEC-FORM-DEPENDENT in real casacore, confirmed live
+        # against real `tableCommand` on a FIELD-row-0-flagged fixture
+        # (see the Phase 145 CHANGELOG entry for the full writeup): a
+        # bare id (`'0'`) or `~`-range (`'0~0'`) spec does NOT exclude
+        # a flagged field (routes through `MSFieldParse::
+        # selectFieldIds`, `MSFieldParse.cc:68-79` -- a plain
+        # `TEN.in(ids)`, no `FLAG_ROW` check); a comparison
+        # (`'<N'`/`'>N'`) or name/pattern spec (`'3C286'`) DOES (routes
+        # through `MSFieldIndex::matchFieldIDLT/GT/GTAndLT`/
+        # `matchFieldNameRegexOrPattern`, which check `!flagRow`,
+        # `MSFieldIndex.cc:103,224`). `MSStateIndex.cc` has the
+        # identical structure (`.cc:104,130`) -- inferred by symmetry
+        # for STATE, not independently live-tested. `_mssel_idset`'s
+        # `flagged` kwarg implements exactly this per-term-form split;
+        # baseline/spw/scan/array/obs pass no `flagged` (Phases 118-119
+        # confirmed those never filter by `FLAG_ROW` in real casacore).
         _need("FIELD_ID")
         fid = Int.(column(t, "FIELD_ID")[:])
-        nf = haskey(subs, "FIELD") ? nrow(readtable(subs["FIELD"])) : maximum(fid; init = -1) + 1
-        S = _mssel_idset(spec, 0:(nf - 1), _sub("FIELD", "NAME"))
+        fldtab = haskey(subs, "FIELD") ? readtable(subs["FIELD"]) : nothing
+        nf = fldtab === nothing ? maximum(fid; init = -1) + 1 : nrow(fldtab)
+        flagged = fldtab !== nothing && "FLAG_ROW" in Set(columnnames(fldtab)) ?
+                  Bool.(column(fldtab, "FLAG_ROW")[:]) : nothing
+        S = _mssel_idset(spec, 0:(nf - 1), _sub("FIELD", "NAME"); flagged)
         return Bool[f in S for f in fid]
     elseif fn == "spw" || fn == "chan"
         _need("DATA_DESC_ID")
@@ -1202,13 +1262,15 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
               fn == "array" ? "ARRAY_ID" : "OBSERVATION_ID"
         _need(col)
         ids = Int.(column(t, col)[:])
-        n2i = fn == "state" ?
-              (haskey(subs, "STATE") &&
-               "OBS_MODE" in Set(columnnames(readtable(subs["STATE"]))) ?
-               _mssel_names_to_ids(column(readtable(subs["STATE"]), "OBS_MODE")[:]) :
-               Dict{String,Vector{Int}}()) :
-              Dict{String,Vector{Int}}()
-        S = _mssel_idset(spec, sort(unique(ids)), n2i)
+        statetab = fn == "state" && haskey(subs, "STATE") ? readtable(subs["STATE"]) : nothing
+        n2i = statetab !== nothing && "OBS_MODE" in Set(columnnames(statetab)) ?
+              _mssel_names_to_ids(column(statetab, "OBS_MODE")[:]) : Dict{String,Vector{Int}}()
+        # Phase 145/146: STATE has the identical FLAG_ROW structure as
+        # FIELD (see the `field` branch's comment above) -- inferred by
+        # source symmetry, applied here too.
+        flagged = statetab !== nothing && "FLAG_ROW" in Set(columnnames(statetab)) ?
+                  Bool.(column(statetab, "FLAG_ROW")[:]) : nothing
+        S = _mssel_idset(spec, sort(unique(ids)), n2i; flagged)
         return Bool[x in S for x in ids]
     end
 end
@@ -1590,6 +1652,28 @@ end
 # feed: the antenna-grammar form on FEED1 / FEED2 -- `L & R` feed-pair
 #   selection, comma-lists of ids / `N~M` ranges, `!` negation -- exactly
 #   like `mscal.baseline` but with numeric feed ids only.
+#
+# Phase 143 finding: read `ms/MSSel/MSCorrParse.cc` (the code
+# `msCorrGramParseCommand`/`mscal.corr()` actually calls,
+# `derivedmscal/DerivedMC/UDFMSCal.cc:470-474`) to re-verify this
+# against source. `MSCorrParse::selectCorrType` builds the SAME
+# selection condition this package computes (`DATA_DESC_ID IN` the set
+# of data-desc ids whose `POLARIZATION.CORR_TYPE` contains the
+# requested code, via `MSDataDescIndex::matchPolId`/
+# `MSPolarizationIndex::matchCorrType`) -- confirming the core
+# selection logic here is correct. But the real function has a genuinely
+# alarming, undocumented SIDE EFFECT along the way: it reopens the very
+# MS being queried in `Table::Update` (writable) mode and unconditionally
+# `addColumn`s (removing any existing one first) a `"SELECTED_DATA"`
+# column, then copies a slice of `DATA` into it — as a side effect of
+# evaluating what should be a read-only WHERE-clause predicate. This
+# means `mscal.corr()` / a native `WHERE CORR = 'RR'` selection against
+# a real, writable MS in real casacore genuinely MUTATES the MS on disk.
+# `MSFeedParse.cc` (the `mscal.feed()` counterpart) has no such pattern
+# — this is specific to `MSCorrParse`. This package's `mscal.corr()` is
+# a pure, read-only, in-memory `Bool` computation with no such side
+# effect — a deliberate and CORRECT divergence; replicating casacore's
+# destructive behaviour here would be a regression, not a fix.
 
 function _parse_corr_types(spec::AbstractString)
     out = Set{Int}()

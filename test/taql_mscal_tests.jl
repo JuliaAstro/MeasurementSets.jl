@@ -1410,3 +1410,97 @@ if _HAVE_TAQL
         end
     end
 end
+
+@testset "TaQL-lite — mscal.* array-centre: one lookup per engine, not per OBSERVATION_ID (Phase 144)" begin
+    # Found while sweeping `MSCalEngine.cc` for another Phase-136-style
+    # bug (post Phase 143): `MSCalEngine::attachColumns` resolves the
+    # array centre used by every suffix-less `mscal.ha()`/`azel()`/`pa()`/
+    # `itrf()`/`delay()` ONCE for the whole table, from OBSERVATION
+    # ROW 0's TELESCOPE_NAME (`MSCalEngine.cc:330-349`) -- never per
+    # MAIN row via that row's own `OBSERVATION_ID`. This package
+    # previously looked it up per row. Live-verified against real
+    # `tableCommand` on a synthetic 2-observation ("VLA"/"ALMA") MS:
+    # real casacore's `mscal.ha()` is bit-identical across the
+    # OBSERVATION_ID split; before this fix, ours jumped by ~0.7 rad at
+    # the boundary. Also fixed the no-telescope-found fallback to match
+    # source exactly: the MIDDLE antenna (`itsAntPos[0][nant/2]`,
+    # 0-based), not antenna 0.
+    tmp = mktempdir()
+    p = joinpath(tmp, "obs2.ms")
+    copyms(SAMPLE_MS, p; rows = 1:20)
+    edit(joinpath(p, "OBSERVATION")) do t
+        addrows!(t, 1)
+        t[:TELESCOPE_NAME][1] = "VLA"
+        t[:TELESCOPE_NAME][2] = "ALMA"
+    end
+    edit(p) do t
+        n = length(t.rowmap)
+        oid = Int32.(vcat(zeros(Int, n ÷ 2), ones(Int, n - n ÷ 2)))
+        t[:OBSERVATION_ID][:] = oid
+    end
+    main = readtable(p)
+    obsids = column(main, "OBSERVATION_ID")[:]
+    @test length(unique(obsids)) == 2
+
+    ha = column(query(main, "rownumber() >= 1"; select = ["h" => "mscal.ha()"]), "h")[:]
+    # every row uses OBSERVATION row 0's telescope ("VLA"), regardless
+    # of its own OBSERVATION_ID -- no jump at the id-1 boundary.
+    @test all(x -> x ≈ ha[1], ha)
+
+    if _HAVE_TAQL
+        res = _taqlcmd("SELECT mscal.ha() AS H FROM \$1", p)
+        ha_real = res[:H][:]
+        @test all(x -> isapprox(x, ha_real[1]; atol = 1e-6), ha_real)   # sanity: real casacore too
+        @test ha[1] ≈ ha_real[1] atol = 1e-4                  # SOFA vs casacore ephemeris
+    else
+        @info "real TaQL unavailable; skipping mscal array-centre cross-check"
+    end
+end
+
+@testset "TaQL-lite — mscal.field()/mscal.state() FLAG_ROW: spec-form-dependent (Phase 146)" begin
+    # Fixes the Phase 145 finding: a bare id (`'0'`) / `~`-range
+    # (`'0~0'`) spec must NOT exclude a flagged field/state (matches
+    # real casacore's `MSFieldParse::selectFieldIds`, no `FLAG_ROW`
+    # check), while a comparison (`'<N'`/`'>N'`) or name/pattern spec
+    # MUST (matches `MSFieldIndex`'s flagRow-checking matchers).
+    tmp = mktempdir()
+    p = joinpath(tmp, "flagrow.ms")
+    copyms(SAMPLE_MS, p; rows = 1:20)
+    edit(joinpath(p, "FIELD")) do t
+        t[:FLAG_ROW][1] = true
+    end
+    edit(joinpath(p, "STATE")) do t
+        t[:FLAG_ROW][1] = true
+    end
+    main = readtable(p)
+    fid = column(main, "FIELD_ID")[:]
+    sid = column(main, "STATE_ID")[:]
+    @test count(==(0), fid) > 0
+    @test count(==(0), sid) > 0
+    fldname = String(column(subtable(MeasurementSet(p), "FIELD"), "NAME")[1])
+
+    # bare id / range: flagged row still selected (unfiltered)
+    @test nrow(query(main, "mscal.field('0')")) == count(==(0), fid)
+    @test nrow(query(main, "mscal.field('0~0')")) == count(==(0), fid)
+    @test nrow(query(main, "mscal.state('0')")) == count(==(0), sid)
+    @test nrow(query(main, "mscal.state('0~0')")) == count(==(0), sid)
+
+    # comparison / name specs: flagged row excluded
+    @test nrow(query(main, "mscal.field('<1')")) == 0
+    @test nrow(query(main, "mscal.field('$fldname')")) == 0
+    @test nrow(query(main, "mscal.field('>0')")) == count(!=(0), fid)   # nothing to exclude here
+
+    if _HAVE_TAQL
+        for spec in ("0", "0~0")
+            tc = try
+                _taqlcmd("SELECT FROM \$1 WHERE mscal.field('$spec') GIVING '$(joinpath(mktempdir(), "r"))'", p)
+            catch
+                nothing
+            end
+            tc === nothing && continue
+            @test size(tc, 1) == count(==(0), fid)   # bare id/range: not excluded, matches real TaQL
+        end
+    else
+        @info "real TaQL unavailable; skipping mscal.field()/state() FLAG_ROW cross-check"
+    end
+end

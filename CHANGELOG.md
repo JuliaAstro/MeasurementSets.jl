@@ -3688,3 +3688,146 @@ against real casacore (`test/taql_mscal_tests.jl`, "mscal.stokes(WEIGHT)
 zero-poisoning vs real TaQL") confirmed the fix — the WEIGHT column
 naturally has no zero cells on the committed `sample.ms` fixture, so the
 cross-check patches a copy to introduce one.
+
+### Phase 143 — verified `mscal.uvdist()` (no bug) and confirmed a real casacore MS-mutation bug in `mscal.corr()`'s underlying grammar (not replicated here)
+
+Re-verified two more `mscal.*` selection functions against their real
+casacore source, following Phases 80/81/83/84's original convention-
+and-live-TaQL-based build.
+
+**`mscal.uvdist()`**: `ms/MSSel/MSUvDistParse.cc` has two code paths —
+a "slow" one (explicitly commented "here for testing — should
+ultimately be removed") using the full 3-D `√(u²+v²+w²)` uv-distance,
+and the actual default "fast" path (`doSlow=false`, ~60× faster per its
+own comment) using `SQUARE(UVW[1]) + SQUARE(UVW[2])` — the 2-D
+projection only. This package's Phase 81 implementation already uses
+the 2-D form, matching the real, actually-used default path exactly.
+The wavelength-unit scaling (`uvDist_lambda = uvDist_m · refFreq /
+c`) also matches the slow path's own formula (the fast path scales the
+*bound* the other algebraic way, but the two are mathematically
+identical). No bug found.
+
+**`mscal.corr()`**: reading `MSCorrParse::selectCorrType` (what
+`msCorrGramParseCommand`, hence `mscal.corr()`, actually calls) found
+the core selection logic matches this package's implementation exactly
+(`DATA_DESC_ID IN` the set of data-desc ids whose `POLARIZATION.
+CORR_TYPE` contains the requested code). But the real function also has
+a genuinely alarming, undocumented side effect along the way: it
+reopens the very MS being queried in **writable** mode and
+unconditionally adds (replacing any existing one) a `SELECTED_DATA`
+column, copying a slice of `DATA` into it — as a side effect of
+evaluating what should be a read-only WHERE-clause predicate. Using
+`mscal.corr()` (or a native `WHERE CORR = 'RR'` selection) against a
+real, writable MS in real casacore genuinely mutates that MS on disk.
+`MSFeedParse.cc` (the `mscal.feed()` counterpart) has no such pattern —
+this is specific to `MSCorrParse`.
+
+This package's `mscal.corr()` is a pure, read-only, in-memory `Bool`
+computation with no such side effect — confirmed as the correct,
+deliberate choice, not a divergence to fix; replicating casacore's
+destructive behaviour would be a regression. Documented in a comment
+above `mscal.corr`'s implementation (`src/taql/mscal.jl`) for anyone
+reading the source later. No production behaviour changed.
+
+### Phase 144 — found a real bug: `mscal.*`'s array centre was looked up per row via `OBSERVATION_ID` instead of once for the whole engine
+
+Continuing the sweep of `MSCalEngine.cc` for real bugs (following
+Phases 136-143), re-read `MSCalEngine::attachColumns`'s array-centre
+resolution in full. Real casacore computes the array centre used by
+every suffix-less `mscal.ha()` / `azel()` / `pa()` / `itrf()` /
+`delay()` **once for the whole engine**, from **OBSERVATION row 0's**
+`TELESCOPE_NAME` (falling back to a table-level `TELESCOPE_NAME`
+keyword, then to the *middle* antenna's position,
+`itsAntPos[0][nant/2]`, 0-based) — never per MAIN row via that row's
+own `OBSERVATION_ID`.
+
+This package (since Phase 90) looked the telescope up **per row**,
+indexed by `OBSERVATION_ID` into the `OBSERVATION` subtable — a real
+divergence for any MS with more than one `OBSERVATION` row (rare, but
+real — e.g. a concatenated/combined dataset). Live-verified against
+real `tableCommand` on a synthetic two-observation MS ("VLA" row 0,
+"ALMA" row 1, half the MAIN rows tagged `OBSERVATION_ID=1`): real
+casacore's `mscal.ha()` was bit-identical across the `OBSERVATION_ID`
+split (as expected — it never looks at the per-row id at all); this
+package's own output jumped by ~0.7 rad at the boundary before the fix.
+The same read also caught a second, harder-to-observe divergence in
+the no-telescope-found fallback: this package fell back to antenna 0,
+casacore falls back to the *middle* antenna — both fixed together.
+
+Fixed in `src/taql/mscal.jl`: `centrepos` is now a single `MPosition`
+resolved once (OBSERVATION row 0 → the bundled Observatories table →
+a table keyword `TELESCOPE_NAME` → the middle antenna), not a
+`Dict{Int,Any}` keyed by `OBSERVATION_ID`. New testset
+`test/taql_mscal_tests.jl` "mscal.* array-centre: one lookup per
+engine, not per OBSERVATION_ID (Phase 144)" — the synthetic
+two-observation cross-check above, plus a same-value-across-the-split
+assertion on our own output. Full mscal suite green (510/510,
+standalone).
+
+### Phase 145 — redid a lost investigation: `mscal.field()`/`mscal.state()` vs `FLAG_ROW` is spec-form-dependent, not a blanket "never filters"
+
+A Phase 144 investigation into whether `mscal.field()`/`mscal.state()`
+exclude `FLAG_ROW`-flagged rows was lost (never committed) before a
+context-summary cut. Redone from scratch, live-verified against real
+`tableCommand`, with a more complete result than the original: the
+original probes (`'0'`, `'0~0'`, `'>=0'` — a parse error, `'<1'` — also
+a parse error at the time) concluded "field/state selection never
+respects `FLAG_ROW`" and were about to revert a matching code change.
+Redoing it with a wider set of specs (and, critically, comparing a
+flagged fixture against an *unflagged* one for the same spec, rather
+than assuming a parse error meant "unsupported syntax") shows the real
+behaviour is **spec-form-dependent**:
+
+- A bare id (`'0'`) or `~`-range (`'0~0'`) spec does **not** exclude a
+  flagged field/state — confirmed live, both return every row. Real
+  casacore's grammar routes these through `MSFieldParse::
+  selectFieldIds` (`MSFieldParse.cc:68-79`), which is a plain
+  `columnAsTEN_p.in(fieldIds)` — `FLAG_ROW` is never consulted here.
+- A comparison spec (`'<N'`/`'>N'`) or a name/pattern spec (`'3C286'`)
+  **does** exclude it — confirmed live: the identical spec succeeds on
+  an unflagged fixture and fails ("No field ID found" / "No match
+  found for name") once the only matching field/state is flagged. These
+  route through `MSFieldIndex::matchFieldIDLT/GT/GTAndLT` and
+  `matchFieldNameRegexOrPattern` (`MSFieldIndex.cc:103,224`), which DO
+  check `!flagRow`. `MSStateIndex.cc` has the identical structure
+  (`.cc:104,130`) — inferred by symmetry, not independently re-tested.
+
+So this package's `mscal.field()`/`mscal.state()` (which never filter
+by `FLAG_ROW` at all, for any spec form) match real casacore only for
+the bare id/range case — a genuine, confirmed divergence for comparison
+and name specs remains, now precisely characterised. **Not fixed in
+this phase** — documented as a comment above the `field`/`state`
+handling in `src/taql/mscal.jl` (Phase 145) for a scoped follow-up,
+since a correct fix needs spec-form-aware routing this function
+doesn't currently have. No production behaviour changed.
+
+### Phase 146 — fixed `mscal.field()`/`mscal.state()` to respect `FLAG_ROW` for comparison and name specs (per the Phase 145 finding)
+
+Implements the Phase 145 finding: real casacore's `FLAG_ROW` exclusion
+for `mscal.field()`/`mscal.state()` is spec-form-dependent — a bare id
+(`'0'`) or `~`-range (`'0~0'`) spec never checks `FLAG_ROW`
+(`MSFieldParse::selectFieldIds`), while a comparison (`'<N'`/`'>N'`) or
+name/pattern spec does (`MSFieldIndex`'s `matchFieldIDLT/GT/GTAndLT`/
+`matchFieldNameRegexOrPattern`).
+
+`_mssel_resolve`/`_mssel_idset` (`src/taql/mscal.jl`) gain an optional
+`flagged` vector (0-based-id-indexed, `nothing` = no filtering,
+default everywhere): a bare-id or `~`-range term ignores it entirely;
+a comparison, regex, glob, or exact-name term intersects its match set
+with the unflagged ids. Only the `field`/`state` branches of
+`_mssel_one` now build and pass a real `flagged` vector (from that
+subtable's own `FLAG_ROW` column); `baseline`/`spw`/`scan`/`array`/
+`obs` keep the default `nothing` (Phases 118-119 confirmed those never
+filter by `FLAG_ROW` in real casacore either).
+
+Live-verified against real `tableCommand` on a FIELD-row-0-flagged
+fixture: `mscal.field('0')`/`'0~0'` are unaffected (still select the
+flagged field, matching real casacore exactly); `mscal.field('<1')`/
+a name spec on the flagged field now correctly exclude it (real
+casacore instead raises a grammar error in this degenerate
+all-excluded case — an acceptable, pre-existing difference in error-
+handling style, not a semantic one — this package returns an empty
+result rather than erroring, consistent with how `'>0'` already
+behaves). New testset `test/taql_mscal_tests.jl` "mscal.field()/
+mscal.state() FLAG_ROW: spec-form-dependent (Phase 146)". Full mscal
+suite green (521/521, standalone).
