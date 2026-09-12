@@ -3931,3 +3931,47 @@ Continuing the sweep discipline, three leads investigated this phase:
 
 No production behaviour changed; full mscal suite green (521/521,
 standalone, unchanged).
+
+### Phase 149 — found and fixed a real bug: `update!`'s `SET` list evaluated every item against one pre-update snapshot instead of applying items in order (real casacore does NOT swap `SET A=B, B=A`)
+
+Investigated real casacore's `TableParseUpdate`/`doUpdate` after the
+Phase 30 plan's own claim that "all RHS are evaluated against the
+pre-update values (so `SET A = B, B = A` swaps)" had never actually
+been checked against real TaQL. It's wrong: reading
+`TableParseQuery::doUpdate` (`tables/TaQL/TableParseQuery.cc:575-614`)
+shows the real loop is row-outer, SET-item-inner —
+`for (row) { for (item) { item->updateColumn(...) } }` — and each
+`updateColumn` writes straight to the live, writable table column. Live-
+verified: `UPDATE t SET A = B, B = A` does **not** swap in real casacore
+— `A` takes `B`'s old value first, then `B`'s own item reads that
+*already-updated* `A`, so both columns end up equal to the old `B`.
+
+This package's `update!` computed every SET item's RHS from one shared,
+frozen `cols` snapshot loaded before any writes — genuine "swap"
+semantics, a real, confirmed divergence for any `SET` list where one
+item's RHS references a column an earlier item in the same call also
+targets (the classic swap idiom, but also any multi-column `SET` in
+general once a later item happens to reference an earlier target).
+
+Fixed in `src/taql/commands.jl`: `update!` now applies `specs` in their
+literal given order (dropped the previous "group by target column"
+step), and after every write — whole-column, per-row, sliced, or
+masked — immediately reflects the new value back into the live `cols`
+dict (and, for a sliced/masked write's full-precision continuation, a
+new `curval` cache) so a later item genuinely observes an earlier one's
+write, matching casacore exactly. Required materialising a SET target
+column into an owned, `Any`-typed `Vector` (previously an array-eltype
+column could be a lazy, non-`setindex!`-able `Column` view — safe since
+only actual write targets are touched, not every referenced column).
+The `(D, M) => ...` masked-array sugar (Phase 59) needed its own fix in
+tandem: its expansion now pushes the **mask** entry before the **data**
+entry, since the mask always re-evaluates the RHS expression from
+scratch and must see the pre-update data, not the data entry's own
+just-written result.
+
+Docstring updated to state the real (non-swap) semantics; the existing
+hand-computed swap test corrected to the real expected values, and a
+same-string real-TaQL cross-check for `SET A = B, B = A` added (passes).
+Full suite green: commands 241/241, broad query/groupby/join 867/867,
+writer+edit+schema 219/219, mscal 521/521 (all standalone, no
+regressions).

@@ -25,10 +25,15 @@ end
     update!(target; set, where=nothing) -> Int
 
 Change column values in the CTDS table at `target` (a path or an open
-`Table` / `subtable(ms, …)`). `set` is `"COL" => "expr"` pairs — each
-`expr` a TaQL-lite expression over the row's columns, **evaluated
-against the pre-update values** (so `set = ["A" => "B", "B" => "A"]`
-swaps). The `set` key may also be an array-slice or boolean-mask target,
+`Table` / `subtable(ms, …)`). `set` is `"COL" => "expr"` pairs, applied
+**in the given order, each RHS seeing any earlier entries' already-
+written values for that row** — matching real casacore's own per-row,
+per-item `UPDATE` semantics (`TableParseQuery::doUpdate`, verified live:
+`set = ["A" => "B", "B" => "A"]` does **not** swap — `A` becomes `B`'s
+old value, then `B` reads *that already-updated* `A`, so both end up
+equal to the old `B`; to actually swap, stage a temporary column, or
+give both new values from a pre-computed constant). The `set` key may
+also be an array-slice or boolean-mask target,
 `"COL[subscripts]" => "expr"` (TaQL's `UPDATE … SET NAME[i,j] = …` /
 `NAME[maskexpr] = …`) — 1-based, `end`-relative and range subscripts,
 or a single Bool-array subscript acting as a write mask — which writes
@@ -106,6 +111,15 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
         union!(needed, columnnames(rd))
     end
     cols = _tql_cols(rd, needed, [s[3] for s in specs], whereast)
+    # every SET *target* column must be a genuinely mutable `Vector` --
+    # `_tql_cols`/`_load_col` deliberately keeps an array-eltype column
+    # as a lazy, read-only `Column` (no `setindex!`) for read-side
+    # performance; force materialisation only for columns this update
+    # actually writes into (Phase 149 -- needed so a later SET item can
+    # observe an earlier one's write, see below).
+    for c in Set(s[1] for s in specs)
+        cols[c] isa Vector{Any} || (cols[c] = Any[v for v in cols[c]])
+    end
 
     # unit-strip a `Quantity` SET RHS to each target column's own unit
     _qty = whereast !== nothing && _has_qty(whereast) || any(_has_qty(s[3]) for s in specs)
@@ -128,46 +142,56 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
         end
     end
 
-    # group specs by target column, preserving order
-    bycol = Pair{String,Vector{Tuple{Any,Any}}}[]
-    for (c, axes, a) in specs
-        i = findfirst(kv -> first(kv) == c, bycol)
-        i === nothing ? push!(bycol, c => Tuple{Any,Any}[(axes, a)]) :
-                        push!(last(bycol[i]), (axes, a))
+    # Phase 149: casacore's own `TableParseQuery::doUpdate` applies the
+    # SET list one item at a time, per row, writing straight to the live
+    # (writable) column -- so a LATER item's RHS sees an EARLIER item's
+    # already-written value for that same row (live-verified: `SET A=B,
+    # B=A` does NOT swap in real casacore). Previously this function
+    # grouped `specs` by target column and evaluated every item's RHS
+    # against one fixed pre-update snapshot (`cols`), giving true "swap"
+    # semantics -- a real, confirmed divergence. Fixed by processing
+    # `specs` in their ORIGINAL given order (no more grouping-by-column)
+    # and updating `cols[c][i]` (for a plain overwrite) / `curval[(c,i)]`
+    # (the full-precision seed a later slice/mask op on the same cell
+    # continues from) immediately after each write, so every subsequent
+    # spec — on the same or a different column — observes it.
+    curval = Dict{Tuple{String,Int},Any}()
+    _curbase(c, i) = get(curval, (c, i)) do
+        haskey(fullcols, c) ? fullcols[c][i] : cols[c][i]
     end
 
     edit(path) do t
-        for (c, ops) in bycol
+        for (c, levels, a) in specs
             u = colunit(c)
-            if length(ops) == 1 && ops[1][1] === nothing
-                a = ops[1][2]
+            ec = t[c]
+            if levels === nothing
                 if where === nothing && !limited
-                    t[c][:] = [_tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u) for i in 1:nr]
+                    vals = [_tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u) for i in 1:nr]
+                    ec[:] = vals
+                    for i in 1:nr
+                        cols[c][i] = vals[i]
+                        curval[(c, i)] = vals[i]
+                    end
                 else
-                    ec = t[c]
                     for i in rows
-                        ec[i] = _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u)
+                        val = _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u)
+                        ec[i] = val
+                        cols[c][i] = val
+                        curval[(c, i)] = val
                     end
                 end
             else
-                ec = t[c]
-                base = get(fullcols, c, nothing)
                 for i in rows
-                    cur = nothing
-                    for (levels, a) in ops
-                        ev = x -> _tql_write_strip(_unwrap_marray(_tqleval(x, cols, i)), u)
-                        if levels === nothing
-                            cur = ev(a)
-                        else
-                            cur === nothing && (cur = copy(base[i]))
-                            if length(levels) == 1 && _as_mask(levels[1], ev) === nothing
-                                _slice_assign!(cur, _tql_index_tuple(cur, levels[1], ev), ev(a))
-                            else
-                                _apply_index_chain!(cur, levels, ev, ev(a))
-                            end
-                        end
+                    ev = x -> _tql_write_strip(_unwrap_marray(_tqleval(x, cols, i)), u)
+                    cur = copy(_curbase(c, i))
+                    if length(levels) == 1 && _as_mask(levels[1], ev) === nothing
+                        _slice_assign!(cur, _tql_index_tuple(cur, levels[1], ev), ev(a))
+                    else
+                        _apply_index_chain!(cur, levels, ev, ev(a))
                     end
                     ec[i] = _unwrap_marray(cur)
+                    cols[c][i] = cur
+                    curval[(c, i)] = cur
                 end
             end
         end
@@ -210,10 +234,17 @@ function _expand_set_pairs(set, vn)
             (rv isa AbstractString ?
              (x = _pair_split(rv); x === nothing ? (String(rv), nothing) : x) :
              throw(ArgumentError("update!: unsupported RHS for a (col, maskcol) target")))
-        push!(out, dn => de)
+        # Phase 149: push the MASK entry BEFORE the data entry. `update!`'s
+        # SET items apply strictly in order, each mutating the live `cols`
+        # snapshot so a LATER item sees an EARLIER item's write (the real-
+        # casacore semantics fixed in that phase) -- but `me` (or the
+        # default `TQLMaskOf`, below) re-evaluates the ORIGINAL expression
+        # from `cols`, not from `D`'s already-computed result, so it must
+        # run BEFORE `D`'s own write overwrites the data it reads from.
         # no explicit mask: use the data expr's own mask when it is a
         # masked array, else flag its non-finite elements (Phase 59).
         push!(out, mn => (me === nothing ? TQLMaskOf(_taqllite_parse(de, vn)) : me))
+        push!(out, dn => de)
     end
     return out
 end

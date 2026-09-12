@@ -17,11 +17,22 @@
     @test column(t, "A")[:] == Int32[K[i] == 0 ? A[i] + 100 : A[i] for i in 1:8]
     @test column(t, "B")[:] == B                     # untouched
 
-    # swap uses pre-update values
+    # Phase 149: SET items apply in order, each seeing the PRECEDING
+    # item's already-written value for that row -- NOT a swap. Live-
+    # verified against real casacore: `SET A=B, B=A` leaves both columns
+    # equal to the OLD B (A takes B's old value; B then reads that
+    # already-updated A). A prior version of this test asserted a true
+    # swap, matching this package's old (incorrect) semantics rather
+    # than real casacore's.
     p2 = mk("t2")
     update!(p2; set=["A" => "B", "B" => "A"])
     t2 = readtable(p2)
-    @test column(t2, "A")[:] == B && column(t2, "B")[:] == A
+    @test column(t2, "A")[:] == B && column(t2, "B")[:] == B
+    # a later item CAN see an earlier item's write on a DIFFERENT column
+    p2b = mk("t2b")
+    update!(p2b; set=["A" => "1000", "B" => "A"])   # B ends up 1000, not old A
+    t2b = readtable(p2b)
+    @test all(==(1000), column(t2b, "A")[:]) && all(==(1000), column(t2b, "B")[:])
 
     # array column, elementwise
     p3 = mk("t3")
@@ -658,6 +669,11 @@ if _HAVE_TAQL
             (["A" => "A * 2"], "SET A = A * 2", "K == 0"),
             (["A" => "A + B"], "SET A = A + B", "K != 1"),
             (["B" => "B - 1", "A" => "A * 10"], "SET B = B - 1, A = A * 10", nothing),
+            # Phase 149: the classic "swap" -- real casacore does NOT
+            # swap (each SET item is applied immediately, so B=A reads
+            # A's value AFTER the A=B item already wrote it); pins the
+            # fix live against real TaQL, not just a hand-computed value.
+            (["A" => "B", "B" => "A"], "SET A = B, B = A", nothing),
         )
             d = mktempdir()
             K = Int32[(i - 1) % 3 for i in 1:12]
