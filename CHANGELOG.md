@@ -3387,3 +3387,53 @@ No production code changed — test-only addition (9 new assertions). A
 third candidate, the pseudo-Stokes `Ptotal`/`Plinear` formulas fixed in
 Phase 122, was also re-checked against the current source and
 confirmed still correct.
+
+### Phase 135 — found a real limitation in casacore's own `MVDirection::shiftAngle`; confirmed `ephemeris_direction`/`_slerp_lonlat` are correct (and, in one case, better)
+
+Swept two more ephemeris-related formulas from Phase 82/93 against
+casacore source, neither previously cross-checked against a live
+oracle.
+
+**`MeasComet::get`'s position interpolation** (used by
+`ephemeris_direction`/`ephemeris_distance`/`ephemeris_radvel`). Read
+`MeasComet::get`/`getRelPosition`/`fillMeas`
+(`measures/Measures/MeasComet.cc`) directly: casacore converts each
+bracketing row's `(Rho, RA, Dec)` to a Cartesian `MVPosition` first,
+then does a **plain linear interpolation of the Cartesian vector**
+(`p0 + f·(p1−p0)`) — not a separate radial/angular interpolation.
+Confirmed this package's `ephemeris_direction`/`_ephem_bracket` do
+exactly the same thing, including matching `fillMeas`'s bracket-index
+arithmetic (`ut = floor((mjd−mjd0)/dmjd) − 1`) and its choice to
+compute the interpolation fraction from the bracket row's *actual*
+stored MJD value, not the nominal `mjd0 + ut·dmjd`. No bug found.
+
+**`MeasComet::getDisk`'s sub-observer-point interpolation** (used by
+`ephemeris_diskpos`/`_slerp_lonlat`) — this one turned up a real,
+previously undocumented divergence. `_slerp_lonlat`'s own comment
+claimed to be "equivalent to casacore's `separation` + `positionAngle`
++ `shiftAngle`"; a direct, independent numeric comparison against a
+from-scratch port of those three functions (`casa/Quanta/
+MVDirection.cc`) found they agree for a realistic small angular
+separation but genuinely diverge (by over a radian at the interpolation
+midpoint, not floating-point noise) for a 172°-separated pair. Tracing
+it down: `MVDirection::shiftAngle`'s own longitude update is `nlng =
+asin(sin(off)·sin(pa) / cos(nlat))` — an `asin`, where the exact
+spherical "direct problem" needs an `atan2` — so casacore's own
+function is only valid while the shift stays within about a quarter
+circle of the start point, and silently returns an aliased longitude
+beyond that. This isn't hypothetical for `DiskLong`: a fast-rotating
+body (e.g. Jupiter, ~10 h rotation) sampled at typical ephemeris
+cadence can genuinely have its sub-observer longitude shift by more
+than 90° between two adjacent table rows. `_slerp_lonlat` computes the
+true great-circle interpolation directly (SLERP on the unit vectors),
+so it's unaffected — a deliberate, now-documented case where this
+package is *more* correct than a literal port would be, not a bug to
+fix. Rewrote the comment above `_slerp_lonlat` to state this precisely
+instead of the previous (only-approximately-true) "equivalent" claim.
+
+No production code behaviour changed (comment-only in
+`src/measures/ephemeris.jl`). New tests in `test/measures_tests.jl`
+("`_slerp_lonlat` vs casacore shiftAngle") pin both halves: agreement
+for a small, ephemeris-realistic separation, and the large-separation
+divergence together with a check that `_slerp_lonlat` still lands
+exactly on the correct fractional great-circle arc length.

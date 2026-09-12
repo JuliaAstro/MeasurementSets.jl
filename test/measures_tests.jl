@@ -747,3 +747,53 @@ end
         nrow = 3, keywords = Dict("MJD0" => 59999.0, "dMJD" => 1.0))
     @test_throws ErrorException ephemeris_diskpos(open_ephemeris(p2), 60000.5)
 end
+
+# Phase 135: `_slerp_lonlat` vs a from-scratch port of casacore's own
+# `MVDirection::separation`/`positionAngle`/`shiftAngle` (the actual
+# `MeasComet::getDisk` formula) -- independently written here, not
+# copied from `src/measures/ephemeris.jl`, so this checks against
+# source, not the implementation under test.
+_casacore_shiftangle_interp(lon0, lat0, lon1, lat1, f) = begin
+    x0 = (cos(lat0) * cos(lon0), cos(lat0) * sin(lon0), sin(lat0))
+    x1 = (cos(lat1) * cos(lon1), cos(lat1) * sin(lon1), sin(lat1))
+    d1 = sqrt(sum((x0 .- x1) .^ 2)) / 2.0
+    sep = 2 * asin(min(d1, 1.0))
+    longDiff = lon0 - lon1
+    slat1, slat2 = x0[3], x1[3]
+    clat2 = sqrt(abs(1.0 - slat2^2))
+    s1 = -clat2 * sin(longDiff)
+    c1 = sqrt(abs(1.0 - slat1^2)) * slat2 - slat1 * clat2 * cos(longDiff)
+    pa = (s1 != 0 || c1 != 0) ? atan(s1, c1) : 0.0
+    off = f * sep
+    nlat = asin(cos(off) * sin(lat0) + sin(off) * cos(lat0) * cos(pa))
+    nlng = cos(nlat) != 0 ? asin(sin(off) * sin(pa) / cos(nlat)) : 0.0
+    (lon0 + nlng, nlat)
+end
+_unitvec(lon, lat) = (cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
+
+@testset "measures — _slerp_lonlat vs casacore shiftAngle (Phase 135)" begin
+    # Small, ephemeris-realistic separation (a few degrees, as RA/Dec or
+    # a slowly-rotating body's DiskLong would move between adjacent
+    # rows): the two formulas agree to numerical precision.
+    for f in (0.0, 0.25, 0.5, 0.75, 1.0)
+        a = MSv2._slerp_lonlat(deg2rad(10.0), deg2rad(5.0), deg2rad(14.0), deg2rad(7.0), f)
+        b = _casacore_shiftangle_interp(deg2rad(10.0), deg2rad(5.0), deg2rad(14.0), deg2rad(7.0), f)
+        @test all(abs.(_unitvec(a...) .- _unitvec(b...)) .< 1e-10)
+    end
+
+    # Large separation (172°, e.g. a fast-rotating body's DiskLong
+    # between two low-cadence samples): casacore's own `shiftAngle` uses
+    # an `asin` for the longitude update, which is only valid within a
+    # quarter circle of the start point -- confirmed here to genuinely
+    # diverge (not float noise) from the true great-circle path at
+    # f=0.75, while `_slerp_lonlat` always walks the correct one.
+    lon0, lat0, lon1, lat1 = 0.0, 0.0, 3.0, 0.3
+    a = MSv2._slerp_lonlat(lon0, lat0, lon1, lat1, 0.75)
+    b = _casacore_shiftangle_interp(lon0, lat0, lon1, lat1, 0.75)
+    @test sqrt(sum((_unitvec(a...) .- _unitvec(b...)) .^ 2)) > 0.5
+    # `_slerp_lonlat` still lands exactly 75% of the great-circle arc
+    # from point0 toward point1, by construction.
+    full = 2 * asin(min(sqrt(sum((_unitvec(lon0, lat0) .- _unitvec(lon1, lat1)) .^ 2)) / 2, 1.0))
+    d0a = 2 * asin(min(sqrt(sum((_unitvec(lon0, lat0) .- _unitvec(a...)) .^ 2)) / 2, 1.0))
+    @test d0a ≈ 0.75 * full atol = 1e-9
+end

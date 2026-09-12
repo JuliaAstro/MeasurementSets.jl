@@ -158,8 +158,27 @@ _ephem_shift(lon, lat, dlon, dlat) =
     (dlon == 0 && dlat == 0) ? (lon, lat) : (lon + dlon / cos(lat + dlat), lat + dlat)
 
 # great-circle (SLERP) interpolation between two (lon, lat) points --
-# equivalent to casacore's separation + positionAngle + shiftAngle, and
-# correct near the pole where a plain linear interp of lon/lat is not.
+# geometrically the same *path* casacore's own `separation` +
+# `positionAngle` + `shiftAngle` walks (`MeasComet::getDisk`, verified
+# directly against `casa/Quanta/MVDirection.cc`), and correct near the
+# pole where a plain linear interp of lon/lat is not.
+#
+# Phase 135 finding: this is NOT a bit-exact port of `shiftAngle` for a
+# large angular separation. `MVDirection::shiftAngle`'s own longitude
+# update is `nlng = asin(sin(off)*sin(pa) / cos(nlat))` -- an `asin`,
+# not the `atan2` the exact spherical "direct problem" formula needs --
+# so it is only correct while the shift stays within about a quarter
+# circle of the start point; beyond that it silently returns the wrong
+# (aliased) longitude, independently confirmed by a direct numeric
+# comparison against this SLERP for a 172°-separated pair (off by >1
+# radian at f=0.75, not float noise). This function instead computes the
+# true great-circle interpolation, which agrees with casacore's own
+# formula for any *typical* ephemeris row-to-row separation (RA/Dec
+# between two nearby dates is always small) but is deliberately more
+# correct than a literal port for `DiskLong`/`DiskLat` on a fast-
+# rotating body sampled at low cadence, where the sub-observer
+# longitude can genuinely shift by more than 90° between two adjacent
+# table rows.
 function _slerp_lonlat(lon0, lat0, lon1, lat1, f)
     u0 = (cos(lat0) * cos(lon0), cos(lat0) * sin(lon0), sin(lat0))
     u1 = (cos(lat1) * cos(lon1), cos(lat1) * sin(lon1), sin(lat1))
