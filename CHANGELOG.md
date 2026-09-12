@@ -4158,3 +4158,48 @@ mask term for baseline/spw, and the no-Index-class structure for
 scan/array/obs) rather than a phase-number pointer alone. No
 production behaviour changed; standalone mscal suite green
 (666/666, unchanged).
+
+### Phase 155 — added a real CASA cross-check for `meas.wgs()`/`meas.itrfxyz()`'s geodetic transform; found and fixed a misleading comment about `MPosition{WGS84}`'s own semantics
+
+Investigated whether `meas.wgs()`/`meas.itrfxyz()` (Phase 106's
+geodetic ↔ Cartesian ellipsoidal transform, `_geodetic_to_itrf`/
+`_itrf_to_geodetic` in `ext/SOFAExt.jl`) had ever been checked against
+a real oracle — it hadn't, only self-round-trip. Live-verified against
+`casatools`: `me.position('WGS84', lon, lat, height)` →
+`me.measure(..., 'ITRF')` for a VLA-like site (-107.6°, 34.0°, 2124 m)
+matches this package's `_geodetic_to_itrf` to sub-micrometre precision
+(both use the identical WGS84 ellipsoid constants — `a=6378137 m`,
+`1/f=298.257223563`, confirmed identical to `SOFA.eform(:WGS84)`).
+Added this as a permanent cross-check (`test/measures_fixture.py` +
+`test/measures_tests.jl`), not just a scratch script.
+
+While setting this up, this same live test also proved something else:
+the code comment above `_mconv(::MPosition, ...)` (`ext/SOFAExt.jl`)
+claimed "casacore stores the SAME geocentric Cartesian vector under
+both [ITRF and WGS84] refs" as the justification for implementing that
+conversion as an identity on `(x,y,z)` — that claim is **false**. Real
+casacore's `MPosition::WGS84` genuinely represents a *geodetic*
+(longitude, latitude, height) position, and `MCPosition.cc`'s
+`ITRF_WGS84`/`WGS84_ITRF` cases perform a real ellipsoidal transform
+(confirmed in source: they use `MeasTable::WGS84(0)`/`(1)`, the
+ellipsoid semi-major axis and inverse flattening, in a Bowring-style
+iteration) — exactly the live-verified behaviour above, definitely not
+a passthrough. This package's own `MPosition{R}` is, by its own
+docstring, ALWAYS geocentric Cartesian metres regardless of `R` — so
+the identity behaviour for `measconvert(::MPosition{WGS84}, ITRF)` is
+still the correct thing for THIS package to do (no real MS `POSITION`
+column ever uses `MEASINFO Ref="WGS84"`, so nothing in this project
+actually depends on the real geodetic semantics through that path) —
+but the comment's stated REASON was wrong, and could mislead a future
+investigator into thinking this mirrors real casacore. Fixed the
+comment in `ext/SOFAExt.jl` and the `MPosition` docstring
+(`src/measures/types.jl`) to state the real, verified fact (casacore's
+conversion is a genuine ellipsoidal transform) and the actual reason
+this package diverges (a deliberate, documented scoping choice, not
+an accurate port), pointing to `meas.wgs()`/`meas.itrfxyz()` as the
+real geodetic transform. Also corrected a test comment
+(`test/taql_query_tests.jl`) that called the identity "a Cartesian
+identity" without noting it's this package's own convention, not real
+casacore's. No production behaviour changed (comment/docstring fixes +
+one new permanent test); standalone measures suite green (486/486,
+including the new geodetic cross-check), query suite green (1008/1008).

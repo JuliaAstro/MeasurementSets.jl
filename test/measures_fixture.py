@@ -167,6 +167,24 @@ L.append(f"  emm = (height = {EMM_HEIGHT!r}, "
          f"field = ({bx!r}, {by!r}, {bz!r}), "
          f"losfield = {bx * ux + by * uy + bz * uz!r}),")
 
+# Phase 155: WGS84 (geodetic lon/lat/height) -> ITRF (geocentric),
+# a genuine ellipsoidal transform in real casacore -- oracle for
+# MeasurementSets's own `_geodetic_to_itrf`/`_itrf_to_geodetic`
+# (`meas.wgs()`/`meas.itrfxyz()`, Phase 106). `me`'s reported ITRF
+# representation for a position measure is SPHERICAL (m0=lon rad,
+# m1=geocentric lat rad, m2=radius m), not Cartesian -- reconstruct
+# Cartesian xyz here so the Julia side can compare directly.
+GEO_LON_DEG, GEO_LAT_DEG, GEO_HEIGHT_M = -107.6, 34.0, 2124.0
+p_wgs = me.position("WGS84", qa.quantity(GEO_LON_DEG, "deg"),
+                    qa.quantity(GEO_LAT_DEG, "deg"), qa.quantity(GEO_HEIGHT_M, "m"))
+p_itrf = me.measure(p_wgs, "ITRF")
+r_i, lon_i, lat_i = (p_itrf["m2"]["value"], p_itrf["m0"]["value"], p_itrf["m1"]["value"])
+gx = r_i * math.cos(lat_i) * math.cos(lon_i)
+gy = r_i * math.cos(lat_i) * math.sin(lon_i)
+gz = r_i * math.sin(lat_i)
+L.append(f"  geodetic = (lon_deg = {GEO_LON_DEG!r}, lat_deg = {GEO_LAT_DEG!r}, "
+         f"height_m = {GEO_HEIGHT_M!r}, itrf_xyz = ({gx!r}, {gy!r}, {gz!r})),")
+
 L.append(")")
 
 with open(sys.argv[1], "w") as fh:

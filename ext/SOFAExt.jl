@@ -200,13 +200,36 @@ function MS._riseset(ra::Real, dec::Real, mjd::Real, x::Real, y::Real, z::Real,
 end
 
 # ======================================================================
-# position  (ITRF <-> WGS84: casacore stores the SAME geocentric
-# Cartesian vector under both refs -- they only differ in which
-# ellipsoid a *geodetic* (lon,lat,height) view of that vector uses, so
-# the position-frame "conversion" is an identity on x,y,z; the real
-# conversion is Cartesian <-> geodetic, `_itrf_to_geodetic`/
-# `_geodetic_to_itrf` below, exposed to TaQL-lite as `meas.wgs` /
-# `meas.itrfxyz`, Phase 106).
+# position (ITRF <-> WGS84)
+#
+# Phase 155 correction: the comment here previously claimed "casacore
+# stores the SAME geocentric Cartesian vector under both refs" as the
+# justification for treating this conversion as an identity on x,y,z.
+# That claim is FALSE -- live-verified against real `casatools`:
+# `me.position('WGS84', lon, lat, height)` genuinely constructs a
+# GEODETIC position, and `me.measure(..., 'ITRF')` performs a real
+# ellipsoidal (geodetic -> geocentric) transform that materially
+# changes the numbers (e.g. geocentric latitude != geodetic latitude).
+# `MCPosition.cc`'s `ITRF_WGS84`/`WGS84_ITRF` cases confirm this in the
+# source too -- they use `MeasTable::WGS84(0)`/`(1)` (the ellipsoid
+# semi-major axis / inverse flattening) in a real Bowring-style
+# iteration, not a passthrough.
+#
+# What IS true, and is the actual reason this package's `MPosition`
+# keeps `_mconv` an identity: `MPosition{R}` here is documented and
+# built as ALWAYS geocentric Cartesian metres for every `R` (see its
+# docstring in `src/measures/types.jl`) -- `WGS84` is used only as a
+# frame *label*, not as a geodetic (lon,lat,height) representation the
+# way real casacore's `MPosition::WGS84` is. This is a deliberate
+# scoping choice (no real MS ever stores a `POSITION` column with
+# `MEASINFO Ref="WGS84"` -- `ANTENNA.POSITION` etc. are always ITRF),
+# not a port of casacore's own WGS84 semantics. The real geodetic
+# <-> Cartesian ellipsoidal transform IS implemented, just not through
+# `MPosition{WGS84}`/`measconvert` -- it's `_itrf_to_geodetic`/
+# `_geodetic_to_itrf` below, exposed to TaQL-lite as `meas.wgs()`/
+# `meas.itrfxyz()` (Phase 106), and cross-checked against real
+# `casatools` to sub-micrometre agreement (Phase 155,
+# `test/measures_tests.jl`).
 # ======================================================================
 
 function MS._mconv(m::MPosition{A}, ::Type{B}, ::MeasFrame) where {A<:RefFrame,B<:RefFrame}

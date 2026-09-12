@@ -147,6 +147,14 @@ end
     MPosition{R}(x, y, z)
 
 A location, geocentric Cartesian **metres**, in frame `R` (`ITRF`/`WGS84`).
+
+Note this differs from real casacore's own `MPosition::WGS84`, which
+represents a *geodetic* (longitude, latitude, height) position — here
+`WGS84` is only a frame label, and `measconvert` between `ITRF`/`WGS84`
+is an identity on `(x,y,z)` (no real MS `POSITION` column ever uses
+`MEASINFO Ref="WGS84"`). For the real geodetic ↔ Cartesian ellipsoidal
+transform, use [`_geodetic_to_itrf`](@ref)/[`_itrf_to_geodetic`](@ref)
+(exposed to TaQL-lite as `meas.wgs()`/`meas.itrfxyz()`).
 """
 struct MPosition{R<:RefFrame}
     x::Float64

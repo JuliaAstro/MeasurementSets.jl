@@ -646,6 +646,21 @@ if _HAVE_MEAS_CASA
         @test radialvelocity(d).mps ≈ ref.rv_from_dop rtol = 1e-10
         @test frequency(d, ref.rest_hz).hz ≈ ref.freq_from_dop rtol = 1e-12
         @test restfrequency(obsf, d).hz ≈ ref.rest_from_freq rtol = 1e-12
+
+        # Phase 155: `_geodetic_to_itrf` (the engine behind `meas.wgs()`/
+        # `meas.itrfxyz()`, Phase 106) vs real casacore's own WGS84->ITRF
+        # ellipsoidal transform -- previously only self-round-trip tested,
+        # never against a real oracle. Sub-micrometre agreement expected
+        # (both use the same WGS84 ellipsoid constants: a=6378137 m,
+        # 1/f=298.257223563 -- confirmed identical to SOFA's `eform`).
+        gxyz = MSv2._geodetic_to_itrf(deg2rad(ref.geodetic.lon_deg),
+                                      deg2rad(ref.geodetic.lat_deg),
+                                      ref.geodetic.height_m)
+        @test collect(gxyz) ≈ collect(ref.geodetic.itrf_xyz) atol = 1e-6
+        lon2, lat2, h2 = MSv2._itrf_to_geodetic(gxyz...)
+        @test rad2deg(lon2) ≈ ref.geodetic.lon_deg atol = 1e-9
+        @test rad2deg(lat2) ≈ ref.geodetic.lat_deg atol = 1e-9
+        @test h2 ≈ ref.geodetic.height_m atol = 1e-6
     end
 else
     @info "CASA python3 not found; skipping measures oracle cross-check" _MEAS_CASA

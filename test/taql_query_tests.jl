@@ -2377,7 +2377,10 @@ end
         "X" => [-1601185.0], "Y" => [-5041977.0], "Z" => [3554876.0]]; nrow = 1)
     t = readtable(joinpath(d, "T"))
 
-    # meas.pos matches measconvert exactly (and ITRF<->WGS84 is a Cartesian identity)
+    # meas.pos matches measconvert exactly (and ITRF<->WGS84 is a Cartesian
+    # identity in THIS package's own MPosition{WGS84} convention -- not
+    # real casacore's geodetic WGS84; see the MPosition docstring / the
+    # Phase 155 comment above `_mconv(::MPosition,...)` in SOFAExt.jl)
     q1 = query(t, "X < 0"; select = ["p" => "meas.pos('ITRF', 'WGS84', X, Y, Z)"])
     @test collect(q1.p)[1] == [-1601185.0, -5041977.0, 3554876.0]
     ref = measconvert(MPosition{ITRF}(-1601185.0, -5041977.0, 3554876.0), WGS84)
