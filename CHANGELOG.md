@@ -3593,3 +3593,33 @@ few seconds for the ramp to show up row-to-row on that MS, so the
 grid's own wider span is used to exercise the machinery directly). No
 production behaviour changed — comment/doc-only, plus the one new test
 assertion.
+
+### Phase 140 — found `mscal.*`'s direction argument only accepted a hard-coded whitelist of 3 FIELD column names
+
+Continuing the `MSCalEngine.cc`/`UDFMSCal.cc` read-through, read
+`UDFMSCal`'s actual string-direction-argument dispatch
+(`derivedmscal/DerivedMC/UDFMSCal.cc:288-308`): real casacore tries the
+string as a solar-system body/frame name FIRST
+(`MDirection::makeMDirection`), and only if that fails does it fall
+back to `itsEngine.setDirColName(str)` — accepting **any** FIELD
+column name, not a fixed set.
+
+This package's direction-argument resolver (`_djfor`, Phase 85) did
+the opposite: it checked a hard-coded whitelist of exactly three
+column names (`PHASE_DIR`, `DELAY_DIR`, `REFERENCE_DIR`) *before*
+trying a body/frame lookup, and any string outside that whitelist went
+straight to the body/frame branch, erroring "unknown direction" if it
+wasn't a recognized name. A real (if unusual) MS with some other
+custom FIELD direction column — anything other than those three exact
+names — would be unreadable via `mscal.*`'s direction argument, even
+though the underlying column-read machinery was already fully generic
+(it calls `measure(fld, dir, ...)` with whatever name was given).
+
+Fixed in `src/taql/mscal.jl`: `_djfor` now tries a body/frame name
+first (matching casacore's actual precedence), then falls back to
+checking whether the string names any real column of the FIELD
+subtable (`fieldcols = Set(columnnames(fld))`, computed once) — not a
+fixed list. Removed the now-dead `_MSCAL_DIR_COLS` constant. New tests
+in `test/taql_mscal_tests.jl` covering a genuinely custom direction
+column, confirming body-name precedence is unaffected, and confirming
+a name that is neither a body nor a real column still errors clearly.

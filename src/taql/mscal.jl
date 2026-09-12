@@ -190,6 +190,7 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     ant = readtable(subs["ANTENNA"])
     antpos = measure(ant, "POSITION")                 # Vector{MPosition{ITRF}}
     fld = readtable(subs["FIELD"])
+    fieldcols = Set(columnnames(fld))
 
     # Phase 138: `mscal.pa*()` -- casacore's `MSCalEngine::getPA` returns
     # a hard `0.0` unless the antenna's own `MOUNT` starts with "alt-az"
@@ -278,26 +279,41 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     # direction + a memo-distinguishing key.  "" -> FIELD.PHASE_DIR (or
     # its ephemeris); a body name -> geocentric apparent place; a FIELD
     # direction column; a `[ra,dec]` J2000 pair.
+    #
+    # Phase 140: real casacore (`UDFMSCal::setupHA` et al.,
+    # `derivedmscal/DerivedMC/UDFMSCal.cc:288-308`) tries a string
+    # argument as a body/frame name FIRST (`MDirection::makeMDirection`)
+    # and falls back to `itsEngine.setDirColName(str)` — an ARBITRARY
+    # FIELD column name, not a fixed set — only if that fails. This
+    # package previously checked a hard-coded whitelist of 3 column
+    # names (`PHASE_DIR`/`DELAY_DIR`/`REFERENCE_DIR`) BEFORE the body/
+    # frame lookup, so a real (if unusual) MS with some other custom
+    # FIELD direction column would wrongly fail with "unknown
+    # direction" instead of being read as a column. Fixed to match
+    # casacore's actual precedence and genericity: try a body/frame
+    # name first, then any real column of the FIELD subtable.
     djcache = Dict{Any,Any}()
     function _djfor(dir::AbstractString, i::Int)
         isempty(dir) && return (_fielddir(fid[i], i), fid[i])
         if startswith(dir, "[")
             m = match(r"^\[([^,]+),([^\]]+)\]$", dir)
             return (MDirection{J2000}(parse(Float64, m[1]), parse(Float64, m[2])), :fixed)
-        elseif dir in _MSCAL_DIR_COLS
+        end
+        R = get(_DIRECTION_FRAMES, uppercase(dir), nothing)
+        if R !== nothing
+            d = get!(() -> measconvert(MDirection{R}(0.0, 0.0), J2000;
+                                       frame = MeasFrame(epoch = epochs[i])),
+                     djcache, (dir, tsec[i]))
+            return (d, (dir,))
+        elseif dir in fieldcols
             d = get!(() -> measconvert(measure(fld, dir, fid[i] + 1; epoch = epochs[i]),
                                        J2000; frame = MeasFrame(epoch = epochs[i])),
                      djcache, (dir, fid[i], tsec[i]))
             return (d, (dir, fid[i]))
         else
-            R = get(_DIRECTION_FRAMES, uppercase(dir), nothing)
-            R === nothing && error("mscal: unknown direction \"$dir\" — give a " *
-                "body name ('SUN'), a FIELD direction column ('DELAY_DIR'), or " *
-                "a `[ra, dec]` pair")
-            d = get!(() -> measconvert(MDirection{R}(0.0, 0.0), J2000;
-                                       frame = MeasFrame(epoch = epochs[i])),
-                     djcache, (dir, tsec[i]))
-            return (d, (dir,))
+            error("mscal: unknown direction \"$dir\" — give a body name " *
+                "('SUN'), a FIELD direction column ('DELAY_DIR'), or a " *
+                "`[ra, dec]` pair")
         end
     end
 
@@ -1617,4 +1633,3 @@ function _mscal_split_dir(spec::AbstractString)
         (String(spec[1:prevind(spec, first(i))]), String(spec[nextind(spec, last(i)):end]))
 end
 
-const _MSCAL_DIR_COLS = Set(["PHASE_DIR", "DELAY_DIR", "REFERENCE_DIR"])

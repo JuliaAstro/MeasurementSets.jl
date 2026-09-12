@@ -104,8 +104,10 @@ wired in automatically) — computed per MAIN row from `TIME` + the
 `ANTENNA` / `FIELD` subtables (`query(main, "mscal.el1() > 0.3")`,
 `groupby(main, "FIELD_ID"; select = ["az" => "gmean(mscal.az1())"])`).
 The direction functions take an optional direction argument — a body
-name (`mscal.el1('SUN')`), a FIELD direction column
-(`mscal.az1('DELAY_DIR')`), a `[ra, dec]` J2000 pair (radians), or a
+name (`mscal.el1('SUN')`), any real direction-valued FIELD column
+(`mscal.az1('DELAY_DIR')` or a custom one — a body/frame name is tried
+first, then falls back to a FIELD column lookup, matching casacore's
+own precedence), a `[ra, dec]` J2000 pair (radians), or a
 sexagesimal `'RA, DEC'` string (`mscal.el1('10h42m31, 45d51m16')`). For a
 moving-target field (polynomial `PHASE_DIR` or `EPHEMERIS_ID`), these
 interpolate at each row's `TIME` — a deliberate improvement over real
