@@ -93,6 +93,47 @@ if isdir(SAMPLE_MS)
     end
 end
 
+@testset "copyms stamps a missing FLAG_CATEGORY CATEGORY keyword (Phase 147)" begin
+    # `MeasurementSet`'s own C++ constructor (`MeasurementSet.cc:89-99`)
+    # requires FLAG_CATEGORY to carry a `CATEGORY` keyword; real MSes
+    # commonly lack it (it self-heals on a WRITABLE open but throws
+    # "Missing CATEGORY keyword" on a read-only one, Phase 121). The
+    # committed sample fixture itself lacks it -- confirmed live while
+    # chasing a `mscal.*` cross-check for Phase 147: every `derivedmscal`
+    # UDF that constructs a full `MeasurementSet` (state/scan/array/obs)
+    # threw that exact error against a plain `copyms` of the fixture,
+    # even though the query never touched `FLAG_CATEGORY` at all.
+    # `_copy_table_cols` now stamps the same empty `_flag_category_kw()`
+    # `create_ms`/`addcolumn!` already use whenever the source lacks it.
+    src = readtable(SAMPLE_MS)
+    @test !haskey(columndesc(src, "FLAG_CATEGORY").keywords, "CATEGORY")
+
+    dst = joinpath(mktempdir(), "flagcat.ms")
+    copyms(SAMPLE_MS, dst; rows=1:5)
+    kw = columndesc(readtable(dst), "FLAG_CATEGORY").keywords
+    @test haskey(kw, "CATEGORY")
+    @test kw["CATEGORY"] == String[]
+
+    # NOTE: no real-TaQL cross-check here. `mscal.state()`/`scan()`/
+    # `array()`/`obs()` each construct a full `MeasurementSet` inside
+    # `UDFMSCal::setupSelection` -- live-verified (Phase 147) to
+    # SEGFAULT the whole process in this environment's linked casacore
+    # (`TableExprNodeBinary::getCommonTypes`, crashing via `newEQ`/
+    # `newGE`), for ANY spec including a bare id -- NOT limited to
+    # `>=`/`<=`. A segfault cannot be caught by Julia's `try`/`catch`,
+    # so NEVER call `_taqlcmd`/`tableCommand` with `mscal.state`/`scan`/
+    # `array`/`obs` in this environment; `mscal.field`/`spw`/`baseline`/
+    # `corr`/`feed`/`uvdist` are unaffected (a different, working code
+    # path) and are the only `mscal.<sel>` functions this test suite's
+    # real-TaQL cross-checks ever exercise.
+
+    # a source whose CATEGORY is already non-empty keeps its own value
+    dst2 = joinpath(mktempdir(), "flagcat2.ms")
+    copyms(dst, dst2; rows=1:5)   # dst's own (empty) value carries through
+    kw2 = columndesc(readtable(dst2), "FLAG_CATEGORY").keywords
+    @test kw2["CATEGORY"] == kw["CATEGORY"]
+end
+
 @testset "create_ms" begin
     dst = joinpath(mktempdir(), "synth.ms")
     create_ms(dst; nrow=6, nchan=4, ncorr=2, nant=3)
