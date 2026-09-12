@@ -3892,3 +3892,42 @@ separate things:
 
 Full suite standalone: mscal (521/521), writer+edit+schema (219/219,
 +4 new).
+
+### Phase 148 — swept three more leads (ECLIPTIC frame, ICRS approximation, `mscal.corr()`'s selection condition); no confirmed bug, no code behaviour change
+
+Continuing the sweep discipline, three leads investigated this phase:
+
+1. **`ECLIPTIC` frame epoch-handling** — re-checked `MDirection.h`'s
+   frame documentation directly: casacore's plain `ECLIPTIC` (as
+   opposed to `MECLIPTIC`/`TECLIPTIC`) is explicitly listed among the
+   handful of epoch-*independent* frames (fixed at the J2000 mean
+   ecliptic/equinox, paired one-to-one with `J2000` in the conversion
+   table, `MCDirection.cc:77-78`) — confirmed this package's
+   `ECLIPTIC` implementation (a fixed-epoch `SOFA.eceq06`/`eqec06` call,
+   no frame epoch needed) matches exactly. No bug.
+2. **ICRS≈J2000 approximation** — re-confirmed as an already-documented,
+   deliberate design choice (~0.02″), not a new finding.
+3. **`mscal.corr()`'s selection condition** — re-reading `ms/MSSel/
+   MSCorrParse.cc` more closely than the Phase 143 pass found a real
+   discrepancy with that phase's own "confirming the core selection
+   logic here is correct" claim: `selectCorrType`'s `corrtype` argument
+   to `MSPolarizationIndex::matchCorrType` is the WHOLE, unfiltered
+   `POLARIZATION.CORR_TYPE` column (flattened across every row), never
+   actually narrowed to the requested correlation-type string's own
+   code — which, per `matchCorrType`'s own matching semantics
+   (`MSPolIndex.cc:105-138`), looks like it would make the real
+   selection non-selective for any MS with more than one distinct
+   polarization setup (masked by the sample fixture's single setup).
+   **Not independently confirmed live**: `mscal.corr()`/`mscal.feed()`
+   are not registered as callable TaQL UDFs in this environment's
+   casacore build at all (same limitation Phase 84 already
+   documented). Per this project's standing discipline, an unverified
+   source-reading hunch is recorded as an open question, not treated as
+   an established bug — the correction is now in
+   `src/taql/mscal.jl`'s comment above `_parse_corr_types`, alongside
+   the original Phase 143 note. This package's own `mscal.corr()` is
+   unaffected either way (it correctly filters by the requested type
+   regardless of what real casacore's condition actually computes).
+
+No production behaviour changed; full mscal suite green (521/521,
+standalone, unchanged).

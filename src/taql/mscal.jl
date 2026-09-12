@@ -1674,6 +1674,34 @@ end
 # a pure, read-only, in-memory `Bool` computation with no such side
 # effect — a deliberate and CORRECT divergence; replicating casacore's
 # destructive behaviour here would be a regression, not a fix.
+#
+# Phase 148 correction to the "confirming the core selection logic here
+# is correct" claim two paragraphs up: a closer re-read casts doubt on
+# it. `selectCorrType`'s `corrtype` vector — the argument it actually
+# passes to `MSPolarizationIndex::matchCorrType` to build the
+# `TableExprNode` condition — is `Vector<Int> corrtype(nCorr)`, where
+# `nCorr` is a copy of `polc.corrType().getColumn().nonDegenerate()`:
+# the WHOLE `POLARIZATION.CORR_TYPE` column flattened across EVERY row,
+# never actually filtered down to the requested `corrType` string's own
+# numeric code anywhere in the function. `matchCorrType`'s default
+# (non-`exactMatch`) semantics (`MSPolIndex.cc:105-138`) require EVERY
+# element of its input vector to appear somewhere in a candidate row's
+# own `CORR_TYPE` — with an unfiltered whole-table `corrtype`, that
+# condition looks like it would only ever hold for a POLARIZATION row
+# whose own type list happens to equal the union of every row in the
+# table, i.e. plausibly never-selective (or trivially-always-true for a
+# single-polarization-setup MS, which is what the sample fixture is —
+# masking the issue there). NOT independently confirmed live: real
+# `mscal.corr()`/`mscal.feed()` are not registered as callable TaQL
+# UDFs in this environment's casacore build at all ("TaQL function
+# mscal.corr (=derivedmscal.corr) is unknown" — matches the Phase 84
+# writeup's own note that these two couldn't be live-tested there
+# either). Per this project's own standing discipline, an unverified
+# source-reading hunch is not treated as a confirmed finding — recorded
+# here only as an open question for an environment where the UDF is
+# actually registered, not as an established bug. This package's own
+# `mscal.corr()` (below) filters by the requested type correctly
+# regardless of what real casacore's selection condition actually does.
 
 function _parse_corr_types(spec::AbstractString)
     out = Set{Int}()
