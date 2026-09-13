@@ -2610,6 +2610,35 @@ end
     end
 end
 
+# Phase 178: `normangle()`/`angdist()` real-TaQL cross-check -- neither
+# had ever been checked against a real oracle by direct value comparison
+# before (only hand-computed unit tests, plus one indirect row-selection
+# check for `normangle`). Following the Phase 175-177 "check every
+# function in this file the same way" discipline: both turn out already
+# correct -- `normangleFUNC`'s `fmod`-based range reduction
+# (`tables/TaQL/ExprFuncNode.cc:849-853`) matches `rem2pi(x,
+# RoundNearest)` to floating-point precision, and `_tql_angdist` (the
+# SOFA `seps`-style atan2 form) matches real casacore's own
+# `angdistFUNC`/`angdist()` (`.cc:835-847`) to floating-point precision
+# across ordinary points, near-antipodal points, and a near-pole pair.
+@testset "Phase 178 — normangle()/angdist(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    for x in (-Float64(pi), Float64(pi), 3pi, -3pi, 0.0, 100.0, -100.0, 2pi, -2pi,
+              pi - 1e-12, pi + 1e-12, -pi - 1e-12)
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT normangle($x) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        @test column(readtable(rdir), "X")[1] ≈ MSv2._TQL_FUNCS["normangle"][1](x) atol = 1e-12
+    end
+    for (l1, b1, l2, b2) in ((0.0, 0.0, 0.0, pi / 2), (0.0, 0.0, Float64(pi), 0.0),
+                             (1.0, 0.5, 1.2, 0.3), (0.1, -0.4, 3.0, 0.8))
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT angdist([$l1,$b1],[$l2,$b2]) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        @test column(readtable(rdir), "X")[1] ≈ MSv2._tql_angdist(l1, b1, l2, b2) atol = 1e-9
+    end
+end
+
 @testset "Phase 69 — angdist / array literal" begin
     @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
     @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi

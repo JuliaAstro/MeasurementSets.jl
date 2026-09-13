@@ -5050,3 +5050,37 @@ regression check on the already-correct `year`/`month`/`day`/`weekday`/
 `dow`) plus "Phase 177 — week(), real-TaQL cross-check" (375
 assertions across 75 dates × 5 functions, `_HAVE_TAQL`-gated).
 Standalone `taql_query_tests.jl` green in full.
+
+### Phase 178 — swept `normangle()` and `angdist()`; both confirmed correct via a direct real-TaQL cross-check that had never existed before
+
+Continuing the same "check every function in this corner of the file"
+sweep as Phases 175-177, since three of the last four checks turned up
+real bugs. `normangle` and `angdist` had only ever been checked against
+hand-computed unit-test expectations (`normangle` also had one indirect
+row-selection check inside a real-TaQL testset, but never a direct
+value comparison; `angdist` had no real-TaQL exposure at all) — exactly
+the "invented, never oracle-checked" pattern that produced Phases
+174-177's four bugs, so both were worth a direct check.
+
+Read `TableExprFuncNode`'s `normangleFUNC`
+(`tables/TaQL/ExprFuncNode.cc:849-853`, `fmod`-based range reduction to
+`(-π, π]`) and `angdistFUNC`/`angdist()`
+(`.cc:835-847`, calling the shared `angdist(lon1,lat1,lon2,lat2)`
+free function) and live-verified both directly against real casacore
+via `tableCommand` — `normangle` for a spread of angles including exact
+π/multiples-of-2π/values a floating-point epsilon either side of the
+`(-π,π]` boundary, `angdist` for ordinary point pairs, an antipodal
+pair, and a near-pole pair. **Both match to floating-point precision —
+no bug found.** `rem2pi(x, RoundNearest)` (Julia stdlib) turns out to
+be exactly equivalent to casacore's own `fmod`+branch construction, and
+`_tql_angdist`'s SOFA-`seps`-style atan2 form agrees with casacore's
+own `angdist()` everywhere tested.
+
+New testset "Phase 178 — normangle()/angdist(), real-TaQL cross-check"
+(16 assertions, `_HAVE_TAQL`-gated) — the first direct value-level
+oracle check either function has ever had. Standalone
+`taql_query_tests.jl` green in full; this also closes out the
+`src/taql/functions.jl` date/time-and-angle-formatting sweep opened by
+Phase 174 — every function in that corner of the file has now been
+either fixed (174-177) or confirmed correct (178) against a real
+oracle.
