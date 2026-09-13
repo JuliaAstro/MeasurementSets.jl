@@ -48,6 +48,54 @@ _tql_avdev(x) = _red(y -> Statistics.mean(abs.(y .- Statistics.mean(y))))(x)
 _tql_nelem(x) = x isa TQLMArray ? count(!, x.mask) : x isa AbstractArray ? length(x) : 1
 _tql_ndim(x) = x isa TQLMArray ? ndims(x.data) : x isa AbstractArray ? ndims(x) : 0
 
+# casacore's `ltrim()`/`rtrim()` (`leadingWS`/`trailingWS` regexes,
+# `ExprFuncNode.cc:973-974`, `"^[ \\t]*"`/`"[ \\t]*\$"`) strip ONLY
+# space and tab -- NOT newline/carriage-return -- unlike `trim()`
+# (`String::trim()`, `casa/BasicSL/String.cc:105-112`), which strips
+# all FOUR (space/tab/`\n`/`\r`) from BOTH ends. Julia's `lstrip`/
+# `rstrip` (no predicate) strip ALL Unicode whitespace by default --
+# a real, confirmed divergence for `ltrim`/`rtrim` specifically.
+# Live-verified: `ltrim("\n\t X \t\n")` in real casacore leaves the
+# string COMPLETELY UNCHANGED (it starts with `\n`, which `[ \t]*`
+# never matches), while this package's old `lstrip`-based
+# implementation stripped everything down to `"X \t\n"`. `trim()`
+# itself was already correct (Julia's broader Unicode-whitespace
+# `strip` happens to agree with casacore's narrower 4-char set for
+# every plain-ASCII case) but is narrowed here too, for exact fidelity
+# rather than an accidental agreement.
+_tql_trim(s::AbstractString) = strip(c -> c == ' ' || c == '\t' || c == '\n' || c == '\r', s)
+_tql_ltrim(s::AbstractString) = lstrip(c -> c == ' ' || c == '\t', s)
+_tql_rtrim(s::AbstractString) = rstrip(c -> c == ' ' || c == '\t', s)
+
+# `capitalize()`/`reversestring()`/`sreverse()` (`capitalizeFUNC`/
+# `sreverseFUNC`, `ExprFuncNode.cc:988-998`, via `String::capitalize()`/
+# `String::reverse()`, `casa/BasicSL/String.cc:315-334`) were entirely
+# missing from this package -- found by checking the surrounding string
+# functions once the trim divergence above turned up. `capitalize()`
+# title-cases each "word" (a maximal run of letters/digits; ANY other
+# character, including `_`/`.`, is a word boundary) -- first char of
+# each word uppercased, the rest of that word lowercased. Live-verified:
+# `capitalize("hello world") == "Hello World"`,
+# `capitalize("3d star_field.name") == "3d Star_Field.Name"` (the
+# leading digit `3` starts a "word" too, per casacore's own
+# `isdigit(*p)` check, but has no case to change). `sreverse`/
+# `reversestring` are a plain character reversal, matching Julia's
+# `reverse(::AbstractString)` exactly.
+function _tql_capitalize(s::AbstractString)
+    io = IOBuffer()
+    at_word = false
+    for c in s
+        if isletter(c) || isdigit(c)
+            write(io, at_word ? lowercase(c) : uppercase(c))
+            at_word = true
+        else
+            write(io, c)
+            at_word = false
+        end
+    end
+    return String(take!(io))
+end
+
 _tql_arraymask(x::TQLMArray) = x.mask
 _tql_arraymask(x::AbstractArray) = falses(size(x))
 _tql_arraymask(_) = false
@@ -609,8 +657,12 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- string ---
     "strlength" => (length, 1:1), "len" => (length, 1:1),
     "upcase" => (uppercase, 1:1), "upper" => (uppercase, 1:1), "toupper" => (uppercase, 1:1),
+    "to_upper" => (uppercase, 1:1),
     "downcase" => (lowercase, 1:1), "lower" => (lowercase, 1:1), "tolower" => (lowercase, 1:1),
-    "trim" => (strip, 1:1), "ltrim" => (lstrip, 1:1), "rtrim" => (rstrip, 1:1),
+    "to_lower" => (lowercase, 1:1),
+    "capitalize" => (_tql_capitalize, 1:1),
+    "reversestring" => (reverse, 1:1), "sreverse" => (reverse, 1:1),
+    "trim" => (_tql_trim, 1:1), "ltrim" => (_tql_ltrim, 1:1), "rtrim" => (_tql_rtrim, 1:1),
     # --- misc ---
     "iif" => (ifelse, 3:3),
     # --- date/time (MJD-Float days) + angle strings (Phase 69) ---

@@ -5589,3 +5589,48 @@ New testsets "Phase 186 — missing avdev()/runningavdev()/boxedavdev()/
 runningrms()/boxedrms()" (14 assertions, including a `Complex`-array
 `avdev` case) + its real-TaQL cross-check (6 assertions). Standalone
 `taql_query_tests.jl` green in full.
+
+### Phase 187 — found a real bug (`ltrim()`/`rtrim()` strip too much) and
+### two more missing functions (`capitalize()`, `sreverse()`/`reversestring()`)
+
+Moved to the string-function corner of `src/taql/functions.jl`, not yet
+swept this batch. Read `ExprFuncNode.cc`'s `ltrimFUNC`/`rtrimFUNC`/
+`trimFUNC` cases directly and found a real, confirmed divergence:
+casacore's `ltrim()`/`rtrim()` use the regexes `leadingWS`/`trailingWS`
+(`"^[ \t]*"`/`"[ \t]*$"`, `.cc:973-974`) — stripping **only space and
+tab**, never newline or carriage-return — whereas `trim()`
+(`String::trim()`, `casa/BasicSL/String.cc:105-112`) strips all
+**four** (space/tab/`\n`/`\r`) from both ends. This package's `ltrim`/
+`rtrim` were wired to plain Julia `lstrip`/`rstrip` (no predicate),
+which strip *every* Unicode whitespace character — a real divergence
+whenever a string's leading/trailing whitespace includes a newline.
+Live-verified: `ltrim("\n\t X \t\n")` in real casacore is the string
+**completely unchanged** (it starts with `\n`, which `[ \t]*` never
+matches), while the old Julia-`lstrip`-based implementation stripped
+it down to `"X \t\n"`. `trim()` itself happened to already agree with
+casacore for every plain-ASCII case (Julia's broader whitespace set is
+a superset of casacore's narrower 4-char one) but was narrowed to the
+exact 4-char set anyway, for genuine fidelity rather than an
+accidental agreement. Fixed with `_tql_trim`/`_tql_ltrim`/`_tql_rtrim`.
+
+While checking the surrounding string functions for more of the same,
+found two entirely missing ones: **`capitalize()`** (title-cases each
+"word" — a maximal run of letters/digits; any other character,
+including `_`/`.`, is a word boundary — first character of each word
+uppercased, the rest lowercased; `String::capitalize()`,
+`casa/BasicSL/String.cc:323-334`) and **`sreverse()`/`reversestring()`**
+(a plain character reversal, `String::reverse()`). Live-verified:
+`capitalize("hello world") == "Hello World"`,
+`capitalize("3d star_field.name") == "3d Star_Field.Name"` (the
+leading digit `3` starts a "word" too, per casacore's own
+`isdigit(*p)` check, but has no letter case to change).
+`sreverse`/`reversestring` matches Julia's own `reverse(::AbstractString)`
+exactly. Also added the missing `to_upper`/`to_lower` aliases for
+`upcase`/`downcase` (casacore accepts all four spellings; this package
+only had three of the four).
+
+New testsets "Phase 187 — ltrim()/rtrim() strip too much;
+capitalize()/sreverse() missing" (15 assertions) + its real-TaQL
+cross-check (9 assertions, covering both the whitespace corner case
+and the new functions). Standalone `taql_query_tests.jl` green in
+full.

@@ -959,6 +959,59 @@ end
     end
 end
 
+@testset "Phase 187 — ltrim()/rtrim() strip too much; capitalize()/sreverse() missing" begin
+    # casacore's ltrim()/rtrim() ("leadingWS"/"trailingWS" regexes,
+    # `"^[ \t]*"`/`"[ \t]*\$"`) strip ONLY space and tab -- NOT
+    # newline/carriage-return -- unlike trim() (String::trim()), which
+    # strips all 4 (space/tab/\n/\r) from both ends. Julia's lstrip/
+    # rstrip (no predicate) strip ALL Unicode whitespace -- a real
+    # divergence found by checking the string-function corner once the
+    # general-math sweep (Phases 184-186) moved on to other areas.
+    s = "\n\t X \t\n"
+    @test MSv2._tql_trim(s) == "X"
+    @test MSv2._tql_ltrim(s) == s            # unchanged -- starts with '\n', not ' '/'\t'
+    @test MSv2._tql_rtrim(s) == s
+    @test MSv2._tql_ltrim(" \tX") == "X"     # a genuine space/tab prefix IS stripped
+    @test MSv2._tql_rtrim("X \t") == "X"
+
+    # capitalize()/reversestring()/sreverse() were entirely missing.
+    @test MSv2._tql_capitalize("hello world") == "Hello World"
+    @test MSv2._tql_capitalize("3d star_field.name") == "3d Star_Field.Name"
+    @test reverse("hello") == "olleh"          # sreverse/reversestring == plain reverse
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [s]]; nrow=1)
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = [
+        "tr" => "trim(A)", "lt" => "ltrim(A)", "rt" => "rtrim(A)",
+        "cap" => "capitalize('hello world')", "rev" => "sreverse('hello')",
+        "ru" => "to_upper('x')", "rl" => "to_lower('X')"])
+    @test r.tr[1] == "X"
+    @test r.lt[1] == s
+    @test r.rt[1] == s
+    @test r.cap[1] == "Hello World"
+    @test r.rev[1] == "olleh"
+    @test r.ru[1] == "X"
+    @test r.rl[1] == "x"
+end
+
+@testset "Phase 187 — string function corner, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => ["\n\t X \t\n", "hello world",
+                                                        "3d star_field.name"]]; nrow=3)
+    t = readtable(tabpath)
+    for (i, expr) in ((1, "trim(A)"), (1, "ltrim(A)"), (1, "rtrim(A)"),
+                       (2, "capitalize(A)"), (2, "sreverse(A)"), (2, "reversestring(A)"),
+                       (3, "capitalize(A)"), (2, "to_upper(A)"), (2, "to_lower(A)"))
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[i]
+        ours = query(t, "rownumber() == $i"; select = ["X" => expr]).X[1]
+        @test casa == ours
+    end
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)
