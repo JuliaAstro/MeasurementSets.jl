@@ -4460,3 +4460,41 @@ citations already in the code); `_mf_pack_index`/`_mf_unpack_index`
 round-trip correctly for the empty- and single-block edge cases.
 
 No source or test change. Standalone suite unaffected.
+
+### Phase 163 — found a real function-name mismatch: `mscal.uvw_j2000()` doesn't match real casacore's own spelling; added the correct alias
+
+Read `derivedmscal/DerivedMC/{Register,UDFMSCal}.cc` directly (having
+already mined `MSCalEngine.cc` heavily in Phases 136-144) and found the
+real registered function name for "new uvw in J2000" is
+`derivedmscal.UVWJ2000` — **no underscore** — matched case-insensitively
+via `mscal` being a genuine TaQL synonym for `derivedmscal`
+(`tables/TaQL/TaQLStyle.cc`'s `defineSynonym("mscal", "derivedmscal")`,
+confirmed directly, closing a standing unstated assumption in this
+project's use of the `mscal.` prefix since Phase 77). This package
+spelled the function `uvw_j2000` (Phase 79) without ever checking real
+casacore's own name for it — a query written against real casacore's
+`mscal.uvwj2000()` would have failed here with "unknown mscal function".
+Fixed by aliasing the real, underscore-free spelling onto the existing
+internal name in `_make_func` (`src/taql/functions.jl`) — both spellings
+now work identically, case-insensitively, live-verified against the
+sample MS (`mscal.uvwj2000()`/`mscal.UVWJ2000()` give byte-identical
+results to `mscal.uvw_j2000()`).
+
+The same source read turned up two more findings, recorded but not
+acted on this phase: real casacore's `derivedmscal` library has **no
+bare `PA` function at all** (only `PA1`/`PA2` are registered) — this
+package's suffix-less `mscal.pa()` (added for symmetry with `ha`/`azel`/
+…) is a MeasurementSets-only extension with no real casacore
+counterpart, not a divergence from one, and none of the existing
+`mscal.pa()`-bare tests are real-TaQL cross-checks, so nothing needed
+fixing there. And real casacore has a whole family of wavelength-scaled
+uvw functions this package doesn't implement at all
+(`UVWWVL`/`UVWWVLS`/`UVWJ2000WVL(S)`/`UVWAPP(WVL(S))` — the last also in
+the APP frame rather than J2000) — a genuine, real gap, left for a
+future phase.
+
+Full standalone `test/taql_mscal_tests.jl` green (renders `_HAVE_TAQL`/
+`_HAVE_CASACORE` stubbed `false` to run outside the dev machine's real-
+casacore setup — every one of its 500+ assertions, including the new
+Phase 163 parser-unit and query cross-check tests, passes with no
+regressions).

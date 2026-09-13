@@ -12,6 +12,10 @@ using MeasurementSets: measure, measconvert, MeasFrame, MDirection, MuvW, J2000,
     @test p("mscal.el1() > 0").lhs.fn == "el1"
     @test p("MSCAL.Hadec2() > 0").lhs.fn == "hadec2"
     @test p("mscal.uvw_j2000()[3] > 0").lhs.base isa MSv2.TQLMScal
+    # Phase 163: real casacore's `derivedmscal.UVWJ2000` (no underscore)
+    # aliases to this package's `uvw_j2000` spelling.
+    @test p("mscal.uvwj2000()[3] > 0").lhs.base.fn == "uvw_j2000"
+    @test p("mscal.UVWJ2000()[3] > 0").lhs.base.fn == "uvw_j2000"
     @test_throws ArgumentError p("mscal.wombat() > 0")
     @test_throws ArgumentError p("mscal.el1(A) > 0")
     s = Set{String}()
@@ -226,6 +230,24 @@ end
         # uvw_j2000()'s w corresponds to ANTENNA2-ANTENNA1 -- so, up to
         # the (small) J2000-vs-ITRF frame difference, uj[3] ≈ -c*delay.
         @test column(q, "uj")[i][3] ≈ -MSv2.C_LIGHT * column(q, "d")[i] rtol = 1e-6
+    end
+end
+
+@testset "TaQL-lite — mscal.uvwj2000() real-casacore spelling alias (Phase 163)" begin
+    # Real casacore registers this function as `derivedmscal.UVWJ2000`
+    # (`derivedmscal/DerivedMC/Register.cc`) -- no underscore -- matched
+    # case-insensitively via `mscal` as a synonym for `derivedmscal`
+    # (`tables/TaQL/TaQLStyle.cc`'s `defineSynonym`). This package spelled
+    # it `uvw_j2000` (Phase 79) before checking real casacore's own
+    # naming; `uvwj2000` (no underscore) is now accepted as an alias for
+    # the exact same function, so a query written against real casacore's
+    # own spelling also works here.
+    main = readtable(SAMPLE_MS)
+    q = query(main, "rownumber() >= 1"; select = [
+        "a" => "mscal.uvw_j2000()", "b" => "mscal.uvwj2000()", "c" => "mscal.UVWJ2000()"])
+    for i in (3, 17, 250, 599)
+        @test column(q, "b")[i] == column(q, "a")[i]
+        @test column(q, "c")[i] == column(q, "a")[i]
     end
 end
 

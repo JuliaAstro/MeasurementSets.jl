@@ -595,6 +595,17 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     n = length(args)
     if startswith(name, "mscal.")
         fn = name[7:end]
+        # Phase 163: real casacore's own function is registered as
+        # `derivedmscal.UVWJ2000` (`derivedmscal/DerivedMC/Register.cc`,
+        # matched case-insensitively via TaQL's `mscal` synonym for
+        # `derivedmscal`, `tables/TaQL/TaQLStyle.cc`'s `defineSynonym`)
+        # -- no underscore. This package spelled it `uvw_j2000`
+        # (Phase 79) before this was checked against source; keep that
+        # name (used throughout this codebase's tests/docs/CHANGELOG)
+        # as the canonical internal one and accept the real, underscore-
+        # free spelling as an alias so a query written against real
+        # casacore's own `mscal.uvwj2000()` also works here.
+        fn == "uvwj2000" && (fn = "uvw_j2000")
         if fn == "stokes"
             1 <= n <= 3 || throw(ArgumentError(
                 "TaQL-lite: mscal.stokes takes 1 to 3 arguments in \"$src\""))
