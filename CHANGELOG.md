@@ -4779,3 +4779,274 @@ errors clearly, the plain (unmasked) `mscal.stokes(DATA, 'I')` path is
 completely unaffected. New testset `test/taql_mscal_tests.jl`
 "mscal.stokes() vs a masked-array argument (Phase 171)" (2 assertions).
 Standalone mscal suite green (all 28 testsets, no regressions).
+
+### Phase 172 — swept `CompressComplexSD`'s bit-packing and `removecolumn!`'s Hypercolumn-keyword handling; no bug found in either
+
+Two source-reading investigations, following the same discipline as
+Phases 161-166 (re-verify a flagged-but-never-independently-checked
+risk, or a code path with no obvious test coverage).
+
+**1. `CompressComplexSD` bit-packing** — flagged as a specific risk at
+Phase 19's own drafting time ("ported verbatim from
+`CompressComplex.cc:740-846` + Casacore cross-check", never itself
+re-derived line-by-line in a later sweep). Read
+`CompressComplex.cc`'s `CompressComplexSD::scaleOnGet`/`scaleOnPut` in
+full (this checkout's real path is `tables/DataMan/CompressComplex.cc`,
+not the `tables/Dysco/` guess in the original plan) and compared every
+constant and branch against `src/datamanagers/virtual.jl`'s
+`_decode(::CompressComplexSD,...)`/`_encode(::CompressComplexSD,...)`:
+the even/odd LSB dispatch, the `fullScale = scale/32768` / `imagScale =
+scale*2` factors, the wrap-correction arithmetic shared with plain
+`CompressComplex`, and every clamp range (`ENG_SD_EVEN_LO/HI =
+∓32768·32768[-1]`, `ENG_SD_REAL_MAX = 32767`, `ENG_SD_IMAG_LO/HI =
+-16384/16383`) all match casacore's source exactly, including the
+`<<1`/`+1` odd-flag bit convention. No divergence found — the existing
+Phase 19 CASA cross-check for this engine was already exercising
+correct code.
+
+**2. `removecolumn!`'s Hypercolumn-keyword handling** — prompted by
+Phase 112's own `_copy_table` fix (`_filter_hypercolumns`, which drops
+a `Hypercolumn_<name>` private keyword on copy when a column it names
+is missing from the output) raising the question of whether `edit()`'s
+`removecolumn!` needed the same treatment for its own regenerated
+`TableDesc` (`src/tables/edit.jl`'s `_flush_regen`, which reuses
+`rd.desc.private` verbatim with no filtering). Read
+`TableDesc::removeColumn` (`tables/Tables/TableDesc.h:576`) directly:
+it is a bare one-line pass-through to `ColumnDescSet::remove`, with
+**no** hypercolumn-declaration cleanup at all — real casacore itself
+leaves a stale `Hypercolumn_<name>` keyword referencing a since-removed
+column after a plain `Table::removeColumn`. So `_flush_regen`'s
+verbatim-copy behaviour after `removecolumn!` **matches real casacore
+exactly** (both leave the same dangling declaration) — not a bug, and
+not a case Phase 112's `_copy_table` fix needs extending to (that fix
+addresses `copytable`'s *rename/drop-via-selection* case, a genuinely
+different situation from `edit()`'s in-place column removal).
+
+No production code changed either way; both are confirmed-correct
+findings, not fixes. Standalone engine + edit suites green (existing
+tests unaffected — no new test needed, since neither investigation
+produced a code path that wasn't already exercised).
+
+### Phase 173 — swept MultiFile's CRC32 + pack/unpack-index algorithms against casacore source; both confirmed correct, closing two previously-flagged uncertainties
+
+Two more source-reading investigations, targeting the specific "never
+independently verified" language left in Phase 20/21's own Risks
+sections rather than a fresh area.
+
+**1. `_mf_crc32`** — Phase 20's own Risk (b) explicitly noted "no
+independent reference vector for casacore's nonstandard variant" (the
+CRC32 used for a MultiFile container's header integrity check, `useCRC`
+— never itself set by any real casacore write path, per Phase 21's own
+finding, so a bug here would be completely inert in practice, but worth
+closing anyway since the uncertainty was explicitly on record). Read
+`casa/IO/MultiFile.cc`'s `CRCTable()` (the lookup-table construction,
+`.cc:44-67`) and `MultiFile::calcCRC` (`.cc:694-719`) in full and
+compared every step against `src/datamanagers/container.jl`'s
+`_MF_CRC_TABLE`/`_mf_crc32`: the polynomial (`0x04C11DB7`, built
+MSB-first per byte), the custom `crcinit = 0x46AF6449`, the per-byte
+update (`crc = ((crc<<8)|byte) ^ table[(crc>>24)&0xff]`), the 4-round
+"augment with zero bytes" tail, and the final `crc ^= 0xFFFFFFFF` all
+match exactly, table-index off-by-one (0-based C++ vs 1-based Julia)
+correctly accounted for. (Noted in passing, not acted on: casacore's
+own `MultiFile::writeHeader` calls `calcCRC` on the *same* buffer
+**twice in a row** — `.cc:245-246`, `crc = calcCRC(...); crc =
+calcCRC(...)` — an apparent redundant/dead first call in casacore
+itself, harmless since the function is a pure, deterministic
+computation with no side effects.)
+
+**2. `_mf_pack_index` / `_mf_unpack_index`** — Phase 21's own Risk (a)
+flagged the write-side run-length packer as "new, untested-against-a-
+real-fixture logic" (no real casacore-authored fixture in the test
+suite has ever needed more than one block per file, so the multi-run
+packing path was only ever exercised by this package's own round-trip
+tests). Read `MultiFile::packIndex`/`unpackIndex`
+(`casa/IO/MultiFile.cc:734-786`) directly and compared to
+`_mf_pack_index`/`_mf_unpack_index` step by step — the run-detection
+loop, the "count excludes the first block number" convention, and the
+trailing-run flush after the loop all match exactly. One structural
+question worth recording: `_mf_unpack_index` assumes every negative
+(run-length) entry immediately follows the positive value it extends —
+a real simplification versus casacore's own `unpackIndex`, which
+handles a fully general `Vector<Int64>` with no such assumption. Traced
+through `packIndex`'s own emission logic and confirmed this is a safe
+simplification, not a latent bug: a negative entry is only ever emitted
+immediately after the positive that started the run it extends, and is
+always immediately followed by either the end of the list or the next
+run's positive start — `packIndex` can never itself emit two
+consecutive negatives, so any output it produces is unambiguously
+decodable by the simpler one-negative-per-positive scheme our unpacker
+implements.
+
+No production code changed in either case — both close out an
+explicitly-recorded uncertainty with a real, line-by-line source
+comparison rather than leaving it as "should be fine." Standalone
+container test suite green (unaffected — no new test needed, since the
+existing round-trip + real-fixture tests were already exercising the
+confirmed-correct code).
+
+### Phase 174 — found and fixed a real bug: TaQL-lite's `datetime()` couldn't parse casacore's own `dd-mm-yyyy` dash-numeric date form
+
+**Real bug found via direct source reading + live reproduction.**
+`_tql_parse_datetime` (Phase 69) covers ISO dates and `dd-Mon-yyyy` /
+`ddMonyyyy` (month-name) forms via a fixed `Dates.DateFormat` list, but
+casacore's real `MVTime::read` (`casa/Quanta/MVTime.cc:465-497`) also
+accepts a **dash-numeric** `r-mm-dd` form whose interpretation depends
+on the *magnitude* of the first number: `r > 1000` means `r` is the
+year (`yyyy-mm-dd`, already covered); otherwise `r` is the DAY and the
+trailing number is the year (`dd-mm-yyyy`), with the same 2-digit-year
+expansion (`<50 → +2000`, `<100 → +1900`) as the month-name sibling
+format already implements. `"12-02-2020"` — a perfectly ordinary,
+common date string — used to throw `"cannot parse datetime"` outright.
+Live-verified against real casacore's own `datetime()` via
+`tableCommand`: `"12-02-2020"`, `"1-1-2020"`, `"31-12-2020"` and the
+2-digit-year form `"12-02-20"` all resolve to 2020-02-12, matching the
+day/year-swap-plus-expansion rule exactly.
+
+Fixing this surfaced a second, more subtle issue along the way: naively
+adding the new dash-numeric parser as a *fallback*, tried only after
+the existing `_TQL_DT_FORMATS` list, was not enough — Julia's
+`Dates.DateFormat("yyyy-mm-dd")` **mis-parses** `"12-02-20"` as
+`year=12` (stopping at the first dash rather than requiring exactly 4
+digits), succeeding with a garbage answer before the correct parser
+ever got a chance to run. Fixed by trying the new
+`_tql_parse_dashnum_date` (`src/taql/functions.jl`) **first**, ahead of
+the named-format list, for exactly the bare `N-N-N` shape; genuinely
+ISO strings (`r > 1000`) still resolve to the same correct value
+through the new parser's own branch, so no format-list matches are
+lost. Also extended the date/time separator set to `/` / `-` / ` ` (not
+just the ISO `T`) after confirming live that real casacore accepts all
+four (`MVTime.cc:513`, `in.tSkipChar('/') || in.tSkipChar('-') ||
+in.tSkipChar(' ')`).
+
+New testset "Phase 174 — dash-numeric dd-mm-yyyy date parsing" (13
+assertions: ISO unaffected, day/year swap, 2-digit-year expansion, all
+four separators, an invalid-month/day still errors, and two `query()`
+row-selection checks) plus "Phase 174 — dash-numeric date, real-TaQL
+cross-check" (5 assertions, `_HAVE_TAQL`-gated, comparing this
+package's parse directly against real casacore's `datetime()` for five
+representative strings). Standalone `taql_query_tests.jl` green in
+full (every pre-existing testset in the file, including all of Phase
+22-97's query-engine coverage, unaffected).
+
+### Phase 175 — found and fixed a real bug: `hms()`/`dms()` produced an invented output format that never matched real casacore at all
+
+**Real bug found via direct source reading + live reproduction**,
+continuing straight on from Phase 174's date-parsing fix in the same
+file (`src/taql/functions.jl`). This package's `_tql_hms`/`_tql_dms`
+(Phase 69) had never actually been checked against real casacore's own
+`hms()`/`dms()` TaQL functions — Phase 69's own test only asserted a
+hand-invented format (`"HH:MM:SS.sss"` for hms, `"+DD.MM.SS.sss"` for
+dms, colon/dot separators throughout).
+
+Read `TableExprFuncNode::stringHMS`/`stringDMS`
+(`tables/TaQL/ExprFuncNode.cc:1315-1339`, which format via
+`MVAngle::print`, `casa/Quanta/MVAngle.cc:198-330`) directly: real
+casacore's actual format is completely different —
+`hms()` produces `"HHhMMmSS.sss"` (letter separators `h`/`m`, no
+colons, and critically **no leading sign at all** — `MVAngle::print`
+only emits a sign character for the `ANGLE` branch or the `DIG2`
+modifier, neither of which the TIME-type `hms()` sets), and `dms()`
+produces `"+DDDdMMmSS.sss"` (letter separators `d`/`m`, an **always-
+present** sign, and a **3-digit** zero-padded degree field, not 2 —
+`stringDMS`'s underlying separator-replace loop stops after replacing
+exactly the first two `.` occurrences, leaving the seconds' own decimal
+point untouched). Live-verified against real casacore's `hms()`/
+`dms()` via `tableCommand` for a spread of angles (quadrant boundaries,
+negative, zero, `π`, near-`2π`, an arbitrary value): every one of the
+old assertions was simply wrong output, not a rounding/precision
+nuance — this package's TaQL-lite `hms`/`dms` never once produced a
+string a real casacore user or a downstream tool expecting the real
+format could have used.
+
+Fixed both functions to match the verified format exactly (still
+computing the same quantised-to-milliseconds-first integer arithmetic
+that avoids a stray `60` from float rounding — that numeric core was
+already correct, only the string assembly was wrong). Updated the
+Phase 69 test's two format assertions to the correct strings and added
+a new "Phase 175 — hms()/dms() output format" unit testset (7
+assertions covering the no-sign-on-hms / always-signed-dms / 3-digit-
+degree-field distinctions) plus "Phase 175 — hms()/dms(), real-TaQL
+cross-check" (16 assertions across 8 angles, `_HAVE_TAQL`-gated).
+Standalone `taql_query_tests.jl` green in full.
+
+### Phase 176 — found and fixed two more real bugs: `ctime()` was missing fractional seconds, and `ctod()`/`cdatetime()` used the wrong date format entirely
+
+**Two more real bugs found**, continuing directly from Phase 175's
+`hms`/`dms` fix by checking the neighbouring date/time-string functions
+in the same source file (`src/taql/functions.jl`) the same way: read
+casacore source first, then live-verify against real casacore.
+
+Read `TableExprFuncNode`'s `cdateFUNC`/`ctimeFUNC`/`ctodFUNC`
+dispatch (`tables/TaQL/ExprFuncNode.cc:1045-1054`) and the underlying
+`stringDate`/`stringTime`/`stringDateTime` (`.cc:1218-1227`, which
+format via `MVTime::print`, `casa/Quanta/MVTime.cc:366-434`):
+- **`ctime()`** calls `stringTime(dt, 9)` — precision 9, i.e. 3
+  fractional-second digits. This package's implementation was a bare
+  `Dates.format(..., "HH:MM:SS")` with **no fractional part at all**.
+- **`ctod()`** and its alias **`cdatetime()`** (confirmed the same
+  function in real casacore — `TableParseFunc.cc:571` maps both names
+  to `ctodFUNC`) call `stringDateTime(dt, 9)`, which uses `MVTime`'s
+  **`YMD`** print mode (`"YYYY/MM/DD/HH:MM:SS.sss"`, slash-separated,
+  4-digit year first) — a completely different `MVTime` mode from
+  `cdate()`'s own `DMY` mode (`"DD-Mon-YYYY"`, dash-separated,
+  3-letter month name). This package's `ctod`/`cdatetime` were instead
+  built from `cdate`'s DMY format with a bare `/HH:MM:SS` suffix
+  tacked on (no fractional seconds either) — the wrong day/month/year
+  ORDER and separator, not just missing decimals.
+
+`cdate()`, `cmonth()`, and `cdow()` were independently re-checked
+against `MVTime::monthName`/`dayName` (`casa/Quanta/MVTime.cc:100-154`)
+and confirmed already correct — no change needed there.
+
+Fixed by adding a shared `_tql_time_of_day_str(mjd)` (the same
+quantise-to-milliseconds-then-carry-safely integer arithmetic as
+Phase 175's `_tql_hms`, but operating on an MJD's fractional day
+directly rather than a radian angle, and using plain colon separators
+with no sign) and wiring it into `ctime`, and into `ctod`/`cdatetime`
+alongside a corrected `"yyyy/mm/dd"` date prefix. Live-verified against
+real casacore across five MJD values spanning a day boundary, a
+midnight, a fractional-second rounding case, and an ordinary date —
+every one of the six `c*` functions now matches exactly.
+
+New testset "Phase 176 — ctime()/ctod()/cdatetime() output format" (6
+assertions) plus "Phase 176 — ctime()/ctod()/cdatetime(), real-TaQL
+cross-check" (30 assertions across 5 MJDs × 6 functions, `_HAVE_TAQL`-
+gated, covering the already-correct `cdate`/`cmonth`/`cdow` too as a
+regression guard). Standalone `taql_query_tests.jl` green in full.
+
+### Phase 177 — found and fixed a real bug: `week()` used ISO-8601 week numbering, but casacore's own `MVTime::yearweek()` is a different, non-ISO convention
+
+**Another real bug found**, continuing the same "check the sibling
+functions in this file" sweep from Phases 175-176: checked the numeric
+date-component functions (`year`/`month`/`day`/`weekday`/`dow`/`week`)
+against `TableExprFuncNode`'s `yearFUNC`/`monthFUNC`/`dayFUNC`/
+`weekdayFUNC`/`weekFUNC` (`tables/TaQL/ExprFuncNode.cc:558-566`) and
+the underlying `MVTime` methods (`casa/Quanta/MVTime.cc:156-206`).
+
+`year()`, `month()`, `day()`, `weekday()`, `dow()` were all already
+correct — Julia's `Dates.year`/`month`/`day`/`dayofweek` happen to
+agree exactly with casacore's `MVTime::year`/`month`/`monthday`/
+`weekday` (both use the same Mon=1..Sun=7 weekday numbering). But
+`week()` used `Dates.week` — ISO-8601 week numbering — while casacore's
+`MVTime::yearweek()` (built on `yearday()`, a classic day-of-year
+formula) is a **different, non-ISO convention**: at a year boundary
+where the ISO week wraps to week 52/53 of the *previous* year,
+casacore's own algorithm instead returns **0** for those early-January
+days that don't yet belong to a "full" week of the new year. Found
+live: `2022-01-01` (a Saturday) is ISO week 52 of 2021, but real
+casacore's `week()` gives `0`, not `52`.
+
+Fixed with a direct port of `MVTime::yearday`/`yearweek`
+(`_tql_yearday`/`_tql_yearweek`, `src/taql/functions.jl`) — Julia's
+`div`/`rem` truncate toward zero and preserve the dividend's sign
+exactly like C++'s `/`/`%` on `Int`, so this is a literal translation,
+not a re-derivation. Live-verified against real casacore across a
+75-date sweep spanning five consecutive year boundaries (2020-2024) —
+every value matches, including every ISO-vs-non-ISO edge case.
+
+New testset "Phase 177 — week() (casacore's non-ISO MVTime::yearweek)"
+(10 assertions, incl. the confirmed 2022-01-01 divergence and a
+regression check on the already-correct `year`/`month`/`day`/`weekday`/
+`dow`) plus "Phase 177 — week(), real-TaQL cross-check" (375
+assertions across 75 dates × 5 functions, `_HAVE_TAQL`-gated).
+Standalone `taql_query_tests.jl` green in full.

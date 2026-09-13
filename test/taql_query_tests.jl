@@ -2405,8 +2405,8 @@ end
     @test f("day")(58891.0) == 12
     @test f("date")(58891.7) == 58891.0
     @test f("time")(58891.25) ≈ pi / 2
-    @test MSv2._tql_hms(pi / 2) == "06:00:00.000"
-    @test startswith(MSv2._tql_dms(-pi / 6), "-30.00.00")
+    @test MSv2._tql_hms(pi / 2) == "06h00m00.000"
+    @test MSv2._tql_dms(-pi / 6) == "-030d00m00.000"
     @test f("normangle")(3pi) ≈ pi
     @test f("cmonth")(58891.0) == "Feb"
 
@@ -2444,6 +2444,170 @@ end
     tr = readtable(dir2)
     @test query(tr, "RA > 10h30m").rows == [2, 3]            # 157.5 deg = 2.749 rad
     @test query(tr, "RA BETWEEN 8h AND 12h").rows == [1, 2, 3]
+end
+
+# Phase 174: `MVTime::read`'s dash-numeric `dd-mm-yyyy` date form (a
+# genuine gap found by reading `MVTime.cc` directly and live-verifying
+# against real casacore's own `datetime()` -- `"12-02-2020"` used to
+# throw "cannot parse datetime" instead of parsing as 2020-02-12).
+@testset "Phase 174 — dash-numeric dd-mm-yyyy date parsing" begin
+    # ISO (year-first, r > 1000) is unaffected and still wins that branch
+    @test MSv2._tql_parse_datetime("2020-02-12") ≈ 58891.0
+    # dd-mm-yyyy (day-first, r <= 1000) -- casacore's day/year swap
+    @test MSv2._tql_parse_datetime("12-02-2020") ≈ 58891.0
+    @test MSv2._tql_parse_datetime("1-1-2020") ≈ 58849.0
+    @test MSv2._tql_parse_datetime("31-12-2020") ≈ 59214.0
+    # 2-digit year expansion (<50 -> +2000, <100 -> +1900) -- this is the
+    # case a plain `Dates.DateFormat("yyyy-mm-dd")` mis-parses (it reads
+    # "12-02-20" as year=12, stopping at the first dash, since Julia's
+    # format codes don't enforce a fixed digit width on parse) unless
+    # the dash-numeric form is tried FIRST, ahead of the format list.
+    @test MSv2._tql_parse_datetime("12-02-20") ≈ 58891.0
+    @test MSv2._tql_parse_datetime("12-02-99") ≈ MSv2._tql_parse_datetime("12-02-1999")
+    # date/time separator is `/`, `-`, ` `, or `T` in real casacore
+    # (`MVTime.cc:513`), not just the ISO `T`
+    for sep in ('/', '-', ' ', 'T')
+        @test MSv2._tql_parse_datetime("12-02-2020$(sep)06:00:00") ≈ 58891.25
+    end
+    # invalid month/day still errors clearly (not silently misparsed)
+    @test_throws ArgumentError MSv2._tql_parse_datetime("13-13-2020")
+
+    d = mktempdir()
+    T = Float64[58000, 58891, 59500, 60000] .* 86400.0
+    dir = joinpath(d, "m2.tab")
+    write_table(dir, "M", Pair{String,Any}["T" => T]; nrow=4)
+    t = readtable(dir)
+    @test query(t, "T > datetime('12-02-2020') * 86400.0").rows == [3, 4]
+    @test query(t, "T > datetime('12-02-20') * 86400.0").rows == [3, 4]
+end
+
+@testset "Phase 174 — dash-numeric date, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    for datestr in ("12-02-2020", "12-02-20", "1-1-2020", "31-12-2020",
+                    "12-02-2020/06:00:00")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT mjd(datetime('$datestr')) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa_mjd = column(readtable(rdir), "X")[1]
+        @test MSv2._tql_parse_datetime(datestr) ≈ casa_mjd
+    end
+end
+
+# Phase 175: `hms()`/`dms()` output format -- found by reading
+# `TableExprFuncNode::stringHMS`/`stringDMS`
+# (`tables/TaQL/ExprFuncNode.cc:1315-1339`) directly. Real casacore's
+# format uses `h`/`m` (time) or `d`/`m` (angle) letter separators, not
+# colons/dots, and a 3-digit zero-padded degree field for `dms` (not
+# 2) -- this package's original implementation used an invented
+# colon/dot convention that never matched real TaQL output at all.
+@testset "Phase 175 — hms()/dms() output format" begin
+    @test MSv2._tql_hms(pi / 2) == "06h00m00.000"
+    @test MSv2._tql_hms(0.0) == "00h00m00.000"
+    @test MSv2._tql_hms(-pi / 6) == "22h00m00.000"        # no sign on hms, wraps to 22h
+    @test MSv2._tql_dms(pi / 2) == "+090d00m00.000"        # 3-digit degree field
+    @test MSv2._tql_dms(-pi / 6) == "-030d00m00.000"
+    @test MSv2._tql_dms(0.0) == "+000d00m00.000"           # always signed, even at 0
+    @test MSv2._tql_dms(pi) == "+180d00m00.000"
+end
+
+@testset "Phase 175 — hms()/dms(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    for rad in (pi / 2, -pi / 6, 0.0, Float64(pi), -Float64(pi), 2pi - 0.0001, 3.0, deg2rad(45.85444))
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT hms($rad) AS H, dms($rad) AS D FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        m = readtable(rdir)
+        @test column(m, "H")[1] == MSv2._tql_hms(rad)
+        @test column(m, "D")[1] == MSv2._tql_dms(rad)
+    end
+end
+
+# Phase 176: `ctime()`/`ctod()`/`cdatetime()` output format -- found
+# right after Phase 175's hms/dms fix, in the same source file, by
+# checking the sibling date/time-string functions the same way.
+# `ctime()` was missing its fractional-second digits entirely (an
+# unqualified `Dates.format(..., "HH:MM:SS")`), and `ctod()`/
+# `cdatetime()` (the SAME real casacore function --
+# `TableParseFunc.cc:571` maps both names to `ctodFUNC`) used `cdate`'s
+# DMY format (`dd-Mon-yyyy`) instead of the real `YYYY/MM/DD/HH:MM:SS.sss`
+# (`stringDateTime` -> `MVTime::YMD`, a completely different `MVTime`
+# print mode than `stringDate`'s `DMY`).
+@testset "Phase 176 — ctime()/ctod()/cdatetime() output format" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    mjd = 58891.25123456                      # 2020-02-12 06:01:46.666
+    @test f("ctime")(mjd) == "06:01:46.666"
+    @test f("ctod")(mjd) == "2020/02/12/06:01:46.666"
+    @test f("cdatetime")(mjd) == "2020/02/12/06:01:46.666"
+    @test f("ctime")(58891.0) == "00:00:00.000"          # midnight, no carry
+    @test f("ctime")(60000.999999) == "23:59:59.914"     # rounds without wrapping the day
+    @test f("cdate")(mjd) == "12-Feb-2020"               # unaffected (already correct)
+end
+
+@testset "Phase 176 — ctime()/ctod()/cdatetime(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    for mjd in (58891.25123456, 58891.0, 60000.999999, 58000.5, 59214.9999999)
+        for fn in ("cdate", "ctime", "cmonth", "cdow", "ctod", "cdatetime")
+            rdir = joinpath(mktempdir(), "r")
+            _taqlcmd("SELECT $fn(mjdtodate($mjd)) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+            @test column(readtable(rdir), "X")[1] == MSv2._TQL_FUNCS[fn][1](mjd)
+        end
+    end
+end
+
+# Phase 177: `week()` -- found right after Phase 176's date/time-format
+# fixes, by checking the numeric date-component functions
+# (year/month/day/weekday/week) the same way against real casacore.
+# `year`/`month`/`day`/`weekday`/`dow` were all already correct
+# (`Dates.year`/`month`/`day`/`dayofweek` happen to agree with
+# casacore's `MVTime::year/month/monthday/weekday` exactly), but
+# `week()` used Julia's `Dates.week` (ISO-8601), which is NOT what
+# casacore's `MVTime::yearweek()` computes: at a year boundary where
+# the ISO week wraps to week 52/53 of the *previous* year, casacore's
+# own (non-ISO) algorithm instead returns 0 for those early-January
+# days.
+@testset "Phase 177 — week() (casacore's non-ISO MVTime::yearweek)" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    # 2022-01-01 is a Saturday: ISO week 52 of 2021, but casacore's own
+    # week() gives 0 -- this is the actual divergence found live.
+    @test f("week")(59580.0) == 0
+    @test f("week")(58891.0) == 7            # 2020-02-12, unaffected case
+    @test f("week")(58849.0) == 1            # 2020-01-01 (a Wednesday)
+    @test f("week")(59214.0) == 53           # 2020-12-31 (year has a week 53)
+    @test f("week")(60310.0) == 1            # 2024-01-01 (a Monday)
+    @test f("year")(58891.0) == 2020
+    @test f("month")(58891.0) == 2
+    @test f("day")(58891.0) == 12
+    @test f("weekday")(58891.0) == 3         # Wed, Mon=1..Sun=7
+    @test f("dow")(58891.0) == 3
+end
+
+@testset "Phase 177 — week(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    # a window around each of several consecutive year boundaries, plus
+    # the fixed set above -- exercises every ISO-vs-casacore edge case
+    mjds = Float64[]
+    for base in (58849.0, 59214.0, 59580.0, 59945.0, 60310.0)
+        append!(mjds, collect((base - 5):(base + 8)))
+    end
+    append!(mjds, [58891.0, 58000.0, 60000.0, 58487.0, 58489.0])
+    for mjd in mjds
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT year(mjdtodate($mjd)) AS Y, month(mjdtodate($mjd)) AS M, " *
+                 "day(mjdtodate($mjd)) AS D, weekday(mjdtodate($mjd)) AS WD, " *
+                 "week(mjdtodate($mjd)) AS W FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        tab = readtable(rdir)
+        @test column(tab, "Y")[1] == MSv2._TQL_FUNCS["year"][1](mjd)
+        @test column(tab, "M")[1] == MSv2._TQL_FUNCS["month"][1](mjd)
+        @test column(tab, "D")[1] == MSv2._TQL_FUNCS["day"][1](mjd)
+        @test column(tab, "WD")[1] == MSv2._TQL_FUNCS["weekday"][1](mjd)
+        @test column(tab, "W")[1] == MSv2._TQL_FUNCS["week"][1](mjd)
+    end
 end
 
 @testset "Phase 69 — angdist / array literal" begin

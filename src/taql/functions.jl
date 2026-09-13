@@ -74,18 +74,64 @@ function _parse_sexagesimal(s::AbstractString, kind::Symbol)
     return (neg ? -1.0 : 1.0) * deg2rad(v)
 end
 
+# casacore `MVTime::read`'s dash-numeric date form (`casa/Quanta/
+# MVTime.cc:465-497`) -- `r-mm-dd`, where `r` is read first and the
+# grammar disambiguates by its *magnitude*: `r > 1000` means `r` is
+# itself the year (`yyyy-mm-dd`, already covered by the ISO
+# `_TQL_DT_FORMATS` above); otherwise `r` is the DAY and the trailing
+# number is the year, with the same 2-digit-year expansion as the
+# `dd-Mon-yyyy` sibling format (`<50` -> `+2000`, `<100` -> `+1900`).
+# So `"12-02-2020"` is DD-MM-YYYY (2020-02-12), not ISO -- a valid TaQL
+# literal `Dates.DateFormat` can't express (no threshold-dependent
+# field-swap), live-verified against real casacore's own `datetime()`.
+# The date/time separator is `/`, `-`, or a space in real casacore too
+# (`in.tSkipChar('/') || in.tSkipChar('-') || in.tSkipChar(' ')`,
+# `MVTime.cc:513`), not just the ISO `T` -- also live-verified.
+function _tql_parse_dashnum_date(s::AbstractString)
+    m = match(r"^(\d{1,4})-(\d{1,2})-(\d{1,4})(?:[ /T-](\d{1,2}):(\d{1,2}):(\d{1,2}(?:\.\d+)?))?$", s)
+    m === nothing && return nothing
+    r = parse(Int, m[1]); mm = parse(Int, m[2]); dd2 = parse(Int, m[3])
+    if r > 1000
+        yyyy, mon, day = r, mm, dd2
+    else
+        dd2 < 50 && (dd2 += 2000)
+        dd2 < 100 && (dd2 += 1900)
+        yyyy, mon, day = dd2, mm, r
+    end
+    (1 <= mon <= 12 && 1 <= day <= 31) || return nothing
+    h  = m[4] === nothing ? 0   : parse(Int, m[4])
+    mi = m[5] === nothing ? 0   : parse(Int, m[5])
+    se = m[6] === nothing ? 0.0 : parse(Float64, m[6])
+    ms = round(Int, 1000 * (se - floor(se)))
+    dt = try
+        Dates.DateTime(yyyy, mon, day, h, mi, floor(Int, se), ms)
+    catch
+        return nothing
+    end
+    return _tql_mjd_of(dt)
+end
+
 function _tql_parse_datetime(s::AbstractString)
     ss = strip(String(s))
     isempty(ss) && return _tql_mjd_of(Dates.now())
+    # Tried FIRST, ahead of the `_TQL_DT_FORMATS` list below: a plain
+    # `Dates.DateFormat("yyyy-mm-dd")` will happily match a short
+    # numeric field it shouldn't (e.g. it reads "12-02-20" as year=12,
+    # stopping at the first dash, rather than raising a mismatch) --
+    # `_tql_parse_dashnum_date` applies casacore's own day/year-swap +
+    # 2-digit-year-expansion rule up front so the bare `N-N-N` shape is
+    # never handed to a format string that can silently mis-parse it.
+    m = _tql_parse_dashnum_date(ss)
+    m === nothing || return m
     for f in _TQL_DT_FORMATS
         v = tryparse(Dates.DateTime, ss, f)
         v === nothing || return _tql_mjd_of(v)
     end
     v = tryparse(Dates.DateTime, ss)
-    v === nothing && throw(ArgumentError(
+    v === nothing || return _tql_mjd_of(v)
+    throw(ArgumentError(
         "TaQL-lite: cannot parse datetime \"$s\" — try ISO " *
-        "(`2020-02-12`, `2020-02-12T03:04:05`)"))
-    return _tql_mjd_of(v)
+        "(`2020-02-12`, `2020-02-12T03:04:05`) or `dd-mm-yyyy`"))
 end
 
 _tql_datetime(a...) = isempty(a) ? _tql_mjd_of(Dates.now()) :
@@ -93,15 +139,27 @@ _tql_datetime(a...) = isempty(a) ? _tql_mjd_of(Dates.now()) :
 _tql_now_mjd() = _tql_mjd_of(Dates.now())
 
 _pad2(n) = lpad(n, 2, '0')
-# radians -> `HH:MM:SS.sss` (of time) / `+DD.MM.SS.sss` (of arc); the
-# angle is quantised to milliseconds/milliarcsec as an integer first so
-# rounding never leaves a `60` in a field.
+# radians -> `HHhMMmSS.sss` (of time) / `+DDDdMMmSS.sss` (of arc) --
+# `TableExprFuncNode::stringHMS`/`stringDMS`
+# (`tables/TaQL/ExprFuncNode.cc:1315-1339`), which format via
+# `MVAngle::print` (precision 9 -> 3 fractional-second digits) then
+# replace the base `HH:MM:SS`/`+DDD.MM.SS` separators with letters (the
+# THIRD dms separator -- the seconds decimal point -- is left alone;
+# `stringDMS`'s replace loop stops after the second hit). Live-verified
+# against real casacore's own `hms()`/`dms()`: no colons/dots-only form
+# exists in real TaQL, degrees are always 3 digits (zero-padded, "***"
+# above 999 -- not reproduced, no MS angle gets there), hours always 2,
+# and — unlike `dms` — `hms` never carries a leading sign (`MVAngle::
+# print` only emits one for the ANGLE branch or the `DIG2` modifier,
+# neither of which `stringHMS` sets). The angle is quantised to
+# milliseconds/milliarcsec as an integer first so rounding never leaves
+# a `60` in a field.
 function _tql_hms(rad::Real)
     tms = mod(round(Int, mod(float(rad) * (12 / pi), 24) * 3_600_000), 24 * 3_600_000)
     h, r = divrem(tms, 3_600_000)
     m, r = divrem(r, 60_000)
     sec, ms = divrem(r, 1000)
-    string(_pad2(h), ":", _pad2(m), ":", _pad2(sec), ".", lpad(ms, 3, '0'))
+    string(_pad2(h), "h", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 function _tql_dms(rad::Real)
     sgn = signbit(float(rad)) ? "-" : "+"
@@ -109,7 +167,53 @@ function _tql_dms(rad::Real)
     d, r = divrem(tmas, 3_600_000)
     m, r = divrem(r, 60_000)
     sec, ms = divrem(r, 1000)
-    string(sgn, _pad2(d), ".", _pad2(m), ".", _pad2(sec), ".", lpad(ms, 3, '0'))
+    string(sgn, lpad(d, 3, '0'), "d", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
+end
+
+# MJD -> `"HH:MM:SS.sss"` (of-day, colon separators, no sign) -- the
+# time-of-day format `ctime()`/`ctod()` use (`TableExprFuncNode::
+# stringTime`/`stringDateTime`, precision 9 -> 3 fractional-second
+# digits, `casa/Quanta/MVTime.cc:366-434`'s `MVAngle::print` TIME
+# branch). Distinct from `_tql_hms` (which takes a *radian angle*, not
+# an MJD, and uses `h`/`m` letter separators): both quantise to
+# milliseconds first so rounding never leaves a `60` in a field.
+function _tql_time_of_day_str(mjd::Real)
+    frac = mod(float(mjd), 1.0)
+    tms = mod(round(Int, frac * 24 * 3_600_000), 24 * 3_600_000)
+    h, r = divrem(tms, 3_600_000)
+    m, r = divrem(r, 60_000)
+    sec, ms = divrem(r, 1000)
+    string(_pad2(h), ":", _pad2(m), ":", _pad2(sec), ".", lpad(ms, 3, '0'))
+end
+
+# `week()` -- casacore's `MVTime::yearweek()` (`casa/Quanta/MVTime.cc:
+# 198-206`, on top of `yearday()`, `.cc:185-193`) is NOT the ISO-8601
+# week Julia's `Dates.week` computes: at a year boundary where the ISO
+# week wraps to week 52/53 of the *previous* year, casacore's own
+# algorithm instead returns **0** for those early-January days (found
+# by live-checking `Dates.week` against real casacore's `week()` --
+# 2022-01-01, a Saturday, is ISO week 52 of 2021 but casacore's own
+# `week()` gives 0, not 52). `yearday()`/`yearweek()` ported verbatim
+# (integer division/remainder below are Julia `div`/`rem`, which -- like
+# C++'s `/`/`%` on `Int` -- truncate toward zero and keep the dividend's
+# sign, so this is a direct translation, not a re-derivation).
+function _tql_yearday(dt::Dates.DateTime)
+    yyyy, e, a = Dates.year(dt), Dates.month(dt), Dates.day(dt)
+    c = (yyyy % 4 == 0 && (yyyy % 100 != 0 || yyyy % 400 == 0)) ?
+        div(e + 9, 12) : 2 * div(e + 9, 12)
+    return div(275 * e, 9) - c + a - 30
+end
+function _tql_yearweek(dt::Dates.DateTime)
+    yd = _tql_yearday(dt) - 4
+    yw = div(yd + 7, 7)
+    yd = rem(yd, 7)
+    wd = Dates.dayofweek(dt)             # casacore's weekday(): Mon=1..Sun=7, same as Dates
+    if yd >= 0
+        yd >= wd && return yw + 1
+    elseif yd + 7 >= wd
+        return yw + 1
+    end
+    return yw
 end
 
 # great-circle angular distance between two `[lon, lat]` radian points
@@ -263,15 +367,19 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "year" => (x -> Dates.year(_tql_dt_of(x)), 1:1),
     "month" => (x -> Dates.month(_tql_dt_of(x)), 1:1),
     "day" => (x -> Dates.day(_tql_dt_of(x)), 1:1),
-    "week" => (x -> Dates.week(_tql_dt_of(x)), 1:1),
+    "week" => (x -> _tql_yearweek(_tql_dt_of(x)), 1:1),
     "weekday" => (x -> Dates.dayofweek(_tql_dt_of(x)), 1:1),
     "dow" => (x -> Dates.dayofweek(_tql_dt_of(x)), 1:1),
     "cdate" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy"), 1:1),
-    "ctime" => (x -> Dates.format(_tql_dt_of(x), "HH:MM:SS"), 1:1),
+    "ctime" => (x -> _tql_time_of_day_str(float(x)), 1:1),
     "cmonth" => (x -> Dates.format(_tql_dt_of(x), "uuu"), 1:1),
     "cdow" => (x -> Dates.format(_tql_dt_of(x), "eee"), 1:1),
-    "ctod" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy/HH:MM:SS"), 1:1),
-    "cdatetime" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy/HH:MM:SS"), 1:1),
+    # `ctod`/`cdatetime` are the SAME real casacore function
+    # (`TableParseFunc.cc:571`, both map to `ctodFUNC`) -- `YYYY/MM/DD`
+    # (not `dd-Mon-yyyy` -- that's `cdate`'s DMY format, a different
+    # `MVTime` mode) + `/` + the `HH:MM:SS.sss` time-of-day.
+    "ctod" => (x -> Dates.format(_tql_dt_of(x), "yyyy/mm/dd") * "/" * _tql_time_of_day_str(float(x)), 1:1),
+    "cdatetime" => (x -> Dates.format(_tql_dt_of(x), "yyyy/mm/dd") * "/" * _tql_time_of_day_str(float(x)), 1:1),
     "hms" => (x -> _tql_hms(float(x)), 1:1),
     "dms" => (x -> _tql_dms(float(x)), 1:1),
     "normangle" => (x -> rem2pi(float(x), RoundNearest), 1:1),
