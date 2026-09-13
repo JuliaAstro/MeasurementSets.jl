@@ -32,6 +32,19 @@ function _tql_max2(a, b)
 end
 
 _tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y))(x))
+
+# `avdev()` (`arravdevFUNC`, `casa/Arrays/ArrayMath.tcc:1022-1043`):
+# the mean ABSOLUTE deviation from the mean, `mean(|xᵢ - mean(x)|)`
+# (casacore uses `std::abs` in the per-element sum, which for a
+# Complex array is the magnitude -- so this already generalises to
+# complex with no separate branch needed, matching `real(avdev(...))`
+# in `ExprFuncNode.cc:808-814`, where the `real()` is a no-op since the
+# `abs`-based sum is already real-valued). A real, missing-function
+# gap found the same way Phase 185's `*samplevariance*` family was:
+# checking the surrounding functions in `TableParseFunc.cc`'s name
+# table once one sibling turned out to be absent. Live-verified:
+# `avdev(1:8) == 2.0`, matching a hand computation exactly.
+_tql_avdev(x) = _red(y -> Statistics.mean(abs.(y .- Statistics.mean(y))))(x)
 _tql_nelem(x) = x isa TQLMArray ? count(!, x.mask) : x isa AbstractArray ? length(x) : 1
 _tql_ndim(x) = x isa TQLMArray ? ndims(x.data) : x isa AbstractArray ? ndims(x) : 0
 
@@ -448,6 +461,21 @@ _running_std(x, w) = (a = _require_array(x);
                       _running_reduce(y -> Statistics.std(y; corrected = false), Float64, a, w))
 _running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, w))
 
+# `runningavdev`/`runningrms` (`runavdevFUNC`/`runrmsFUNC`,
+# `TableParseFunc.cc:429,437`) -- two more missing siblings found the
+# same way as Phase 185's `*samplevariance*` family, this time
+# alongside the ALREADY-present scalar `avdev()`/`rms()` (`_tql_avdev`/
+# `_tql_rms` above already work as-is when handed a plain window
+# vector, no new formula needed). `runrmsFUNC` is `dtin=NTReal` (no
+# complex overload, unlike `runavdevFUNC`'s `NTNumeric`) -- an
+# irrelevant distinction here since `_tql_rms` already only special-
+# cases nothing for Complex (it always uses `abs2`, correct for both).
+# Live-verified: `runningavdev(1:8,[2])[3] == 1.2`,
+# `runningrms(1:8,[2])[3] ≈ 3.3166247903554`, both matching a hand
+# computation over the same 5-element window exactly.
+_running_avdev(x, w) = (a = _require_array(x); _running_reduce(_tql_avdev, Float64, a, w))
+_running_rms(x, w) = (a = _require_array(x); _running_reduce(_tql_rms, Float64, a, w))
+
 # casacore's TableParseFunc.cc has TWO ddof variants for `running`/
 # `boxed` variance/stddev -- `runningvariance`/`boxedvariance` (ddof=0,
 # what `_running_var`/`_boxed_var` above already compute) AND
@@ -488,6 +516,8 @@ _boxed_var(x, w) = (a = _require_array(x);
 _boxed_std(x, w) = (a = _require_array(x);
                     _boxed_reduce(y -> Statistics.std(y; corrected = false), Float64, a, w))
 _boxed_sum(x, w) = (a = _require_array(x); _boxed_reduce(sum, eltype(a), a, w))
+_boxed_avdev(x, w) = (a = _require_array(x); _boxed_reduce(_tql_avdev, Float64, a, w))
+_boxed_rms(x, w) = (a = _require_array(x); _boxed_reduce(_tql_rms, Float64, a, w))
 _boxed_svar(x, w) = (a = _require_array(x);
                      _boxed_reduce(y -> Statistics.var(_tql_need2(y, "samplevariance")), Float64, a, w))
 _boxed_sstd(x, w) = (a = _require_array(x);
@@ -539,12 +569,22 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "median" => (_red(_tql_median), 1:1),
     "variance" => (_red(x -> Statistics.var(x; corrected=false)), 1:1),
     "stddev" => (_red(x -> Statistics.std(x; corrected=false)), 1:1),
-    "rms" => (_tql_rms, 1:1),
+    "rms" => (_tql_rms, 1:1), "avdev" => (_tql_avdev, 1:1),
     "any" => (_red(any), 1:1), "all" => (_red(all), 1:1),
     "ntrue" => (_red(x -> count(identity, x)), 1:1),
     "nfalse" => (_red(x -> count(!, x)), 1:1),
     "nelements" => (_tql_nelem, 1:1), "count" => (_tql_nelem, 1:1),
     "ndim" => (_tql_ndim, 1:1),
+    # NOTE (found during Phase 186, not implemented): casacore also has
+    # a whole "s"-suffixed axis-collapse family (`sums`, `means`,
+    # `mins`, `maxs`, `products`, `medians`, `variances`, `stddevs`,
+    # `avdevs`, `rmss`, `fractiles`, `anys`, `alls`, `ntrues`,
+    # `nfalses` -- `arrsumsFUNC` etc., `TableParseFunc.cc`) that reduce
+    # a multi-dimensional array cell along SPECIFIC axes (an `axes`
+    # argument), leaving the other axes intact -- distinct from this
+    # package's `gs*` masked group aggregates (Phase 62) despite the
+    # similar naming. A real, larger feature gap, out of scope for a
+    # same-day bug-fix sweep; flagged for a dedicated future phase.
     # --- running*/boxed* sliding-window array smoothing (Phase 108) ---
     "runningaverage" => (_running_avg, 2:2), "runningmean" => (_running_avg, 2:2),
     "runningmedian" => (_running_med, 2:2),
@@ -553,12 +593,14 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "runningsamplevariance" => (_running_svar, 2:2),
     "runningsamplestddev" => (_running_sstd, 2:2),
     "runningsum" => (_running_sum, 2:2),
+    "runningavdev" => (_running_avdev, 2:2), "runningrms" => (_running_rms, 2:2),
     "boxedaverage" => (_boxed_avg, 2:2), "boxedmean" => (_boxed_avg, 2:2),
     "boxedmedian" => (_boxed_med, 2:2),
     "boxedmin" => (_boxed_min, 2:2), "boxedmax" => (_boxed_max, 2:2),
     "boxedvariance" => (_boxed_var, 2:2), "boxedstddev" => (_boxed_std, 2:2),
     "boxedsamplevariance" => (_boxed_svar, 2:2), "boxedsamplestddev" => (_boxed_sstd, 2:2),
     "boxedsum" => (_boxed_sum, 2:2),
+    "boxedavdev" => (_boxed_avdev, 2:2), "boxedrms" => (_boxed_rms, 2:2),
     # --- masked arrays ---
     "marray" => ((d, m) -> TQLMArray(collect(d), m isa AbstractArray ?
                      BitArray(m) : fill(Bool(m), size(d))), 2:2),

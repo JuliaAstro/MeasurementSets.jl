@@ -5536,3 +5536,56 @@ throw cases and confirming the ddof=0 variant stays well-defined at
 `n=1`) + its real-TaQL cross-check (11 assertions, including that both
 engines throw for a same trailing-1-element-bin case). Standalone
 `taql_query_tests.jl` green in full.
+
+### Phase 186 — found five more missing functions: `avdev()`, `runningavdev()`,
+### `boxedavdev()`, `runningrms()`, `boxedrms()`
+
+Continuing the same `TableParseFunc.cc` function-name-table check that
+found Phase 185's `*samplevariance*` gap — this time turning up a
+whole `avdev` (mean absolute deviation from the mean) family this
+package never had at all, plus the `running`/`boxed` siblings of the
+already-implemented scalar `rms()`:
+
+```
+funcName == "avdev"         -> arravdevFUNC     (missing — new)
+funcName == "runningavdev"  -> runavdevFUNC     (missing — new)
+funcName == "boxedavdev"    -> boxavdevFUNC     (missing — new)
+funcName == "runningrms"    -> runrmsFUNC       (missing — new)
+funcName == "boxedrms"      -> boxrmsFUNC       (missing — new)
+```
+
+`avdev()` (`casa/Arrays/ArrayMath.tcc:1022-1043`) is
+`mean(|xᵢ − mean(x)|)` — casacore's own per-element sum uses
+`std::abs`, so it already generalises to a `Complex` array with no
+separate branch (the magnitude-based `abs` makes the result real by
+construction; `ExprFuncNode.cc:808-814`'s wrapping `real(...)` is a
+no-op). `rms()`, already implemented (`_tql_rms`), needed no formula
+change at all — `runrmsFUNC`/`boxrmsFUNC` are `dtin=NTReal` (no
+complex overload, unlike `avdev`'s `NTNumeric`), which is irrelevant
+here since `_tql_rms` already only ever uses `abs2` (correct for both
+real and complex) and was never given a complex-unsafe shortcut to
+begin with.
+
+Both new reducers (`_tql_avdev`, reused directly as a sliding-window
+reducer via the existing `_running_reduce`/`_boxed_reduce` machinery —
+no new plumbing needed) live-verified against real casacore:
+`avdev(1:8) == 2.0`, `runningavdev(1:8,[2])[3] == 1.2`,
+`runningrms(1:8,[2])[3] ≈ 3.3166247903554`, all matching a hand
+computation over the same windows exactly.
+
+While checking the function-name table for these, found (but did NOT
+implement — a real, larger feature gap flagged for a dedicated future
+phase, not this same-day bug-fix sweep) that casacore also has an
+entire "s"-suffixed **axis-collapse** family — `sums`, `means`, `mins`,
+`maxs`, `products`, `medians`, `variances`, `stddevs`, `avdevs`,
+`rmss`, `fractiles`, `anys`, `alls`, `ntrues`, `nfalses`
+(`arrsumsFUNC` etc.) — that reduce a multi-dimensional array cell
+along *specific* axes given as an argument, leaving the other axes
+intact. This is entirely distinct from this package's own `gs*` masked
+group aggregates (Phase 62) despite the superficially similar naming,
+and none of it exists in TaQL-lite today.
+
+New testsets "Phase 186 — missing avdev()/runningavdev()/boxedavdev()/
+runningrms()/boxedrms()" (14 assertions, including a `Complex`-array
+`avdev` case) + its real-TaQL cross-check (6 assertions). Standalone
+`taql_query_tests.jl` green in full.

@@ -907,6 +907,58 @@ end
     @test_throws ArgumentError query(t2, "rownumber() == 1"; select = ["X" => "boxedsamplevariance(A,[2])"])
 end
 
+@testset "Phase 186 — missing avdev()/runningavdev()/boxedavdev()/runningrms()/boxedrms()" begin
+    # casacore's TableParseFunc.cc has an `avdev`/`avdevs`/
+    # `runningavdev`/`boxedavdev` family (mean absolute deviation from
+    # the mean) and `runningrms`/`boxedrms` siblings of the already-
+    # implemented scalar `rms()` -- none of the scalar `avdev`, or the
+    # sliding-window `runningavdev`/`boxedavdev`/`runningrms`/
+    # `boxedrms`, existed in this package at all. Found while checking
+    # the surrounding function-name table for more missing siblings
+    # once Phase 185's `*samplevariance*` gap turned up.
+    a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    @test MSv2._tql_avdev(a) ≈ Statistics.mean(abs.(a .- Statistics.mean(a)))
+    @test MSv2._tql_avdev(a) == 2.0
+    @test MSv2._running_avdev(a, 2)[3] ≈ Statistics.mean(abs.(a[1:5] .- Statistics.mean(a[1:5])))
+    @test MSv2._running_avdev(a, 2)[1] == 0.0                      # edge zero-filled
+    @test MSv2._boxed_avdev(a, 2)[1] ≈ Statistics.mean(abs.(a[1:2] .- Statistics.mean(a[1:2])))
+    @test MSv2._running_rms(a, 2)[3] ≈ sqrt(Statistics.mean(a[1:5] .^ 2))
+    @test MSv2._running_rms(a, 2)[1] == 0.0
+    @test MSv2._boxed_rms(a, 2)[1] ≈ sqrt(Statistics.mean(a[1:2] .^ 2))
+    # a Complex array works for avdev (magnitude-based, no restriction
+    # in casacore) -- confirm no error
+    ac = ComplexF64[1 + 1im, 2 + 0im, 0 + 3im]
+    @test MSv2._tql_avdev(ac) ≈ Statistics.mean(abs.(ac .- Statistics.mean(ac)))
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = [
+        "d" => "avdev(A)", "rd" => "runningavdev(A,[2])", "bd" => "boxedavdev(A,[2])",
+        "rr" => "runningrms(A,[2])", "br" => "boxedrms(A,[2])"])
+    @test r.d[1] == MSv2._tql_avdev(a)
+    @test r.rd[1] == MSv2._running_avdev(a, 2)
+    @test r.bd[1] == MSv2._boxed_avdev(a, 2)
+    @test r.rr[1] == MSv2._running_rms(a, 2)
+    @test r.br[1] == MSv2._boxed_rms(a, 2)
+end
+
+@testset "Phase 186 — avdev()/rms() family, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:8)
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    for expr in ("avdev(A)", "runningavdev(A,[2])", "boxedavdev(A,[2])",
+                 "rms(A)", "runningrms(A,[2])", "boxedrms(A,[2])")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa isa AbstractArray ? all(casa .≈ ours) : casa ≈ ours
+    end
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)
