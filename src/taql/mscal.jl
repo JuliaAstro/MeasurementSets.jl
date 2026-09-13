@@ -818,6 +818,19 @@ end
 _stokes_convert(s::StokesSetup, x::AbstractVector) =
     vec(_stokes_convert(s, reshape(x, :, 1)))
 
+# Phase 171: `mscal.stokes(DATA[FLAG], 'I')` (a masked-array argument,
+# Phase 60) used to fall through to a raw, unhelpful `MethodError` --
+# none of the three `AbstractMatrix{...}` methods above match a
+# `TQLMArray`. There is no unambiguous way to propagate a per-element
+# mask through a Stokes conversion (each output correlation is a linear
+# combination of several inputs -- masking one input doesn't obviously
+# mask, or not mask, a given output), so this raises a clear, actionable
+# error instead of silently guessing a masking rule.
+_stokes_convert(::StokesSetup, ::TQLMArray) = throw(ArgumentError(
+    "mscal.stokes: a masked-array argument (e.g. DATA[FLAG]) is not " *
+    "supported -- convert first, then mask the result, e.g. " *
+    "mscal.stokes(DATA, 'I')[FLAG] or arraydata(DATA[FLAG]) as the input"))
+
 # --- name-set threading ---------------------------------------------------
 
 function _stokes_split(names)

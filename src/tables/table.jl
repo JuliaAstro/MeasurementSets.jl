@@ -588,6 +588,25 @@ pairs in output order (default: every column of `parent`, unrenamed). A
 function write_reftable(dir::AbstractString, parent::AbstractTable,
                         rows::AbstractVector{<:Integer};
                         select::AbstractVector{<:Pair}=[n => n for n in columnnames(parent)])
+    # Phase 169: `parent` (and hence, after flattening, `root`) must have a
+    # real `.path`/`.type`/`.subtype`/`.readme` -- true for `Table`/
+    # `RefTable`/`ConcatTable` (the latter two only ever constructed from a
+    # real on-disk directory or, for a `RefTable`, checked below) but NOT
+    # for a `GroupedTable` (`groupby`/`join`/a computed `query` select),
+    # which has none of those fields. Before this check, passing one here
+    # threw a confusing `KeyError: key "path" not found` (from
+    # `GroupedTable`'s property-routing `getproperty`) instead of a clear
+    # message, AND left a half-created output directory behind (`mkpath`
+    # ran before the failing access) -- the exact bug class Phase 167 fixed
+    # for `write_concattable`, missed here because Phase 168's follow-up
+    # audit only checked that a *RefTable chain* fully flattens to a
+    # `Table`/`ConcatTable`, not that the *initial* `parent` itself is one
+    # of the three supported kinds to begin with.
+    parent isa Union{Table,RefTable,ConcatTable} || throw(ArgumentError(
+        "write_reftable: `parent` must be a Table, RefTable, or ConcatTable, " *
+        "got a $(typeof(parent)) — e.g. a GroupedTable (from groupby/join/a " *
+        "computed query select) has no CTDS layout to reference; persist it " *
+        "first via write_table/copytable"))
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     any(x -> x < 1, rows) && throw(ArgumentError("write_reftable: row indices are 1-based"))
@@ -597,7 +616,7 @@ function write_reftable(dir::AbstractString, parent::AbstractTable,
 
     mkpath(dir)
     rows0 = rootrows .- 1
-    bytes_ = reftable_dat_bytes(_strip_directory(root.path, dir), rows0, rootnamemap, order,
+    bytes_ = reftable_dat_bytes(_strip_directory(_ondisk_path(root), dir), rows0, rootnamemap, order,
                                 nrow(root), length(rows0))
     _atomic_write(joinpath(dir, "table.dat"), bytes_)
     write_tableinfo(dir; type=parent.type, subtype=parent.subtype, readme=parent.readme)

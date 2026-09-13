@@ -489,3 +489,32 @@ end
     @test columnnames(rt4) == ["VV"]
     @test column(rt4, "VV")[:] == [10.0, 8.0]
 end
+
+@testset "write_reftable — non-Table/RefTable/ConcatTable parent errors clearly (Phase 169)" begin
+    # Same bug class as Phase 167's write_concattable fix: `parent` had no
+    # type guard at all, so a `GroupedTable` (no `.path`/`.type`/`.subtype`/
+    # `.readme` fields) threw a confusing `KeyError: key "path" not found`
+    # instead of a clear message, and left a half-created output directory
+    # behind (`mkpath` ran before the failing access). Missed by Phase
+    # 168's own follow-up audit, which only checked that a RefTable *chain*
+    # fully flattens to a Table/ConcatTable, not that the initial `parent`
+    # itself is one of the three supported kinds.
+    d = mktempdir()
+    write_table(joinpath(d, "p0"), "T", ["A" => collect(Int32, 1:5)]; nrow=5)
+    p0 = readtable(joinpath(d, "p0"))
+    gt = groupby(p0, "A"; select = ["A" => "A"])
+
+    dst = joinpath(d, "rt_bad")
+    @test_throws ArgumentError write_reftable(dst, gt, [1, 2])
+    @test !ispath(dst)                            # no partial directory left behind
+
+    # legitimate parents still work
+    dst2 = joinpath(d, "rt_good")
+    write_reftable(dst2, p0, [1, 3, 5])
+    @test column(readtable(dst2), "A")[:] == Int32[1, 3, 5]
+
+    rt = query(p0, "A > 2")                       # a RefTable parent (chained)
+    dst3 = joinpath(d, "rt_chain")
+    write_reftable(dst3, rt, [1, 2])
+    @test column(readtable(dst3), "A")[:] == Int32[3, 4]
+end

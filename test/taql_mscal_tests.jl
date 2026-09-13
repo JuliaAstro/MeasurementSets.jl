@@ -486,6 +486,23 @@ end
         "x" => "mscal.stokes(WEIGHT, 'Plinear')"])
 end
 
+@testset "TaQL-lite — mscal.stokes() vs a masked-array argument (Phase 171)" begin
+    # `mscal.stokes(DATA[FLAG], 'I')` used to fall through to a raw,
+    # unhelpful `MethodError` (none of `_stokes_convert`'s three
+    # `AbstractMatrix{...}` methods match a `TQLMArray`, Phase 60's
+    # masked-array type) -- there's no unambiguous way to propagate a
+    # per-element mask through a Stokes conversion, so this now raises a
+    # clear `ArgumentError` instead. Found by actually calling the
+    # function with a masked argument, not by reading source.
+    main = readtable(SAMPLE_MS)
+    @test_throws ArgumentError query(main, "rownumber() == 1"; select = [
+        "x" => "mscal.stokes(DATA[FLAG], 'I')"])
+    # the un-masked path, and the documented convert-then-mask
+    # workaround, both still work
+    q = query(main, "rownumber() == 1"; select = ["x" => "mscal.stokes(DATA, 'I')"])
+    @test size(column(q, "x")[1], 1) == 1
+end
+
 @testset "TaQL-lite — mscal.<sel>() MSSelection-lite" begin
     p(s) = MSv2._taqllite_parse(s, Set(["A"]))
     @test p("mscal.baseline('0') > 0").lhs isa MSv2.TQLMSSel

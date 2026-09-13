@@ -4675,3 +4675,107 @@ guaranteed a real path. A documented limitation, not a fix candidate.
 
 No source or test change beyond Phase 167's own fix. Standalone suite
 unaffected.
+
+### Phase 169 — found and fixed a real bug: `write_reftable` also silently accepted a non-`Table`/`RefTable`/`ConcatTable` parent (the Phase 167 bug pattern, missed by Phase 168's own follow-up audit)
+
+**Real bug found — Phase 168's audit had a real gap.** Phase 168 confirmed
+`write_reftable` was safe because its `_flatten_to_root` always fully
+unwraps any `RefTable`-of-`RefTable` chain down to a genuine on-disk
+`Table`/`ConcatTable` root before touching `.path` — true, but that
+check only covers the case where `parent` **is already** a `RefTable`
+to begin with. `write_reftable(dir, parent::AbstractTable, rows; …)`
+had no guard on `parent`'s type at all: if `parent` is a `GroupedTable`
+(from `groupby`/`join`/a computed `query` select — no `.path`/`.type`/
+`.subtype`/`.readme` fields, since `_flatten_to_root`'s base case
+returns any non-`RefTable` input unchanged), the function used to throw
+a confusing `KeyError: key "path" not found` (from `GroupedTable`'s
+property-routing `getproperty` trying to look up a column literally
+named `"path"`) instead of a clear message — and, since `mkpath(dir)`
+ran *before* the failing access, left a half-created output directory
+behind.
+
+Fixed with a single top-of-function guard in `write_reftable`
+(`src/tables/table.jl`): `parent isa Union{Table,RefTable,ConcatTable}`,
+matching the function's own documented contract, checked before
+`mkpath(dir)` runs. The existing `_ondisk_path` helper (Phase 167) is
+also applied to the flattened `root` as defense in depth. Live-verified:
+the exact `GroupedTable`-as-`parent` scenario now raises a clear
+`ArgumentError` with no directory left behind, while every legitimate
+case (a plain `Table`, and a chained `RefTable` parent) still works
+correctly.
+
+New testset `test/reftable_tests.jl` "write_reftable —
+non-Table/RefTable/ConcatTable parent errors clearly (Phase 169)" (4
+assertions). Standalone `test/reftable_tests.jl` and the full
+`test/taql_query_tests.jl` suite both green (the latter exercises
+`write_reftable` transitively through `copytable`/`SELECT … INTO`-style
+call paths) — no regressions.
+
+**Reinforces last batch's own methodology takeaway, with a twist**:
+an "audit every other access site" follow-up (Phase 168) is valuable
+but not infallible — it correctly found the *chained*-RefTable case was
+safe, but didn't independently re-derive the full precondition
+(`parent` itself must already be one of the three supported kinds)
+before declaring the function safe. A targeted reproduction attempt
+(actually calling the function with a suspicious argument type) caught
+what a pure code-reading audit missed.
+
+### Phase 170 — applied Phase 169's "actually reproduce it" lesson to `copytable`/`insert!`/`write_ms`; confirmed no further instances of the pattern
+
+Following directly from Phase 169's own reinforcement ("a code-reading
+audit can miss a precondition a direct reproduction catches"), rather
+than reasoning about `copytable`/`Base.insert!`/`write_ms` from source
+alone, actually called each with the two suspicious argument shapes
+that broke `write_concattable`/`write_reftable`: an in-memory
+(unpersisted, `path == ""`) `RefTable` and a `GroupedTable`, in every
+position where a loosely-typed `AbstractTable` argument is accepted.
+
+- `copytable(dst, rt::RefTable)` with `rt.path == ""` — works correctly
+  (its `_copy_table(dir, rt::RefTable, ...)` method never touches
+  `rt.path` at all; it materialises through the flattened parent `Table`
+  and column reads, which need no directory reference).
+- `copytable(dst, gt::GroupedTable)` — has its own dedicated
+  `_copy_table(dst, gt::GroupedTable, ...)` dispatch (Phase 30); works.
+- `insert!(target, source::GroupedTable)` and `insert!(target,
+  source::RefTable)` with an empty-path `RefTable` — both work; neither
+  needs `source.path` (rows are pulled via the generic `Tables.jl` /
+  column-read interface).
+- `write_ms`/`copyms` take a typed `ms::MeasurementSet`, and
+  `MeasurementSet` has no public constructor that can wrap a
+  `GroupedTable` (only `readtable`'s `Table`/`RefTable`/`ConcatTable`) —
+  confirmed by inspection, not independently reproducible as a call
+  that type-checks in the first place.
+- `_cmd_path` (shared by `update!`/`delete!`/`insert!`'s `target`
+  argument and `taql`) already requires `t isa Table`, consistently
+  rejecting a `GroupedTable`/unpersisted-`RefTable` `target` before
+  touching `.path` anywhere.
+
+All five reproductions confirmed already-correct behaviour — no new bug
+found. This closes out the "loosely-typed `AbstractTable` argument +
+persist function" sweep opened by Phases 167-169: `write_concattable`
+and `write_reftable` were the only two gaps, both now fixed.
+
+No source or test change. Standalone suite unaffected.
+
+### Phase 171 — found and fixed a real gap: `mscal.stokes()` gave a raw `MethodError` on a masked-array argument instead of a clear error
+
+**Real bug found, via direct reproduction** (continuing Phases 169-170's
+discipline of actually calling suspicious combinations, not just
+reading source). `mscal.stokes()` (Phase 78/109) predates the
+masked-array feature (Phase 60 — `DATA[boolexpr]` produces a
+`TQLMArray`, not a plain `AbstractMatrix`), and nobody had tried
+combining them: `mscal.stokes(DATA[FLAG], 'I')` fell through all three
+of `_stokes_convert`'s `AbstractMatrix{...}` methods and threw a raw,
+uninformative `MethodError` naming three unrelated candidate methods.
+
+Fixed with a dedicated `_stokes_convert(::StokesSetup, ::TQLMArray)`
+method (`src/taql/mscal.jl`) that raises a clear `ArgumentError`
+pointing at the workaround (convert first, then mask the result) rather
+than attempting to propagate a mask through the conversion — there is
+no unambiguous rule for that, since each output correlation is a linear
+combination of several inputs and masking one input doesn't obviously
+mask (or not mask) a given output. Live-verified: the masked call now
+errors clearly, the plain (unmasked) `mscal.stokes(DATA, 'I')` path is
+completely unaffected. New testset `test/taql_mscal_tests.jl`
+"mscal.stokes() vs a masked-array argument (Phase 171)" (2 assertions).
+Standalone mscal suite green (all 28 testsets, no regressions).
