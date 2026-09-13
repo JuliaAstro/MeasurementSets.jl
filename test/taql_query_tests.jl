@@ -835,6 +835,78 @@ end
     end
 end
 
+@testset "Phase 185 — missing runningsamplevariance()/boxedsamplevariance() family" begin
+    # casacore's TableParseFunc.cc has TWO ddof variants for
+    # running/boxed variance+stddev -- the plain name (ddof=0,
+    # population -- already implemented) and a `*sample*` name
+    # (ddof=1, n-1-corrected), mirroring the already-implemented
+    # gvariance/gsamplevariance group-aggregate split. This package had
+    # no `*sample*` sliding-window variant at all -- found while
+    # checking the surrounding functions for a sibling of the same
+    # shape once the general-math sweep turned up several real bugs.
+    a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    @test MSv2._running_svar(a, 1)[3] ≈ Statistics.var([2.0, 3.0, 4.0])  # ddof=1 default
+    @test MSv2._running_svar(a, 1)[1] == 0.0                              # edge still zero-filled
+    @test MSv2._running_sstd(a, 1)[3] ≈ Statistics.std([2.0, 3.0, 4.0])
+    @test MSv2._boxed_svar(a, 2) ≈ [Statistics.var([1.0, 2.0]), Statistics.var([3.0, 4.0]),
+                                    Statistics.var([5.0, 6.0]), Statistics.var([7.0, 8.0])]
+    @test MSv2._boxed_sstd(a, 2)[1] ≈ Statistics.std([1.0, 2.0])
+    # confirm this is genuinely a DIFFERENT value from the ddof=0 variant
+    @test MSv2._running_svar(a, 1)[3] != MSv2._running_var(a, 1)[3]
+    @test MSv2._boxed_svar(a, 2)[1] != MSv2._boxed_var(a, 2)[1]
+
+    # a window/bin of fewer than 2 elements is undefined for the
+    # n-1-corrected sample variance -- real casacore genuinely throws
+    # ("Need at least 2 elements") rather than silently returning NaN,
+    # live-verified; a half-width/box-width of 0/1 or a trailing
+    # 1-element partial box all hit it.
+    @test_throws ArgumentError MSv2._running_svar(a, 0)          # window size 1
+    @test_throws ArgumentError MSv2._boxed_svar(a, 1)            # every bin has 1 element
+    b = [1.0, 2.0, 3.0, 4.0, 5.0]                                 # trailing partial bin of 1
+    @test_throws ArgumentError MSv2._boxed_svar(b, 2)
+    @test_throws ArgumentError MSv2._boxed_sstd(b, 2)
+    # the ddof=0 (population) variant stays well-defined at n=1 (no throw)
+    @test MSv2._boxed_var(b, 2)[3] == 0.0
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = [
+        "rsv" => "runningsamplevariance(A,[1])", "rss" => "runningsamplestddev(A,[1])",
+        "bsv" => "boxedsamplevariance(A,[2])", "bss" => "boxedsamplestddev(A,[2])"])
+    @test r.rsv[1] == MSv2._running_svar(a, 1)
+    @test r.rss[1] == MSv2._running_sstd(a, 1)
+    @test r.bsv[1] == MSv2._boxed_svar(a, 2)
+    @test r.bss[1] == MSv2._boxed_sstd(a, 2)
+end
+
+@testset "Phase 185 — runningsamplevariance() family, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:8)
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    for fn in ("runningvariance", "runningsamplevariance", "runningstddev",
+               "runningsamplestddev", "boxedvariance", "boxedsamplevariance",
+               "boxedstddev", "boxedsamplestddev")
+        expr = "$fn(A,[2])"
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test all(i -> (isnan(casa[i]) && isnan(ours[i])) || casa[i] ≈ ours[i], eachindex(casa))
+    end
+    # both engines throw for a bin with fewer than 2 elements
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    b = Float64.(1:5)
+    write_table(tabpath2, "T", Pair{String,Any}["A" => [b]]; nrow=1, tsm=[["A"]])
+    t2 = readtable(tabpath2)
+    rdir2 = joinpath(mktempdir(), "r2")
+    @test_throws Exception _taqlcmd(
+        "SELECT boxedsamplevariance(A,[2]) AS X FROM \$1 GIVING '$rdir2' AS PLAIN", tabpath2)
+    @test_throws ArgumentError query(t2, "rownumber() == 1"; select = ["X" => "boxedsamplevariance(A,[2])"])
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)

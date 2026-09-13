@@ -5479,3 +5479,60 @@ assertions, through a genuine complex column since TaQL-lite has no
 separate, larger gap noted but out of this phase's bug-fixing scope).
 
 Standalone `taql_query_tests.jl` green in full.
+
+### Phase 185 — found a real missing-function gap: `runningsamplevariance()`/
+### `runningsamplestddev()`/`boxedsamplevariance()`/`boxedsamplestddev()`
+
+Continuing the same corner of `src/taql/functions.jl` — the
+`running*`/`boxed*` sliding-window family Phase 182/183 already fixed
+two real bugs in. Reading `TableParseFunc.cc`'s function-name table
+turned up something this package had entirely missed: casacore has
+**two ddof variants** of `running`/`boxed` variance and stddev —
+
+```
+funcName == "runningvariance"       -> runvariance0FUNC   (ddof=0, population)
+funcName == "runningsamplevariance" -> runvariance1FUNC   (ddof=1, n-1-corrected)
+funcName == "runningstddev"         -> runstddev0FUNC
+funcName == "runningsamplestddev"   -> runstddev1FUNC
+funcName == "boxedvariance"         -> boxvariance0FUNC
+funcName == "boxedsamplevariance"   -> boxvariance1FUNC
+funcName == "boxedstddev"           -> boxstddev0FUNC
+funcName == "boxedsamplestddev"     -> boxstddev1FUNC
+```
+
+— mirroring the already-implemented `gvariance`/`gsamplevariance`
+group-aggregate split (`_TQL_AGGRS` already has both). This package's
+`_running_var`/`_boxed_var` (already correct — `corrected=false`,
+ddof=0, matching the *plain* name) had simply never been given `*sample*`
+siblings at all; calling `runningsamplevariance(...)` raised "unknown
+function" rather than computing the n-1-corrected value. Live-verified
+both variants are real and genuinely different:
+`runningsamplevariance(1:8,[2])` gives `2.5` where `runningvariance`
+gives `2.0` over the same 5-element window.
+
+Fixed by adding `_running_svar`/`_running_sstd`/`_boxed_svar`/
+`_boxed_sstd` (`Statistics.var`/`Statistics.std`'s own default
+`corrected=true`, i.e. ddof=1) and wiring all four new names into
+`_TQL_FUNCS`.
+
+A second, smaller divergence turned up immediately while testing the
+edge cases: a window/bin with **fewer than 2 elements** is
+mathematically undefined for the n-1-corrected sample variance (unlike
+the population variant, which is well-defined — `0` — at `n=1`), and
+live-verified, real casacore genuinely **throws** ("Need at least 2
+elements") rather than silently returning `NaN` the way a bare
+`Statistics.var([x])` would. Reachable via a half-width/box-width of
+`0`/`1`, or (more realistically) a trailing partial box with exactly
+one element. This is the same "match casacore's real behavior exactly"
+discipline the rest of this sweep has applied throughout Phase 184 —
+just pointed the other direction (there, several functions needed to
+stop throwing and start returning `NaN`; here, one needs to start
+throwing instead of silently returning `NaN`). Fixed with a shared
+`_tql_need2` guard raising a clear `ArgumentError`.
+
+New testsets "Phase 185 — missing runningsamplevariance()/
+boxedsamplevariance() family" (21 assertions, including the <2-element
+throw cases and confirming the ddof=0 variant stays well-defined at
+`n=1`) + its real-TaQL cross-check (11 assertions, including that both
+engines throw for a same trailing-1-element-bin case). Standalone
+`taql_query_tests.jl` green in full.

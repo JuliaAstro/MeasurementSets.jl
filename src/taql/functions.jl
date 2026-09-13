@@ -448,6 +448,37 @@ _running_std(x, w) = (a = _require_array(x);
                       _running_reduce(y -> Statistics.std(y; corrected = false), Float64, a, w))
 _running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, w))
 
+# casacore's TableParseFunc.cc has TWO ddof variants for `running`/
+# `boxed` variance/stddev -- `runningvariance`/`boxedvariance` (ddof=0,
+# what `_running_var`/`_boxed_var` above already compute) AND
+# `runningsamplevariance`/`boxedsamplevariance` (ddof=1), mirroring the
+# already-implemented `gvariance`/`gsamplevariance` group-aggregate
+# split. This package had NO `*sample*` sliding-window variant at all
+# -- a real, missing-function gap found while checking the surrounding
+# functions for a sibling of the same shape, not a wrong-value bug.
+# Live-verified against real casacore: `runningsamplevariance(1:8,[2])`
+# gives `2.5` where `runningvariance` gives `2.0` (population vs
+# n-1-corrected over a 5-element window), confirming both are real,
+# distinct, and reachable via TaQL.
+#
+# A window/bin of fewer than 2 elements is mathematically undefined for
+# the n-1-corrected sample variance (unlike the population variant,
+# which is well-defined -- 0 -- at n=1) -- and, live-verified, real
+# casacore genuinely THROWS in that case ("Need at least 2 elements")
+# rather than silently returning NaN the way `Statistics.var([x])`
+# would. Reachable via a half-width/box-width of `0`/`1`, or a trailing
+# partial box with exactly one element. Faithfully reproduced with a
+# guard rather than a silent NaN, matching the "match casacore's real
+# behavior exactly" discipline this whole sweep has applied in the
+# OPPOSITE direction (making several other functions return NaN
+# instead of throwing) -- here casacore is the one that throws.
+_tql_need2(y, name) = length(y) >= 2 ? y : throw(ArgumentError(
+    "TaQL-lite: $name needs at least 2 elements in the window/bin (matches casacore's own restriction)"))
+_running_svar(x, w) = (a = _require_array(x);
+                       _running_reduce(y -> Statistics.var(_tql_need2(y, "samplevariance")), Float64, a, w))
+_running_sstd(x, w) = (a = _require_array(x);
+                       _running_reduce(y -> Statistics.std(_tql_need2(y, "samplestddev")), Float64, a, w))
+
 _boxed_avg(x, w) = (a = _require_array(x); _boxed_reduce(Statistics.mean, Float64, a, w))
 _boxed_med(x, w) = (a = _require_array(x); _boxed_reduce(_tql_median_lo, Float64, a, w))
 _boxed_min(x, w) = (a = _require_array(x); _boxed_reduce(minimum, eltype(a), a, w))
@@ -457,6 +488,10 @@ _boxed_var(x, w) = (a = _require_array(x);
 _boxed_std(x, w) = (a = _require_array(x);
                     _boxed_reduce(y -> Statistics.std(y; corrected = false), Float64, a, w))
 _boxed_sum(x, w) = (a = _require_array(x); _boxed_reduce(sum, eltype(a), a, w))
+_boxed_svar(x, w) = (a = _require_array(x);
+                     _boxed_reduce(y -> Statistics.var(_tql_need2(y, "samplevariance")), Float64, a, w))
+_boxed_sstd(x, w) = (a = _require_array(x);
+                     _boxed_reduce(y -> Statistics.std(_tql_need2(y, "samplestddev")), Float64, a, w))
 
 # name => (callable-over-arg-values, allowed arg count).  `min`/`max` and
 # `angdist` are arity-overloaded and handled in `_make_func`, not here.
@@ -515,11 +550,14 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "runningmedian" => (_running_med, 2:2),
     "runningmin" => (_running_min, 2:2), "runningmax" => (_running_max, 2:2),
     "runningvariance" => (_running_var, 2:2), "runningstddev" => (_running_std, 2:2),
+    "runningsamplevariance" => (_running_svar, 2:2),
+    "runningsamplestddev" => (_running_sstd, 2:2),
     "runningsum" => (_running_sum, 2:2),
     "boxedaverage" => (_boxed_avg, 2:2), "boxedmean" => (_boxed_avg, 2:2),
     "boxedmedian" => (_boxed_med, 2:2),
     "boxedmin" => (_boxed_min, 2:2), "boxedmax" => (_boxed_max, 2:2),
     "boxedvariance" => (_boxed_var, 2:2), "boxedstddev" => (_boxed_std, 2:2),
+    "boxedsamplevariance" => (_boxed_svar, 2:2), "boxedsamplestddev" => (_boxed_sstd, 2:2),
     "boxedsum" => (_boxed_sum, 2:2),
     # --- masked arrays ---
     "marray" => ((d, m) -> TQLMArray(collect(d), m isa AbstractArray ?
