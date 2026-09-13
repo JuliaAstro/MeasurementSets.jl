@@ -297,7 +297,9 @@ const _TQL_CMPOPS = Dict{String,Function}(
     "~=" => _tql_near, "!~=" => _tql_nnear)
 
 # `/` is Julia's `/` (always Float); `%` -> `rem`; `//` -> `div`
-# (truncating, matching TaQL DIVIDETRUNC); `**` -> `^`.
+# (truncating, matching TaQL DIVIDETRUNC); `**` is handled separately in
+# `_parse_power!` (-> `_tql_pow`, not this dict -- casacore's `**` and
+# `pow()` are the same runtime `powFUNC`/std::pow, Phase 184).
 const _TQL_ARITHOPS = Dict{String,Function}(
     "+" => (+), "-" => (-), "*" => (*), "/" => (/), "%" => rem, "//" => div)
 
@@ -450,7 +452,12 @@ function _parse_power!(p::TQLParser)
     t = _peek(p)
     if t.kind === :arithop && t.text == "**"
         _advance!(p)
-        return TQLArith(^, base, _parse_unary!(p))   # right-assoc
+        # casacore's `**` (B_POWER, `TaQLNodeHandler.cc:181` -> the
+        # same runtime `powFUNC`/std::pow this package's `pow()`
+        # function already had a real Julia-`^`-throws-DomainError
+        # divergence from (`_tql_pow`, `functions.jl`) -- use it here
+        # too so `2 ** 0.5` on a negative base gives NaN, not a crash.
+        return TQLArith(_tql_pow, base, _parse_unary!(p))   # right-assoc
     end
     return base                                       # `^` handled at _parse_bitxor!
 end

@@ -5320,3 +5320,272 @@ median()/gmedian() vs casacore's actual (non-Statistics.median)
 conventions" (7 assertions) plus "Phase 183 — median()/gmedian(),
 real-TaQL cross-check" (8 assertions, `_HAVE_TAQL`-gated). Standalone
 `taql_query_tests.jl` green in full.
+
+### Phase 184 — found and fixed a real bug: `round()` used Julia's
+### ties-to-even instead of casacore's round-half-away-from-zero
+
+Continuing the sweep into the general math corner of
+`src/taql/functions.jl` (the same area Phase 179 fixed `square()`/
+`min()`/`max()` in). Read `TableExprFuncNode::getDouble`'s `roundFUNC`
+case (`tables/TaQL/ExprFuncNode.cc:737-742`) directly:
+
+```cpp
+case roundFUNC:
+  {
+    Double val = operands_p[0]->getDouble(id);
+    if (val < 0) {
+        return ceil (val - 0.5);
+    }
+    return floor (val + 0.5);
+  }
+```
+
+This is round-**half-away-from-zero** — every exact `.5` value rounds
+outward, regardless of parity. `round()` in `src/taql/functions.jl`
+was wired straight to Julia's own `round`, whose default is round-
+**half-to-even** (banker's rounding) — a silent divergence at every
+`.5` boundary landing on an even integer, invisible unless you
+specifically probe a tie value (non-tie inputs like `2.4`/`2.6` already
+agreed, which is presumably why this went unnoticed since Phase 25
+first registered the function). Live-verified against real casacore:
+`round(2.5) == 3.0` (Julia: `2.0`), `round(0.5) == 1.0` (Julia: `0.0`,
+with the added footgun of a signed `-0.0`), `round(-2.5) == -3.0`
+(Julia: `-2.0`) — every one of these is a case a real query
+(`WHERE round(CHAN_FREQ/1e6) == …`, a decimation/rounding filter) could
+plausibly hit.
+
+Fixed with a new `_tql_round(x) = x < 0 ? ceil(x - 0.5) : floor(x +
+0.5)` (`src/taql/functions.jl`) — a direct port of the quoted C++ —
+wired into `_TQL_FUNCS["round"]` in place of Julia's `round`. (The
+several *other* internal `round(Int, …)` call sites in
+`src/taql/functions.jl`/`src/taql/mscal.jl` are unrelated millisecond-
+formatting helpers for the date/time string functions, not the exposed
+`round()` TaQL function — left unchanged.)
+
+New testset "Phase 184 — round() vs casacore's round-half-away-from-
+zero" (12 assertions: unit tests on `_tql_round` across every tie/non-
+tie/sign combination, plus a `query()`-level check) and "Phase 184 —
+round(), real-TaQL cross-check" (14 assertions, `_HAVE_TAQL`-gated,
+both literal-argument and column-argument forms). Standalone
+`taql_query_tests.jl` green in full.
+
+Continuing the same source dive (per the standing methodology: once
+one function turns out wrong, check its siblings the same way
+immediately), swept the rest of the general-math corner of
+`ExprFuncNode.cc` and found three more real bugs, all the same
+"raw C++ `std::` call, NaN not throw" shape:
+
+- **`pow(x,y)` / `**`** (`powFUNC`, `.cc:655-657` — and `**`, which
+  live-verified is the identical runtime `powFUNC`/`std::pow` path,
+  not a separate implementation): a negative base with a non-integer
+  exponent is `NaN` in casacore, but Julia's `^` for two `Real`s
+  **throws** a `DomainError` in exactly that case. A real crash risk
+  for any column that can go negative (`pow(UVW[1], 0.5)`). Fixed with
+  `_tql_pow(x,y) = x < 0 && !isinteger(y) ? NaN : x^y` (an
+  integer-valued exponent, even as a `Float64`, does not throw in
+  Julia either — `(-1.0)^2.0 == 1.0` — matching casacore, so only the
+  fractional case needs a guard), wired into both `pow()` and the
+  `**` operator's `_parse_power!`.
+
+  A subtlety found while testing this: casacore's operator precedence
+  (like this package's own) puts unary minus OUTSIDE `**`, so
+  `-2.0 ** 0.5` parses as `-(2.0 ** 0.5)`, not `pow(-2.0, 0.5)` — a
+  literal negative base needs the `pow(-2.0, 0.5)` function-call form
+  (each argument parses independently) or a genuinely negative-valued
+  *column* to exercise; live-verified both engines agree on this
+  precedence.
+
+- **`sqrt`/`log`/`log10`** (`.cc:668-670,653-654`) and **`asin`/
+  `acos`** (`.cc:713-716`): all four are a bare `sqrt`/`log`/`log10`/
+  `asin`/`acos` on a `Double` — out-of-domain (`sqrt`/`log`/`log10` of
+  a negative number; `asin`/`acos` of `|x|>1`) is `NaN` in C++, but
+  Julia's own `sqrt`/`log`/`log10`/`asin`/`acos` for a `Real` all
+  **throw** `DomainError` in that case. Live-verified against real
+  casacore: `sqrt(-4.0)`, `log(-1.0)`, `log10(-1.0)`, `asin(2.0)`,
+  `acos(2.0)` are all `NaN`. The same crash risk as `pow` — any
+  real-valued column that can go out of a function's domain
+  (`sqrt(WEIGHT - threshold)`, `asin(UVW[1] / baseline_length)`).
+  Fixed with `_tql_sqrt`/`_tql_log`/`_tql_log10`/`_tql_asin`/
+  `_tql_acos`, each a `::Real`-specific domain guard returning `NaN`
+  with a fallback method passing a `Complex` argument straight through
+  (Julia's own `Complex` overloads already never throw — they return
+  the analytic-continuation branch, matching C++'s `std::complex`
+  overloads — so only the `Real` methods needed a guard).
+
+- **`sign()`** (`signFUNC`, `.cc:727-735`): a manual
+  `if(val>0) 1; if(val<0) -1; else 0` — a `NaN` input falls through
+  *both* comparisons to the `else 0` branch, so `sign(NaN) == 0.0` in
+  casacore, not `NaN` (Julia's own `sign(NaN) == NaN`). Found while
+  sweeping the surrounding functions for the same shape, and directly
+  relevant now that the fixes above let more `NaN`s flow downstream
+  into a `sign()` call than before (live-verified:
+  `sign(sqrt(-1.0)) == 0.0` in real casacore). Fixed with
+  `_tql_sign(x) = isnan(x) ? zero(float(x)) : sign(x)`.
+
+New testsets: "Phase 184 — pow()/`**` vs a negative base + non-integer
+exponent" (11 assertions) + its real-TaQL cross-check (13 assertions,
+covering both the function-call form and a negative-valued column
+through `**`); "Phase 184 — sqrt()/log()/log10()/asin()/acos() vs
+out-of-domain real args" (34 assertions) + its real-TaQL cross-check
+(20 assertions — tolerating a 1-ULP cross-library libm difference on
+in-domain values with `≈` rather than exact `==`, live-verified as an
+ordinary floating-point variance and not a logic bug); "Phase 184 —
+sign() vs NaN" (4 assertions) + its real-TaQL cross-check (1
+assertion). Corrected two stale `.op === (^)` unit-test assertions
+(`**`'s AST node now carries `_tql_pow`, not raw `^`).
+
+A fifth bug in the same family turned up directly as a *consequence*
+of the fixes above: **`int()`/`integer()`** (`intFUNC`,
+`ExprFuncNode.cc:552-553`) is a raw C++ `Int64(double)` cast — a
+NaN/out-of-range argument **saturates** rather than raising in C++
+(live-verified: `int(0.0/0.0) == 0`, `int(1.0/0.0) ==
+typemax(Int64)`, `int(-1.0/0.0) == typemin(Int64)`), but Julia's own
+`trunc(Int, …)` **throws** an `InexactError` in all three cases.
+Before this phase, `int(sqrt(-1.0))` was an unreachable combination
+(the old `sqrt` would already have thrown on the negative argument);
+now that `sqrt()`/`log()`/etc. correctly return `NaN` instead, that
+`NaN` flows straight into `int()`, which needed the identical fix.
+Fixed with `_tql_int`, a saturating cast matching the observed real
+casacore behavior. New testsets "Phase 184 — int()/integer() saturate
+instead of throwing" (8 assertions) + its real-TaQL cross-check (7
+assertions, including through `int(sqrt(A))` with a negative `A`).
+
+A sixth bug, of a different (non-throwing) shape, turned up while
+checking `isnan`/`isinf` for the same Complex-argument corner once
+`isfinite` was under scrutiny: **`isfinite()` on a `Complex` value**.
+casacore's `isFinite(Complex)`/`isFinite(DComplex)`
+(`casa/BasicSL/Complex.cc:123-129`) is
+`isFinite(re) || isFinite(im)` — an **OR**, not the logically-expected
+AND (arguably a bug in casacore itself — "finite" should mean *both*
+parts finite — but real and reachable via TaQL's `isfinite()`).
+Live-verified: `isfinite(complex(0.0/0.0, 5.0)) == true` in real
+casacore. Julia's own `isfinite(::Complex)` uses AND — exactly
+backwards from casacore for a mixed finite/non-finite value.
+`isnan`/`isinf` on `Complex` (`.cc:76-105`) are **already** `||` in
+both casacore and Julia, so only `isfinite` needed a fix. Fixed with
+`_tql_isfinite(x::Complex) = isfinite(real(x)) || isfinite(imag(x))`.
+
+Deliberately left `nonfinite`/`isnonfinite` (a MeasurementSets-only
+extension, not a real casacore function, used by the Phase 59/60
+masked-array default-mask sugar) on Julia's own `!isfinite` rather
+than the new casacore-matching `_tql_isfinite` — for a masking
+predicate, "not finite" should mean *either* part is bad, which is
+exactly what `!isfinite` (AND, then negated → OR) already gives.
+
+New testsets "Phase 184 — isfinite() vs a mixed finite/non-finite
+complex value" (10 assertions) + its real-TaQL cross-check (3
+assertions, through a genuine complex column since TaQL-lite has no
+`complex(re,im)` constructor function to build one inline — a
+separate, larger gap noted but out of this phase's bug-fixing scope).
+
+Standalone `taql_query_tests.jl` green in full.
+
+### Phase 185 — found a real missing-function gap: `runningsamplevariance()`/
+### `runningsamplestddev()`/`boxedsamplevariance()`/`boxedsamplestddev()`
+
+Continuing the same corner of `src/taql/functions.jl` — the
+`running*`/`boxed*` sliding-window family Phase 182/183 already fixed
+two real bugs in. Reading `TableParseFunc.cc`'s function-name table
+turned up something this package had entirely missed: casacore has
+**two ddof variants** of `running`/`boxed` variance and stddev —
+
+```
+funcName == "runningvariance"       -> runvariance0FUNC   (ddof=0, population)
+funcName == "runningsamplevariance" -> runvariance1FUNC   (ddof=1, n-1-corrected)
+funcName == "runningstddev"         -> runstddev0FUNC
+funcName == "runningsamplestddev"   -> runstddev1FUNC
+funcName == "boxedvariance"         -> boxvariance0FUNC
+funcName == "boxedsamplevariance"   -> boxvariance1FUNC
+funcName == "boxedstddev"           -> boxstddev0FUNC
+funcName == "boxedsamplestddev"     -> boxstddev1FUNC
+```
+
+— mirroring the already-implemented `gvariance`/`gsamplevariance`
+group-aggregate split (`_TQL_AGGRS` already has both). This package's
+`_running_var`/`_boxed_var` (already correct — `corrected=false`,
+ddof=0, matching the *plain* name) had simply never been given `*sample*`
+siblings at all; calling `runningsamplevariance(...)` raised "unknown
+function" rather than computing the n-1-corrected value. Live-verified
+both variants are real and genuinely different:
+`runningsamplevariance(1:8,[2])` gives `2.5` where `runningvariance`
+gives `2.0` over the same 5-element window.
+
+Fixed by adding `_running_svar`/`_running_sstd`/`_boxed_svar`/
+`_boxed_sstd` (`Statistics.var`/`Statistics.std`'s own default
+`corrected=true`, i.e. ddof=1) and wiring all four new names into
+`_TQL_FUNCS`.
+
+A second, smaller divergence turned up immediately while testing the
+edge cases: a window/bin with **fewer than 2 elements** is
+mathematically undefined for the n-1-corrected sample variance (unlike
+the population variant, which is well-defined — `0` — at `n=1`), and
+live-verified, real casacore genuinely **throws** ("Need at least 2
+elements") rather than silently returning `NaN` the way a bare
+`Statistics.var([x])` would. Reachable via a half-width/box-width of
+`0`/`1`, or (more realistically) a trailing partial box with exactly
+one element. This is the same "match casacore's real behavior exactly"
+discipline the rest of this sweep has applied throughout Phase 184 —
+just pointed the other direction (there, several functions needed to
+stop throwing and start returning `NaN`; here, one needs to start
+throwing instead of silently returning `NaN`). Fixed with a shared
+`_tql_need2` guard raising a clear `ArgumentError`.
+
+New testsets "Phase 185 — missing runningsamplevariance()/
+boxedsamplevariance() family" (21 assertions, including the <2-element
+throw cases and confirming the ddof=0 variant stays well-defined at
+`n=1`) + its real-TaQL cross-check (11 assertions, including that both
+engines throw for a same trailing-1-element-bin case). Standalone
+`taql_query_tests.jl` green in full.
+
+### Phase 186 — found five more missing functions: `avdev()`, `runningavdev()`,
+### `boxedavdev()`, `runningrms()`, `boxedrms()`
+
+Continuing the same `TableParseFunc.cc` function-name-table check that
+found Phase 185's `*samplevariance*` gap — this time turning up a
+whole `avdev` (mean absolute deviation from the mean) family this
+package never had at all, plus the `running`/`boxed` siblings of the
+already-implemented scalar `rms()`:
+
+```
+funcName == "avdev"         -> arravdevFUNC     (missing — new)
+funcName == "runningavdev"  -> runavdevFUNC     (missing — new)
+funcName == "boxedavdev"    -> boxavdevFUNC     (missing — new)
+funcName == "runningrms"    -> runrmsFUNC       (missing — new)
+funcName == "boxedrms"      -> boxrmsFUNC       (missing — new)
+```
+
+`avdev()` (`casa/Arrays/ArrayMath.tcc:1022-1043`) is
+`mean(|xᵢ − mean(x)|)` — casacore's own per-element sum uses
+`std::abs`, so it already generalises to a `Complex` array with no
+separate branch (the magnitude-based `abs` makes the result real by
+construction; `ExprFuncNode.cc:808-814`'s wrapping `real(...)` is a
+no-op). `rms()`, already implemented (`_tql_rms`), needed no formula
+change at all — `runrmsFUNC`/`boxrmsFUNC` are `dtin=NTReal` (no
+complex overload, unlike `avdev`'s `NTNumeric`), which is irrelevant
+here since `_tql_rms` already only ever uses `abs2` (correct for both
+real and complex) and was never given a complex-unsafe shortcut to
+begin with.
+
+Both new reducers (`_tql_avdev`, reused directly as a sliding-window
+reducer via the existing `_running_reduce`/`_boxed_reduce` machinery —
+no new plumbing needed) live-verified against real casacore:
+`avdev(1:8) == 2.0`, `runningavdev(1:8,[2])[3] == 1.2`,
+`runningrms(1:8,[2])[3] ≈ 3.3166247903554`, all matching a hand
+computation over the same windows exactly.
+
+While checking the function-name table for these, found (but did NOT
+implement — a real, larger feature gap flagged for a dedicated future
+phase, not this same-day bug-fix sweep) that casacore also has an
+entire "s"-suffixed **axis-collapse** family — `sums`, `means`, `mins`,
+`maxs`, `products`, `medians`, `variances`, `stddevs`, `avdevs`,
+`rmss`, `fractiles`, `anys`, `alls`, `ntrues`, `nfalses`
+(`arrsumsFUNC` etc.) — that reduce a multi-dimensional array cell
+along *specific* axes given as an argument, leaving the other axes
+intact. This is entirely distinct from this package's own `gs*` masked
+group aggregates (Phase 62) despite the superficially similar naming,
+and none of it exists in TaQL-lite today.
+
+New testsets "Phase 186 — missing avdev()/runningavdev()/boxedavdev()/
+runningrms()/boxedrms()" (14 assertions, including a `Complex`-array
+`avdev` case) + its real-TaQL cross-check (6 assertions). Standalone
+`taql_query_tests.jl` green in full.
