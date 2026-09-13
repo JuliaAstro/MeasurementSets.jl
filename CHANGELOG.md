@@ -4826,3 +4826,60 @@ No production code changed either way; both are confirmed-correct
 findings, not fixes. Standalone engine + edit suites green (existing
 tests unaffected — no new test needed, since neither investigation
 produced a code path that wasn't already exercised).
+
+### Phase 173 — swept MultiFile's CRC32 + pack/unpack-index algorithms against casacore source; both confirmed correct, closing two previously-flagged uncertainties
+
+Two more source-reading investigations, targeting the specific "never
+independently verified" language left in Phase 20/21's own Risks
+sections rather than a fresh area.
+
+**1. `_mf_crc32`** — Phase 20's own Risk (b) explicitly noted "no
+independent reference vector for casacore's nonstandard variant" (the
+CRC32 used for a MultiFile container's header integrity check, `useCRC`
+— never itself set by any real casacore write path, per Phase 21's own
+finding, so a bug here would be completely inert in practice, but worth
+closing anyway since the uncertainty was explicitly on record). Read
+`casa/IO/MultiFile.cc`'s `CRCTable()` (the lookup-table construction,
+`.cc:44-67`) and `MultiFile::calcCRC` (`.cc:694-719`) in full and
+compared every step against `src/datamanagers/container.jl`'s
+`_MF_CRC_TABLE`/`_mf_crc32`: the polynomial (`0x04C11DB7`, built
+MSB-first per byte), the custom `crcinit = 0x46AF6449`, the per-byte
+update (`crc = ((crc<<8)|byte) ^ table[(crc>>24)&0xff]`), the 4-round
+"augment with zero bytes" tail, and the final `crc ^= 0xFFFFFFFF` all
+match exactly, table-index off-by-one (0-based C++ vs 1-based Julia)
+correctly accounted for. (Noted in passing, not acted on: casacore's
+own `MultiFile::writeHeader` calls `calcCRC` on the *same* buffer
+**twice in a row** — `.cc:245-246`, `crc = calcCRC(...); crc =
+calcCRC(...)` — an apparent redundant/dead first call in casacore
+itself, harmless since the function is a pure, deterministic
+computation with no side effects.)
+
+**2. `_mf_pack_index` / `_mf_unpack_index`** — Phase 21's own Risk (a)
+flagged the write-side run-length packer as "new, untested-against-a-
+real-fixture logic" (no real casacore-authored fixture in the test
+suite has ever needed more than one block per file, so the multi-run
+packing path was only ever exercised by this package's own round-trip
+tests). Read `MultiFile::packIndex`/`unpackIndex`
+(`casa/IO/MultiFile.cc:734-786`) directly and compared to
+`_mf_pack_index`/`_mf_unpack_index` step by step — the run-detection
+loop, the "count excludes the first block number" convention, and the
+trailing-run flush after the loop all match exactly. One structural
+question worth recording: `_mf_unpack_index` assumes every negative
+(run-length) entry immediately follows the positive value it extends —
+a real simplification versus casacore's own `unpackIndex`, which
+handles a fully general `Vector<Int64>` with no such assumption. Traced
+through `packIndex`'s own emission logic and confirmed this is a safe
+simplification, not a latent bug: a negative entry is only ever emitted
+immediately after the positive that started the run it extends, and is
+always immediately followed by either the end of the list or the next
+run's positive start — `packIndex` can never itself emit two
+consecutive negatives, so any output it produces is unambiguously
+decodable by the simpler one-negative-per-positive scheme our unpacker
+implements.
+
+No production code changed in either case — both close out an
+explicitly-recorded uncertainty with a real, line-by-line source
+comparison rather than leaving it as "should be fine." Standalone
+container test suite green (unaffected — no new test needed, since the
+existing round-trip + real-fixture tests were already exercising the
+confirmed-correct code).
