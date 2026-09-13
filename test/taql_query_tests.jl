@@ -1120,6 +1120,154 @@ end
     end
 end
 
+@testset "Phase 190 — sweeping functions.jl to completion: hms/dms array bug + hdms + the rest of running*/boxed*" begin
+    # a real, confirmed bug: hms()/dms() threw a MethodError on an
+    # array argument, but real casacore applies them ELEMENTWISE
+    # (ExprFuncNodeArray.cc:2424-2454). hdms() (alternating hms/dms by
+    # 0-based index) was entirely missing.
+    PD = [1.0, 0.5]
+    @test MSv2._TQL_FUNCS["hms"][1](PD) == [MSv2._tql_hms(1.0), MSv2._tql_hms(0.5)]
+    @test MSv2._TQL_FUNCS["dms"][1](PD) == [MSv2._tql_dms(1.0), MSv2._tql_dms(0.5)]
+    @test MSv2._tql_hdms(PD) == [MSv2._tql_hms(1.0), MSv2._tql_dms(0.5)]
+    @test MSv2._tql_hdms([1.0, 0.5, 0.2, -0.3]) ==
+          [MSv2._tql_hms(1.0), MSv2._tql_dms(0.5), MSv2._tql_hms(0.2), MSv2._tql_dms(-0.3)]
+
+    # completing running*/boxed*: full diff of TableParseFunc.cc's
+    # "running.../boxed..." chain found 8 more missing pairs + 2
+    # missing aliases (runningavg/boxedavg).
+    a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    b = Bool[true, true, false, true, true, false, true, true]
+    @test MSv2._TQL_FUNCS["runningavg"][1](a, 2) == MSv2._running_avg(a, 2)
+    @test MSv2._TQL_FUNCS["boxedavg"][1](a, 2) == MSv2._boxed_avg(a, 2)
+    @test MSv2._running_product(a, 2)[3] == prod(a[1:5])
+    @test MSv2._running_product(a, 2)[1] == 0.0
+    @test MSv2._boxed_product(a, 2)[1] == prod(a[1:2])
+    @test MSv2._running_fractile(a, 0.5, 2)[3] == MSv2._tql_fractile(a[1:5], 0.5)
+    @test MSv2._boxed_fractile(a, 0.5, 2)[1] == MSv2._tql_fractile(a[1:2], 0.5)
+    @test MSv2._running_med(a, 2) == MSv2._running_fractile(a, 0.5, 2)   # median IS fractile(0.5)
+    @test MSv2._running_any(b, 2)[3] == any(b[1:5])
+    @test MSv2._running_any(b, 2)[1] == false
+    @test MSv2._boxed_any(b, 2)[1] == any(b[1:2])
+    @test MSv2._running_all(b, 2)[3] == all(b[1:5])
+    @test MSv2._boxed_all(b, 2)[1] == all(b[1:2])
+    @test MSv2._running_ntrue(b, 2)[3] == count(identity, b[1:5])
+    @test MSv2._boxed_ntrue(b, 2)[1] == count(identity, b[1:2])
+    @test MSv2._running_nfalse(b, 2)[3] == count(!, b[1:5])
+    @test MSv2._boxed_nfalse(b, 2)[1] == count(!, b[1:2])
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a], "B" => [b], "PD" => [PD]];
+                nrow=1, tsm=[["A"], ["B"], ["PD"]])
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = [
+        "h" => "hms(PD)", "hd" => "hdms(PD)",
+        "rp" => "runningproduct(A,[2])", "bp" => "boxedproduct(A,[2])",
+        "rf" => "runningfractile(A,0.5,[2])", "bf" => "boxedfractile(A,0.5,[2])",
+        "ra" => "runningany(B,[2])", "ba" => "boxedany(B,[2])",
+        "rall" => "runningall(B,[2])", "ball" => "boxedall(B,[2])",
+        "rnt" => "runningntrue(B,[2])", "bnt" => "boxedntrue(B,[2])",
+        "rnf" => "runningnfalse(B,[2])", "bnf" => "boxednfalse(B,[2])"])
+    @test r.h[1] == [MSv2._tql_hms(1.0), MSv2._tql_hms(0.5)]   # hms alone == elementwise hms, not alternating
+    @test r.hd[1] == MSv2._tql_hdms(PD)
+    @test r.rp[1] == MSv2._running_product(a, 2)
+    @test r.bp[1] == MSv2._boxed_product(a, 2)
+    @test r.rf[1] == MSv2._running_fractile(a, 0.5, 2)
+    @test r.bf[1] == MSv2._boxed_fractile(a, 0.5, 2)
+    @test r.ra[1] == MSv2._running_any(b, 2)
+    @test r.ba[1] == MSv2._boxed_any(b, 2)
+    @test r.rall[1] == MSv2._running_all(b, 2)
+    @test r.ball[1] == MSv2._boxed_all(b, 2)
+    @test r.rnt[1] == MSv2._running_ntrue(b, 2)
+    @test r.bnt[1] == MSv2._boxed_ntrue(b, 2)
+    @test r.rnf[1] == MSv2._running_nfalse(b, 2)
+    @test r.bnf[1] == MSv2._boxed_nfalse(b, 2)
+
+    # c() / near() / nearabs() / gfractile() / countall() / mask() / cweekday()
+    @test MSv2._tql_nearabs(5.0, 5.05, 0.1) == true
+    @test MSv2._tql_nearabs(5.0, 5.2, 0.1) == false
+    r2 = query(t, "rownumber() == 1"; select = [
+        "cc" => "c()", "n1" => "near(5.0, 5.1)", "n2" => "near(5.0, 5.1, 0.5)",
+        "na1" => "nearabs(5.0, 5.05, 0.1)", "na2" => "nearabs(5.0, 5.2, 0.1)",
+        "mk" => "mask(A)", "cw" => "cweekday(datetime('2020-02-12'))"])
+    @test r2.cc[1] == MSv2.C_LIGHT
+    @test r2.n1[1] == false
+    @test r2.n2[1] == true
+    @test r2.na1[1] == true
+    @test r2.na2[1] == false
+    @test r2.mk[1] == MSv2._tql_arraymask(a)
+    @test r2.cw[1] == query(t, "rownumber() == 1"; select = ["X" => "cdow(datetime('2020-02-12'))"]).X[1]
+
+    K = Int32[1, 1, 1, 1, 2, 2]
+    X = Float64[1, 2, 3, 4, 5, 6]
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    write_table(tabpath2, "T2", Pair{String,Any}["K" => K, "X" => X]; nrow=6)
+    tg = readtable(tabpath2)
+    g = groupby(tg, "K"; select = ["K" => "K", "GF" => "gfractile(X, 0.25)", "CA" => "countall()"])
+    order = sortperm(collect(g.K))
+    @test collect(g.K)[order] == [1, 2]
+    @test collect(g.GF)[order] == [MSv2._tql_fractile([1.0, 2, 3, 4], 0.25),
+                                   MSv2._tql_fractile([5.0, 6], 0.25)]
+    @test collect(g.CA)[order] == [4, 2]
+
+    # errors
+    @test_throws ArgumentError MSv2._taqllite_parse("gfractile(X)", Set(["X"]))
+    @test_throws ArgumentError MSv2._taqllite_parse("countall(X)", Set(["X"]))
+end
+
+@testset "Phase 190 — completing functions.jl, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:8)
+    b = Bool[true, true, false, true, true, false, true, true]
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a], "B" => [b]]; nrow=1,
+                tsm=[["A"], ["B"]])
+    t = readtable(tabpath)
+    for expr in ("runningproduct(A,[2])", "boxedproduct(A,[2])",
+                 "runningfractile(A,0.5,[2])", "boxedfractile(A,0.5,[2])",
+                 "runningany(B,[2])", "boxedany(B,[2])",
+                 "runningall(B,[2])", "boxedall(B,[2])",
+                 "runningntrue(B,[2])", "boxedntrue(B,[2])",
+                 "runningnfalse(B,[2])", "boxednfalse(B,[2])",
+                 "runningavg(A,[2])", "boxedavg(A,[2])",
+                 "near(5.0,5.1,0.5)", "nearabs(5.0,5.2,0.1)", "c()", "mask(A)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa isa AbstractArray ? all(casa .== ours) : casa == ours
+    end
+
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    PD = [1.0, 0.5, 0.2, -0.3]
+    write_table(tabpath2, "T2", Pair{String,Any}["PD" => [PD]]; nrow=1, tsm=[["PD"]])
+    t2 = readtable(tabpath2)
+    for expr in ("hms(PD)", "dms(PD)", "hdms(PD)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath2)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t2, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa == ours
+    end
+
+    K = Int32[1, 1, 1, 1, 2, 2]
+    X = Float64[1, 2, 3, 4, 5, 6]
+    dir3 = mktempdir(); tabpath3 = joinpath(dir3, "t3.tab")
+    write_table(tabpath3, "T3", Pair{String,Any}["K" => K, "X" => X]; nrow=6)
+    tc3 = CCT.Table(tabpath3)
+    rdir3 = joinpath(mktempdir(), "r3")
+    _taqlcmd("SELECT K, gfractile(X, 0.25) AS GF, countall() AS CA FROM \$1 GROUP BY K GIVING '$rdir3'", tc3)
+    m3 = readtable(rdir3)
+    casaK = column(m3, "K")[:]
+    casaGF = Dict(casaK[i] => column(m3, "GF")[i] for i in 1:nrow(m3))
+    casaCA = Dict(casaK[i] => column(m3, "CA")[i] for i in 1:nrow(m3))
+    tg3 = readtable(tabpath3)
+    g3 = groupby(tg3, "K"; select = ["K" => "K", "GF" => "gfractile(X, 0.25)", "CA" => "countall()"])
+    for i in 1:length(g3.K)
+        @test casaGF[g3.K[i]] == g3.GF[i]
+        @test casaCA[g3.K[i]] == g3.CA[i]
+    end
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)

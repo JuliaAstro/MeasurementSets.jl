@@ -5718,3 +5718,108 @@ via a full function-name-table diff)" (12 assertions, including a
 real-TaQL cross-check (6 assertions, covering the scalar, running,
 boxed, and group-aggregate forms). Standalone `taql_query_tests.jl`
 green in full.
+
+### Phase 190 — sweeping `src/taql/functions.jl` to completion (user request):
+### a real `hms()`/`dms()` bug, missing `hdms()`, the rest of `running*`/`boxed*`,
+### and six more standalone functions
+
+At the user's explicit direction, continued sweeping
+`src/taql/functions.jl` toward genuine completion rather than stopping
+at the next isolated finding. Two threads:
+
+**A real, confirmed bug, found while checking `hdms()`'s implementation
+against `hms()`/`dms()`'s:** casacore's `getArrayString`
+(`ExprFuncNodeArray.cc:2424-2454`) shows `hms()`/`dms()` apply
+ELEMENTWISE to an array argument, not just a scalar — but this
+package's registration called `_tql_hms(float(x))` directly with no
+`_ew` wrapping, so `hms(a_PHASE_DIR_column)` threw a `MethodError`
+instead of formatting each element. Live-verified: `hms([1.0, 0.5]) ==
+["03h49m10.987", "01h54m35.494"]` in real casacore. Fixed by wrapping
+both in `_ew` (the standard elementwise-or-scalar dispatch already
+used throughout this file). While there, found **`hdms()`** — an
+array-only sky-position formatter that alternates `hms`/`dms` by
+(0-based) index (`hdms([ra1,dec1,ra2,dec2]) == [hms(ra1), dms(dec1),
+hms(ra2), dms(dec2)]`) — entirely missing; added `_tql_hdms`.
+
+**Completed the `running*`/`boxed*` family**: a full diff of
+`TableParseFunc.cc`'s `funcName == "running..."`/`"boxed..."` chain
+(`.cc:353-488`) — the same technique Phase 189 introduced — against
+`_TQL_FUNCS` turned up EIGHT more entirely missing pairs (16 functions)
+plus two missing aliases:
+- `runningproduct`/`boxedproduct` — product per window/bin.
+- `runningfractile`/`boxedfractile` — a THIRD argument (the fraction,
+  0–1) inserted before the half-width/box-width, using the SAME
+  never-average `fractile()` convention already implemented for
+  `gmedian`/`runningmedian`/`boxedmedian` (`_tql_fractile`, Phase 183)
+  — `runningmedian(arr,[h])` is in fact just
+  `runningfractile(arr,0.5,[h])` under the hood in casacore itself.
+- `runningany`/`runningall`/`boxedany`/`boxedall` and
+  `runningntrue`/`runningnfalse`/`boxedntrue`/`boxednfalse` — plain
+  `any`/`all`/count-true/count-false per window over a `Bool` array;
+  the Phase-182 edge zero-fill naturally becomes `false`/`0`.
+- `runningavg`/`boxedavg` — real casacore ALIASES for
+  `runningmean`/`boxedmean` this package never registered.
+
+Live-verified every one against real casacore: `runningproduct(1:8,[2])[3]
+== 120.0`, `runningfractile(1:8,0.5,[2])[3] == 3.0` (matches
+`_tql_fractile([1,2,3,4,5],0.5)` exactly), `runningany`/`runningall`/
+`runningntrue`/`runningnfalse` on a `[T,T,F,T,T,F,T,T]` array all match
+a hand count.
+
+**Six more standalone functions**, found continuing the same
+`TableParseFunc.cc` name-table sweep past the `running*`/`boxed*`
+chain:
+- **`c()`** — the speed of light (`cFUNC`), the same value already in
+  `src/constants.jl` as `C_LIGHT`.
+- **`near(a,b[,tol])`/`nearabs(a,b[,tol])`** — standalone
+  FUNCTION-CALL forms of approximate equality. `near` is the SAME
+  relative-magnitude algorithm as the `~=` operator (`_tql_near`,
+  Phase 47), but with a much tighter DEFAULT tolerance (`1.0e-13`, not
+  `~=`'s `1e-5`) when no 3rd argument is given. `nearabs` is a
+  different, ABSOLUTE-difference check (`|a-b| <= tol`, casacore's own
+  `nearAbs`) with no default tolerance concept shared with `near` at
+  all — a bare `nearabs(a,b)` also uses `1.0e-13`. Live-verified:
+  `near(5.0, 5.1) == false` (tol `1e-13`, `|5.0-5.1|=0.1` far too big),
+  `near(5.0, 5.1, 0.5) == true`, `nearabs(5.0, 5.05, 0.1) == true`,
+  `nearabs(5.0, 5.2, 0.1) == false`. Fixed with a new `_tql_nearabs`
+  (`_tql_near` already existed and slotted in directly).
+- **`gfractile(col, frac)`** — the group-aggregate sibling of
+  `gmedian`, with an explicit constant fraction instead of the
+  hardcoded `0.5` (`gmedian` is literally
+  `TableExprGroupFractileDouble(this, 0.5)` internally in casacore,
+  `gfractile` is the same class with `frac` supplied). The fraction is
+  evaluated once, not per row, so it must be a numeric-literal
+  argument — mirrors how this file already handles a handful of other
+  constant-argument functions (`mscal.pbresponse`'s beam spec,
+  `mscal.riseset`'s elevation cutoff). Live-verified:
+  `gfractile([1,2,3,4], 0.25) == 1.0`, matching `_tql_fractile`'s
+  existing formula exactly.
+- **`countall()`** — the SQL-standard `COUNT(*)` spelling, byte-for-byte
+  the same row count `gcount()` computes (`TableExprGroupCountAll` vs
+  `TableExprGroupCount` — casacore's own two classes do the identical
+  thing), just never taking a column argument.
+- **`mask`** — a missing alias for the already-implemented
+  `arraymask()`.
+- **`cweekday`** — a missing alias for the already-implemented
+  `cdow()`.
+
+New testset "Phase 190 — sweeping functions.jl to completion: hms/dms
+array bug + hdms + the rest of running*/boxed*" (49 assertions) + its
+real-TaQL cross-check (25 assertions). Standalone `taql_query_tests.jl`
+green in full — the whole file's ~116 testsets ran end to end with no
+failures.
+
+Remaining `functions.jl` names not yet resolved this phase (continuing
+next): `bool`/`boolean`, `str`/`string` (needs a `getPrintFormat`-style
+width/precision spec), `rand`, `rowid`, `cones`/`anycone`/`findcone`
+(needs a spatial cone-search index), the rest of the masked-array
+native functions (`negatemask`/`replacemasked`/`replaceunmasked`/
+`nullarray`), the array-reshaping family (`array`/`arrayflatten`/
+`flatten`/`diagonal`/`diagonals`/`resize`/`transpose`/`reversearray`),
+`regex`/`pattern`/`sqlpattern` (Phase 188, needs a new value type),
+`isdefined`/`isnull`/`iscolumn`/`iskeyword` (Phase 188, needs a
+null-cell concept or table-level context), `substr`/`substring`/
+`replace` (the Phase 25 "string index-base rabbit hole" non-goal),
+`gaggr`/`ghist`/`ghistogram`/`growid`/`gstack` (the Phase 26 non-goal),
+and the "s"-suffixed axis-collapse family (Phase 186's flagged larger
+feature).
