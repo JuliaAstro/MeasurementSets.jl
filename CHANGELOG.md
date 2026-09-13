@@ -4387,3 +4387,114 @@ gains the two new exported names (keeps the `checkdocs = :exported`
 docs build clean). Standalone measures suite green (508/508, was 490
 before the 18 new assertions); standalone query suite unaffected
 (1008/1008, unchanged).
+
+### Phase 161 — swept `Record`-keyword indexing for a Phase-156-style unguarded-access bug; confirmed the ISM bucket-relative-row-0 invariant is real (no bug found)
+
+Continued sweeping for the class of bug Phase 156 found (`BitFlagsEngine`'s
+mask-key lookup indexing a `Record` directly instead of guarding with
+`haskey`). Grepped every `.keywords[...]` / `kw["..."]` access across
+`src/` and `ext/` — every remaining unguarded index (`_BaseMappedArrayEngine_Name`
+in `_engine_spec_from_source`, `mi["type"]` in `measinfo`, `kw["QuantumUnits"]`
+in `UnitfulExt`) is a keyword every real engine/MEASINFO writer emits
+unconditionally as part of constructing that record in the first place —
+categorically different from `BitFlagsEngine`'s `ReadMaskKeys`/
+`WriteMaskKeys`, which are user-supplied *lists* that may legitimately
+name a key absent from a particular table's `FLAGSETS`. No missing-key
+crash risk found.
+
+Redirected to a related but distinct question raised while reading
+`src/datamanagers/incremental.jl`'s reader: `_le_index` (the
+bucket-relative-row lookup used by `getcell`/`getcolumn`) returns index
+1 whenever the target row is *before* the first entry in that bucket's
+row index — silently falling back to that bucket's first stored value
+rather than correctly inheriting the previous bucket's last value. This
+would be a real bug if a valid on-disk ISM bucket could ever lack an
+entry at bucket-relative row 0. Read `~/Development/CASACORE/casacore/
+tables/DataMan/ISMBucket.cc`'s `getInterval` directly: when the binary
+search finds no exact match and the target precedes every index entry
+(`inx == 0`), it unconditionally does `inx--` on an *unsigned* `uInt`
+index with no underflow guard — which would wrap to a huge value and
+crash/corrupt on any bucket whose row index doesn't start at 0. This
+confirms "every bucket's row index starts at bucket-relative row 0" is
+a real invariant real casacore itself relies on for `getInterval`'s own
+correctness (an unsigned-underflow landmine, not merely a convention
+this package's own writer happens to follow) — so `_le_index`'s
+fallback-to-index-1 path is unreachable for any valid on-disk table,
+matching the existing Phase 8 plan note ("Every column has an entry at
+bucket-relative row 0") but now confirmed from the reader side too, not
+just the writer's own design choice.
+
+No source or test change — this phase closes out two investigation
+leads with no bug found, continuing the established discipline of
+verifying an assumption against real casacore source before trusting
+it. Standalone suite unaffected.
+
+### Phase 162 — swept the multi-column tiled tie-break sort + Dysco/Stokes read paths once more; no new bug (one false alarm resolved)
+
+Re-read `_tile_order` (`src/datamanagers/tiled.jl`) — its explicit
+`by = i -> (-_canon(types[i]), -i)` sort key initially looked backwards
+(a naive reading of "stable descending sort, ties keep binding order"
+from the Phase 11 plan text suggests ties should stay in *ascending*
+original-index order, which this key does not produce). Before
+"fixing" it, checked the existing test that specifically documents this
+case: `test/tsm_multicol_tests.jl`'s "tile-block order — equal-size
+types (casacore tie-break)" testset's own comment states real casacore
+was found, during Phase 11's implementation, to order equal-canonical-
+size columns by **descending** binding index, not ascending — and that
+testset cross-checks both directions (casacore-authored → our reader,
+and our writer → casacore reader) against real `CCT.Table`. The current
+`-i` tie-break key produces exactly that descending-index order. So the
+Phase 11 plan's own prose summary ("ties keep binding order") was an
+imprecise gloss on what was actually verified live; the code and its
+real-oracle test already agree with each other and with real casacore.
+No bug — a false alarm caught before any code was touched, by checking
+the test before "fixing" anything.
+
+Also re-verified, without finding an issue: `_dysco_spec_from_source`'s
+`antenna1`/`antenna2` row selection (`inst.ant1[rows]`) is correctly
+absolute-row-indexed since `DyscoStMan.ant1`/`.ant2` are populated as
+full-table-length vectors at open time; `mscal.stokes`'s Bool (FLAG)
+conversion path already matches casacore's `any(coefficient≠0 && flag)`
+per-output rule exactly (confirmed against the Phase 78/142 source
+citations already in the code); `_mf_pack_index`/`_mf_unpack_index`
+round-trip correctly for the empty- and single-block edge cases.
+
+No source or test change. Standalone suite unaffected.
+
+### Phase 163 — found a real function-name mismatch: `mscal.uvw_j2000()` doesn't match real casacore's own spelling; added the correct alias
+
+Read `derivedmscal/DerivedMC/{Register,UDFMSCal}.cc` directly (having
+already mined `MSCalEngine.cc` heavily in Phases 136-144) and found the
+real registered function name for "new uvw in J2000" is
+`derivedmscal.UVWJ2000` — **no underscore** — matched case-insensitively
+via `mscal` being a genuine TaQL synonym for `derivedmscal`
+(`tables/TaQL/TaQLStyle.cc`'s `defineSynonym("mscal", "derivedmscal")`,
+confirmed directly, closing a standing unstated assumption in this
+project's use of the `mscal.` prefix since Phase 77). This package
+spelled the function `uvw_j2000` (Phase 79) without ever checking real
+casacore's own name for it — a query written against real casacore's
+`mscal.uvwj2000()` would have failed here with "unknown mscal function".
+Fixed by aliasing the real, underscore-free spelling onto the existing
+internal name in `_make_func` (`src/taql/functions.jl`) — both spellings
+now work identically, case-insensitively, live-verified against the
+sample MS (`mscal.uvwj2000()`/`mscal.UVWJ2000()` give byte-identical
+results to `mscal.uvw_j2000()`).
+
+The same source read turned up two more findings, recorded but not
+acted on this phase: real casacore's `derivedmscal` library has **no
+bare `PA` function at all** (only `PA1`/`PA2` are registered) — this
+package's suffix-less `mscal.pa()` (added for symmetry with `ha`/`azel`/
+…) is a MeasurementSets-only extension with no real casacore
+counterpart, not a divergence from one, and none of the existing
+`mscal.pa()`-bare tests are real-TaQL cross-checks, so nothing needed
+fixing there. And real casacore has a whole family of wavelength-scaled
+uvw functions this package doesn't implement at all
+(`UVWWVL`/`UVWWVLS`/`UVWJ2000WVL(S)`/`UVWAPP(WVL(S))` — the last also in
+the APP frame rather than J2000) — a genuine, real gap, left for a
+future phase.
+
+Full standalone `test/taql_mscal_tests.jl` green (renders `_HAVE_TAQL`/
+`_HAVE_CASACORE` stubbed `false` to run outside the dev machine's real-
+casacore setup — every one of its 500+ assertions, including the new
+Phase 163 parser-unit and query cross-check tests, passes with no
+regressions).

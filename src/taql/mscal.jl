@@ -12,6 +12,22 @@
 # `_mscal_columns(t, fns)`, which returns a `Dict` of precomputed
 # per-row vectors keyed `"mscal.<fn>"`.  `_tqleval` / `_geval` then just
 # index that vector.
+#
+# Phase 163 (found reading `derivedmscal/DerivedMC/{Register,
+# UDFMSCal}.cc` directly): real casacore registers this function as
+# `derivedmscal.UVWJ2000` -- no underscore (`mscal` is a TaQL synonym
+# for `derivedmscal`, `tables/TaQL/TaQLStyle.cc`) -- while this package
+# spelled it `uvw_j2000` (Phase 79) before checking; `_make_func`
+# (functions.jl) now aliases the real, underscore-free spelling onto
+# this one. Also found there but NOT (yet) implemented: real casacore
+# has NO bare `derivedmscal.PA` at all (only `PA1`/`PA2` are
+# registered) -- this package's suffix-less `mscal.pa()` (an "array-
+# centre parallactic angle", added for symmetry with `ha`/`azel`/…) is
+# a MeasurementSets-only extension with no real casacore counterpart,
+# not a divergence from one; and the wavelength-scaled uvw variants
+# (`UVWWVL`/`UVWWVLS`/`UVWJ2000WVL(S)`/`UVWAPP(WVL(S))` -- the last also
+# in the APP frame rather than J2000) are a genuine, real, unimplemented
+# gap, left for a future phase.
 
 struct TQLMScal <: TQLExpr
     fn::String        # "ha"/"ha1"/"ha2" "hadec*" "azel*" "az*"/"el*"
