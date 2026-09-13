@@ -4598,3 +4598,45 @@ comment in `src/taql/commands.jl`, now independently re-verified rather
 than taken on faith.
 
 No source or test change. Standalone suite unaffected.
+
+### Phase 167 — found and fixed a real bug: `write_concattable` silently accepted an unpersisted (in-memory) part, corrupting the output table
+
+**Real bug found.** `write_concattable`'s part list is written by
+computing `_strip_directory(p.path, dir)` for each part — but a
+`RefTable` built purely in-memory by `query()` (never persisted to
+disk) has `path == ""` by design (Phase 22: "an in-memory, never-
+persisted query result can carry `path=\"\"` safely"). `abspath("")`
+resolves to `pwd()` (the current working directory) rather than
+erroring, so `write_concattable(dst, [t1, query(t2, "...")])` used to
+**succeed silently**, writing a bogus part reference (the CWD) into the
+persisted `table.dat` — no error at write time. Only a *subsequent*
+`readtable(dst)` would fail, with a confusing `SystemError: opening
+file "<cwd>/table.dat": No such file or directory` — far from the
+actual mistake and easy to misdiagnose as a filesystem problem rather
+than a usage error.
+
+Fixed with a new `_ondisk_path` dispatch in `src/tables/table.jl`: a
+plain `Table`/already-persisted `ConcatTable` always has a real path
+(both are only ever constructed from a real on-disk directory,
+confirmed structurally — `ConcatTable(...)` is called from exactly two
+places in `src/`, both given a genuine directory); a `RefTable` with an
+empty path now raises a clear `ArgumentError` naming the fix (persist
+it with `write_reftable` first); anything else (e.g. a `GroupedTable`
+from `groupby`/`join`, which has no `.path` field at all) raises an
+equally clear error rather than an opaque property-access failure. The
+validation runs *before* `mkpath(dir)`, so a rejected call leaves no
+partial output directory behind.
+
+Verified live: the exact scenario now errors immediately at the
+`write_concattable` call site instead of corrupting the output;
+persisting the `RefTable` first and retrying produces a correct,
+readable concatenation. `write_reftable` itself was independently
+confirmed NOT to have this bug — its own `_flatten_to_root` (Phase 132)
+always fully unwraps any `RefTable` chain down to a genuine `Table`/
+`ConcatTable` root before touching `.path`, so it never reaches an
+empty-path object. New testset `test/reftable_tests.jl` "write_concattable
+— non-on-disk part errors clearly (Phase 167)" (6 assertions): the
+`RefTable`-part and `GroupedTable`-part error cases, no partial
+directory on error, and the legitimate persist-then-concatenate path.
+Standalone `test/reftable_tests.jl` green (all pre-existing testsets
+unaffected).
