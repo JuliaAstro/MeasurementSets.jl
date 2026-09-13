@@ -5166,3 +5166,48 @@ cell" (4 assertions) plus "Phase 180 — variance()/stddev()/mean(),
 real-TaQL cross-check" (3 assertions, `_HAVE_TAQL`-gated). Neither
 function had any prior complex-argument test coverage. Standalone
 `taql_query_tests.jl` green in full.
+
+### Phase 181 — checked whether Phase 179's `min()`/`max()`-vs-complex fix needs to extend to the group-aggregate `gmin()`/`gmax()`; confirmed it doesn't
+
+Natural follow-up question after Phase 179: `_TQL_AGGRS`'s
+`gmin`/`gmax`/`gmins`/`gmaxs` use plain Julia `minimum`/`maximum` —
+the exact same shape of implementation that turned out wrong for
+complex scalars in the plain `min`/`max` functions. Worth checking
+whether the group-aggregate versions have the same gap.
+
+Read `TableExprGroupFuncBase::makeGroupAggrFunc`'s dtype declarations
+(`tables/TaQL/ExprAggrNode.cc:110-152`) directly: real casacore
+restricts `gminFUNC`/`gmaxFUNC`/`gminsFUNC`/`gmaxsFUNC`/`grmsFUNC`/
+`grmssFUNC`/`gmedianFUNC` to `NTReal` — there is **no complex overload
+for any of them at all** (`checkDT(dtypeOper, NTReal, ...)`, so a
+GROUP BY query using one of these on a complex column is rejected at
+TaQL *parse time*, not silently computed with some behaviour to
+match). So, unlike the plain `min`/`max`/`rms` case (where casacore
+DOES have a defined complex behaviour this package was missing),
+**there is no real casacore behaviour here for a complex `gmin`/
+`gmax`/`grms`/`gmedian` to diverge from** — Phase 179's fix correctly
+does not need to extend to these siblings. This package's own raw
+`MethodError` on a complex `gmin`/`gmax` is less polished than real
+casacore's `TableInvExpr`, but is not a "wrong value" bug.
+
+Separately confirmed (same source read): `gsum`/`gproduct`/`gmean`/
+`gvariance`/`gstddev` DO support complex in real casacore
+(`.cc:286-300`, `NTComplex` cases exist for all five) — but each
+reuses the exact same Julia primitive (`sum`/`prod`/`Statistics.mean`/
+`_pop_var`/`_pop_std`) already live-verified correct for the plain,
+non-aggregate forms in Phases 179-180, so there was no separate
+divergence risk to check there either; confirmed via a
+self-consistency test against a hand-computed per-group reduction
+(a direct real-TaQL GROUP BY oracle comparison hit an unrelated
+`tableCommand` parsing quirk in this environment — "A GROUPBY key
+cannot have data type dcomplex" even with the complex column only
+ever referenced inside an aggregate — not pursued further since the
+NTComplex-support fact is already unambiguous from source, and the
+underlying Julia primitives are independently already proven correct).
+
+New testset "Phase 181 — group-aggregate min/max/rms/median vs complex
+(scope check)" (6 assertions): `gsum`/`gproduct`/`gmean` on a complex
+column match a hand-computed per-group reduction; `gmin`/`gmax`
+on a complex column raise an error rather than silently misbehaving.
+No production code changed — this phase closes an open question, not
+a bug. Standalone `taql_query_tests.jl` green in full.

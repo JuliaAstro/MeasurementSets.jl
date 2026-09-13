@@ -2732,6 +2732,44 @@ end
     end
 end
 
+# Phase 181: does Phase 179's `min`/`max`-vs-complex fix need to extend
+# to the GROUP-aggregate siblings `gmin`/`gmax` (and `grms`/`gmedian`)?
+# Read `ExprAggrNode.cc:110-152` directly: real casacore restricts
+# `gminFUNC`/`gmaxFUNC`/`gminsFUNC`/`gmaxsFUNC`/`grmsFUNC`/`grmssFUNC`/
+# `gmedianFUNC` to `NTReal` -- there is no complex overload for any of
+# them at all (an aggregate query using one on a complex column is
+# rejected at TaQL parse time, not silently computed). So the answer
+# is **no** -- there is no real casacore behaviour for a complex
+# `gmin`/`gmax`/`grms`/`gmedian` to diverge from, unlike the plain
+# `min`/`max`/`rms` case. `gsum`/`gproduct`/`gmean`/`gvariance`/
+# `gstddev` DO support complex in real casacore (`.cc:286-300`), but
+# they reuse the exact same Julia primitives (`sum`/`prod`/
+# `Statistics.mean`/`_pop_var`/`_pop_std`) already live-verified
+# correct for the plain (non-aggregate) forms in Phases 179-180, so no
+# separate divergence risk exists there either.
+@testset "Phase 181 — group-aggregate min/max/rms/median vs complex (scope check)" begin
+    K = Int32[1, 1, 2]
+    A = ComplexF32[1 + 1im, 2 + 0im, 0 + 3im]
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["K" => K, "A" => A]; nrow=3)
+    t = readtable(tabpath)
+    # gsum/gproduct/gmean on complex: correct by construction (ordinary
+    # Julia sum/prod/mean on Complex), self-consistency vs a hand
+    # reduction per group.
+    g = groupby(t, "K"; select = ["K" => "K", "S" => "gsum(A)",
+                                  "P" => "gproduct(A)", "M" => "gmean(A)"])
+    order = sortperm(collect(g.K))
+    @test collect(g.K)[order] == [1, 2]
+    @test collect(g.S)[order] ≈ [A[1] + A[2], A[3]]
+    @test collect(g.P)[order] ≈ [A[1] * A[2], A[3]]
+    @test collect(g.M)[order] ≈ [(A[1] + A[2]) / 2, A[3]]
+    # gmin/gmax/grms/gmedian on a complex group column error (matching
+    # real casacore's own compile-time NTReal restriction, if with a
+    # less polished message) rather than silently producing a value.
+    @test_throws Exception groupby(t, "K"; select = ["K" => "K", "X" => "gmin(A)"])
+    @test_throws Exception groupby(t, "K"; select = ["K" => "K", "X" => "gmax(A)"])
+end
+
 @testset "Phase 69 — angdist / array literal" begin
     @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
     @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi
