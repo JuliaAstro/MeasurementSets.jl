@@ -4498,3 +4498,39 @@ Full standalone `test/taql_mscal_tests.jl` green (renders `_HAVE_TAQL`/
 casacore setup — every one of its 500+ assertions, including the new
 Phase 163 parser-unit and query cross-check tests, passes with no
 regressions).
+
+### Phase 164 — swept `derivedmscal`'s full registration table + `MSCorrParse.cc` directly; confirmed several existing findings with full certainty, no new bug
+
+Read `derivedmscal/DerivedMC/Register.cc`'s complete `register_derivedmscal()`
+function (every `UDFBase::registerUDF` call, not just the subset touched
+by Phases 77-163) and cross-checked it against this package's own
+`_MSCAL_FUNCS`/`_MSCAL_DIR_FUNCS`/`_MSSEL_FUNCS` name lists. No further
+naming mismatches beyond Phase 163's `UVWJ2000` found; confirmed the
+Phase 163 findings independently from the registration table itself
+(no bare `PA` registration or help text anywhere; the wavelength-scaled
+uvw family — `UVWWVL`/`UVWWVLS`/`UVWJ2000WVL(S)`/`UVWAPP(WVL(S))` — is
+real and genuinely unimplemented here).
+
+Also read `ms/MSSel/MSCorrParse.cc` directly (the file `mscal.corr()`
+actually calls into) to close out the Phase 148 "not independently
+confirmed live" note. Confirmed precisely WHY that live confirmation
+has never been possible anywhere: `UDFMSCal::makeCorr`/`makeFeed`
+(`derivedmscal/DerivedMC/UDFMSCal.cc`) are real, working C++ factory
+functions, but `Register.cc`'s `register_derivedmscal()` — the only
+place any `derivedmscal.*` name is ever wired to a factory — has no
+`registerUDF` call for either one, unlike every other selection type
+(`BASELINE`/`TIME`/`SPW`/`UVDIST`/`FIELD`/`ARRAY`/`SCAN`/`STATE`/`OBS`,
+all registered). This is a genuine, permanent dead-code path in
+upstream casacore itself, not an artifact of this environment's
+particular build — so the Phase 148 non-selectivity question about
+`MSCorrParse::selectCorrType`'s unfiltered `corrtype` argument is
+untestable against real casacore anywhere `Register.cc` is used
+unmodified, not just here. Recorded as an addendum to the existing
+Phase 148/152 comments in `src/taql/mscal.jl`; no behaviour change —
+this package's own read-only `mscal.corr()`/`mscal.feed()` already
+stand on their own correctness, independent of what real casacore's
+(apparently non-selective, and separately confirmed to have a real
+MS-mutation side effect via a `SELECTED_DATA` column — Phase 143) own
+implementation does.
+
+Comment-only change; no source/test behaviour affected.
