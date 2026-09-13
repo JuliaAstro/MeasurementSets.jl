@@ -4756,3 +4756,26 @@ persist function" sweep opened by Phases 167-169: `write_concattable`
 and `write_reftable` were the only two gaps, both now fixed.
 
 No source or test change. Standalone suite unaffected.
+
+### Phase 171 — found and fixed a real gap: `mscal.stokes()` gave a raw `MethodError` on a masked-array argument instead of a clear error
+
+**Real bug found, via direct reproduction** (continuing Phases 169-170's
+discipline of actually calling suspicious combinations, not just
+reading source). `mscal.stokes()` (Phase 78/109) predates the
+masked-array feature (Phase 60 — `DATA[boolexpr]` produces a
+`TQLMArray`, not a plain `AbstractMatrix`), and nobody had tried
+combining them: `mscal.stokes(DATA[FLAG], 'I')` fell through all three
+of `_stokes_convert`'s `AbstractMatrix{...}` methods and threw a raw,
+uninformative `MethodError` naming three unrelated candidate methods.
+
+Fixed with a dedicated `_stokes_convert(::StokesSetup, ::TQLMArray)`
+method (`src/taql/mscal.jl`) that raises a clear `ArgumentError`
+pointing at the workaround (convert first, then mask the result) rather
+than attempting to propagate a mask through the conversion — there is
+no unambiguous rule for that, since each output correlation is a linear
+combination of several inputs and masking one input doesn't obviously
+mask (or not mask) a given output. Live-verified: the masked call now
+errors clearly, the plain (unmasked) `mscal.stokes(DATA, 'I')` path is
+completely unaffected. New testset `test/taql_mscal_tests.jl`
+"mscal.stokes() vs a masked-array argument (Phase 171)" (2 assertions).
+Standalone mscal suite green (all 28 testsets, no regressions).
