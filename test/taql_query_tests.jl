@@ -1012,6 +1012,42 @@ end
     end
 end
 
+@testset "Phase 188 — missing shape() function" begin
+    # casacore's shape() (shapeFUNC, ExprFuncNodeArray.cc:1041-1053) --
+    # the per-axis extents of an array cell as an Int array, in the
+    # SAME order this package already stores/indexes arrays in
+    # (casacore's own default, non-C-order style) -- was entirely
+    # missing. Found by continuing the same TableParseFunc.cc
+    # function-name-table check that found Phases 185/186's gaps, now
+    # applied to the general "misc" function corner instead of
+    # running*/boxed*. Live-verified: shape(B) for a (3,4)-shaped cell
+    # gives [3, 4], matching Julia's own size(B) directly (no
+    # reversal); a scalar's shape is the empty Int array.
+    @test MSv2._tql_shape(reshape(1.0:12.0, 3, 4)) == [3, 4]
+    @test MSv2._tql_shape([1.0, 2.0, 3.0]) == [3]
+    @test MSv2._tql_shape(5.0) == Int[]
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    A2 = Float64.(reshape(1:12, 3, 4))
+    write_table(tabpath, "T", Pair{String,Any}["B" => [A2]]; nrow=1, tsm=[["B"]])
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = ["X" => "shape(B)"])
+    @test r.X[1] == [3, 4]
+end
+
+@testset "Phase 188 — shape(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    A2 = Float64.(reshape(1:12, 3, 4))
+    write_table(tabpath, "T", Pair{String,Any}["B" => [A2]]; nrow=1, tsm=[["B"]])
+    t = readtable(tabpath)
+    rdir = joinpath(mktempdir(), "r")
+    _taqlcmd("SELECT shape(B) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+    casa = column(readtable(rdir), "X")[1]
+    ours = query(t, "rownumber() == 1"; select = ["X" => "shape(B)"]).X[1]
+    @test casa == ours
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)

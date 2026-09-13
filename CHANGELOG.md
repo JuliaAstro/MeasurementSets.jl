@@ -5634,3 +5634,46 @@ capitalize()/sreverse() missing" (15 assertions) + its real-TaQL
 cross-check (9 assertions, covering both the whitespace corner case
 and the new functions). Standalone `taql_query_tests.jl` green in
 full.
+
+### Phase 188 — found a real missing function: `shape()`
+
+Continuing the same `TableParseFunc.cc` function-name-table check that
+found Phases 185-186's gaps, now applied to the general "misc"
+function corner instead of the `running*`/`boxed*` family: **`shape()`**
+(`shapeFUNC`, `ExprFuncNodeArray.cc:1041-1053`) — the per-axis extents
+of an array cell as an Int array — was entirely absent from TaQL-lite.
+Confirmed casacore's own non-C-order default style returns the axes in
+exactly the order this package already stores/indexes arrays in (the
+C-order-reversed form only applies under an explicit
+`USING STYLE PYTHON`-family selector, which TaQL-lite has no concept
+of at all — a non-issue). Live-verified: `shape(B)` for a `(3,4)`-shaped
+cell gives `[3, 4]`, matching Julia's own `size(B) == (3, 4)` directly,
+no reversal needed; a scalar's shape is the empty Int array. Fixed
+with `_tql_shape`.
+
+While at the same corner of the name table, found three more
+introspection-style functions this package doesn't (and likely won't
+soon) implement, each for a different, real reason:
+- **`regex()`/`pattern()`/`sqlpattern()`** — build a regex/glob/SQL
+  pattern object DYNAMICALLY from an arbitrary string expression (not
+  just the fixed literal `~ p/.../` grammar Phase 24 already supports),
+  usable in a subsequent `~`/`==` comparison. A real, meaningfully
+  different capability (`NAME ~ regex(PATTERN_COL)`, matching against a
+  computed/column pattern) — but properly supporting it needs a new
+  "compiled pattern" value type threaded through the comparison
+  operators, not a one-line function addition. Flagged for a dedicated
+  future phase, same treatment as the axis-collapse family (Phase 186).
+- **`isdefined()`/`isnull()`** — this package has no "null"/"undefined
+  cell" concept anywhere (confirmed by the existing `gcount` design
+  note from Phase 26), so these would be close to meaningless no-ops;
+  not worth the surface area without a real use case.
+- **`iscolumn()`/`iskeyword()`** — check table-level metadata by a name
+  string, not a per-row column value — architecturally different from
+  every other TaQL-lite function (which only ever sees
+  `cols[name][i]`, never the table object itself). Would need
+  table-level context threaded through the whole function-eval
+  machinery; a structural change, not a quick addition.
+
+New testsets "Phase 188 — missing shape() function" (4 assertions) +
+its real-TaQL cross-check (1 assertion). Standalone
+`taql_query_tests.jl` green in full.

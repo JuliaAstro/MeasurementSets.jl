@@ -48,6 +48,18 @@ _tql_avdev(x) = _red(y -> Statistics.mean(abs.(y .- Statistics.mean(y))))(x)
 _tql_nelem(x) = x isa TQLMArray ? count(!, x.mask) : x isa AbstractArray ? length(x) : 1
 _tql_ndim(x) = x isa TQLMArray ? ndims(x.data) : x isa AbstractArray ? ndims(x) : 0
 
+# `shape()` (`shapeFUNC`, `ExprFuncNodeArray.cc:1041-1053`) was entirely
+# missing -- returns the cell's per-axis extents as an Int array, in
+# the SAME axis order this package's arrays are already stored/indexed
+# in (casacore's own default, non-C-order style; the C-order-reversed
+# form only applies under an explicit `USING STYLE PYTHON`-family
+# TaQL style, out of scope -- TaQL-lite has no style selector at all).
+# Live-verified: `shape(B)` for a `(3,4)`-shaped cell gives `[3, 4]`,
+# matching Julia's own `size(B) == (3, 4)` with no reversal needed; a
+# scalar's shape is the empty Int array, matching `size(scalar) == ()`.
+_tql_shape(x) = x isa TQLMArray ? collect(Int, size(x.data)) :
+    x isa AbstractArray ? collect(Int, size(x)) : Int[]
+
 # casacore's `ltrim()`/`rtrim()` (`leadingWS`/`trailingWS` regexes,
 # `ExprFuncNode.cc:973-974`, `"^[ \\t]*"`/`"[ \\t]*\$"`) strip ONLY
 # space and tab -- NOT newline/carriage-return -- unlike `trim()`
@@ -622,7 +634,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "ntrue" => (_red(x -> count(identity, x)), 1:1),
     "nfalse" => (_red(x -> count(!, x)), 1:1),
     "nelements" => (_tql_nelem, 1:1), "count" => (_tql_nelem, 1:1),
-    "ndim" => (_tql_ndim, 1:1),
+    "ndim" => (_tql_ndim, 1:1), "shape" => (_tql_shape, 1:1),
     # NOTE (found during Phase 186, not implemented): casacore also has
     # a whole "s"-suffixed axis-collapse family (`sums`, `means`,
     # `mins`, `maxs`, `products`, `medians`, `variances`, `stddevs`,
