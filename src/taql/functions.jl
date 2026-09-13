@@ -249,12 +249,21 @@ end
 # name overlap with `gs*`'s "s"-suffixed per-element GROUP BY reductions
 # is coincidental, unrelated machinery.
 #
-#   running<X>(arr, hwidth)  -- a centred sliding window: output element
-#       i (per axis d) reduces arr[max(1,i-h[d]) : min(n[d],i+h[d])] --
-#       SAME shape as `arr` (shrinking half-windows at the edges).
+#   running<X>(arr, hwidth)  -- a centred sliding window, SAME shape as
+#       `arr`. Ported from casacore's own `slidingArrayMath`
+#       (`casa/Arrays/ArrayPartMath.tcc:1060-1104`, `fillEdge=true` --
+#       the only mode TaQL's 2-arg `running<X>()` ever exercises, live-
+#       verified against real casacore): output element i (per axis d)
+#       reduces the FULL `arr[i-h[d] : i+h[d]]` window ONLY where that
+#       whole window fits inside the array; every edge position within
+#       `h[d]` of a boundary (where no full window fits) is `zero(T)`,
+#       NOT a reduction over a truncated window -- casacore does not
+#       shrink the window at the edges, it leaves them unfilled.
 #   boxed<X>(arr, bwidth)    -- non-overlapping bins of size `bwidth`
 #       (per axis) -- SMALLER shape, `cld(n[d], b[d])` per axis (the
-#       trailing bin is partial if `bwidth` doesn't divide evenly).
+#       trailing bin genuinely IS a partial-window reduction if `bwidth`
+#       doesn't divide evenly -- confirmed against `boxedArrayMath`,
+#       `.tcc:1021-1053` -- no edge/fill concept here, unlike `running*`).
 #
 # `hwidth`/`bwidth` is a scalar (same width on every axis) or an array
 # literal (one width per axis, `ndims(arr)` elements). Masked-array
@@ -274,9 +283,12 @@ function _running_reduce(f, T::Type, arr::AbstractArray, hw)
     nd = ndims(arr)
     h = _tql_window_widths(hw, nd)
     sz = size(arr)
-    out = Array{T}(undef, sz)
-    for idx in CartesianIndices(arr)
-        rng = ntuple(d -> max(1, idx[d] - h[d]):min(sz[d], idx[d] + h[d]), nd)
+    out = zeros(T, sz)                    # edges stay `zero(T)` (fillEdge=true)
+    lo = ntuple(d -> h[d] + 1, nd)
+    hi = ntuple(d -> sz[d] - h[d], nd)
+    any(lo[d] > hi[d] for d in 1:nd) && return out     # no position has a full window
+    for idx in CartesianIndices(ntuple(d -> lo[d]:hi[d], nd))
+        rng = ntuple(d -> (idx[d] - h[d]):(idx[d] + h[d]), nd)
         out[idx] = f(vec(view(arr, rng...)))
     end
     out
@@ -295,8 +307,39 @@ function _boxed_reduce(f, T::Type, arr::AbstractArray, bw)
     out
 end
 
+# casacore's plain `median()` (`arrmedianFUNC` -> `casa/Arrays/
+# ArrayMath.tcc:1066-1107`, the default overload
+# `median(a) = median(a, false, a.nelements()<=100, false)`) has an
+# odd, size-dependent quirk Julia's `Statistics.median` does not: for
+# an EVEN-length array it averages the two middle order statistics
+# ONLY when the array has <=100 elements -- above that threshold it
+# returns just the LOWER of the two, no averaging at all. Live-verified
+# against real casacore: `median(1.0:128.0) == 64.0`, not `64.5` --
+# directly relevant to any wideband spectral-window array (128/256/
+# 3840-channel bands are common and both even and >100).
+function _tql_median(v)
+    s = sort!(vec(collect(v)))
+    n = length(s)
+    n == 0 && throw(ArgumentError("TaQL-lite: median of an empty array"))
+    n2 = (n - 1) ÷ 2 + 1                       # 1-based lower-middle order statistic
+    (iseven(n) && n <= 100) ? (s[n2] + s[n2+1]) / 2 : s[n2]
+end
+
+# casacore's GENERIC `fractile()` (`.tcc:1138-1161`) -- what `gmedian()`
+# (`TableExprGroupFractileDouble(this, 0.5)`) and `running`/`boxed`
+# median (`slidingMedians`/`boxedMedians`, `MArrayMath.h:1168-1184`,
+# hardcoded `takeEvenMean=False`, no TaQL argument to change it) both
+# actually go through -- NEVER averages, regardless of size (a
+# genuinely different convention from plain `median()` above). Live-
+# verified: `gmedian` of the 4-row group `[1,2,3,4]` is `2.0` in real
+# casacore, not `2.5`.
+_tql_fractile(v, frac::Real) = (s = sort!(vec(collect(v))); n = length(s);
+    n == 0 ? throw(ArgumentError("TaQL-lite: fractile of an empty array")) :
+    s[Int(floor((n - 1) * frac + 0.01)) + 1])
+_tql_median_lo(v) = _tql_fractile(v, 0.5)
+
 _running_avg(x, w) = (a = _require_array(x); _running_reduce(Statistics.mean, Float64, a, w))
-_running_med(x, w) = (a = _require_array(x); _running_reduce(Statistics.median, Float64, a, w))
+_running_med(x, w) = (a = _require_array(x); _running_reduce(_tql_median_lo, Float64, a, w))
 _running_min(x, w) = (a = _require_array(x); _running_reduce(minimum, eltype(a), a, w))
 _running_max(x, w) = (a = _require_array(x); _running_reduce(maximum, eltype(a), a, w))
 _running_var(x, w) = (a = _require_array(x);
@@ -306,7 +349,7 @@ _running_std(x, w) = (a = _require_array(x);
 _running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, w))
 
 _boxed_avg(x, w) = (a = _require_array(x); _boxed_reduce(Statistics.mean, Float64, a, w))
-_boxed_med(x, w) = (a = _require_array(x); _boxed_reduce(Statistics.median, Float64, a, w))
+_boxed_med(x, w) = (a = _require_array(x); _boxed_reduce(_tql_median_lo, Float64, a, w))
 _boxed_min(x, w) = (a = _require_array(x); _boxed_reduce(minimum, eltype(a), a, w))
 _boxed_max(x, w) = (a = _require_array(x); _boxed_reduce(maximum, eltype(a), a, w))
 _boxed_var(x, w) = (a = _require_array(x);
@@ -351,7 +394,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- array-cell reductions ---
     "sum" => (_red(sum), 1:1), "product" => (_red(prod), 1:1),
     "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
-    "median" => (_red(Statistics.median), 1:1),
+    "median" => (_red(_tql_median), 1:1),
     "variance" => (_red(x -> Statistics.var(x; corrected=false)), 1:1),
     "stddev" => (_red(x -> Statistics.std(x; corrected=false)), 1:1),
     "rms" => (_tql_rms, 1:1),
@@ -440,7 +483,7 @@ const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
     "gcount" => (length, :scalar),
     "gsum" => (sum, :scalar), "gproduct" => (prod, :scalar),
     "gmean" => (Statistics.mean, :scalar), "gavg" => (Statistics.mean, :scalar),
-    "gmedian" => (Statistics.median, :scalar),
+    "gmedian" => (_tql_median_lo, :scalar),
     "gmin" => (minimum, :scalar), "gmax" => (maximum, :scalar),
     "gvariance" => (_pop_var, :scalar), "gsamplevariance" => (Statistics.var, :scalar),
     "gstddev" => (_pop_std, :scalar), "gsamplestddev" => (Statistics.std, :scalar),

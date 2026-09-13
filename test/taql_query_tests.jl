@@ -686,12 +686,23 @@ end
 end
 
 @testset "Phase 108 — running*/boxed* sliding-window array reductions" begin
-    # unit: hand-computed 1-D and 2-D
+    # unit: hand-computed 1-D and 2-D.
+    #
+    # Phase 182 correction: `running*`'s edge positions -- those within
+    # `hwidth` of a boundary, where the FULL (not truncated) window
+    # doesn't fit -- are `zero(T)`, matching real casacore's
+    # `slidingArrayMath(..., fillEdge=true)` (the only mode TaQL's
+    # 2-arg `running<X>()` ever uses; live-verified). Earlier phases had
+    # this shrinking the window at the edges instead (a real, confirmed
+    # divergence, fixed in Phase 182) -- `boxed*` is unaffected (its
+    # trailing partial bin is a genuine reduction, no edge/fill concept
+    # in casacore's `boxedArrayMath` at all).
     a = [1.0, 2.0, 3.0, 4.0, 5.0]
-    @test MSv2._running_avg(a, 1) == [1.5, 2.0, 3.0, 4.0, 4.5]     # shrinking edge windows
-    @test MSv2._running_min(a, 1) == [1.0, 1.0, 2.0, 3.0, 4.0]
-    @test MSv2._running_max(a, 1) == [2.0, 3.0, 4.0, 5.0, 5.0]
-    @test MSv2._running_sum(a, 2) == [1+2+3, 1+2+3+4, 1+2+3+4+5, 2+3+4+5, 3+4+5]
+    @test MSv2._running_avg(a, 1) == [0.0, 2.0, 3.0, 4.0, 0.0]
+    @test MSv2._running_min(a, 1) == [0.0, 1.0, 2.0, 3.0, 0.0]
+    @test MSv2._running_max(a, 1) == [0.0, 3.0, 4.0, 5.0, 0.0]
+    @test MSv2._running_sum(a, 2) == [0.0, 0.0, 1+2+3+4+5, 0.0, 0.0]   # only the centre has a full 5-wide window
+    @test MSv2._running_sum(a, 0) == a                                 # hwidth 0 -> every position is its own (full) window
     @test MSv2._boxed_avg(a, 2) == [1.5, 3.5, 5.0]                 # non-overlapping bins, partial last
     @test MSv2._boxed_sum(a, 2) == [3.0, 7.0, 5.0]
 
@@ -699,12 +710,23 @@ end
     @test MSv2._boxed_avg(A, 2) == [3.0 4.5; 7.5 9.0]
     @test MSv2._boxed_avg(A, [1, 3]) == reshape([2.0, 5.0, 8.0], 3, 1)   # per-axis widths
     @test MSv2._boxed_min(A, 3) == reshape([1.0], 1, 1)
-    @test MSv2._running_avg(A, 1)[2, 2] ≈ Statistics.mean(A)             # centre cell sees the whole 3x3
+    @test MSv2._running_avg(A, 1)[2, 2] ≈ Statistics.mean(A)             # only the centre cell has a full 3x3 window
+    @test MSv2._running_avg(A, 1)[1, 1] == 0.0                          # every other cell is an edge -> 0
 
-    # variance/stddev/median agree with a direct Statistics call on the same window
+    # variance/stddev/median agree with a direct Statistics call on the
+    # same window, at an interior position; edges are 0
     @test MSv2._running_var(a, 1)[3] ≈ Statistics.var([2.0, 3.0, 4.0]; corrected = false)
-    @test MSv2._running_std(a, 1)[1] ≈ Statistics.std([1.0, 2.0]; corrected = false)
-    @test MSv2._boxed_med(a, 2) == [1.5, 3.5, 5.0]
+    @test MSv2._running_var(a, 1)[1] == 0.0
+    @test MSv2._running_std(a, 1)[2] ≈ Statistics.std([1.0, 2.0, 3.0]; corrected = false)
+    @test MSv2._running_std(a, 1)[1] == 0.0
+    # Phase 183: casacore's `slidingMedians`/`boxedMedians` NEVER average
+    # the two middle elements of an even-length window (hardcoded
+    # `takeEvenMean=false`, no TaQL argument to change it) -- a
+    # genuinely different convention from plain `median()`'s
+    # size-dependent rule below. `boxedmedian([1,2],[3,4],[5])` picks
+    # the LOWER-middle element of each bin: `[1.0, 3.0, 5.0]`, not the
+    # averaged `[1.5, 3.5, 5.0]`.
+    @test MSv2._boxed_med(a, 2) == [1.0, 3.0, 5.0]
 
     # errors
     @test_throws ArgumentError MSv2._require_array(5.0)
@@ -728,6 +750,85 @@ end
     end
     # a non-array argument errors clearly at eval time
     @test_throws ArgumentError query(tv, "runningaverage(V[1], 1)[1] > 0")
+end
+
+@testset "Phase 182 — running*() edge semantics, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:12)
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    for hw in (0, 1, 2, 3, 5), fn in ("runningsum", "runningmean", "runningmin",
+                                       "runningmax", "runningmedian",
+                                       "runningvariance", "runningstddev")
+        expr = "$fn(A,[$hw])"
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa ≈ ours atol = 1e-9
+    end
+    # 2-D
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    A2 = Float64.(reshape(1:12, 3, 4))
+    write_table(tabpath2, "T2", Pair{String,Any}["B" => [A2]]; nrow=1, tsm=[["B"]])
+    t2 = readtable(tabpath2)
+    rdir2 = joinpath(mktempdir(), "r2")
+    _taqlcmd("SELECT runningsum(B,[1,1]) AS X FROM \$1 GIVING '$rdir2' AS PLAIN", tabpath2)
+    casa2 = column(readtable(rdir2), "X")[1]
+    ours2 = query(t2, "rownumber() == 1"; select = ["X" => "runningsum(B,[1,1])"]).X[1]
+    @test casa2 ≈ ours2
+end
+
+# Phase 183: `median()`'s size-dependent averaging quirk, and
+# `gmedian()`'s "never average" fractile convention -- found while
+# reading casacore's `ArrayMath.tcc` right after Phase 182's own
+# array-math source dive. `median(a)` (`arrmedianFUNC`'s default
+# overload) only averages the two middle order statistics of an
+# EVEN-length array when `nelements() <= 100`; above that it silently
+# returns just the lower one. `gmedian()` (`TableExprGroupFractileDouble
+# (this, 0.5)`) goes through the GENERIC `fractile()` instead, which
+# NEVER averages regardless of size -- a real, easily-triggered
+# divergence for any even-sized GROUP BY group, not just a >100-element
+# array.
+@testset "Phase 183 — median()/gmedian() vs casacore's actual (non-Statistics.median) conventions" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    @test f("median")(collect(1.0:128.0)) == 64.0          # even, >100 -> no averaging
+    @test f("median")(collect(1.0:50.0)) == 25.5            # even, <=100 -> averaged
+    @test f("median")(collect(1.0:100.0)) == 50.5           # even, ==100 (boundary) -> averaged
+    @test f("median")(collect(1.0:102.0)) == 51.0           # even, >100 -> no averaging
+    @test f("median")(collect(1.0:101.0)) == 51.0           # odd -> always the exact middle
+    @test MSv2._tql_median_lo([1.0, 2.0, 3.0, 4.0]) == 2.0  # gmedian/running/boxed: never averages
+    @test MSv2._tql_median_lo([1.0, 2.0, 3.0]) == 2.0       # odd -> the exact middle either way
+end
+
+@testset "Phase 183 — median()/gmedian(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    for n in (50, 100, 102, 128, 4, 7)
+        arr = collect(1.0:n)
+        dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+        write_table(tabpath, "T", Pair{String,Any}["A" => [arr]]; nrow=1, tsm=[["A"]])
+        t = readtable(tabpath)
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT median(A) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        @test casa == MSv2._TQL_FUNCS["median"][1](arr)
+    end
+
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    K = Int32[1, 1, 1, 1, 2, 2]
+    X = Float64[1, 2, 3, 4, 5, 6]
+    write_table(tabpath2, "T2", Pair{String,Any}["K" => K, "X" => X]; nrow=6)
+    tc2 = CCT.Table(tabpath2)
+    rdir2 = joinpath(mktempdir(), "r2")
+    _taqlcmd("SELECT K, gmedian(X) AS M FROM \$1 GROUP BY K GIVING '$rdir2'", tc2)
+    m2 = readtable(rdir2)
+    casa2 = Dict(column(m2, "K")[i] => column(m2, "M")[i] for i in 1:nrow(m2))
+    t2 = readtable(tabpath2)
+    g2 = groupby(t2, "K"; select = ["K" => "K", "M" => "gmedian(X)"])
+    for i in 1:length(g2.K)
+        @test casa2[g2.K[i]] == g2.M[i]
+    end
 end
 
 @testset "TaQL-lite parser — aggregate unit" begin
@@ -779,7 +880,10 @@ end
     @test collect(r.MX) == [maximum(X[grp[k]]) for k in uk]
     @test collect(r.MN) == [minimum(X[grp[k]]) for k in uk]
     @test collect(r.AV) ≈ [sum(X[grp[k]]) / length(grp[k]) for k in uk]
-    @test collect(r.MED) ≈ [Statistics.median(X[grp[k]]) for k in uk]
+    # Phase 183: `gmedian()` goes through casacore's generic `fractile()`
+    # (never averages, unlike `Statistics.median`) -- every group here
+    # happens to have an even size, so this is a real, exercised case.
+    @test collect(r.MED) == [MSv2._tql_median_lo(X[grp[k]]) for k in uk]
     @test collect(r.SD) ≈ [Statistics.std(X[grp[k]]; corrected=false) for k in uk]
 
     # gcount(col) == gcount() (no null concept)
@@ -2730,6 +2834,44 @@ end
         ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
         @test casa ≈ ours atol = 1e-4
     end
+end
+
+# Phase 181: does Phase 179's `min`/`max`-vs-complex fix need to extend
+# to the GROUP-aggregate siblings `gmin`/`gmax` (and `grms`/`gmedian`)?
+# Read `ExprAggrNode.cc:110-152` directly: real casacore restricts
+# `gminFUNC`/`gmaxFUNC`/`gminsFUNC`/`gmaxsFUNC`/`grmsFUNC`/`grmssFUNC`/
+# `gmedianFUNC` to `NTReal` -- there is no complex overload for any of
+# them at all (an aggregate query using one on a complex column is
+# rejected at TaQL parse time, not silently computed). So the answer
+# is **no** -- there is no real casacore behaviour for a complex
+# `gmin`/`gmax`/`grms`/`gmedian` to diverge from, unlike the plain
+# `min`/`max`/`rms` case. `gsum`/`gproduct`/`gmean`/`gvariance`/
+# `gstddev` DO support complex in real casacore (`.cc:286-300`), but
+# they reuse the exact same Julia primitives (`sum`/`prod`/
+# `Statistics.mean`/`_pop_var`/`_pop_std`) already live-verified
+# correct for the plain (non-aggregate) forms in Phases 179-180, so no
+# separate divergence risk exists there either.
+@testset "Phase 181 — group-aggregate min/max/rms/median vs complex (scope check)" begin
+    K = Int32[1, 1, 2]
+    A = ComplexF32[1 + 1im, 2 + 0im, 0 + 3im]
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["K" => K, "A" => A]; nrow=3)
+    t = readtable(tabpath)
+    # gsum/gproduct/gmean on complex: correct by construction (ordinary
+    # Julia sum/prod/mean on Complex), self-consistency vs a hand
+    # reduction per group.
+    g = groupby(t, "K"; select = ["K" => "K", "S" => "gsum(A)",
+                                  "P" => "gproduct(A)", "M" => "gmean(A)"])
+    order = sortperm(collect(g.K))
+    @test collect(g.K)[order] == [1, 2]
+    @test collect(g.S)[order] ≈ [A[1] + A[2], A[3]]
+    @test collect(g.P)[order] ≈ [A[1] * A[2], A[3]]
+    @test collect(g.M)[order] ≈ [(A[1] + A[2]) / 2, A[3]]
+    # gmin/gmax/grms/gmedian on a complex group column error (matching
+    # real casacore's own compile-time NTReal restriction, if with a
+    # less polished message) rather than silently producing a value.
+    @test_throws Exception groupby(t, "K"; select = ["K" => "K", "X" => "gmin(A)"])
+    @test_throws Exception groupby(t, "K"; select = ["K" => "K", "X" => "gmax(A)"])
 end
 
 @testset "Phase 69 — angdist / array literal" begin

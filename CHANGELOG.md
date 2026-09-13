@@ -5166,3 +5166,157 @@ cell" (4 assertions) plus "Phase 180 — variance()/stddev()/mean(),
 real-TaQL cross-check" (3 assertions, `_HAVE_TAQL`-gated). Neither
 function had any prior complex-argument test coverage. Standalone
 `taql_query_tests.jl` green in full.
+
+### Phase 181 — checked whether Phase 179's `min()`/`max()`-vs-complex fix needs to extend to the group-aggregate `gmin()`/`gmax()`; confirmed it doesn't
+
+Natural follow-up question after Phase 179: `_TQL_AGGRS`'s
+`gmin`/`gmax`/`gmins`/`gmaxs` use plain Julia `minimum`/`maximum` —
+the exact same shape of implementation that turned out wrong for
+complex scalars in the plain `min`/`max` functions. Worth checking
+whether the group-aggregate versions have the same gap.
+
+Read `TableExprGroupFuncBase::makeGroupAggrFunc`'s dtype declarations
+(`tables/TaQL/ExprAggrNode.cc:110-152`) directly: real casacore
+restricts `gminFUNC`/`gmaxFUNC`/`gminsFUNC`/`gmaxsFUNC`/`grmsFUNC`/
+`grmssFUNC`/`gmedianFUNC` to `NTReal` — there is **no complex overload
+for any of them at all** (`checkDT(dtypeOper, NTReal, ...)`, so a
+GROUP BY query using one of these on a complex column is rejected at
+TaQL *parse time*, not silently computed with some behaviour to
+match). So, unlike the plain `min`/`max`/`rms` case (where casacore
+DOES have a defined complex behaviour this package was missing),
+**there is no real casacore behaviour here for a complex `gmin`/
+`gmax`/`grms`/`gmedian` to diverge from** — Phase 179's fix correctly
+does not need to extend to these siblings. This package's own raw
+`MethodError` on a complex `gmin`/`gmax` is less polished than real
+casacore's `TableInvExpr`, but is not a "wrong value" bug.
+
+Separately confirmed (same source read): `gsum`/`gproduct`/`gmean`/
+`gvariance`/`gstddev` DO support complex in real casacore
+(`.cc:286-300`, `NTComplex` cases exist for all five) — but each
+reuses the exact same Julia primitive (`sum`/`prod`/`Statistics.mean`/
+`_pop_var`/`_pop_std`) already live-verified correct for the plain,
+non-aggregate forms in Phases 179-180, so there was no separate
+divergence risk to check there either; confirmed via a
+self-consistency test against a hand-computed per-group reduction
+(a direct real-TaQL GROUP BY oracle comparison hit an unrelated
+`tableCommand` parsing quirk in this environment — "A GROUPBY key
+cannot have data type dcomplex" even with the complex column only
+ever referenced inside an aggregate — not pursued further since the
+NTComplex-support fact is already unambiguous from source, and the
+underlying Julia primitives are independently already proven correct).
+
+New testset "Phase 181 — group-aggregate min/max/rms/median vs complex
+(scope check)" (6 assertions): `gsum`/`gproduct`/`gmean` on a complex
+column match a hand-computed per-group reduction; `gmin`/`gmax`
+on a complex column raise an error rather than silently misbehaving.
+No production code changed — this phase closes an open question, not
+a bug. Standalone `taql_query_tests.jl` green in full.
+
+### Phase 182 — found and fixed a significant real bug: `running*()` computed a completely different thing at every array-edge position than real casacore
+
+**A significant real bug found**, in a fresh area (Phase 108's
+sliding-window array functions, self-described at the time as having
+"no oracle" and only ever hand-computed) rather than a further sweep
+of the already-closed-out `functions.jl` complex-value corner.
+
+`running<X>(arr, hwidth)` was documented and implemented as a
+*shrinking-window* filter: at every position, including near an array
+boundary, it reduced whatever portion of the `[i-h, i+h]` window
+actually fit within the array. Read casacore's real implementation
+directly — `slidingArrayMath` (`casa/Arrays/ArrayPartMath.tcc:
+1060-1104`) — and found this is not what real casacore does at all.
+TaQL's 2-argument `running<X>(arr, shape)` always calls the C++
+function with its default `fillEdge=true` (confirmed: `checkNumOfArg
+(2, 2, nodes)` in `ExprFuncNode.cc` — TaQL exposes no 3rd argument to
+select the alternative mode), under which:
+- the OUTPUT has the SAME shape as the input (matching what this
+  package already did), but
+- an edge position — anywhere within `hwidth` of a boundary, where
+  the FULL `2·hwidth+1`-wide window does not entirely fit — is set to
+  **`zero(T)`**, not a reduction over a truncated window, and
+- only genuinely interior positions (where the full window fits) get
+  a real computed value.
+
+Live-verified against real casacore via `tableCommand`:
+`runningsum([1..8], [1])` gives `[0, 6, 9, 12, 15, 18, 21, 0]` — the
+first and last elements are exactly `0`, not `1+2=3` / `7+8=15` as
+this package's shrinking-window implementation produced. This affects
+**every** `running*` function (`runningsum`/`runningmean`/`runningmin`/
+`runningmax`/`runningmedian`/`runningvariance`/`runningstddev`) at
+every array boundary — for a typical spectral smoothing use
+(`runningmean(DATA, [k])` over a channel axis), that's `2k` channels
+at each edge of every spectrum silently computed as a value they
+should never have received, rather than the zero real casacore
+reports there. `boxed*` (the non-overlapping-bin sibling) was
+independently checked against `boxedArrayMath`
+(`.tcc:1021-1053`/`fillBoxedShape`, `casa/Arrays/ArrayPartMath.cc:
+29-48`) and confirmed **already correct** — its trailing partial bin
+genuinely is a partial-window reduction in real casacore too (no
+edge/fill concept there at all), matching this package unchanged.
+
+Fixed `_running_reduce` (`src/taql/functions.jl`) to compute only the
+genuinely-interior positions (`zeros(T, size(arr))` pre-filled, then
+only the range where the full window fits gets overwritten). Live-
+verified against real casacore across 5 half-widths × 7 functions on a
+12-element 1-D array plus a 2-D case — every value matches exactly,
+including the `hwidth=0` (every position is its own full window, so
+the whole array is "interior") and `hwidth ≥ n/2` (no position has a
+full window, entire output is zero) boundary cases.
+
+Corrected the stale hand-computed assertions in the existing "Phase
+108" testset (several previously asserted the old, wrong
+shrinking-window values) and added a new testset "Phase 182 —
+running*() edge semantics, real-TaQL cross-check" (36 assertions,
+`_HAVE_TAQL`-gated, covering all 7 functions across 5 widths plus a
+2-D case). Standalone `taql_query_tests.jl` green in full.
+
+### Phase 183 — found and fixed two more real bugs: `median()`'s size-dependent averaging quirk, and `gmedian()`'s "never average" convention
+
+**Two more real bugs found**, reading `casa/Arrays/ArrayMath.tcc`
+directly right after Phase 182's own array-math source dive — the
+`median()` family turns out to have not one but two distinct,
+non-obvious conventions this package's uniform `Statistics.median`
+usage completely missed.
+
+- **Plain `median()`** (`arrmedianFUNC`'s default overload,
+  `median(a) = median(a, false, a.nelements()<=100, false)`,
+  `.tcc:1066-1107`): for an EVEN-length array, casacore averages the
+  two middle order statistics **only when the array has ≤100
+  elements**. Above that threshold it silently returns just the lower
+  of the two — no averaging at all. Live-verified:
+  `median(1.0:128.0) == 64.0` in real casacore, not `64.5`. This
+  directly affects any wideband spectral-window array — 128/256/
+  3840-channel bands are common, and both even and well over 100.
+- **`gmedian()`** (the GROUP BY aggregate) does not go through
+  `median()` at all — it's built on `TableExprGroupFractileDouble
+  (this, 0.5)`, i.e. casacore's GENERIC `fractile()`
+  (`.tcc:1138-1161`), which **never averages, regardless of size** —
+  a third, distinct convention from both `Statistics.median` and
+  plain `median()`'s size-gated rule. Live-verified: `gmedian` of the
+  4-row group `[1,2,3,4]` is `2.0` in real casacore, not `2.5`. Unlike
+  the >100-element trigger for plain `median()`, this one is
+  routinely hit — GROUP BY groups are very often small and even-sized.
+  The same investigation also confirmed `runningmedian`/`boxedmedian`
+  (Phase 182's own sliding-window fix) share `gmedian`'s "never
+  average" convention (`slidingMedians`/`boxedMedians` hardcode
+  `takeEvenMean=false`, with no TaQL argument to change it) — so
+  Phase 182's fix, while correct on the edge-fill semantics, still had
+  the wrong even-window tie-break for `runningmedian`/`boxedmedian`
+  specifically.
+
+Fixed with two new helpers (`src/taql/functions.jl`): `_tql_median`
+(plain `median()`'s size-dependent rule) and `_tql_fractile`/
+`_tql_median_lo` (the always-no-average convention shared by
+`gmedian`/`runningmedian`/`boxedmedian`). Live-verified against real
+casacore across the `<=100` boundary (50/100/102/128 elements) for
+plain `median()`, and against a real GROUP BY for `gmedian()`.
+
+Corrected two stale test assertions that had baked in
+`Statistics.median`'s always-average behavior (`_boxed_med`'s existing
+Phase-108 unit test, and the `groupby — correctness` testset's
+`gmedian` assertion — every group there happens to be even-sized, so
+it was silently exercising the exact bug). New testset "Phase 183 —
+median()/gmedian() vs casacore's actual (non-Statistics.median)
+conventions" (7 assertions) plus "Phase 183 — median()/gmedian(),
+real-TaQL cross-check" (8 assertions, `_HAVE_TAQL`-gated). Standalone
+`taql_query_tests.jl` green in full.
