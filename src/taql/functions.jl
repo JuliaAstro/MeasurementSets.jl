@@ -45,7 +45,11 @@ _tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y))(x))
 # table once one sibling turned out to be absent. Live-verified:
 # `avdev(1:8) == 2.0`, matching a hand computation exactly.
 _tql_avdev(x) = _red(y -> Statistics.mean(abs.(y .- Statistics.mean(y))))(x)
-_tql_nelem(x) = x isa TQLMArray ? count(!, x.mask) : x isa AbstractArray ? length(x) : 1
+# `nelements()`/`count()` on a masked array is mask-AGNOSTIC in real
+# casacore -- live-verified: `nelements(A[A>3])` for an 8-element `A`
+# is `8`, not the unmasked count -- so this deliberately ignores
+# `x.mask` (Phase 190 continuation).
+_tql_nelem(x) = x isa TQLMArray ? length(x.data) : x isa AbstractArray ? length(x) : 1
 _tql_ndim(x) = x isa TQLMArray ? ndims(x.data) : x isa AbstractArray ? ndims(x) : 0
 
 # `shape()` (`shapeFUNC`, `ExprFuncNodeArray.cc:1041-1053`) was entirely
@@ -128,6 +132,46 @@ end
 _tql_arraymask(x::TQLMArray) = x.mask
 _tql_arraymask(x::AbstractArray) = falses(size(x))
 _tql_arraymask(_) = false
+
+# Phase 190 continuation -- masked-array natives (casacore
+# `TEFMASKneg`/`TEFMASKrepl`, ExprFuncNodeArray.cc:210-272), live-verified
+# against real TaQL. `negatemask(arr)` flips the mask; an unmasked input
+# (no TQLMArray wrapper -- casacore's `!arr.hasMask()`) becomes FULLY
+# masked, not an error. `replacemasked`/`replaceunmasked` replace the
+# elements where the mask equals `True`/`False` respectively with a
+# scalar or same-shape array `operand2`, preserving the original mask;
+# on an unmasked input, `replaceunmasked` replaces every element (an
+# unmasked array is "all unmasked") while `replacemasked` is a no-op
+# (no element is "masked"). `nullarray()` (a genuinely absent-array
+# sentinel, `MArray<Bool>()`) has no clean mapping onto this package's
+# always-a-concrete-array `TQLMArray` design -- deliberately deferred,
+# same as the rest of Phase 190's own "remaining names" list.
+_tql_negatemask(x::TQLMArray) = TQLMArray(x.data, .!x.mask)
+_tql_negatemask(x::AbstractArray) = TQLMArray(x, trues(size(x)))
+
+function _tql_replmasked(x::TQLMArray, val2, maskvalue::Bool)
+    data = copy(x.data)
+    valv = val2 isa AbstractArray ? val2 : nothing
+    valv === nothing || size(valv) == size(data) || throw(ArgumentError(
+        "TaQL-lite: array shapes mismatch in replacemasked/replaceunmasked"))
+    for i in eachindex(data)
+        if x.mask[i] == maskvalue
+            data[i] = valv === nothing ? val2 : valv[i]
+        end
+    end
+    return TQLMArray(data, copy(x.mask))
+end
+function _tql_replmasked(x::AbstractArray, val2, maskvalue::Bool)
+    maskvalue && return x                     # replacemasked on an unmasked array: no-op
+    if val2 isa AbstractArray
+        size(val2) == size(x) || throw(ArgumentError(
+            "TaQL-lite: array shapes mismatch in replaceunmasked"))
+        return copy(val2)
+    end
+    return fill(val2, size(x))
+end
+_tql_replacemasked(x, val2) = _tql_replmasked(x, val2, true)
+_tql_replaceunmasked(x, val2) = _tql_replmasked(x, val2, false)
 
 # --- date/time (Phase 69) --------------------------------------------
 # Every TaQL-lite date value is an MJD `Float64` (days) -- so `_bcast`,
@@ -763,6 +807,9 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
                      BitArray(m) : fill(Bool(m), size(d))), 2:2),
     "arraydata" => (_unwrap_marray, 1:1),
     "arraymask" => (_tql_arraymask, 1:1), "mask" => (_tql_arraymask, 1:1),
+    "negatemask" => (_tql_negatemask, 1:1),
+    "replacemasked" => (_tql_replacemasked, 2:2),
+    "replaceunmasked" => (_tql_replaceunmasked, 2:2),
     # --- string ---
     "strlength" => (length, 1:1), "len" => (length, 1:1),
     "upcase" => (uppercase, 1:1), "upper" => (uppercase, 1:1), "toupper" => (uppercase, 1:1),

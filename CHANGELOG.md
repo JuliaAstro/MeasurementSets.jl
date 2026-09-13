@@ -5823,3 +5823,62 @@ null-cell concept or table-level context), `substr`/`substring`/
 `gaggr`/`ghist`/`ghistogram`/`growid`/`gstack` (the Phase 26 non-goal),
 and the "s"-suffixed axis-collapse family (Phase 186's flagged larger
 feature).
+
+### Phase 191 — masked-array natives (`negatemask`/`replacemasked`/
+### `replaceunmasked`), and a real, significant bug found while
+### live-verifying them: `V[boolexpr]`'s mask polarity was backwards
+
+Continuing Phase 190's own "Remaining names" list at the user's
+direction: `negatemask(arr)` / `replacemasked(arr, val)` /
+`replaceunmasked(arr, val)` — casacore's `TEFMASKneg`/`TEFMASKrepl`
+(`ExprFuncNodeArray.cc:210-272`). `negatemask` flips a masked array's
+mask (an unmasked input becomes FULLY masked, not an error —
+casacore's own `!arr.hasMask()` branch). `replacemasked`/
+`replaceunmasked` replace the elements where the mask is `True`/`False`
+respectively with a scalar or same-shape array, preserving the
+original mask; on an unmasked input, `replaceunmasked` replaces
+EVERYTHING (an unmasked array is "all unmasked") while `replacemasked`
+is a no-op. `nullarray()` — a genuinely absent-array sentinel
+(`MArray<Bool>()`) with no clean mapping onto this package's
+always-a-concrete-array `TQLMArray` design — stays deliberately
+deferred, per Phase 190's own note.
+
+**While live-verifying these three against real casacore, found the
+actual bug was upstream of them, in `V[boolexpr]` itself (`_tql_do_index`,
+`src/taql/ast.jl`, dating to Phase 60): this package computed the
+masked array's mask as `!boolexpr`, but real casacore's mask is
+`boolexpr` DIRECTLY — no negation.** Live-verified beyond doubt:
+`arraymask(A[A>2])` for `A=1:5` is `[F,F,T,T,T]` in real casacore
+(masked exactly where the condition holds), so `mean(A[A>2]) == 1.5`
+(the mean of `[1,2]`, the elements where the condition is FALSE) — not
+`4.0` (the mean of `[3,4,5]`) as this package's inverted mask produced.
+This is not a cosmetic detail: it silently inverted the result of
+every `V[cond]` masked-selection expression since Phase 60 — `mean`/
+`sum`/`min`/`max`/`variance`/`stddev`/`median`/`any`/`all`/`ntrue`/
+`nfalse`/`arraymask`/`arraydata` over a masked selection, the masked
+`g*`/`gs*` group aggregates (Phase 62), and the faithful `SET (D, M) =
+V[cond]` update (Phase 59) all inherited the inversion. `marray(d, m)`
+(mask given explicitly, never through `V[cond]`) was unaffected and
+already correct. Fixed by dropping the negation:
+`TQLMArray(collect(arr), BitArray(collect(m)))` instead of
+`BitArray(.!m)`.
+
+**A second, smaller bug found in the same live-verification pass**:
+`nelements()`/`count()` on a masked array is mask-AGNOSTIC in real
+casacore — `nelements(A[A>3])` on an 8-element `A` is `8`, the total
+array size, not the unmasked-element count this package's `_tql_nelem`
+computed (`count(!, x.mask)`). Fixed to `length(x.data)`.
+
+Both fixes verified together against real casacore across `mean`/
+`sum`/`min`/`max`/`variance`/`stddev`/`median`/`any`/`all`/`ntrue`/
+`nfalse`/`nelements`/`count`/`arraymask` on a masked selection — every
+one now matches exactly. Updated the stale hand-computed expectations
+in the pre-existing "TaQL-lite — masked arrays (TQLMArray) unit",
+"TaQL-lite query — masked-array expressions", "groupby — masked g*
+aggregates" (`test/taql_query_tests.jl`), and the `SELECT ... AS (val,
+mask)` / `(col, maskcol)` update-pair tests (`test/taql_command_tests.jl`)
+that had baked in the old, backwards convention. New testset "Phase 190
+continuation — masked-array natives: negatemask/replacemasked/
+replaceunmasked" (29 assertions, unit + real-TaQL cross-check).
+Standalone `taql_query_tests.jl` and `taql_command_tests.jl` both green
+in full, end to end, with no other regressions.

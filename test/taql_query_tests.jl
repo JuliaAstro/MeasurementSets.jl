@@ -553,10 +553,13 @@ end
     ma2 = MSv2.TQLMArray(Float64[10 20; 30 40], Bool[true false; false false])
     b2 = MSv2._bcast(*, ma, ma2)
     @test b2.mask == (m .| ma2.mask)          # [true true; true false]
-    # reductions skip masked, nelements counts unmasked
+    # reductions skip masked; nelements is mask-agnostic (live-verified
+    # against real casacore, Phase 190 continuation: `nelements`/`count`
+    # on a masked array give the array's total size, not the unmasked
+    # count)
     @test MSv2._red(sum)(ma) == 5.0
     @test MSv2._red(Statistics.mean)(ma) == 2.5
-    @test MSv2._tql_nelem(ma) == 2
+    @test MSv2._tql_nelem(ma) == 4
     @test MSv2._tql_ndim(ma) == 2
     # shape mismatch errors
     @test_throws ArgumentError MSv2.TQLMArray(d, Bool[true, false])
@@ -571,15 +574,20 @@ end
         nrow=4, tsm=[["V"], ["F"]])
     t = readtable(dir)
 
-    # V[F] is a masked selection: reductions use only the F-true elements
+    # `V[F]` masks OUT the elements where `F` is true (live-verified
+    # against real casacore, Phase 190 continuation: `arraymask(A[A>2])`
+    # for `A=1:5` is `[F,F,T,T,T]` -- masked exactly where the condition
+    # holds), so a reduction over `V[F]` uses the F-FALSE elements; and
+    # `nelements`/`count` on a masked array is mask-agnostic (the total
+    # element count).
     r = query(t; select=["K" => "K", "mv" => "mean(V[F])", "sv" => "sum(V[F])",
                          "n" => "nelements(V[F])"]) do row
         true
     end
     for i in 1:4
-        @test collect(r.mv)[i] ≈ Statistics.mean(V[i][F[i]])
-        @test collect(r.sv)[i] == sum(V[i][F[i]])
-        @test collect(r.n)[i] == count(F[i])
+        @test collect(r.mv)[i] ≈ Statistics.mean(V[i][.!F[i]])
+        @test collect(r.sv)[i] == sum(V[i][.!F[i]])
+        @test collect(r.n)[i] == length(V[i])
     end
 
     # arraydata / arraymask
@@ -587,7 +595,7 @@ end
         true
     end
     @test collect(r2.d)[1] == V[1]
-    @test collect(r2.m)[1] == .!F[1]
+    @test collect(r2.m)[1] == F[1]
 
     # marray(data, mask): mask is taken as-is (true = masked out)
     r3 = query(t; select=["x" => "sum(marray(V, F))"]) do row
@@ -599,11 +607,11 @@ end
     r4 = query(t; select=["s" => "sum(V[V > 4.0])"]) do row
         true
     end
-    @test collect(r4.s)[1] == sum(V[1][V[1].>4.0])
+    @test collect(r4.s)[1] == sum(V[1][.!(V[1].>4.0)])
 
     # groupby: masked reduction inside a g* aggregate
     g = groupby(t, "K"; select=["K" => :K, "mm" => "gmax(mean(V[F]))"], orderby=["K"])
-    @test collect(g.mm) == [Statistics.mean(V[i][F[i]]) for i in 1:4]
+    @test collect(g.mm) == [Statistics.mean(V[i][.!F[i]]) for i in 1:4]
 
     # a computed select column of masked arrays persists as plain data
     dst = joinpath(mktempdir(), "MO")
@@ -624,7 +632,7 @@ end
     r6 = query(t, "K >= 1"; select=["K" => "K", ("D", "M") => "V[V > 4.0]"])
     @test columnnames(r6) == ["K", "D", "M"]
     @test collect(r6.D)[1] == V[2]
-    @test collect(r6.M)[1] == .!(V[2] .> 4.0)
+    @test collect(r6.M)[1] == (V[2] .> 4.0)
 
     # non-masked RHS -> mask column is the non-finite flag
     r7 = query(t; select=[("D", "M") => "1.0 / (V - 5.0)"]) do row
@@ -1268,6 +1276,67 @@ end
     end
 end
 
+@testset "Phase 190 continuation — masked-array natives: negatemask/replacemasked/replaceunmasked" begin
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:5)
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+
+    m = MSv2.TQLMArray(a, BitArray([false, false, true, true, true]))   # A[A>2]
+    @test MSv2._tql_negatemask(m).data == a
+    @test MSv2._tql_negatemask(m).mask == .!m.mask
+
+    r1 = MSv2._tql_negatemask(a)      # a plain (unmasked) array -> fully masked
+    @test r1.data == a
+    @test all(r1.mask)
+
+    rm1 = MSv2._tql_replacemasked(m, 0.0)
+    @test rm1.data == [1.0, 2.0, 0.0, 0.0, 0.0]
+    @test rm1.mask == m.mask
+    ru1 = MSv2._tql_replaceunmasked(m, -1.0)
+    @test ru1.data == [-1.0, -1.0, 3.0, 4.0, 5.0]
+    @test ru1.mask == m.mask
+
+    rm2 = MSv2._tql_replacemasked(m, a .* 0)   # array operand
+    @test rm2.data == [1.0, 2.0, 0.0, 0.0, 0.0]
+
+    # unmasked input: replaceunmasked replaces everything, replacemasked is a no-op
+    @test MSv2._tql_replaceunmasked(a, 9.0) == fill(9.0, 5)
+    @test MSv2._tql_replacemasked(a, 9.0) == a
+
+    @test_throws ArgumentError MSv2._tql_replacemasked(m, [1.0, 2.0])   # shape mismatch
+
+    q = query(t, "rownumber() == 1"; select = [
+        "nd" => "arraydata(negatemask(A[A>2]))", "nm" => "arraymask(negatemask(A[A>2]))",
+        "rd" => "arraydata(replacemasked(A[A>2], 0.0))",
+        "rmk" => "arraymask(replacemasked(A[A>2], 0.0))",
+        "ud" => "arraydata(replaceunmasked(A[A>2], -1.0))",
+        "umk" => "arraymask(replaceunmasked(A[A>2], -1.0))"])
+    @test q.nd[1] == a
+    @test q.nm[1] == .!m.mask
+    @test q.rd[1] == [1.0, 2.0, 0.0, 0.0, 0.0]
+    @test q.rmk[1] == m.mask
+    @test q.ud[1] == [-1.0, -1.0, 3.0, 4.0, 5.0]
+    @test q.umk[1] == m.mask
+
+    if _HAVE_TAQL
+        for expr in ("negatemask(A[A>2])", "arraymask(negatemask(A[A>2]))",
+                     "arraydata(replacemasked(A[A>2], 0.0))",
+                     "arraymask(replacemasked(A[A>2], 0.0))",
+                     "arraydata(replaceunmasked(A[A>2], -1.0))",
+                     "arraymask(replaceunmasked(A[A>2], -1.0))",
+                     "arraydata(replacemasked(A[A>2], A*0))",
+                     "arraymask(negatemask(A))", "arraydata(negatemask(A))",
+                     "replaceunmasked(A, 9.0)", "replacemasked(A, 9.0)")
+            rdir = joinpath(mktempdir(), "r")
+            _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+            casa = column(readtable(rdir), "X")[1]
+            ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+            @test all(casa .== ours)
+        end
+    end
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)
@@ -1438,9 +1507,13 @@ end
                 "gsm" => "gmeans(V[!F])",
                 "gnt" => "gsum(ntrue(F))"])
     for (row, k) in enumerate(Int32[0, 1])
+        # `V[!F]` masks OUT elements where `!F` holds (i.e. where `F` is
+        # false) -- live-verified real-casacore mask polarity, Phase 190
+        # continuation -- so the valid/unmasked elements are where `F`
+        # is TRUE.
         pooled = Float64[]
         for i in grp[k]
-            append!(pooled, V[i][.!F[i]])
+            append!(pooled, V[i][F[i]])
         end
         @test collect(g.gm)[row] ≈ Statistics.mean(pooled)
         @test collect(g.gs)[row] == sum(pooled)
@@ -1451,7 +1524,7 @@ end
 
         want = Matrix{Float64}(undef, 2, 2)
         for p in CartesianIndices((2, 2))
-            vs = [V[i][p] for i in grp[k] if !F[i][p]]
+            vs = [V[i][p] for i in grp[k] if F[i][p]]
             want[p] = isempty(vs) ? NaN : Statistics.mean(vs)
         end
         @test isequal(collect(g.gsm)[row], want)

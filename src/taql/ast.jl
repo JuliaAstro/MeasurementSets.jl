@@ -237,10 +237,17 @@ end
 
 function _tql_do_index(arr, axes, ev)
     # a single Bool-array subscript is a masked selection, not an index:
-    # `V[boolexpr]` -> the whole cell with `!boolexpr` masked out.
+    # `V[boolexpr]` -> the whole cell masked wherever `boolexpr` holds
+    # (mask = the condition itself, NOT its negation -- live-verified
+    # against real casacore: `arraymask(A[A>2])` for A=1:5 is
+    # `[F,F,T,T,T]`, i.e. masked exactly where `A>2` is true, so
+    # `mean(A[A>2])` gives `mean([1,2])==1.5` (the elements where the
+    # condition is FALSE survive) -- a Phase 190-continuation fix; an
+    # earlier phase had this backwards, negating the condition instead
+    # of using it directly).
     if length(axes) == 1
         m = _as_mask(axes, ev)
-        m !== nothing && return TQLMArray(collect(arr), BitArray(.!m))
+        m !== nothing && return TQLMArray(collect(arr), BitArray(collect(m)))
     end
     return arr[_tql_index_tuple(arr, axes, ev)...]
 end
