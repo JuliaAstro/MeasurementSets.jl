@@ -348,8 +348,10 @@ end
     @test e2.op === (-) && e2.lhs isa MSv2.TQLArith && e2.lhs.op === (-)
 
     # ** is right-assoc: A ** B ** C  ->  A ** (B ** C)
+    # (op is `_tql_pow`, not raw `^`, since Phase 184 -- matches
+    # casacore's NaN-not-throw pow() semantics for a negative base)
     e3 = parse("A ** B ** C == 0").lhs
-    @test e3.op === (^) && e3.rhs isa MSv2.TQLArith && e3.rhs.op === (^)
+    @test e3.op === MSv2._tql_pow && e3.rhs isa MSv2.TQLArith && e3.rhs.op === MSv2._tql_pow
 
     # unary minus on an expression
     e4 = parse("-(A + B) < 0")
@@ -408,8 +410,10 @@ end
     @test parse("A + 1 & 2 == 0").lhs.op === (&)             # + binds tighter than &
     @test parse("A + 1 & 2 == 0").lhs.lhs isa MSv2.TQLArith  #   -> (A+1) & 2
 
-    # `**` is still exponentiation; `^` is no longer a "use **" error
-    @test parse("A ** 2 == 4").lhs.op === (^)
+    # `**` is still exponentiation (via `_tql_pow`, Phase 184 -- matches
+    # casacore's NaN-not-throw semantics for a negative base); `^` is
+    # no longer a "use **" error
+    @test parse("A ** 2 == 4").lhs.op === MSv2._tql_pow
     @test parse("A ^ 2 == 4").lhs.op === xor
 
     # `~` before a p/m/f literal is still a pattern match, not bitnot
@@ -2872,6 +2876,278 @@ end
     # less polished message) rather than silently producing a value.
     @test_throws Exception groupby(t, "K"; select = ["K" => "K", "X" => "gmin(A)"])
     @test_throws Exception groupby(t, "K"; select = ["K" => "K", "X" => "gmax(A)"])
+end
+
+@testset "Phase 184 — round() vs casacore's round-half-away-from-zero" begin
+    # Julia's `round` (ties-to-even) silently disagrees with casacore's
+    # `roundFUNC` (ties-away-from-zero) at every exact .5 boundary with
+    # an even integer part.
+    @test MSv2._tql_round(2.5) == 3.0
+    @test MSv2._tql_round(-2.5) == -3.0
+    @test MSv2._tql_round(0.5) == 1.0
+    @test MSv2._tql_round(-0.5) == -1.0
+    @test MSv2._tql_round(1.5) == 2.0
+    @test MSv2._tql_round(-1.5) == -2.0
+    @test MSv2._tql_round(2.4) == 2.0
+    @test MSv2._tql_round(-2.4) == -2.0
+    @test MSv2._tql_round(2.6) == 3.0
+    @test MSv2._tql_round(-2.6) == -3.0
+    @test MSv2._tql_round(0.0) == 0.0
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    A = Float64[2.5, -2.5, 0.5, -0.5, 1.5, -1.5, 3.5, -3.5, 2.4, -2.4, 2.6, -2.6]
+    write_table(tabpath, "T", Pair{String,Any}["A" => A]; nrow=length(A))
+    t = readtable(tabpath)
+    expected = [3.0, -3.0, 1.0, -1.0, 2.0, -2.0, 4.0, -4.0, 2.0, -2.0, 3.0, -3.0]
+    got = [query(t, "rownumber() == $i"; select = ["X" => "round(A)"]).X[1] for i in 1:length(A)]
+    @test got == expected
+end
+
+@testset "Phase 184 — round(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    A = Float64[2.5, -2.5, 0.5, -0.5, 1.5, -1.5, 3.5, -3.5, 2.4, -2.4, 2.6, -2.6, 0.0]
+    write_table(tabpath, "T", Pair{String,Any}["A" => A]; nrow=length(A))
+    t = readtable(tabpath)
+    for v in A
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT round($(v)) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => "round($(v))"]).X[1]
+        @test casa == ours
+    end
+    # also through a column reference, not just a literal
+    rdir2 = joinpath(mktempdir(), "r2")
+    _taqlcmd("SELECT round(A) AS X FROM \$1 GIVING '$rdir2' AS PLAIN", tabpath)
+    casacol = column(readtable(rdir2), "X")[:]
+    ourscol = [query(t, "rownumber() == $i"; select = ["X" => "round(A)"]).X[1] for i in 1:length(A)]
+    @test casacol == ourscol
+end
+
+@testset "Phase 184 — pow()/`**` vs a negative base + non-integer exponent" begin
+    # casacore's pow()/`**` (the same runtime std::pow) return NaN for a
+    # negative base with a fractional exponent; Julia's `^` throws a
+    # DomainError in exactly that case -- a real crash risk for any
+    # column that can go negative (e.g. `pow(UVW[1], 0.5)`).
+    @test isnan(MSv2._tql_pow(-2.0, 0.5))
+    @test isnan(MSv2._tql_pow(-8.0, 1.0 / 3.0))
+    @test MSv2._tql_pow(-1.0, 2.0) == 1.0          # integer-valued exponent: no NaN
+    @test MSv2._tql_pow(-1.0, 3.0) == -1.0
+    @test MSv2._tql_pow(0.0, -1.0) == Inf
+    @test MSv2._tql_pow(0.0, 0.0) == 1.0
+    @test MSv2._tql_pow(2.0, 10.0) == 1024.0
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [-2.0, -1.0, 2.0]]; nrow=3)
+    t = readtable(tabpath)
+    @test isnan(query(t, "rownumber() == 1"; select = ["X" => "pow(A, 0.5)"]).X[1])
+    @test isnan(query(t, "rownumber() == 1"; select = ["X" => "A ** 0.5"]).X[1])
+    @test query(t, "rownumber() == 3"; select = ["X" => "A ** 0.5"]).X[1] ≈ sqrt(2.0)
+    # a query using pow()/`**` on a negative-valued column no longer crashes
+    r = query(t, "pow(A, 2.0) > 3.0")
+    @test collect([-2.0, -1.0, 2.0][r.rows]) == [-2.0, 2.0]
+end
+
+@testset "Phase 184 — pow()/`**`, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1.0]]; nrow=1)
+    for (b, e) in [(-2.0, 0.5), (-8.0, 1.0 / 3.0), (0.0, -1.0), (0.0, 0.0),
+                   (-1.0, 2.0), (2.0, 10.0)]
+        # the pow(b,e) function-call form is unambiguous (each argument
+        # parses independently, so a negative `b` genuinely means a
+        # negative base).
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT pow($b,$e) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = MSv2._tql_pow(b, e)
+        @test (isnan(casa) && isnan(ours)) || casa == ours
+    end
+    # `A ** e` with a NEGATIVE-VALUED COLUMN (not a leading `-` literal
+    # in front of `**`, which real TaQL -- and, matching it, this
+    # package's own parser -- parses as unary-minus-of-the-whole-power,
+    # e.g. `-2.0 ** 0.5` == `-(2.0 ** 0.5)`, NOT `pow(-2.0, 0.5)`; both
+    # engines agree on that precedence, so a column reference is the
+    # only unambiguous way to cross-check `**` on a genuinely negative
+    # base).
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    A = Float64[-2.0, -8.0, 0.0, 0.0, -1.0, 2.0]
+    write_table(tabpath2, "T", Pair{String,Any}["A" => A]; nrow=length(A))
+    t2 = readtable(tabpath2)
+    for (i, e) in enumerate([0.5, 1.0 / 3.0, -1.0, 0.0, 2.0, 10.0])
+        rdir2 = joinpath(mktempdir(), "r2")
+        _taqlcmd("SELECT A ** $e AS X FROM \$1 GIVING '$rdir2' AS PLAIN", tabpath2)
+        casa2 = column(readtable(rdir2), "X")[i]
+        ours2 = query(t2, "rownumber() == $i"; select = ["X" => "A ** $e"]).X[1]
+        @test (isnan(casa2) && isnan(ours2)) || casa2 == ours2
+    end
+    # confirm the shared precedence directly: `-2.0 ** 0.5` is
+    # `-(2.0**0.5)` in both engines.
+    rdir3 = joinpath(mktempdir(), "r3")
+    _taqlcmd("SELECT -2.0 ** 0.5 AS X FROM \$1 GIVING '$rdir3' AS PLAIN", tabpath)
+    casa3 = column(readtable(rdir3), "X")[1]
+    ours3 = query(readtable(tabpath), "rownumber() == 1"; select = ["X" => "-2.0 ** 0.5"]).X[1]
+    @test casa3 ≈ ours3 ≈ -sqrt(2.0)
+end
+
+@testset "Phase 184 — sqrt()/log()/log10()/asin()/acos() vs out-of-domain real args" begin
+    # the same "raw C++ std:: call, NaN not throw" shape as pow() above,
+    # found by sweeping every other unary math function for it once
+    # pow() turned out wrong.
+    @test isnan(MSv2._tql_sqrt(-4.0))
+    @test MSv2._tql_sqrt(4.0) == 2.0
+    @test isnan(MSv2._tql_log(-1.0))
+    @test MSv2._tql_log(1.0) == 0.0
+    @test isnan(MSv2._tql_log10(-1.0))
+    @test MSv2._tql_log10(100.0) == 2.0
+    @test isnan(MSv2._tql_asin(2.0))
+    @test isnan(MSv2._tql_asin(-4.0))
+    @test MSv2._tql_asin(-1.0) ≈ -pi / 2
+    @test isnan(MSv2._tql_acos(2.0))
+    @test MSv2._tql_acos(-1.0) ≈ pi
+    # a Complex argument is unaffected (never throws in Julia either)
+    @test MSv2._tql_sqrt(-4.0 + 0im) ≈ 2im
+    @test MSv2._tql_log(-1.0 + 0im) ≈ im * pi
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [2.0, -1.0, -4.0, 0.5]]; nrow=4)
+    t = readtable(tabpath)
+    for fn in ("sqrt", "log", "log10", "asin", "acos")
+        for i in 1:4
+            @test !isnothing(query(t, "rownumber() == $i"; select = ["X" => "$fn(A)"]).X[1])
+        end
+    end
+    # a query using one of these on a negative-valued column no longer crashes
+    r = query(t, "isnan(sqrt(A))")
+    @test collect([2.0, -1.0, -4.0, 0.5][r.rows]) == [-1.0, -4.0]
+end
+
+@testset "Phase 184 — sign() vs NaN" begin
+    # casacore's sign() is a manual if(val>0)/if(val<0)/else-0 -- NaN
+    # falls through both to 0, not NaN (Julia's own `sign(NaN) ==
+    # NaN`). Found while sweeping the surrounding functions once the
+    # sqrt/log/asin/acos fixes above made a downstream NaN more likely.
+    @test MSv2._tql_sign(NaN) == 0.0
+    @test MSv2._tql_sign(2.0) == 1.0
+    @test MSv2._tql_sign(-2.0) == -1.0
+    @test MSv2._tql_sign(0.0) == 0.0
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [-1.0]]; nrow=1)
+    t = readtable(tabpath)
+    @test query(t, "rownumber() == 1"; select = ["X" => "sign(sqrt(A))"]).X[1] == 0.0
+end
+
+@testset "Phase 184 — sign(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [-1.0]]; nrow=1)
+    t = readtable(tabpath)
+    rdir = joinpath(mktempdir(), "r")
+    _taqlcmd("SELECT sign(sqrt(A)) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+    casa = column(readtable(rdir), "X")[1]
+    ours = query(t, "rownumber() == 1"; select = ["X" => "sign(sqrt(A))"]).X[1]
+    @test casa == ours == 0.0
+end
+
+@testset "Phase 184 — int()/integer() saturate instead of throwing" begin
+    # casacore's int()/integer() is a raw C++ Int64(double) cast --
+    # NaN/out-of-range SATURATES rather than raising; Julia's own
+    # `trunc(Int, ...)` throws an InexactError in all three cases.
+    # Specifically triggered by the sqrt/log/asin/acos fixes above:
+    # int(sqrt(-1.0)) now flows a real NaN into int(), a combination
+    # that used to be unreachable (the old sqrt would already throw).
+    @test MSv2._tql_int(NaN) == 0
+    @test MSv2._tql_int(Inf) == typemax(Int64)
+    @test MSv2._tql_int(-Inf) == typemin(Int64)
+    @test MSv2._tql_int(1e18) == 1_000_000_000_000_000_000
+    @test MSv2._tql_int(2.9) == 2
+    @test MSv2._tql_int(-2.9) == -2
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [-1.0]]; nrow=1)
+    t = readtable(tabpath)
+    @test query(t, "rownumber() == 1"; select = ["X" => "int(sqrt(A))"]).X[1] == 0
+    @test query(t, "rownumber() == 1"; select = ["X" => "integer(1.0/0.0)"]).X[1] == typemax(Int64)
+end
+
+@testset "Phase 184 — int()/integer(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [-1.0]]; nrow=1)
+    t = readtable(tabpath)
+    for expr in ("int(sqrt(A))", "int(1.0/0.0)", "int(-1.0/0.0)", "int(0.0/0.0)",
+                 "int(1e18)", "integer(2.9)", "integer(-2.9)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa == ours
+    end
+end
+
+@testset "Phase 184 — isfinite() vs a mixed finite/non-finite complex value" begin
+    # casacore's isFinite(Complex) is `isFinite(re) || isFinite(im)`
+    # (OR, arguably a bug in casacore itself but real) -- Julia's own
+    # `isfinite(::Complex)` is AND, exactly backwards for a mixed
+    # value. isnan/isinf on Complex already agree (both OR in both
+    # languages) -- only isfinite needed a fix.
+    @test MSv2._tql_isfinite(complex(NaN, 5.0)) == true
+    @test MSv2._tql_isfinite(complex(5.0, NaN)) == true
+    @test MSv2._tql_isfinite(complex(NaN, NaN)) == false
+    @test MSv2._tql_isfinite(complex(Inf, 5.0)) == true
+    @test MSv2._tql_isfinite(complex(5.0, 5.0)) == true
+    @test MSv2._tql_isfinite(5.0) == true
+    @test MSv2._tql_isfinite(NaN) == false
+    # real casacore isnan/isinf on Complex are unaffected -- confirm
+    # this package's plain isnan/isinf already match (no fix needed).
+    @test isnan(complex(NaN, 5.0)) == true
+    @test isinf(complex(Inf, 5.0)) == true
+
+    # TaQL-lite has no `complex(re,im)` constructor function (a real
+    # casacore function this package doesn't yet expose -- a separate,
+    # larger gap, not this phase's bug-fixing scope); exercise the
+    # mixed value through a genuine complex COLUMN instead.
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => ComplexF64[NaN + 5.0im]]; nrow=1)
+    t = readtable(tabpath)
+    @test query(t, "rownumber() == 1"; select = ["X" => "isfinite(A)"]).X[1] == true
+end
+
+@testset "Phase 184 — isfinite(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    A = ComplexF64[NaN + 5.0im, 5.0 + NaN * im, 5.0 + 5.0im, Inf + 5.0im]
+    write_table(tabpath, "T", Pair{String,Any}["A" => A]; nrow=length(A))
+    t = readtable(tabpath)
+    for fn in ("isfinite", "isnan", "isinf")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $fn(A) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casacol = column(readtable(rdir), "X")[:]
+        ourscol = [query(t, "rownumber() == $i"; select = ["X" => "$fn(A)"]).X[1] for i in 1:length(A)]
+        @test casacol == ourscol
+    end
+end
+
+@testset "Phase 184 — sqrt()/log()/log10()/asin()/acos(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    A = Float64[2.0, -1.0, -4.0, 0.5]
+    write_table(tabpath, "T", Pair{String,Any}["A" => A]; nrow=length(A))
+    t = readtable(tabpath)
+    for fn in ("sqrt", "log", "log10", "asin", "acos")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $fn(A) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casacol = column(readtable(rdir), "X")[:]
+        ourscol = [query(t, "rownumber() == $i"; select = ["X" => "$fn(A)"]).X[1] for i in 1:length(A)]
+        for i in 1:length(A)
+            # in-domain values may differ by 1 ULP from casacore's own
+            # libm (`asin(0.5)`/`acos(0.5)` do, live-verified) -- this
+            # is an ordinary cross-library floating-point variance, not
+            # a logic bug, so tolerate it with `≈` rather than `==`.
+            @test (isnan(casacol[i]) && isnan(ourscol[i])) || casacol[i] ≈ ourscol[i]
+        end
+    end
 end
 
 @testset "Phase 69 — angdist / array literal" begin

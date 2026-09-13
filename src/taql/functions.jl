@@ -338,6 +338,106 @@ _tql_fractile(v, frac::Real) = (s = sort!(vec(collect(v))); n = length(s);
     s[Int(floor((n - 1) * frac + 0.01)) + 1])
 _tql_median_lo(v) = _tql_fractile(v, 0.5)
 
+# casacore's `round()` (`roundFUNC`, `ExprFuncNode.cc:737-742`) is
+# round-HALF-AWAY-FROM-ZERO (`val<0 ? ceil(val-0.5) : floor(val+0.5)`),
+# NOT Julia's default `round` (ties-to-even/banker's rounding) -- a
+# real, silent divergence at every exact `.5` boundary with an even
+# integer part. Live-verified against real casacore:
+# `round(2.5) == 3.0` (Julia's `round(2.5) == 2.0`), `round(0.5) ==
+# 1.0` (Julia's `round(0.5) == 0.0`); non-tie values (`2.4`, `2.6`)
+# already agreed, which is why this went unnoticed until directly
+# checked against the source.
+_tql_round(x::Real) = x < 0 ? ceil(x - 0.5) : floor(x + 0.5)
+
+# casacore's `pow(x,y)` (`powFUNC`, `ExprFuncNode.cc:655-657`) is a
+# direct call to C's `std::pow`, which returns NaN for a negative base
+# with a non-integer exponent rather than raising -- Julia's `^` for
+# two reals THROWS a `DomainError` in exactly that case ("Exponentiation
+# yielding a complex result requires a complex argument"). A real,
+# live-verified divergence: `pow(-2.0, 0.5)` is `NaN` in real casacore,
+# and would crash a query in this package before this fix (any column
+# that can go negative -- e.g. `pow(UVW[1], 0.5)` -- is a realistic
+# trigger). An integer-valued exponent (even as a Float, e.g. `2.0`)
+# does NOT throw in Julia either (`(-1.0)^2.0 == 1.0`), matching
+# casacore, so only the genuinely-fractional-exponent case needs a
+# guard.
+_tql_pow(x::Real, y::Real) = (xf = float(x); yf = float(y);
+    xf < 0 && !isinteger(yf) ? NaN : xf^yf)
+
+# The exact same "raw C++ std:: call, no domain guard, returns NaN"
+# shape as `pow` above -- found by sweeping every other unary math
+# function `ExprFuncNode.cc:sqrtFUNC/logFUNC/log10FUNC/asinFUNC/
+# acosFUNC` call for the identical pattern once `pow` turned out wrong.
+# `sqrtFUNC`/`logFUNC`/`log10FUNC` (`.cc:668-670,653-654`) are a bare
+# `sqrt`/`log`/`log10` on a `Double` (out-of-domain -> NaN in C++, a
+# `DomainError` in Julia's own `sqrt`/`log`/`log10` for a negative
+# `Real`); `asinFUNC`/`acosFUNC` (`.cc:713-716`) are a bare `asin`/
+# `acos` (out-of-`[-1,1]` -> NaN in C++, a `DomainError` in Julia's own
+# `asin`/`acos` for a `Real`). Live-verified against real casacore:
+# `sqrt(-4.0)`/`log(-1.0)`/`log10(-1.0)`/`asin(2.0)`/`acos(2.0)` are
+# all `NaN`, not an error -- exactly the same real-column-can-go-
+# negative crash risk `pow` had (`sqrt(WEIGHT - threshold)`,
+# `asin(UVW[1] / baseline)`, …). A `Complex` argument is unaffected --
+# Julia's own `Complex` `sqrt`/`log`/`log10`/`asin`/`acos` already never
+# throw (they return the analytic-continuation branch, matching C++'s
+# `std::complex` overloads) -- so only the `Real` method needs a guard.
+_tql_sqrt(x::Real) = x < 0 ? NaN : sqrt(x)
+_tql_sqrt(x) = sqrt(x)
+_tql_log(x::Real) = x < 0 ? NaN : log(x)
+_tql_log(x) = log(x)
+_tql_log10(x::Real) = x < 0 ? NaN : log10(x)
+_tql_log10(x) = log10(x)
+_tql_asin(x::Real) = abs(x) > 1 ? NaN : asin(x)
+_tql_asin(x) = asin(x)
+_tql_acos(x::Real) = abs(x) > 1 ? NaN : acos(x)
+_tql_acos(x) = acos(x)
+
+# casacore's `sign()` (`signFUNC`, `ExprFuncNode.cc:727-735`) is a
+# manual `if(val>0) 1; if(val<0) -1; else 0` -- unlike Julia's own
+# `sign`, a NaN input falls through BOTH comparisons (neither is true
+# for NaN) to the `else 0` branch, so casacore's `sign(NaN) == 0.0`,
+# not NaN. Live-verified: `sign(sqrt(-1.0)) == 0.0` in real casacore.
+# Found while sweeping the surrounding functions for the same
+# out-of-domain-argument shape as `pow`/`sqrt`/`log`/`asin`/`acos`
+# above -- directly relevant now that those fixes let more NaNs flow
+# into a downstream `sign()` call than before.
+_tql_sign(x::Real) = isnan(x) ? zero(float(x)) : sign(x)
+_tql_sign(x) = sign(x)
+
+# casacore's `int()`/`integer()` (`intFUNC`, `ExprFuncNode.cc:552-553`,
+# reached via `getInt`'s `argDataType_p == NTDouble` branch) is a raw
+# C++ `Int64(double)` cast -- a NaN/out-of-range argument SATURATES
+# rather than raising, live-verified against real casacore:
+# `int(0.0/0.0) == 0`, `int(1.0/0.0) == typemax(Int64)`,
+# `int(-1.0/0.0) == typemin(Int64)`. Julia's `trunc(Int, ...)` instead
+# THROWS an `InexactError` for all three -- the exact same crash-risk
+# shape as the other fixes above, and specifically triggered by them:
+# `int(sqrt(-1.0))` now flows a `NaN` (Phase 184's own `_tql_sqrt` fix)
+# straight into `int()`, which used to be an unreachable combination
+# (the old `_tql_sqrt`-less `sqrt` would have already thrown first).
+const _TQL_INT64_MAXF = Float64(typemax(Int64))
+const _TQL_INT64_MINF = Float64(typemin(Int64))
+_tql_int(x::Real) = isnan(x) ? Int64(0) :
+    x >= _TQL_INT64_MAXF ? typemax(Int64) :
+    x <= _TQL_INT64_MINF ? typemin(Int64) :
+    trunc(Int64, x)
+
+# casacore's `isFinite(Complex)`/`isFinite(DComplex)`
+# (`casa/BasicSL/Complex.cc:123-129`) is
+# `isFinite(re) || isFinite(im)` -- an OR, not the logically-expected
+# AND ("finite" should mean BOTH parts finite; this looks like a bug
+# in casacore itself, but it's real, reachable via TaQL's `isfinite()`,
+# and live-verified: `isfinite(complex(0.0/0.0, 5.0)) == true` in real
+# casacore). Julia's own `isfinite(::Complex)` uses AND -- exactly
+# backwards from casacore for a mixed finite/non-finite value. Found
+# while checking `isnan`/`isinf` for the same Complex-argument shape
+# once `isfinite` turned out different: `isNaN`/`isInf` on `Complex`
+# (`.cc:76-105`) are BOTH already `||` in casacore, and Julia's own
+# `isnan`/`isinf` on `Complex` already agree (also `||`) -- so only
+# `isfinite` needed a fix, not all three.
+_tql_isfinite(x::Complex) = isfinite(real(x)) || isfinite(imag(x))
+_tql_isfinite(x) = isfinite(x)
+
 _running_avg(x, w) = (a = _require_array(x); _running_reduce(Statistics.mean, Float64, a, w))
 _running_med(x, w) = (a = _require_array(x); _running_reduce(_tql_median_lo, Float64, a, w))
 _running_min(x, w) = (a = _require_array(x); _running_reduce(minimum, eltype(a), a, w))
@@ -372,24 +472,31 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # abs2/magnitude-squared function -- a genuinely different real
     # casacore function this package's `sqr`/`square` were wrongly
     # aliased to.
-    "sqrt" => (_ew(sqrt), 1:1), "square" => (_ew(x -> x^2), 1:1), "sqr" => (_ew(x -> x^2), 1:1),
+    "sqrt" => (_ew(_tql_sqrt), 1:1), "square" => (_ew(x -> x^2), 1:1), "sqr" => (_ew(x -> x^2), 1:1),
     "cube" => (_ew(x -> x^3), 1:1),
-    "exp" => (_ew(exp), 1:1), "log" => (_ew(log), 1:1), "ln" => (_ew(log), 1:1),
-    "log10" => (_ew(log10), 1:1),
+    "exp" => (_ew(exp), 1:1), "log" => (_ew(_tql_log), 1:1), "ln" => (_ew(_tql_log), 1:1),
+    "log10" => (_ew(_tql_log10), 1:1),
     "sin" => (_ew(sin), 1:1), "cos" => (_ew(cos), 1:1), "tan" => (_ew(tan), 1:1),
-    "asin" => (_ew(asin), 1:1), "acos" => (_ew(acos), 1:1), "atan" => (_ew(atan), 1:1),
+    "asin" => (_ew(_tql_asin), 1:1), "acos" => (_ew(_tql_acos), 1:1), "atan" => (_ew(atan), 1:1),
     "sinh" => (_ew(sinh), 1:1), "cosh" => (_ew(cosh), 1:1), "tanh" => (_ew(tanh), 1:1),
-    "sign" => (_ew(sign), 1:1), "floor" => (_ew(floor), 1:1), "ceil" => (_ew(ceil), 1:1),
-    "round" => (_ew(round), 1:1), "int" => (_ew(x -> trunc(Int, x)), 1:1),
-    "integer" => (_ew(x -> trunc(Int, x)), 1:1),
+    "sign" => (_ew(_tql_sign), 1:1), "floor" => (_ew(floor), 1:1), "ceil" => (_ew(ceil), 1:1),
+    "round" => (_ew(_tql_round), 1:1), "int" => (_ew(_tql_int), 1:1),
+    "integer" => (_ew(_tql_int), 1:1),
     "real" => (_ew(real), 1:1), "imag" => (_ew(imag), 1:1),
     "arg" => (_ew(angle), 1:1), "phase" => (_ew(angle), 1:1),
     "conj" => (_ew(conj), 1:1), "norm" => (_ew(abs2), 1:1),
     "isnan" => (_ew(isnan), 1:1), "isinf" => (_ew(isinf), 1:1),
-    "isfinite" => (_ew(isfinite), 1:1),
+    "isfinite" => (_ew(_tql_isfinite), 1:1),
+    # `nonfinite`/`isnonfinite` are a MeasurementSets-only extension
+    # (not real casacore functions -- used by the Phase 59/60 masked-
+    # array default-mask sugar), deliberately left on Julia's own
+    # AND-based `isfinite` rather than the casacore-matching
+    # `_tql_isfinite` above: for a masking predicate, "not finite"
+    # should mean EITHER part is bad, which is what `!isfinite`
+    # (AND then negated -> OR) already gives.
     "nonfinite" => (_ew(!isfinite), 1:1), "isnonfinite" => (_ew(!isfinite), 1:1),
     # --- binary elementwise ---
-    "pow" => (_ew2(^), 2:2), "atan2" => (_ew2((y, x) -> atan(y, x)), 2:2),
+    "pow" => (_ew2(_tql_pow), 2:2), "atan2" => (_ew2((y, x) -> atan(y, x)), 2:2),
     "fmod" => (_ew2(rem), 2:2),
     # --- array-cell reductions ---
     "sum" => (_red(sum), 1:1), "product" => (_red(prod), 1:1),

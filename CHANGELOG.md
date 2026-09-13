@@ -5320,3 +5320,162 @@ median()/gmedian() vs casacore's actual (non-Statistics.median)
 conventions" (7 assertions) plus "Phase 183 — median()/gmedian(),
 real-TaQL cross-check" (8 assertions, `_HAVE_TAQL`-gated). Standalone
 `taql_query_tests.jl` green in full.
+
+### Phase 184 — found and fixed a real bug: `round()` used Julia's
+### ties-to-even instead of casacore's round-half-away-from-zero
+
+Continuing the sweep into the general math corner of
+`src/taql/functions.jl` (the same area Phase 179 fixed `square()`/
+`min()`/`max()` in). Read `TableExprFuncNode::getDouble`'s `roundFUNC`
+case (`tables/TaQL/ExprFuncNode.cc:737-742`) directly:
+
+```cpp
+case roundFUNC:
+  {
+    Double val = operands_p[0]->getDouble(id);
+    if (val < 0) {
+        return ceil (val - 0.5);
+    }
+    return floor (val + 0.5);
+  }
+```
+
+This is round-**half-away-from-zero** — every exact `.5` value rounds
+outward, regardless of parity. `round()` in `src/taql/functions.jl`
+was wired straight to Julia's own `round`, whose default is round-
+**half-to-even** (banker's rounding) — a silent divergence at every
+`.5` boundary landing on an even integer, invisible unless you
+specifically probe a tie value (non-tie inputs like `2.4`/`2.6` already
+agreed, which is presumably why this went unnoticed since Phase 25
+first registered the function). Live-verified against real casacore:
+`round(2.5) == 3.0` (Julia: `2.0`), `round(0.5) == 1.0` (Julia: `0.0`,
+with the added footgun of a signed `-0.0`), `round(-2.5) == -3.0`
+(Julia: `-2.0`) — every one of these is a case a real query
+(`WHERE round(CHAN_FREQ/1e6) == …`, a decimation/rounding filter) could
+plausibly hit.
+
+Fixed with a new `_tql_round(x) = x < 0 ? ceil(x - 0.5) : floor(x +
+0.5)` (`src/taql/functions.jl`) — a direct port of the quoted C++ —
+wired into `_TQL_FUNCS["round"]` in place of Julia's `round`. (The
+several *other* internal `round(Int, …)` call sites in
+`src/taql/functions.jl`/`src/taql/mscal.jl` are unrelated millisecond-
+formatting helpers for the date/time string functions, not the exposed
+`round()` TaQL function — left unchanged.)
+
+New testset "Phase 184 — round() vs casacore's round-half-away-from-
+zero" (12 assertions: unit tests on `_tql_round` across every tie/non-
+tie/sign combination, plus a `query()`-level check) and "Phase 184 —
+round(), real-TaQL cross-check" (14 assertions, `_HAVE_TAQL`-gated,
+both literal-argument and column-argument forms). Standalone
+`taql_query_tests.jl` green in full.
+
+Continuing the same source dive (per the standing methodology: once
+one function turns out wrong, check its siblings the same way
+immediately), swept the rest of the general-math corner of
+`ExprFuncNode.cc` and found three more real bugs, all the same
+"raw C++ `std::` call, NaN not throw" shape:
+
+- **`pow(x,y)` / `**`** (`powFUNC`, `.cc:655-657` — and `**`, which
+  live-verified is the identical runtime `powFUNC`/`std::pow` path,
+  not a separate implementation): a negative base with a non-integer
+  exponent is `NaN` in casacore, but Julia's `^` for two `Real`s
+  **throws** a `DomainError` in exactly that case. A real crash risk
+  for any column that can go negative (`pow(UVW[1], 0.5)`). Fixed with
+  `_tql_pow(x,y) = x < 0 && !isinteger(y) ? NaN : x^y` (an
+  integer-valued exponent, even as a `Float64`, does not throw in
+  Julia either — `(-1.0)^2.0 == 1.0` — matching casacore, so only the
+  fractional case needs a guard), wired into both `pow()` and the
+  `**` operator's `_parse_power!`.
+
+  A subtlety found while testing this: casacore's operator precedence
+  (like this package's own) puts unary minus OUTSIDE `**`, so
+  `-2.0 ** 0.5` parses as `-(2.0 ** 0.5)`, not `pow(-2.0, 0.5)` — a
+  literal negative base needs the `pow(-2.0, 0.5)` function-call form
+  (each argument parses independently) or a genuinely negative-valued
+  *column* to exercise; live-verified both engines agree on this
+  precedence.
+
+- **`sqrt`/`log`/`log10`** (`.cc:668-670,653-654`) and **`asin`/
+  `acos`** (`.cc:713-716`): all four are a bare `sqrt`/`log`/`log10`/
+  `asin`/`acos` on a `Double` — out-of-domain (`sqrt`/`log`/`log10` of
+  a negative number; `asin`/`acos` of `|x|>1`) is `NaN` in C++, but
+  Julia's own `sqrt`/`log`/`log10`/`asin`/`acos` for a `Real` all
+  **throw** `DomainError` in that case. Live-verified against real
+  casacore: `sqrt(-4.0)`, `log(-1.0)`, `log10(-1.0)`, `asin(2.0)`,
+  `acos(2.0)` are all `NaN`. The same crash risk as `pow` — any
+  real-valued column that can go out of a function's domain
+  (`sqrt(WEIGHT - threshold)`, `asin(UVW[1] / baseline_length)`).
+  Fixed with `_tql_sqrt`/`_tql_log`/`_tql_log10`/`_tql_asin`/
+  `_tql_acos`, each a `::Real`-specific domain guard returning `NaN`
+  with a fallback method passing a `Complex` argument straight through
+  (Julia's own `Complex` overloads already never throw — they return
+  the analytic-continuation branch, matching C++'s `std::complex`
+  overloads — so only the `Real` methods needed a guard).
+
+- **`sign()`** (`signFUNC`, `.cc:727-735`): a manual
+  `if(val>0) 1; if(val<0) -1; else 0` — a `NaN` input falls through
+  *both* comparisons to the `else 0` branch, so `sign(NaN) == 0.0` in
+  casacore, not `NaN` (Julia's own `sign(NaN) == NaN`). Found while
+  sweeping the surrounding functions for the same shape, and directly
+  relevant now that the fixes above let more `NaN`s flow downstream
+  into a `sign()` call than before (live-verified:
+  `sign(sqrt(-1.0)) == 0.0` in real casacore). Fixed with
+  `_tql_sign(x) = isnan(x) ? zero(float(x)) : sign(x)`.
+
+New testsets: "Phase 184 — pow()/`**` vs a negative base + non-integer
+exponent" (11 assertions) + its real-TaQL cross-check (13 assertions,
+covering both the function-call form and a negative-valued column
+through `**`); "Phase 184 — sqrt()/log()/log10()/asin()/acos() vs
+out-of-domain real args" (34 assertions) + its real-TaQL cross-check
+(20 assertions — tolerating a 1-ULP cross-library libm difference on
+in-domain values with `≈` rather than exact `==`, live-verified as an
+ordinary floating-point variance and not a logic bug); "Phase 184 —
+sign() vs NaN" (4 assertions) + its real-TaQL cross-check (1
+assertion). Corrected two stale `.op === (^)` unit-test assertions
+(`**`'s AST node now carries `_tql_pow`, not raw `^`).
+
+A fifth bug in the same family turned up directly as a *consequence*
+of the fixes above: **`int()`/`integer()`** (`intFUNC`,
+`ExprFuncNode.cc:552-553`) is a raw C++ `Int64(double)` cast — a
+NaN/out-of-range argument **saturates** rather than raising in C++
+(live-verified: `int(0.0/0.0) == 0`, `int(1.0/0.0) ==
+typemax(Int64)`, `int(-1.0/0.0) == typemin(Int64)`), but Julia's own
+`trunc(Int, …)` **throws** an `InexactError` in all three cases.
+Before this phase, `int(sqrt(-1.0))` was an unreachable combination
+(the old `sqrt` would already have thrown on the negative argument);
+now that `sqrt()`/`log()`/etc. correctly return `NaN` instead, that
+`NaN` flows straight into `int()`, which needed the identical fix.
+Fixed with `_tql_int`, a saturating cast matching the observed real
+casacore behavior. New testsets "Phase 184 — int()/integer() saturate
+instead of throwing" (8 assertions) + its real-TaQL cross-check (7
+assertions, including through `int(sqrt(A))` with a negative `A`).
+
+A sixth bug, of a different (non-throwing) shape, turned up while
+checking `isnan`/`isinf` for the same Complex-argument corner once
+`isfinite` was under scrutiny: **`isfinite()` on a `Complex` value**.
+casacore's `isFinite(Complex)`/`isFinite(DComplex)`
+(`casa/BasicSL/Complex.cc:123-129`) is
+`isFinite(re) || isFinite(im)` — an **OR**, not the logically-expected
+AND (arguably a bug in casacore itself — "finite" should mean *both*
+parts finite — but real and reachable via TaQL's `isfinite()`).
+Live-verified: `isfinite(complex(0.0/0.0, 5.0)) == true` in real
+casacore. Julia's own `isfinite(::Complex)` uses AND — exactly
+backwards from casacore for a mixed finite/non-finite value.
+`isnan`/`isinf` on `Complex` (`.cc:76-105`) are **already** `||` in
+both casacore and Julia, so only `isfinite` needed a fix. Fixed with
+`_tql_isfinite(x::Complex) = isfinite(real(x)) || isfinite(imag(x))`.
+
+Deliberately left `nonfinite`/`isnonfinite` (a MeasurementSets-only
+extension, not a real casacore function, used by the Phase 59/60
+masked-array default-mask sugar) on Julia's own `!isfinite` rather
+than the new casacore-matching `_tql_isfinite` — for a masking
+predicate, "not finite" should mean *either* part is bad, which is
+exactly what `!isfinite` (AND, then negated → OR) already gives.
+
+New testsets "Phase 184 — isfinite() vs a mixed finite/non-finite
+complex value" (10 assertions) + its real-TaQL cross-check (3
+assertions, through a genuine complex column since TaQL-lite has no
+`complex(re,im)` constructor function to build one inline — a
+separate, larger gap noted but out of this phase's bug-fixing scope).
+
+Standalone `taql_query_tests.jl` green in full.
