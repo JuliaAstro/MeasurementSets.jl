@@ -5133,3 +5133,36 @@ casacore for 8 expressions). Neither bug had ANY prior test coverage
 anywhere, and every existing `min`/`max` test used real-valued
 columns only) — a real, previously-invisible gap now closed.
 Standalone `taql_query_tests.jl` green in full.
+
+### Phase 180 — swept `variance()`/`stddev()`/`mean()` against a complex array cell; confirmed correct, plus a benign `rms()` permissiveness note
+
+Continuing the complex-value sweep opened by Phase 179 — a reduction
+that's wrong for complex data is exactly the same bug shape, so
+`variance`/`stddev`/`mean` (all used on `DATA`-like columns in
+practice) were checked against real casacore's actual computation, not
+just assumed fine.
+
+Read `casa/Arrays/ElementFunctions.h:218-245` (`SumSqrDiff`'s
+complex-type specialization) and `ExprFuncNode.cc:788-808`
+(`arrvariance0FUNC`/`arrstddev0FUNC`): real casacore's complex variance
+sums `(Δre)² + (Δim)²` per element — the squared magnitude of each
+deviation from the mean, the standard definition of a complex random
+variable's variance — then takes the (already-real) result. This
+turns out to be **exactly** what Julia's `Statistics.var`/`std` already
+compute for a `Complex` vector, so `_red(Statistics.var)`/`_red(
+Statistics.std)` needed no change — confirmed correct via both source
+reading and a live cross-check against real casacore
+(`variance`/`stddev`/`mean` of a 4-element complex cell all match
+exactly).
+
+Also confirmed, in passing: real casacore's `rms()` does **not** support
+a complex argument at all (`tableCommand` throws "function argument is
+not real"), while this package's `rms` computes the RMS magnitude for
+one — a benign extension, not a divergence to "fix" (there is no real
+casacore behaviour to match or diverge from).
+
+New testset "Phase 180 — variance()/stddev()/mean() vs a complex array
+cell" (4 assertions) plus "Phase 180 — variance()/stddev()/mean(),
+real-TaQL cross-check" (3 assertions, `_HAVE_TAQL`-gated). Neither
+function had any prior complex-argument test coverage. Standalone
+`taql_query_tests.jl` green in full.

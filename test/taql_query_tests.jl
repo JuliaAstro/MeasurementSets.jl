@@ -2690,6 +2690,48 @@ end
     end
 end
 
+# Phase 180: `variance()`/`stddev()`/`mean()` vs a COMPLEX array cell --
+# checked because a wrong-for-complex reduction is exactly the kind of
+# bug Phase 179 just found in `square`/`min`/`max`, and `variance`/
+# `stddev` in particular have a real, non-obvious subtlety: real
+# casacore's complex variance uses a SPECIALIZED accumulator
+# (`SumSqrDiff<complex<T>>`, `casa/Arrays/ElementFunctions.h:236-245`)
+# that sums `(Δre)² + (Δim)²` per element -- i.e. the squared MAGNITUDE
+# of each deviation from the mean, the standard definition of a complex
+# random variable's variance -- then keeps only the (already-real)
+# result (`ExprFuncNode.cc:791-795`, `real(variance(complexArray,
+# ddof))`). This turns out to be EXACTLY what Julia's `Statistics.var`
+# already computes for a `Complex` vector, so `_red(Statistics.var)`
+# needed no change -- confirmed correct, not a bug. Also confirmed:
+# real casacore's `rms()` does NOT support a complex argument at all
+# (throws "function argument is not real") -- this package's `rms` is
+# more permissive (computes the RMS magnitude), a benign extension, not
+# a divergence to "fix" since there is no real casacore behaviour to
+# match.
+@testset "Phase 180 — variance()/stddev()/mean() vs a complex array cell" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    cell = ComplexF32[1.0+2.0im 3.0-1.0im 0.5+0.5im 2.0+0.0im]
+    @test f("mean")(cell) ≈ Statistics.mean(cell)
+    @test f("variance")(cell) ≈ 2.09375
+    @test f("stddev")(cell) ≈ 1.4469796128487782
+    @test f("mean")(cell) ≈ ComplexF32(1.625, 0.375)
+end
+
+@testset "Phase 180 — variance()/stddev()/mean(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    cell = ComplexF32[1.0+2.0im 3.0-1.0im 0.5+0.5im 2.0+0.0im]
+    write_table(tabpath, "T", Pair{String,Any}["A" => [cell]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    for expr in ("variance(A)", "stddev(A)", "mean(A)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa ≈ ours atol = 1e-4
+    end
+end
+
 @testset "Phase 69 — angdist / array literal" begin
     @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
     @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi
