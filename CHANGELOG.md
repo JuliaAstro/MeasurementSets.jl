@@ -4534,3 +4534,41 @@ MS-mutation side effect via a `SELECTED_DATA` column — Phase 143) own
 implementation does.
 
 Comment-only change; no source/test behaviour affected.
+
+### Phase 165 — line-by-line re-verified Dysco's `AFTimeBlockEncoder::fitToMaximum` port (never independently re-checked since Phase 19); confirmed the frequency/wavelength unit grammars once more; no bug found
+
+`fitToMaximum` was Phase 19's own explicitly-flagged "riskiest" numerical
+port (a greedy channel/antenna hill-climb over the quantizer's dynamic
+range) and had never been independently re-verified against source since.
+Read `tables/Dysco/aftimeblockencoder.cc:100-263` directly, line by line,
+against `src/datamanagers/dysco.jl`'s `_af_fit_to_maximum!`: the initial
+flat per-(channel,polarization) normalization pass, the per-channel
+"largest cross-correlation component" search (`max(re,im,-re,-im)`,
+algebraically identical to casacore's `max(max(re,im), -min(re,im))`),
+the per-antenna maximum-component and hypothetical-increase computation,
+the antenna-vs-channel selection, and both stopping thresholds (`1.01`
+for antenna scaling, `1.001` for channel scaling) all match exactly.
+One genuinely subtle behaviour was specifically checked and confirmed
+correct rather than assumed: `changeAntennaFactor` applies its scale
+factor **twice** to an autocorrelation row of the antenna being boosted
+(`count = (a1==target) + (a2==target)`, both true for that antenna's own
+autocorrelation) — real casacore's own `changeAntennaFactor`
+(`aftimeblockencoder.cc:81-98`) does exactly the same
+(`for repeat in 0..<count`), confirming this is a faithful reproduction
+of a real (if easy to mistake for a bug) casacore quirk, not something
+introduced by the port.
+
+Also re-verified two smaller items while in the area: `mscal.spw`'s
+channel-frequency unit set (`hz`/`khz`/`mhz`/`ghz`/`thz`, Phase 151)
+still matches `ms/MSSel/MSSpwGram.ll`'s `FREQ` token definition exactly
+(an optional case-insensitive `k`/`m`/`g`/`t` prefix + case-insensitive
+`hz`). And `mscal.uvdist`'s wavelength-unit lexer
+(`ms/MSSel/MSUvDistGram.ll`'s `WAVELENGTHUNIT`) turns out to be
+case-*sensitive* within the `lambda`/`LAMBDA` word itself (only those
+two exact spellings are valid, not a mixed-case `Lambda`), while this
+package lowercases every unit string before comparison — a benign
+over-permissiveness (accepts a spelling real casacore's stricter lexer
+would reject), not a correctness bug, in the same category as the
+already-documented `>=`/`<=` leniency on `field`/`spw`/`state` (Phase 147).
+
+No source or test change. Standalone suite unaffected.
