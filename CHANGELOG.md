@@ -4675,3 +4675,47 @@ guaranteed a real path. A documented limitation, not a fix candidate.
 
 No source or test change beyond Phase 167's own fix. Standalone suite
 unaffected.
+
+### Phase 169 — found and fixed a real bug: `write_reftable` also silently accepted a non-`Table`/`RefTable`/`ConcatTable` parent (the Phase 167 bug pattern, missed by Phase 168's own follow-up audit)
+
+**Real bug found — Phase 168's audit had a real gap.** Phase 168 confirmed
+`write_reftable` was safe because its `_flatten_to_root` always fully
+unwraps any `RefTable`-of-`RefTable` chain down to a genuine on-disk
+`Table`/`ConcatTable` root before touching `.path` — true, but that
+check only covers the case where `parent` **is already** a `RefTable`
+to begin with. `write_reftable(dir, parent::AbstractTable, rows; …)`
+had no guard on `parent`'s type at all: if `parent` is a `GroupedTable`
+(from `groupby`/`join`/a computed `query` select — no `.path`/`.type`/
+`.subtype`/`.readme` fields, since `_flatten_to_root`'s base case
+returns any non-`RefTable` input unchanged), the function used to throw
+a confusing `KeyError: key "path" not found` (from `GroupedTable`'s
+property-routing `getproperty` trying to look up a column literally
+named `"path"`) instead of a clear message — and, since `mkpath(dir)`
+ran *before* the failing access, left a half-created output directory
+behind.
+
+Fixed with a single top-of-function guard in `write_reftable`
+(`src/tables/table.jl`): `parent isa Union{Table,RefTable,ConcatTable}`,
+matching the function's own documented contract, checked before
+`mkpath(dir)` runs. The existing `_ondisk_path` helper (Phase 167) is
+also applied to the flattened `root` as defense in depth. Live-verified:
+the exact `GroupedTable`-as-`parent` scenario now raises a clear
+`ArgumentError` with no directory left behind, while every legitimate
+case (a plain `Table`, and a chained `RefTable` parent) still works
+correctly.
+
+New testset `test/reftable_tests.jl` "write_reftable —
+non-Table/RefTable/ConcatTable parent errors clearly (Phase 169)" (4
+assertions). Standalone `test/reftable_tests.jl` and the full
+`test/taql_query_tests.jl` suite both green (the latter exercises
+`write_reftable` transitively through `copytable`/`SELECT … INTO`-style
+call paths) — no regressions.
+
+**Reinforces last batch's own methodology takeaway, with a twist**:
+an "audit every other access site" follow-up (Phase 168) is valuable
+but not infallible — it correctly found the *chained*-RefTable case was
+safe, but didn't independently re-derive the full precondition
+(`parent` itself must already be one of the three supported kinds)
+before declaring the function safe. A targeted reproduction attempt
+(actually calling the function with a suspicious argument type) caught
+what a pure code-reading audit missed.
