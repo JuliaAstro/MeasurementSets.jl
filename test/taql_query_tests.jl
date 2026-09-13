@@ -1048,6 +1048,78 @@ end
     @test casa == ours
 end
 
+@testset "Phase 189 — missing sumsqr()/gsumsqr() family (found via a full function-name-table diff)" begin
+    # Systematically diffed casacore's complete TableParseFunc.cc
+    # function-name table against _TQL_FUNCS/_TQL_AGGRS (rather than
+    # re-reading one more corner by hand) once several individually-
+    # found missing functions (Phases 185, 186, 188) suggested a wider
+    # sweep of the whole table would pay off. Found sumsqr()/
+    # sumsquare() (sum of ELEMENTWISE SQUARES, x_i^2 -- ordinary
+    # multiplication, matching Phase 179's square() finding for
+    # Complex: z*z, not abs2(z)) and its running/boxed/g* siblings
+    # entirely missing.
+    a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    @test MSv2._tql_sumsqr(a) == sum(a .^ 2)
+    @test MSv2._tql_sumsqr(a) == 204.0
+    @test MSv2._running_sumsqr(a, 2)[3] == 55.0          # sum([1,2,3,4,5].^2)
+    @test MSv2._running_sumsqr(a, 2)[1] == 0.0            # edge zero-filled
+    @test MSv2._boxed_sumsqr(a, 2)[1] == 5.0              # sum([1,2].^2)
+    ac = ComplexF64[1 + 1im, 2 + 0im]
+    @test MSv2._tql_sumsqr(ac) == sum(ac .^ 2)            # ordinary complex square, not magnitude
+    @test MSv2._tql_sumsqr(ac) == 4.0 + 2.0im
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = [
+        "s" => "sumsqr(A)", "rs" => "runningsumsqr(A,[2])", "bs" => "boxedsumsqr(A,[2])"])
+    @test r.s[1] == MSv2._tql_sumsqr(a)
+    @test r.rs[1] == MSv2._running_sumsqr(a, 2)
+    @test r.bs[1] == MSv2._boxed_sumsqr(a, 2)
+
+    # group aggregate + per-element variant
+    K = Int32[1, 1, 2]
+    X = Float64[1, 2, 3]
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    write_table(tabpath2, "T2", Pair{String,Any}["K" => K, "X" => X]; nrow=3)
+    tg = readtable(tabpath2)
+    g = groupby(tg, "K"; select = ["K" => "K", "S" => "gsumsqr(X)"])
+    order = sortperm(collect(g.K))
+    @test collect(g.K)[order] == [1, 2]
+    @test collect(g.S)[order] == [5.0, 9.0]               # 1^2+2^2=5; 3^2=9
+end
+
+@testset "Phase 189 — sumsqr() family, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:8)
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    for expr in ("sumsqr(A)", "sumsquare(A)", "runningsumsqr(A,[2])",
+                 "boxedsumsqr(A,[2])")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa isa AbstractArray ? all(casa .≈ ours) : casa ≈ ours
+    end
+
+    K = Int32[1, 1, 2]
+    X = Float64[1, 2, 3]
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    write_table(tabpath2, "T2", Pair{String,Any}["K" => K, "X" => X]; nrow=3)
+    tc2 = CCT.Table(tabpath2)
+    rdir2 = joinpath(mktempdir(), "r2")
+    _taqlcmd("SELECT K, gsumsqr(X) AS S FROM \$1 GROUP BY K GIVING '$rdir2'", tc2)
+    m2 = readtable(rdir2)
+    casa2 = Dict(column(m2, "K")[i] => column(m2, "S")[i] for i in 1:nrow(m2))
+    tg = readtable(tabpath2)
+    g2 = groupby(tg, "K"; select = ["K" => "K", "S" => "gsumsqr(X)"])
+    for i in 1:length(g2.K)
+        @test casa2[g2.K[i]] == g2.S[i]
+    end
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)

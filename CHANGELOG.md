@@ -5677,3 +5677,44 @@ soon) implement, each for a different, real reason:
 New testsets "Phase 188 — missing shape() function" (4 assertions) +
 its real-TaQL cross-check (1 assertion). Standalone
 `taql_query_tests.jl` green in full.
+
+### Phase 189 — found a real missing function family: `sumsqr()`/`sumsquare()`
+### and its `running`/`boxed`/`g*` siblings, via a full function-name-table diff
+
+Phases 185/186/188 each found a missing function by re-reading one
+corner of `TableParseFunc.cc`'s function-name table by hand. This
+phase instead dumped casacore's **complete** function-name table and
+diffed it against everything registered in `_TQL_FUNCS`/`_TQL_AGGRS` —
+a more systematic version of the same check. Found **`sumsqr()`/
+`sumsquare()`** (the sum of elementwise squares, `Σxᵢ²` — ordinary
+multiplication, not `abs2`; for a `Complex` array this matches the
+Phase 179 `square()` finding exactly: `z*z`, not the magnitude) and
+its **`running`/`boxed`/`g*`/`gs*`** siblings — `runningsumsqr`/
+`boxedsumsqr` (sliding-window) and `gsumsqr`/`gsumsqrs` (group
+aggregate + per-element) — entirely missing.
+
+`arrsumsqrFUNC`'s own C++ (`ExprFuncNode.cc:776-782` for `Double`,
+`:948-953` for `DComplex`) confirmed the exact formula: `val*val` for
+a scalar, `sumsqr(array)` (elementwise square then sum) for an array,
+identical for both real and complex. Live-verified: `sumsqr(1:8) ==
+204.0` (`== sum((1:8).^2)`), `runningsumsqr(1:8,[2])[3] == 55.0`,
+`boxedsumsqr(1:8,[2])[1] == 5.0`, `gsumsqr` of the group `[1,2]` is
+`5.0`, and `sumsqr([1+1im, 2+0im]) == 4.0+2.0im ==
+sum([1+1im,2+0im].^2)` (ordinary complex square).
+
+Fixed by adding `_tql_sumsqr` (the scalar array reduction, reused
+directly as a `_running_reduce`/`_boxed_reduce` reducer — no new
+plumbing needed, same pattern as Phase 186's `avdev`/`rms`) and
+`_tql_gsumsqr` (the group-aggregate reducer, shared between the
+`:scalar` and `:perelem` modes exactly like every other `_TQL_AGGRS`
+entry). `sumsqrs`/`sumsquares` (the "s"-suffixed AXIS-COLLAPSE
+variant) is deliberately excluded — it belongs to the same larger,
+already-flagged (Phase 186) axis-collapse feature, not this
+sweep-for-a-missing-sibling pass.
+
+New testsets "Phase 189 — missing sumsqr()/gsumsqr() family (found
+via a full function-name-table diff)" (12 assertions, including a
+`Complex`-array case and a real `groupby` cross-check) + its
+real-TaQL cross-check (6 assertions, covering the scalar, running,
+boxed, and group-aggregate forms). Standalone `taql_query_tests.jl`
+green in full.
