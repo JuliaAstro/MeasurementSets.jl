@@ -5211,3 +5211,61 @@ column match a hand-computed per-group reduction; `gmin`/`gmax`
 on a complex column raise an error rather than silently misbehaving.
 No production code changed — this phase closes an open question, not
 a bug. Standalone `taql_query_tests.jl` green in full.
+
+### Phase 182 — found and fixed a significant real bug: `running*()` computed a completely different thing at every array-edge position than real casacore
+
+**A significant real bug found**, in a fresh area (Phase 108's
+sliding-window array functions, self-described at the time as having
+"no oracle" and only ever hand-computed) rather than a further sweep
+of the already-closed-out `functions.jl` complex-value corner.
+
+`running<X>(arr, hwidth)` was documented and implemented as a
+*shrinking-window* filter: at every position, including near an array
+boundary, it reduced whatever portion of the `[i-h, i+h]` window
+actually fit within the array. Read casacore's real implementation
+directly — `slidingArrayMath` (`casa/Arrays/ArrayPartMath.tcc:
+1060-1104`) — and found this is not what real casacore does at all.
+TaQL's 2-argument `running<X>(arr, shape)` always calls the C++
+function with its default `fillEdge=true` (confirmed: `checkNumOfArg
+(2, 2, nodes)` in `ExprFuncNode.cc` — TaQL exposes no 3rd argument to
+select the alternative mode), under which:
+- the OUTPUT has the SAME shape as the input (matching what this
+  package already did), but
+- an edge position — anywhere within `hwidth` of a boundary, where
+  the FULL `2·hwidth+1`-wide window does not entirely fit — is set to
+  **`zero(T)`**, not a reduction over a truncated window, and
+- only genuinely interior positions (where the full window fits) get
+  a real computed value.
+
+Live-verified against real casacore via `tableCommand`:
+`runningsum([1..8], [1])` gives `[0, 6, 9, 12, 15, 18, 21, 0]` — the
+first and last elements are exactly `0`, not `1+2=3` / `7+8=15` as
+this package's shrinking-window implementation produced. This affects
+**every** `running*` function (`runningsum`/`runningmean`/`runningmin`/
+`runningmax`/`runningmedian`/`runningvariance`/`runningstddev`) at
+every array boundary — for a typical spectral smoothing use
+(`runningmean(DATA, [k])` over a channel axis), that's `2k` channels
+at each edge of every spectrum silently computed as a value they
+should never have received, rather than the zero real casacore
+reports there. `boxed*` (the non-overlapping-bin sibling) was
+independently checked against `boxedArrayMath`
+(`.tcc:1021-1053`/`fillBoxedShape`, `casa/Arrays/ArrayPartMath.cc:
+29-48`) and confirmed **already correct** — its trailing partial bin
+genuinely is a partial-window reduction in real casacore too (no
+edge/fill concept there at all), matching this package unchanged.
+
+Fixed `_running_reduce` (`src/taql/functions.jl`) to compute only the
+genuinely-interior positions (`zeros(T, size(arr))` pre-filled, then
+only the range where the full window fits gets overwritten). Live-
+verified against real casacore across 5 half-widths × 7 functions on a
+12-element 1-D array plus a 2-D case — every value matches exactly,
+including the `hwidth=0` (every position is its own full window, so
+the whole array is "interior") and `hwidth ≥ n/2` (no position has a
+full window, entire output is zero) boundary cases.
+
+Corrected the stale hand-computed assertions in the existing "Phase
+108" testset (several previously asserted the old, wrong
+shrinking-window values) and added a new testset "Phase 182 —
+running*() edge semantics, real-TaQL cross-check" (36 assertions,
+`_HAVE_TAQL`-gated, covering all 7 functions across 5 widths plus a
+2-D case). Standalone `taql_query_tests.jl` green in full.

@@ -686,12 +686,23 @@ end
 end
 
 @testset "Phase 108 — running*/boxed* sliding-window array reductions" begin
-    # unit: hand-computed 1-D and 2-D
+    # unit: hand-computed 1-D and 2-D.
+    #
+    # Phase 182 correction: `running*`'s edge positions -- those within
+    # `hwidth` of a boundary, where the FULL (not truncated) window
+    # doesn't fit -- are `zero(T)`, matching real casacore's
+    # `slidingArrayMath(..., fillEdge=true)` (the only mode TaQL's
+    # 2-arg `running<X>()` ever uses; live-verified). Earlier phases had
+    # this shrinking the window at the edges instead (a real, confirmed
+    # divergence, fixed in Phase 182) -- `boxed*` is unaffected (its
+    # trailing partial bin is a genuine reduction, no edge/fill concept
+    # in casacore's `boxedArrayMath` at all).
     a = [1.0, 2.0, 3.0, 4.0, 5.0]
-    @test MSv2._running_avg(a, 1) == [1.5, 2.0, 3.0, 4.0, 4.5]     # shrinking edge windows
-    @test MSv2._running_min(a, 1) == [1.0, 1.0, 2.0, 3.0, 4.0]
-    @test MSv2._running_max(a, 1) == [2.0, 3.0, 4.0, 5.0, 5.0]
-    @test MSv2._running_sum(a, 2) == [1+2+3, 1+2+3+4, 1+2+3+4+5, 2+3+4+5, 3+4+5]
+    @test MSv2._running_avg(a, 1) == [0.0, 2.0, 3.0, 4.0, 0.0]
+    @test MSv2._running_min(a, 1) == [0.0, 1.0, 2.0, 3.0, 0.0]
+    @test MSv2._running_max(a, 1) == [0.0, 3.0, 4.0, 5.0, 0.0]
+    @test MSv2._running_sum(a, 2) == [0.0, 0.0, 1+2+3+4+5, 0.0, 0.0]   # only the centre has a full 5-wide window
+    @test MSv2._running_sum(a, 0) == a                                 # hwidth 0 -> every position is its own (full) window
     @test MSv2._boxed_avg(a, 2) == [1.5, 3.5, 5.0]                 # non-overlapping bins, partial last
     @test MSv2._boxed_sum(a, 2) == [3.0, 7.0, 5.0]
 
@@ -699,11 +710,15 @@ end
     @test MSv2._boxed_avg(A, 2) == [3.0 4.5; 7.5 9.0]
     @test MSv2._boxed_avg(A, [1, 3]) == reshape([2.0, 5.0, 8.0], 3, 1)   # per-axis widths
     @test MSv2._boxed_min(A, 3) == reshape([1.0], 1, 1)
-    @test MSv2._running_avg(A, 1)[2, 2] ≈ Statistics.mean(A)             # centre cell sees the whole 3x3
+    @test MSv2._running_avg(A, 1)[2, 2] ≈ Statistics.mean(A)             # only the centre cell has a full 3x3 window
+    @test MSv2._running_avg(A, 1)[1, 1] == 0.0                          # every other cell is an edge -> 0
 
-    # variance/stddev/median agree with a direct Statistics call on the same window
+    # variance/stddev/median agree with a direct Statistics call on the
+    # same window, at an interior position; edges are 0
     @test MSv2._running_var(a, 1)[3] ≈ Statistics.var([2.0, 3.0, 4.0]; corrected = false)
-    @test MSv2._running_std(a, 1)[1] ≈ Statistics.std([1.0, 2.0]; corrected = false)
+    @test MSv2._running_var(a, 1)[1] == 0.0
+    @test MSv2._running_std(a, 1)[2] ≈ Statistics.std([1.0, 2.0, 3.0]; corrected = false)
+    @test MSv2._running_std(a, 1)[1] == 0.0
     @test MSv2._boxed_med(a, 2) == [1.5, 3.5, 5.0]
 
     # errors
@@ -728,6 +743,34 @@ end
     end
     # a non-array argument errors clearly at eval time
     @test_throws ArgumentError query(tv, "runningaverage(V[1], 1)[1] > 0")
+end
+
+@testset "Phase 182 — running*() edge semantics, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:12)
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    for hw in (0, 1, 2, 3, 5), fn in ("runningsum", "runningmean", "runningmin",
+                                       "runningmax", "runningmedian",
+                                       "runningvariance", "runningstddev")
+        expr = "$fn(A,[$hw])"
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa ≈ ours atol = 1e-9
+    end
+    # 2-D
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    A2 = Float64.(reshape(1:12, 3, 4))
+    write_table(tabpath2, "T2", Pair{String,Any}["B" => [A2]]; nrow=1, tsm=[["B"]])
+    t2 = readtable(tabpath2)
+    rdir2 = joinpath(mktempdir(), "r2")
+    _taqlcmd("SELECT runningsum(B,[1,1]) AS X FROM \$1 GIVING '$rdir2' AS PLAIN", tabpath2)
+    casa2 = column(readtable(rdir2), "X")[1]
+    ours2 = query(t2, "rownumber() == 1"; select = ["X" => "runningsum(B,[1,1])"]).X[1]
+    @test casa2 ≈ ours2
 end
 
 @testset "TaQL-lite parser — aggregate unit" begin

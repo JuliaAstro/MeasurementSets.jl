@@ -249,12 +249,21 @@ end
 # name overlap with `gs*`'s "s"-suffixed per-element GROUP BY reductions
 # is coincidental, unrelated machinery.
 #
-#   running<X>(arr, hwidth)  -- a centred sliding window: output element
-#       i (per axis d) reduces arr[max(1,i-h[d]) : min(n[d],i+h[d])] --
-#       SAME shape as `arr` (shrinking half-windows at the edges).
+#   running<X>(arr, hwidth)  -- a centred sliding window, SAME shape as
+#       `arr`. Ported from casacore's own `slidingArrayMath`
+#       (`casa/Arrays/ArrayPartMath.tcc:1060-1104`, `fillEdge=true` --
+#       the only mode TaQL's 2-arg `running<X>()` ever exercises, live-
+#       verified against real casacore): output element i (per axis d)
+#       reduces the FULL `arr[i-h[d] : i+h[d]]` window ONLY where that
+#       whole window fits inside the array; every edge position within
+#       `h[d]` of a boundary (where no full window fits) is `zero(T)`,
+#       NOT a reduction over a truncated window -- casacore does not
+#       shrink the window at the edges, it leaves them unfilled.
 #   boxed<X>(arr, bwidth)    -- non-overlapping bins of size `bwidth`
 #       (per axis) -- SMALLER shape, `cld(n[d], b[d])` per axis (the
-#       trailing bin is partial if `bwidth` doesn't divide evenly).
+#       trailing bin genuinely IS a partial-window reduction if `bwidth`
+#       doesn't divide evenly -- confirmed against `boxedArrayMath`,
+#       `.tcc:1021-1053` -- no edge/fill concept here, unlike `running*`).
 #
 # `hwidth`/`bwidth` is a scalar (same width on every axis) or an array
 # literal (one width per axis, `ndims(arr)` elements). Masked-array
@@ -274,9 +283,12 @@ function _running_reduce(f, T::Type, arr::AbstractArray, hw)
     nd = ndims(arr)
     h = _tql_window_widths(hw, nd)
     sz = size(arr)
-    out = Array{T}(undef, sz)
-    for idx in CartesianIndices(arr)
-        rng = ntuple(d -> max(1, idx[d] - h[d]):min(sz[d], idx[d] + h[d]), nd)
+    out = zeros(T, sz)                    # edges stay `zero(T)` (fillEdge=true)
+    lo = ntuple(d -> h[d] + 1, nd)
+    hi = ntuple(d -> sz[d] - h[d], nd)
+    any(lo[d] > hi[d] for d in 1:nd) && return out     # no position has a full window
+    for idx in CartesianIndices(ntuple(d -> lo[d]:hi[d], nd))
+        rng = ntuple(d -> (idx[d] - h[d]):(idx[d] + h[d]), nd)
         out[idx] = f(vec(view(arr, rng...)))
     end
     out
