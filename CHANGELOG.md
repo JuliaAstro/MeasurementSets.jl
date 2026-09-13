@@ -4640,3 +4640,38 @@ empty-path object. New testset `test/reftable_tests.jl` "write_concattable
 directory on error, and the legitimate persist-then-concatenate path.
 Standalone `test/reftable_tests.jl` green (all pre-existing testsets
 unaffected).
+
+### Phase 168 — audited every `.path` access site across `src/` for a repeat of the Phase 167 bug; confirmed no other instances
+
+Grepped every `.path` field access across `src/` (excluding tests) after
+Phase 167's fix — a `Table`/`RefTable`/`ConcatTable`/`GroupedTable` type
+confusion where an in-memory (unpersisted) `AbstractTable`'s `.path`
+silently resolves to a nonsensical value instead of erroring. Checked
+each site's actual type guarantee: `Table.path` is always structurally
+real (a `Table` object is only ever constructed by `readtable` from a
+genuine on-disk directory — confirmed for every internal reader/writer
+call site: `datamanagers/{standard,incremental,tiled,dysco,forwardcol,
+container}.jl`, `resync.jl`, `edit.jl`'s `EditTable.reader::Table`
+field, `concatedit.jl`, `refedit.jl`); `reference_copy` and
+`_cmd_path`/`update!`/`delete!`/`insert!`/`taql` (`taql/commands.jl`)
+already require `t isa Table` before touching `.path`; `edit(ct::
+ConcatTable)` already requires `all(p -> p isa Table, ct.parts)`;
+`edit(rt::RefTable)` already requires `rt.parent isa Table`. The one
+place that read a part's `.path` with NO such guard was exactly the one
+Phase 167 fixed (`write_concattable`'s part-name construction) — the
+readme-line construction in the same function reads `p.path` again
+further down, but by that point `_ondisk_path.(parts)` has already
+validated every part, so it's safe (confirmed by tracing the two lines'
+order, not merely by proximity).
+
+One related, deliberately-safe (not a bug) case also confirmed:
+`edit(rt::RefTable)` rejects — rather than silently mishandling — a
+genuine on-disk `RefTable`-of-`RefTable` chain (`rt.parent` itself a
+`RefTable`, possible only via a hand-authored/real-casacore-written
+nested reference, since this package's own `query()` always flattens to
+a true `Table` root at construction time) with a clear error naming the
+type, instead of attempting anything with an object that isn't
+guaranteed a real path. A documented limitation, not a fix candidate.
+
+No source or test change beyond Phase 167's own fix. Standalone suite
+unaffected.
