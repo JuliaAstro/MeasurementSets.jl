@@ -2405,8 +2405,8 @@ end
     @test f("day")(58891.0) == 12
     @test f("date")(58891.7) == 58891.0
     @test f("time")(58891.25) ≈ pi / 2
-    @test MSv2._tql_hms(pi / 2) == "06:00:00.000"
-    @test startswith(MSv2._tql_dms(-pi / 6), "-30.00.00")
+    @test MSv2._tql_hms(pi / 2) == "06h00m00.000"
+    @test MSv2._tql_dms(-pi / 6) == "-030d00m00.000"
     @test f("normangle")(3pi) ≈ pi
     @test f("cmonth")(58891.0) == "Feb"
 
@@ -2491,6 +2491,36 @@ end
         _taqlcmd("SELECT mjd(datetime('$datestr')) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
         casa_mjd = column(readtable(rdir), "X")[1]
         @test MSv2._tql_parse_datetime(datestr) ≈ casa_mjd
+    end
+end
+
+# Phase 175: `hms()`/`dms()` output format -- found by reading
+# `TableExprFuncNode::stringHMS`/`stringDMS`
+# (`tables/TaQL/ExprFuncNode.cc:1315-1339`) directly. Real casacore's
+# format uses `h`/`m` (time) or `d`/`m` (angle) letter separators, not
+# colons/dots, and a 3-digit zero-padded degree field for `dms` (not
+# 2) -- this package's original implementation used an invented
+# colon/dot convention that never matched real TaQL output at all.
+@testset "Phase 175 — hms()/dms() output format" begin
+    @test MSv2._tql_hms(pi / 2) == "06h00m00.000"
+    @test MSv2._tql_hms(0.0) == "00h00m00.000"
+    @test MSv2._tql_hms(-pi / 6) == "22h00m00.000"        # no sign on hms, wraps to 22h
+    @test MSv2._tql_dms(pi / 2) == "+090d00m00.000"        # 3-digit degree field
+    @test MSv2._tql_dms(-pi / 6) == "-030d00m00.000"
+    @test MSv2._tql_dms(0.0) == "+000d00m00.000"           # always signed, even at 0
+    @test MSv2._tql_dms(pi) == "+180d00m00.000"
+end
+
+@testset "Phase 175 — hms()/dms(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    for rad in (pi / 2, -pi / 6, 0.0, Float64(pi), -Float64(pi), 2pi - 0.0001, 3.0, deg2rad(45.85444))
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT hms($rad) AS H, dms($rad) AS D FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        m = readtable(rdir)
+        @test column(m, "H")[1] == MSv2._tql_hms(rad)
+        @test column(m, "D")[1] == MSv2._tql_dms(rad)
     end
 end
 

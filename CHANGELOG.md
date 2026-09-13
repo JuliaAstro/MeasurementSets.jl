@@ -4927,3 +4927,44 @@ package's parse directly against real casacore's `datetime()` for five
 representative strings). Standalone `taql_query_tests.jl` green in
 full (every pre-existing testset in the file, including all of Phase
 22-97's query-engine coverage, unaffected).
+
+### Phase 175 — found and fixed a real bug: `hms()`/`dms()` produced an invented output format that never matched real casacore at all
+
+**Real bug found via direct source reading + live reproduction**,
+continuing straight on from Phase 174's date-parsing fix in the same
+file (`src/taql/functions.jl`). This package's `_tql_hms`/`_tql_dms`
+(Phase 69) had never actually been checked against real casacore's own
+`hms()`/`dms()` TaQL functions — Phase 69's own test only asserted a
+hand-invented format (`"HH:MM:SS.sss"` for hms, `"+DD.MM.SS.sss"` for
+dms, colon/dot separators throughout).
+
+Read `TableExprFuncNode::stringHMS`/`stringDMS`
+(`tables/TaQL/ExprFuncNode.cc:1315-1339`, which format via
+`MVAngle::print`, `casa/Quanta/MVAngle.cc:198-330`) directly: real
+casacore's actual format is completely different —
+`hms()` produces `"HHhMMmSS.sss"` (letter separators `h`/`m`, no
+colons, and critically **no leading sign at all** — `MVAngle::print`
+only emits a sign character for the `ANGLE` branch or the `DIG2`
+modifier, neither of which the TIME-type `hms()` sets), and `dms()`
+produces `"+DDDdMMmSS.sss"` (letter separators `d`/`m`, an **always-
+present** sign, and a **3-digit** zero-padded degree field, not 2 —
+`stringDMS`'s underlying separator-replace loop stops after replacing
+exactly the first two `.` occurrences, leaving the seconds' own decimal
+point untouched). Live-verified against real casacore's `hms()`/
+`dms()` via `tableCommand` for a spread of angles (quadrant boundaries,
+negative, zero, `π`, near-`2π`, an arbitrary value): every one of the
+old assertions was simply wrong output, not a rounding/precision
+nuance — this package's TaQL-lite `hms`/`dms` never once produced a
+string a real casacore user or a downstream tool expecting the real
+format could have used.
+
+Fixed both functions to match the verified format exactly (still
+computing the same quantised-to-milliseconds-first integer arithmetic
+that avoids a stray `60` from float rounding — that numeric core was
+already correct, only the string assembly was wrong). Updated the
+Phase 69 test's two format assertions to the correct strings and added
+a new "Phase 175 — hms()/dms() output format" unit testset (7
+assertions covering the no-sign-on-hms / always-signed-dms / 3-digit-
+degree-field distinctions) plus "Phase 175 — hms()/dms(), real-TaQL
+cross-check" (16 assertions across 8 angles, `_HAVE_TAQL`-gated).
+Standalone `taql_query_tests.jl` green in full.

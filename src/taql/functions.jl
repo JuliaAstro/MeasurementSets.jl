@@ -139,15 +139,27 @@ _tql_datetime(a...) = isempty(a) ? _tql_mjd_of(Dates.now()) :
 _tql_now_mjd() = _tql_mjd_of(Dates.now())
 
 _pad2(n) = lpad(n, 2, '0')
-# radians -> `HH:MM:SS.sss` (of time) / `+DD.MM.SS.sss` (of arc); the
-# angle is quantised to milliseconds/milliarcsec as an integer first so
-# rounding never leaves a `60` in a field.
+# radians -> `HHhMMmSS.sss` (of time) / `+DDDdMMmSS.sss` (of arc) --
+# `TableExprFuncNode::stringHMS`/`stringDMS`
+# (`tables/TaQL/ExprFuncNode.cc:1315-1339`), which format via
+# `MVAngle::print` (precision 9 -> 3 fractional-second digits) then
+# replace the base `HH:MM:SS`/`+DDD.MM.SS` separators with letters (the
+# THIRD dms separator -- the seconds decimal point -- is left alone;
+# `stringDMS`'s replace loop stops after the second hit). Live-verified
+# against real casacore's own `hms()`/`dms()`: no colons/dots-only form
+# exists in real TaQL, degrees are always 3 digits (zero-padded, "***"
+# above 999 -- not reproduced, no MS angle gets there), hours always 2,
+# and — unlike `dms` — `hms` never carries a leading sign (`MVAngle::
+# print` only emits one for the ANGLE branch or the `DIG2` modifier,
+# neither of which `stringHMS` sets). The angle is quantised to
+# milliseconds/milliarcsec as an integer first so rounding never leaves
+# a `60` in a field.
 function _tql_hms(rad::Real)
     tms = mod(round(Int, mod(float(rad) * (12 / pi), 24) * 3_600_000), 24 * 3_600_000)
     h, r = divrem(tms, 3_600_000)
     m, r = divrem(r, 60_000)
     sec, ms = divrem(r, 1000)
-    string(_pad2(h), ":", _pad2(m), ":", _pad2(sec), ".", lpad(ms, 3, '0'))
+    string(_pad2(h), "h", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 function _tql_dms(rad::Real)
     sgn = signbit(float(rad)) ? "-" : "+"
@@ -155,7 +167,7 @@ function _tql_dms(rad::Real)
     d, r = divrem(tmas, 3_600_000)
     m, r = divrem(r, 60_000)
     sec, ms = divrem(r, 1000)
-    string(sgn, _pad2(d), ".", _pad2(m), ".", _pad2(sec), ".", lpad(ms, 3, '0'))
+    string(sgn, lpad(d, 3, '0'), "d", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 
 # great-circle angular distance between two `[lon, lat]` radian points
