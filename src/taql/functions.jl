@@ -48,6 +48,83 @@ _tql_avdev(x) = _red(y -> Statistics.mean(abs.(y .- Statistics.mean(y))))(x)
 _tql_nelem(x) = x isa TQLMArray ? count(!, x.mask) : x isa AbstractArray ? length(x) : 1
 _tql_ndim(x) = x isa TQLMArray ? ndims(x.data) : x isa AbstractArray ? ndims(x) : 0
 
+# `shape()` (`shapeFUNC`, `ExprFuncNodeArray.cc:1041-1053`) was entirely
+# missing -- returns the cell's per-axis extents as an Int array, in
+# the SAME axis order this package's arrays are already stored/indexed
+# in (casacore's own default, non-C-order style; the C-order-reversed
+# form only applies under an explicit `USING STYLE PYTHON`-family
+# TaQL style, out of scope -- TaQL-lite has no style selector at all).
+# Live-verified: `shape(B)` for a `(3,4)`-shaped cell gives `[3, 4]`,
+# matching Julia's own `size(B) == (3, 4)` with no reversal needed; a
+# scalar's shape is the empty Int array, matching `size(scalar) == ()`.
+_tql_shape(x) = x isa TQLMArray ? collect(Int, size(x.data)) :
+    x isa AbstractArray ? collect(Int, size(x)) : Int[]
+
+# `sumsqr()`/`sumsquare()` (`arrsumsqrFUNC`, `ExprFuncNode.cc:776-782,
+# 948-953`) -- the sum of ELEMENTWISE SQUARES (`x_i^2`, ordinary
+# multiplication -- for `Complex`, matches the Phase-179 `square()`
+# finding: `z*z`, NOT `abs2(z)`) -- and its `running`/`boxed`/`g*`
+# siblings were entirely missing from this package. Found by
+# systematically diffing casacore's full `TableParseFunc.cc`
+# function-name table against `_TQL_FUNCS`/`_TQL_AGGRS` (rather than
+# re-reading one more corner by hand) once several individually-found
+# missing functions (Phases 185, 186, 188) suggested a wider sweep of
+# the whole table would pay off. Live-verified: `sumsqr(1:8) == 204.0`
+# (`== sum((1:8).^2)`), `runningsumsqr(1:8,[2])[3] == 55.0`,
+# `boxedsumsqr(1:8,[2])[1] == 5.0`, `gsumsqr` of the group `[1,2]` is
+# `5.0`, and `sumsqr([1+1im, 2+0im]) == 4.0+2.0im ==
+# sum([1+1im,2+0im].^2)` (ordinary complex square, not magnitude).
+_tql_sumsqr(x) = _red(y -> sum(v -> v^2, y))(x)
+_tql_gsumsqr(v) = sum(x -> x^2, v)
+
+# casacore's `ltrim()`/`rtrim()` (`leadingWS`/`trailingWS` regexes,
+# `ExprFuncNode.cc:973-974`, `"^[ \\t]*"`/`"[ \\t]*\$"`) strip ONLY
+# space and tab -- NOT newline/carriage-return -- unlike `trim()`
+# (`String::trim()`, `casa/BasicSL/String.cc:105-112`), which strips
+# all FOUR (space/tab/`\n`/`\r`) from BOTH ends. Julia's `lstrip`/
+# `rstrip` (no predicate) strip ALL Unicode whitespace by default --
+# a real, confirmed divergence for `ltrim`/`rtrim` specifically.
+# Live-verified: `ltrim("\n\t X \t\n")` in real casacore leaves the
+# string COMPLETELY UNCHANGED (it starts with `\n`, which `[ \t]*`
+# never matches), while this package's old `lstrip`-based
+# implementation stripped everything down to `"X \t\n"`. `trim()`
+# itself was already correct (Julia's broader Unicode-whitespace
+# `strip` happens to agree with casacore's narrower 4-char set for
+# every plain-ASCII case) but is narrowed here too, for exact fidelity
+# rather than an accidental agreement.
+_tql_trim(s::AbstractString) = strip(c -> c == ' ' || c == '\t' || c == '\n' || c == '\r', s)
+_tql_ltrim(s::AbstractString) = lstrip(c -> c == ' ' || c == '\t', s)
+_tql_rtrim(s::AbstractString) = rstrip(c -> c == ' ' || c == '\t', s)
+
+# `capitalize()`/`reversestring()`/`sreverse()` (`capitalizeFUNC`/
+# `sreverseFUNC`, `ExprFuncNode.cc:988-998`, via `String::capitalize()`/
+# `String::reverse()`, `casa/BasicSL/String.cc:315-334`) were entirely
+# missing from this package -- found by checking the surrounding string
+# functions once the trim divergence above turned up. `capitalize()`
+# title-cases each "word" (a maximal run of letters/digits; ANY other
+# character, including `_`/`.`, is a word boundary) -- first char of
+# each word uppercased, the rest of that word lowercased. Live-verified:
+# `capitalize("hello world") == "Hello World"`,
+# `capitalize("3d star_field.name") == "3d Star_Field.Name"` (the
+# leading digit `3` starts a "word" too, per casacore's own
+# `isdigit(*p)` check, but has no case to change). `sreverse`/
+# `reversestring` are a plain character reversal, matching Julia's
+# `reverse(::AbstractString)` exactly.
+function _tql_capitalize(s::AbstractString)
+    io = IOBuffer()
+    at_word = false
+    for c in s
+        if isletter(c) || isdigit(c)
+            write(io, at_word ? lowercase(c) : uppercase(c))
+            at_word = true
+        else
+            write(io, c)
+            at_word = false
+        end
+    end
+    return String(take!(io))
+end
+
 _tql_arraymask(x::TQLMArray) = x.mask
 _tql_arraymask(x::AbstractArray) = falses(size(x))
 _tql_arraymask(_) = false
@@ -475,6 +552,7 @@ _running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, 
 # computation over the same 5-element window exactly.
 _running_avdev(x, w) = (a = _require_array(x); _running_reduce(_tql_avdev, Float64, a, w))
 _running_rms(x, w) = (a = _require_array(x); _running_reduce(_tql_rms, Float64, a, w))
+_running_sumsqr(x, w) = (a = _require_array(x); _running_reduce(_tql_sumsqr, eltype(a), a, w))
 
 # casacore's TableParseFunc.cc has TWO ddof variants for `running`/
 # `boxed` variance/stddev -- `runningvariance`/`boxedvariance` (ddof=0,
@@ -518,6 +596,7 @@ _boxed_std(x, w) = (a = _require_array(x);
 _boxed_sum(x, w) = (a = _require_array(x); _boxed_reduce(sum, eltype(a), a, w))
 _boxed_avdev(x, w) = (a = _require_array(x); _boxed_reduce(_tql_avdev, Float64, a, w))
 _boxed_rms(x, w) = (a = _require_array(x); _boxed_reduce(_tql_rms, Float64, a, w))
+_boxed_sumsqr(x, w) = (a = _require_array(x); _boxed_reduce(_tql_sumsqr, eltype(a), a, w))
 _boxed_svar(x, w) = (a = _require_array(x);
                      _boxed_reduce(y -> Statistics.var(_tql_need2(y, "samplevariance")), Float64, a, w))
 _boxed_sstd(x, w) = (a = _require_array(x);
@@ -565,6 +644,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "fmod" => (_ew2(rem), 2:2),
     # --- array-cell reductions ---
     "sum" => (_red(sum), 1:1), "product" => (_red(prod), 1:1),
+    "sumsqr" => (_tql_sumsqr, 1:1), "sumsquare" => (_tql_sumsqr, 1:1),
     "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
     "median" => (_red(_tql_median), 1:1),
     "variance" => (_red(x -> Statistics.var(x; corrected=false)), 1:1),
@@ -574,7 +654,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "ntrue" => (_red(x -> count(identity, x)), 1:1),
     "nfalse" => (_red(x -> count(!, x)), 1:1),
     "nelements" => (_tql_nelem, 1:1), "count" => (_tql_nelem, 1:1),
-    "ndim" => (_tql_ndim, 1:1),
+    "ndim" => (_tql_ndim, 1:1), "shape" => (_tql_shape, 1:1),
     # NOTE (found during Phase 186, not implemented): casacore also has
     # a whole "s"-suffixed axis-collapse family (`sums`, `means`,
     # `mins`, `maxs`, `products`, `medians`, `variances`, `stddevs`,
@@ -594,6 +674,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "runningsamplestddev" => (_running_sstd, 2:2),
     "runningsum" => (_running_sum, 2:2),
     "runningavdev" => (_running_avdev, 2:2), "runningrms" => (_running_rms, 2:2),
+    "runningsumsqr" => (_running_sumsqr, 2:2), "runningsumsquare" => (_running_sumsqr, 2:2),
     "boxedaverage" => (_boxed_avg, 2:2), "boxedmean" => (_boxed_avg, 2:2),
     "boxedmedian" => (_boxed_med, 2:2),
     "boxedmin" => (_boxed_min, 2:2), "boxedmax" => (_boxed_max, 2:2),
@@ -601,6 +682,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "boxedsamplevariance" => (_boxed_svar, 2:2), "boxedsamplestddev" => (_boxed_sstd, 2:2),
     "boxedsum" => (_boxed_sum, 2:2),
     "boxedavdev" => (_boxed_avdev, 2:2), "boxedrms" => (_boxed_rms, 2:2),
+    "boxedsumsqr" => (_boxed_sumsqr, 2:2), "boxedsumsquare" => (_boxed_sumsqr, 2:2),
     # --- masked arrays ---
     "marray" => ((d, m) -> TQLMArray(collect(d), m isa AbstractArray ?
                      BitArray(m) : fill(Bool(m), size(d))), 2:2),
@@ -609,8 +691,12 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- string ---
     "strlength" => (length, 1:1), "len" => (length, 1:1),
     "upcase" => (uppercase, 1:1), "upper" => (uppercase, 1:1), "toupper" => (uppercase, 1:1),
+    "to_upper" => (uppercase, 1:1),
     "downcase" => (lowercase, 1:1), "lower" => (lowercase, 1:1), "tolower" => (lowercase, 1:1),
-    "trim" => (strip, 1:1), "ltrim" => (lstrip, 1:1), "rtrim" => (rstrip, 1:1),
+    "to_lower" => (lowercase, 1:1),
+    "capitalize" => (_tql_capitalize, 1:1),
+    "reversestring" => (reverse, 1:1), "sreverse" => (reverse, 1:1),
+    "trim" => (_tql_trim, 1:1), "ltrim" => (_tql_ltrim, 1:1), "rtrim" => (_tql_rtrim, 1:1),
     # --- misc ---
     "iif" => (ifelse, 3:3),
     # --- date/time (MJD-Float days) + angle strings (Phase 69) ---
@@ -678,8 +764,10 @@ const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
     "gany" => (any, :scalar), "gall" => (all, :scalar),
     "gntrue" => (_ntrue, :scalar), "gnfalse" => (_nfalse, :scalar),
     "gfirst" => (first, :scalar), "glast" => (last, :scalar),
+    "gsumsqr" => (_tql_gsumsqr, :scalar), "gsumsquare" => (_tql_gsumsqr, :scalar),
     # per-element variants -- same scalar reducer, applied per cell position
     "gsums" => (sum, :perelem), "gproducts" => (prod, :perelem),
+    "gsumsqrs" => (_tql_gsumsqr, :perelem), "gsumsquares" => (_tql_gsumsqr, :perelem),
     "gmeans" => (Statistics.mean, :perelem), "gavgs" => (Statistics.mean, :perelem),
     "gvariances" => (_pop_var, :perelem), "gsamplevariances" => (Statistics.var, :perelem),
     "gstddevs" => (_pop_std, :perelem), "gsamplestddevs" => (Statistics.std, :perelem),

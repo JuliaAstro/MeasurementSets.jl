@@ -5589,3 +5589,132 @@ New testsets "Phase 186 — missing avdev()/runningavdev()/boxedavdev()/
 runningrms()/boxedrms()" (14 assertions, including a `Complex`-array
 `avdev` case) + its real-TaQL cross-check (6 assertions). Standalone
 `taql_query_tests.jl` green in full.
+
+### Phase 187 — found a real bug (`ltrim()`/`rtrim()` strip too much) and
+### two more missing functions (`capitalize()`, `sreverse()`/`reversestring()`)
+
+Moved to the string-function corner of `src/taql/functions.jl`, not yet
+swept this batch. Read `ExprFuncNode.cc`'s `ltrimFUNC`/`rtrimFUNC`/
+`trimFUNC` cases directly and found a real, confirmed divergence:
+casacore's `ltrim()`/`rtrim()` use the regexes `leadingWS`/`trailingWS`
+(`"^[ \t]*"`/`"[ \t]*$"`, `.cc:973-974`) — stripping **only space and
+tab**, never newline or carriage-return — whereas `trim()`
+(`String::trim()`, `casa/BasicSL/String.cc:105-112`) strips all
+**four** (space/tab/`\n`/`\r`) from both ends. This package's `ltrim`/
+`rtrim` were wired to plain Julia `lstrip`/`rstrip` (no predicate),
+which strip *every* Unicode whitespace character — a real divergence
+whenever a string's leading/trailing whitespace includes a newline.
+Live-verified: `ltrim("\n\t X \t\n")` in real casacore is the string
+**completely unchanged** (it starts with `\n`, which `[ \t]*` never
+matches), while the old Julia-`lstrip`-based implementation stripped
+it down to `"X \t\n"`. `trim()` itself happened to already agree with
+casacore for every plain-ASCII case (Julia's broader whitespace set is
+a superset of casacore's narrower 4-char one) but was narrowed to the
+exact 4-char set anyway, for genuine fidelity rather than an
+accidental agreement. Fixed with `_tql_trim`/`_tql_ltrim`/`_tql_rtrim`.
+
+While checking the surrounding string functions for more of the same,
+found two entirely missing ones: **`capitalize()`** (title-cases each
+"word" — a maximal run of letters/digits; any other character,
+including `_`/`.`, is a word boundary — first character of each word
+uppercased, the rest lowercased; `String::capitalize()`,
+`casa/BasicSL/String.cc:323-334`) and **`sreverse()`/`reversestring()`**
+(a plain character reversal, `String::reverse()`). Live-verified:
+`capitalize("hello world") == "Hello World"`,
+`capitalize("3d star_field.name") == "3d Star_Field.Name"` (the
+leading digit `3` starts a "word" too, per casacore's own
+`isdigit(*p)` check, but has no letter case to change).
+`sreverse`/`reversestring` matches Julia's own `reverse(::AbstractString)`
+exactly. Also added the missing `to_upper`/`to_lower` aliases for
+`upcase`/`downcase` (casacore accepts all four spellings; this package
+only had three of the four).
+
+New testsets "Phase 187 — ltrim()/rtrim() strip too much;
+capitalize()/sreverse() missing" (15 assertions) + its real-TaQL
+cross-check (9 assertions, covering both the whitespace corner case
+and the new functions). Standalone `taql_query_tests.jl` green in
+full.
+
+### Phase 188 — found a real missing function: `shape()`
+
+Continuing the same `TableParseFunc.cc` function-name-table check that
+found Phases 185-186's gaps, now applied to the general "misc"
+function corner instead of the `running*`/`boxed*` family: **`shape()`**
+(`shapeFUNC`, `ExprFuncNodeArray.cc:1041-1053`) — the per-axis extents
+of an array cell as an Int array — was entirely absent from TaQL-lite.
+Confirmed casacore's own non-C-order default style returns the axes in
+exactly the order this package already stores/indexes arrays in (the
+C-order-reversed form only applies under an explicit
+`USING STYLE PYTHON`-family selector, which TaQL-lite has no concept
+of at all — a non-issue). Live-verified: `shape(B)` for a `(3,4)`-shaped
+cell gives `[3, 4]`, matching Julia's own `size(B) == (3, 4)` directly,
+no reversal needed; a scalar's shape is the empty Int array. Fixed
+with `_tql_shape`.
+
+While at the same corner of the name table, found three more
+introspection-style functions this package doesn't (and likely won't
+soon) implement, each for a different, real reason:
+- **`regex()`/`pattern()`/`sqlpattern()`** — build a regex/glob/SQL
+  pattern object DYNAMICALLY from an arbitrary string expression (not
+  just the fixed literal `~ p/.../` grammar Phase 24 already supports),
+  usable in a subsequent `~`/`==` comparison. A real, meaningfully
+  different capability (`NAME ~ regex(PATTERN_COL)`, matching against a
+  computed/column pattern) — but properly supporting it needs a new
+  "compiled pattern" value type threaded through the comparison
+  operators, not a one-line function addition. Flagged for a dedicated
+  future phase, same treatment as the axis-collapse family (Phase 186).
+- **`isdefined()`/`isnull()`** — this package has no "null"/"undefined
+  cell" concept anywhere (confirmed by the existing `gcount` design
+  note from Phase 26), so these would be close to meaningless no-ops;
+  not worth the surface area without a real use case.
+- **`iscolumn()`/`iskeyword()`** — check table-level metadata by a name
+  string, not a per-row column value — architecturally different from
+  every other TaQL-lite function (which only ever sees
+  `cols[name][i]`, never the table object itself). Would need
+  table-level context threaded through the whole function-eval
+  machinery; a structural change, not a quick addition.
+
+New testsets "Phase 188 — missing shape() function" (4 assertions) +
+its real-TaQL cross-check (1 assertion). Standalone
+`taql_query_tests.jl` green in full.
+
+### Phase 189 — found a real missing function family: `sumsqr()`/`sumsquare()`
+### and its `running`/`boxed`/`g*` siblings, via a full function-name-table diff
+
+Phases 185/186/188 each found a missing function by re-reading one
+corner of `TableParseFunc.cc`'s function-name table by hand. This
+phase instead dumped casacore's **complete** function-name table and
+diffed it against everything registered in `_TQL_FUNCS`/`_TQL_AGGRS` —
+a more systematic version of the same check. Found **`sumsqr()`/
+`sumsquare()`** (the sum of elementwise squares, `Σxᵢ²` — ordinary
+multiplication, not `abs2`; for a `Complex` array this matches the
+Phase 179 `square()` finding exactly: `z*z`, not the magnitude) and
+its **`running`/`boxed`/`g*`/`gs*`** siblings — `runningsumsqr`/
+`boxedsumsqr` (sliding-window) and `gsumsqr`/`gsumsqrs` (group
+aggregate + per-element) — entirely missing.
+
+`arrsumsqrFUNC`'s own C++ (`ExprFuncNode.cc:776-782` for `Double`,
+`:948-953` for `DComplex`) confirmed the exact formula: `val*val` for
+a scalar, `sumsqr(array)` (elementwise square then sum) for an array,
+identical for both real and complex. Live-verified: `sumsqr(1:8) ==
+204.0` (`== sum((1:8).^2)`), `runningsumsqr(1:8,[2])[3] == 55.0`,
+`boxedsumsqr(1:8,[2])[1] == 5.0`, `gsumsqr` of the group `[1,2]` is
+`5.0`, and `sumsqr([1+1im, 2+0im]) == 4.0+2.0im ==
+sum([1+1im,2+0im].^2)` (ordinary complex square).
+
+Fixed by adding `_tql_sumsqr` (the scalar array reduction, reused
+directly as a `_running_reduce`/`_boxed_reduce` reducer — no new
+plumbing needed, same pattern as Phase 186's `avdev`/`rms`) and
+`_tql_gsumsqr` (the group-aggregate reducer, shared between the
+`:scalar` and `:perelem` modes exactly like every other `_TQL_AGGRS`
+entry). `sumsqrs`/`sumsquares` (the "s"-suffixed AXIS-COLLAPSE
+variant) is deliberately excluded — it belongs to the same larger,
+already-flagged (Phase 186) axis-collapse feature, not this
+sweep-for-a-missing-sibling pass.
+
+New testsets "Phase 189 — missing sumsqr()/gsumsqr() family (found
+via a full function-name-table diff)" (12 assertions, including a
+`Complex`-array case and a real `groupby` cross-check) + its
+real-TaQL cross-check (6 assertions, covering the scalar, running,
+boxed, and group-aggregate forms). Standalone `taql_query_tests.jl`
+green in full.

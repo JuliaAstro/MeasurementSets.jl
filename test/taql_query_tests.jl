@@ -959,6 +959,167 @@ end
     end
 end
 
+@testset "Phase 187 — ltrim()/rtrim() strip too much; capitalize()/sreverse() missing" begin
+    # casacore's ltrim()/rtrim() ("leadingWS"/"trailingWS" regexes,
+    # `"^[ \t]*"`/`"[ \t]*\$"`) strip ONLY space and tab -- NOT
+    # newline/carriage-return -- unlike trim() (String::trim()), which
+    # strips all 4 (space/tab/\n/\r) from both ends. Julia's lstrip/
+    # rstrip (no predicate) strip ALL Unicode whitespace -- a real
+    # divergence found by checking the string-function corner once the
+    # general-math sweep (Phases 184-186) moved on to other areas.
+    s = "\n\t X \t\n"
+    @test MSv2._tql_trim(s) == "X"
+    @test MSv2._tql_ltrim(s) == s            # unchanged -- starts with '\n', not ' '/'\t'
+    @test MSv2._tql_rtrim(s) == s
+    @test MSv2._tql_ltrim(" \tX") == "X"     # a genuine space/tab prefix IS stripped
+    @test MSv2._tql_rtrim("X \t") == "X"
+
+    # capitalize()/reversestring()/sreverse() were entirely missing.
+    @test MSv2._tql_capitalize("hello world") == "Hello World"
+    @test MSv2._tql_capitalize("3d star_field.name") == "3d Star_Field.Name"
+    @test reverse("hello") == "olleh"          # sreverse/reversestring == plain reverse
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [s]]; nrow=1)
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = [
+        "tr" => "trim(A)", "lt" => "ltrim(A)", "rt" => "rtrim(A)",
+        "cap" => "capitalize('hello world')", "rev" => "sreverse('hello')",
+        "ru" => "to_upper('x')", "rl" => "to_lower('X')"])
+    @test r.tr[1] == "X"
+    @test r.lt[1] == s
+    @test r.rt[1] == s
+    @test r.cap[1] == "Hello World"
+    @test r.rev[1] == "olleh"
+    @test r.ru[1] == "X"
+    @test r.rl[1] == "x"
+end
+
+@testset "Phase 187 — string function corner, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => ["\n\t X \t\n", "hello world",
+                                                        "3d star_field.name"]]; nrow=3)
+    t = readtable(tabpath)
+    for (i, expr) in ((1, "trim(A)"), (1, "ltrim(A)"), (1, "rtrim(A)"),
+                       (2, "capitalize(A)"), (2, "sreverse(A)"), (2, "reversestring(A)"),
+                       (3, "capitalize(A)"), (2, "to_upper(A)"), (2, "to_lower(A)"))
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[i]
+        ours = query(t, "rownumber() == $i"; select = ["X" => expr]).X[1]
+        @test casa == ours
+    end
+end
+
+@testset "Phase 188 — missing shape() function" begin
+    # casacore's shape() (shapeFUNC, ExprFuncNodeArray.cc:1041-1053) --
+    # the per-axis extents of an array cell as an Int array, in the
+    # SAME order this package already stores/indexes arrays in
+    # (casacore's own default, non-C-order style) -- was entirely
+    # missing. Found by continuing the same TableParseFunc.cc
+    # function-name-table check that found Phases 185/186's gaps, now
+    # applied to the general "misc" function corner instead of
+    # running*/boxed*. Live-verified: shape(B) for a (3,4)-shaped cell
+    # gives [3, 4], matching Julia's own size(B) directly (no
+    # reversal); a scalar's shape is the empty Int array.
+    @test MSv2._tql_shape(reshape(1.0:12.0, 3, 4)) == [3, 4]
+    @test MSv2._tql_shape([1.0, 2.0, 3.0]) == [3]
+    @test MSv2._tql_shape(5.0) == Int[]
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    A2 = Float64.(reshape(1:12, 3, 4))
+    write_table(tabpath, "T", Pair{String,Any}["B" => [A2]]; nrow=1, tsm=[["B"]])
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = ["X" => "shape(B)"])
+    @test r.X[1] == [3, 4]
+end
+
+@testset "Phase 188 — shape(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    A2 = Float64.(reshape(1:12, 3, 4))
+    write_table(tabpath, "T", Pair{String,Any}["B" => [A2]]; nrow=1, tsm=[["B"]])
+    t = readtable(tabpath)
+    rdir = joinpath(mktempdir(), "r")
+    _taqlcmd("SELECT shape(B) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+    casa = column(readtable(rdir), "X")[1]
+    ours = query(t, "rownumber() == 1"; select = ["X" => "shape(B)"]).X[1]
+    @test casa == ours
+end
+
+@testset "Phase 189 — missing sumsqr()/gsumsqr() family (found via a full function-name-table diff)" begin
+    # Systematically diffed casacore's complete TableParseFunc.cc
+    # function-name table against _TQL_FUNCS/_TQL_AGGRS (rather than
+    # re-reading one more corner by hand) once several individually-
+    # found missing functions (Phases 185, 186, 188) suggested a wider
+    # sweep of the whole table would pay off. Found sumsqr()/
+    # sumsquare() (sum of ELEMENTWISE SQUARES, x_i^2 -- ordinary
+    # multiplication, matching Phase 179's square() finding for
+    # Complex: z*z, not abs2(z)) and its running/boxed/g* siblings
+    # entirely missing.
+    a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    @test MSv2._tql_sumsqr(a) == sum(a .^ 2)
+    @test MSv2._tql_sumsqr(a) == 204.0
+    @test MSv2._running_sumsqr(a, 2)[3] == 55.0          # sum([1,2,3,4,5].^2)
+    @test MSv2._running_sumsqr(a, 2)[1] == 0.0            # edge zero-filled
+    @test MSv2._boxed_sumsqr(a, 2)[1] == 5.0              # sum([1,2].^2)
+    ac = ComplexF64[1 + 1im, 2 + 0im]
+    @test MSv2._tql_sumsqr(ac) == sum(ac .^ 2)            # ordinary complex square, not magnitude
+    @test MSv2._tql_sumsqr(ac) == 4.0 + 2.0im
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = [
+        "s" => "sumsqr(A)", "rs" => "runningsumsqr(A,[2])", "bs" => "boxedsumsqr(A,[2])"])
+    @test r.s[1] == MSv2._tql_sumsqr(a)
+    @test r.rs[1] == MSv2._running_sumsqr(a, 2)
+    @test r.bs[1] == MSv2._boxed_sumsqr(a, 2)
+
+    # group aggregate + per-element variant
+    K = Int32[1, 1, 2]
+    X = Float64[1, 2, 3]
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    write_table(tabpath2, "T2", Pair{String,Any}["K" => K, "X" => X]; nrow=3)
+    tg = readtable(tabpath2)
+    g = groupby(tg, "K"; select = ["K" => "K", "S" => "gsumsqr(X)"])
+    order = sortperm(collect(g.K))
+    @test collect(g.K)[order] == [1, 2]
+    @test collect(g.S)[order] == [5.0, 9.0]               # 1^2+2^2=5; 3^2=9
+end
+
+@testset "Phase 189 — sumsqr() family, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:8)
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    for expr in ("sumsqr(A)", "sumsquare(A)", "runningsumsqr(A,[2])",
+                 "boxedsumsqr(A,[2])")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa isa AbstractArray ? all(casa .≈ ours) : casa ≈ ours
+    end
+
+    K = Int32[1, 1, 2]
+    X = Float64[1, 2, 3]
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    write_table(tabpath2, "T2", Pair{String,Any}["K" => K, "X" => X]; nrow=3)
+    tc2 = CCT.Table(tabpath2)
+    rdir2 = joinpath(mktempdir(), "r2")
+    _taqlcmd("SELECT K, gsumsqr(X) AS S FROM \$1 GROUP BY K GIVING '$rdir2'", tc2)
+    m2 = readtable(rdir2)
+    casa2 = Dict(column(m2, "K")[i] => column(m2, "S")[i] for i in 1:nrow(m2))
+    tg = readtable(tabpath2)
+    g2 = groupby(tg, "K"; select = ["K" => "K", "S" => "gsumsqr(X)"])
+    for i in 1:length(g2.K)
+        @test casa2[g2.K[i]] == g2.S[i]
+    end
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)
