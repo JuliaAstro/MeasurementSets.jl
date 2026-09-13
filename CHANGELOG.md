@@ -4779,3 +4779,50 @@ errors clearly, the plain (unmasked) `mscal.stokes(DATA, 'I')` path is
 completely unaffected. New testset `test/taql_mscal_tests.jl`
 "mscal.stokes() vs a masked-array argument (Phase 171)" (2 assertions).
 Standalone mscal suite green (all 28 testsets, no regressions).
+
+### Phase 172 — swept `CompressComplexSD`'s bit-packing and `removecolumn!`'s Hypercolumn-keyword handling; no bug found in either
+
+Two source-reading investigations, following the same discipline as
+Phases 161-166 (re-verify a flagged-but-never-independently-checked
+risk, or a code path with no obvious test coverage).
+
+**1. `CompressComplexSD` bit-packing** — flagged as a specific risk at
+Phase 19's own drafting time ("ported verbatim from
+`CompressComplex.cc:740-846` + Casacore cross-check", never itself
+re-derived line-by-line in a later sweep). Read
+`CompressComplex.cc`'s `CompressComplexSD::scaleOnGet`/`scaleOnPut` in
+full (this checkout's real path is `tables/DataMan/CompressComplex.cc`,
+not the `tables/Dysco/` guess in the original plan) and compared every
+constant and branch against `src/datamanagers/virtual.jl`'s
+`_decode(::CompressComplexSD,...)`/`_encode(::CompressComplexSD,...)`:
+the even/odd LSB dispatch, the `fullScale = scale/32768` / `imagScale =
+scale*2` factors, the wrap-correction arithmetic shared with plain
+`CompressComplex`, and every clamp range (`ENG_SD_EVEN_LO/HI =
+∓32768·32768[-1]`, `ENG_SD_REAL_MAX = 32767`, `ENG_SD_IMAG_LO/HI =
+-16384/16383`) all match casacore's source exactly, including the
+`<<1`/`+1` odd-flag bit convention. No divergence found — the existing
+Phase 19 CASA cross-check for this engine was already exercising
+correct code.
+
+**2. `removecolumn!`'s Hypercolumn-keyword handling** — prompted by
+Phase 112's own `_copy_table` fix (`_filter_hypercolumns`, which drops
+a `Hypercolumn_<name>` private keyword on copy when a column it names
+is missing from the output) raising the question of whether `edit()`'s
+`removecolumn!` needed the same treatment for its own regenerated
+`TableDesc` (`src/tables/edit.jl`'s `_flush_regen`, which reuses
+`rd.desc.private` verbatim with no filtering). Read
+`TableDesc::removeColumn` (`tables/Tables/TableDesc.h:576`) directly:
+it is a bare one-line pass-through to `ColumnDescSet::remove`, with
+**no** hypercolumn-declaration cleanup at all — real casacore itself
+leaves a stale `Hypercolumn_<name>` keyword referencing a since-removed
+column after a plain `Table::removeColumn`. So `_flush_regen`'s
+verbatim-copy behaviour after `removecolumn!` **matches real casacore
+exactly** (both leave the same dangling declaration) — not a bug, and
+not a case Phase 112's `_copy_table` fix needs extending to (that fix
+addresses `copytable`'s *rename/drop-via-selection* case, a genuinely
+different situation from `edit()`'s in-place column removal).
+
+No production code changed either way; both are confirmed-correct
+findings, not fixes. Standalone engine + edit suites green (existing
+tests unaffected — no new test needed, since neither investigation
+produced a code path that wasn't already exercised).
