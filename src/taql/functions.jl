@@ -170,6 +170,22 @@ function _tql_dms(rad::Real)
     string(sgn, lpad(d, 3, '0'), "d", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 
+# MJD -> `"HH:MM:SS.sss"` (of-day, colon separators, no sign) -- the
+# time-of-day format `ctime()`/`ctod()` use (`TableExprFuncNode::
+# stringTime`/`stringDateTime`, precision 9 -> 3 fractional-second
+# digits, `casa/Quanta/MVTime.cc:366-434`'s `MVAngle::print` TIME
+# branch). Distinct from `_tql_hms` (which takes a *radian angle*, not
+# an MJD, and uses `h`/`m` letter separators): both quantise to
+# milliseconds first so rounding never leaves a `60` in a field.
+function _tql_time_of_day_str(mjd::Real)
+    frac = mod(float(mjd), 1.0)
+    tms = mod(round(Int, frac * 24 * 3_600_000), 24 * 3_600_000)
+    h, r = divrem(tms, 3_600_000)
+    m, r = divrem(r, 60_000)
+    sec, ms = divrem(r, 1000)
+    string(_pad2(h), ":", _pad2(m), ":", _pad2(sec), ".", lpad(ms, 3, '0'))
+end
+
 # great-circle angular distance between two `[lon, lat]` radian points
 # (SOFA `seps` -- the atan2 form, numerically stable near 0 and π).
 function _tql_angdist(lon1::Real, lat1::Real, lon2::Real, lat2::Real)
@@ -325,11 +341,15 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "weekday" => (x -> Dates.dayofweek(_tql_dt_of(x)), 1:1),
     "dow" => (x -> Dates.dayofweek(_tql_dt_of(x)), 1:1),
     "cdate" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy"), 1:1),
-    "ctime" => (x -> Dates.format(_tql_dt_of(x), "HH:MM:SS"), 1:1),
+    "ctime" => (x -> _tql_time_of_day_str(float(x)), 1:1),
     "cmonth" => (x -> Dates.format(_tql_dt_of(x), "uuu"), 1:1),
     "cdow" => (x -> Dates.format(_tql_dt_of(x), "eee"), 1:1),
-    "ctod" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy/HH:MM:SS"), 1:1),
-    "cdatetime" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy/HH:MM:SS"), 1:1),
+    # `ctod`/`cdatetime` are the SAME real casacore function
+    # (`TableParseFunc.cc:571`, both map to `ctodFUNC`) -- `YYYY/MM/DD`
+    # (not `dd-Mon-yyyy` -- that's `cdate`'s DMY format, a different
+    # `MVTime` mode) + `/` + the `HH:MM:SS.sss` time-of-day.
+    "ctod" => (x -> Dates.format(_tql_dt_of(x), "yyyy/mm/dd") * "/" * _tql_time_of_day_str(float(x)), 1:1),
+    "cdatetime" => (x -> Dates.format(_tql_dt_of(x), "yyyy/mm/dd") * "/" * _tql_time_of_day_str(float(x)), 1:1),
     "hms" => (x -> _tql_hms(float(x)), 1:1),
     "dms" => (x -> _tql_dms(float(x)), 1:1),
     "normangle" => (x -> rem2pi(float(x), RoundNearest), 1:1),

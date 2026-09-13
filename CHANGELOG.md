@@ -4968,3 +4968,48 @@ assertions covering the no-sign-on-hms / always-signed-dms / 3-digit-
 degree-field distinctions) plus "Phase 175 — hms()/dms(), real-TaQL
 cross-check" (16 assertions across 8 angles, `_HAVE_TAQL`-gated).
 Standalone `taql_query_tests.jl` green in full.
+
+### Phase 176 — found and fixed two more real bugs: `ctime()` was missing fractional seconds, and `ctod()`/`cdatetime()` used the wrong date format entirely
+
+**Two more real bugs found**, continuing directly from Phase 175's
+`hms`/`dms` fix by checking the neighbouring date/time-string functions
+in the same source file (`src/taql/functions.jl`) the same way: read
+casacore source first, then live-verify against real casacore.
+
+Read `TableExprFuncNode`'s `cdateFUNC`/`ctimeFUNC`/`ctodFUNC`
+dispatch (`tables/TaQL/ExprFuncNode.cc:1045-1054`) and the underlying
+`stringDate`/`stringTime`/`stringDateTime` (`.cc:1218-1227`, which
+format via `MVTime::print`, `casa/Quanta/MVTime.cc:366-434`):
+- **`ctime()`** calls `stringTime(dt, 9)` — precision 9, i.e. 3
+  fractional-second digits. This package's implementation was a bare
+  `Dates.format(..., "HH:MM:SS")` with **no fractional part at all**.
+- **`ctod()`** and its alias **`cdatetime()`** (confirmed the same
+  function in real casacore — `TableParseFunc.cc:571` maps both names
+  to `ctodFUNC`) call `stringDateTime(dt, 9)`, which uses `MVTime`'s
+  **`YMD`** print mode (`"YYYY/MM/DD/HH:MM:SS.sss"`, slash-separated,
+  4-digit year first) — a completely different `MVTime` mode from
+  `cdate()`'s own `DMY` mode (`"DD-Mon-YYYY"`, dash-separated,
+  3-letter month name). This package's `ctod`/`cdatetime` were instead
+  built from `cdate`'s DMY format with a bare `/HH:MM:SS` suffix
+  tacked on (no fractional seconds either) — the wrong day/month/year
+  ORDER and separator, not just missing decimals.
+
+`cdate()`, `cmonth()`, and `cdow()` were independently re-checked
+against `MVTime::monthName`/`dayName` (`casa/Quanta/MVTime.cc:100-154`)
+and confirmed already correct — no change needed there.
+
+Fixed by adding a shared `_tql_time_of_day_str(mjd)` (the same
+quantise-to-milliseconds-then-carry-safely integer arithmetic as
+Phase 175's `_tql_hms`, but operating on an MJD's fractional day
+directly rather than a radian angle, and using plain colon separators
+with no sign) and wiring it into `ctime`, and into `ctod`/`cdatetime`
+alongside a corrected `"yyyy/mm/dd"` date prefix. Live-verified against
+real casacore across five MJD values spanning a day boundary, a
+midnight, a fractional-second rounding case, and an ordinary date —
+every one of the six `c*` functions now matches exactly.
+
+New testset "Phase 176 — ctime()/ctod()/cdatetime() output format" (6
+assertions) plus "Phase 176 — ctime()/ctod()/cdatetime(), real-TaQL
+cross-check" (30 assertions across 5 MJDs × 6 functions, `_HAVE_TAQL`-
+gated, covering the already-correct `cdate`/`cmonth`/`cdow` too as a
+regression guard). Standalone `taql_query_tests.jl` green in full.

@@ -2524,6 +2524,40 @@ end
     end
 end
 
+# Phase 176: `ctime()`/`ctod()`/`cdatetime()` output format -- found
+# right after Phase 175's hms/dms fix, in the same source file, by
+# checking the sibling date/time-string functions the same way.
+# `ctime()` was missing its fractional-second digits entirely (an
+# unqualified `Dates.format(..., "HH:MM:SS")`), and `ctod()`/
+# `cdatetime()` (the SAME real casacore function --
+# `TableParseFunc.cc:571` maps both names to `ctodFUNC`) used `cdate`'s
+# DMY format (`dd-Mon-yyyy`) instead of the real `YYYY/MM/DD/HH:MM:SS.sss`
+# (`stringDateTime` -> `MVTime::YMD`, a completely different `MVTime`
+# print mode than `stringDate`'s `DMY`).
+@testset "Phase 176 — ctime()/ctod()/cdatetime() output format" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    mjd = 58891.25123456                      # 2020-02-12 06:01:46.666
+    @test f("ctime")(mjd) == "06:01:46.666"
+    @test f("ctod")(mjd) == "2020/02/12/06:01:46.666"
+    @test f("cdatetime")(mjd) == "2020/02/12/06:01:46.666"
+    @test f("ctime")(58891.0) == "00:00:00.000"          # midnight, no carry
+    @test f("ctime")(60000.999999) == "23:59:59.914"     # rounds without wrapping the day
+    @test f("cdate")(mjd) == "12-Feb-2020"               # unaffected (already correct)
+end
+
+@testset "Phase 176 — ctime()/ctod()/cdatetime(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    for mjd in (58891.25123456, 58891.0, 60000.999999, 58000.5, 59214.9999999)
+        for fn in ("cdate", "ctime", "cmonth", "cdow", "ctod", "cdatetime")
+            rdir = joinpath(mktempdir(), "r")
+            _taqlcmd("SELECT $fn(mjdtodate($mjd)) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+            @test column(readtable(rdir), "X")[1] == MSv2._TQL_FUNCS[fn][1](mjd)
+        end
+    end
+end
+
 @testset "Phase 69 — angdist / array literal" begin
     @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
     @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi
