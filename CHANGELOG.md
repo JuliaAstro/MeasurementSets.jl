@@ -5050,3 +5050,119 @@ regression check on the already-correct `year`/`month`/`day`/`weekday`/
 `dow`) plus "Phase 177 — week(), real-TaQL cross-check" (375
 assertions across 75 dates × 5 functions, `_HAVE_TAQL`-gated).
 Standalone `taql_query_tests.jl` green in full.
+
+### Phase 178 — swept `normangle()` and `angdist()`; both confirmed correct via a direct real-TaQL cross-check that had never existed before
+
+Continuing the same "check every function in this corner of the file"
+sweep as Phases 175-177, since three of the last four checks turned up
+real bugs. `normangle` and `angdist` had only ever been checked against
+hand-computed unit-test expectations (`normangle` also had one indirect
+row-selection check inside a real-TaQL testset, but never a direct
+value comparison; `angdist` had no real-TaQL exposure at all) — exactly
+the "invented, never oracle-checked" pattern that produced Phases
+174-177's four bugs, so both were worth a direct check.
+
+Read `TableExprFuncNode`'s `normangleFUNC`
+(`tables/TaQL/ExprFuncNode.cc:849-853`, `fmod`-based range reduction to
+`(-π, π]`) and `angdistFUNC`/`angdist()`
+(`.cc:835-847`, calling the shared `angdist(lon1,lat1,lon2,lat2)`
+free function) and live-verified both directly against real casacore
+via `tableCommand` — `normangle` for a spread of angles including exact
+π/multiples-of-2π/values a floating-point epsilon either side of the
+`(-π,π]` boundary, `angdist` for ordinary point pairs, an antipodal
+pair, and a near-pole pair. **Both match to floating-point precision —
+no bug found.** `rem2pi(x, RoundNearest)` (Julia stdlib) turns out to
+be exactly equivalent to casacore's own `fmod`+branch construction, and
+`_tql_angdist`'s SOFA-`seps`-style atan2 form agrees with casacore's
+own `angdist()` everywhere tested.
+
+New testset "Phase 178 — normangle()/angdist(), real-TaQL cross-check"
+(16 assertions, `_HAVE_TAQL`-gated) — the first direct value-level
+oracle check either function has ever had. Standalone
+`taql_query_tests.jl` green in full; this also closes out the
+`src/taql/functions.jl` date/time-and-angle-formatting sweep opened by
+Phase 174 — every function in that corner of the file has now been
+either fixed (174-177) or confirmed correct (178) against a real
+oracle.
+
+### Phase 179 — found and fixed two more real bugs: `square()`/`sqr()` computed the wrong thing for complex values, and `min()`/`max()` couldn't compare complex values at all
+
+**Two more real bugs found**, in a different part of `src/taql/
+functions.jl` (the general math-function table, not the date/time
+corner) — but the exact same "invented, never checked" root cause that
+produced Phases 174-178's findings, and both bugs directly affect
+`DATA`/`MODEL_DATA`/`CORRECTED_DATA` columns (complex-valued) in
+ordinary MS queries, not just an obscure edge case.
+
+- **`square()`/`sqr()`**: read `TableExprFuncNode`'s `squareFUNC`
+  (`tables/TaQL/ExprFuncNode.cc:505-508` (Int), `658-661` (Double),
+  `889-892` (DComplex)) directly: for a complex argument, real
+  casacore computes ordinary complex multiplication `x*x` (a COMPLEX
+  result — `square(3+4i) == -7+24i`). This package's `square`/`sqr`
+  were instead aliased to `abs2` (a REAL magnitude-squared result —
+  `abs2(3+4i) == 25`), silently discarding the phase of every
+  visibility a query squared. `norm()` (`.cc:678-683`) IS the real
+  casacore `abs2`-equivalent function — a genuinely different function
+  this package's `square`/`sqr` were conflated with. `cube()` was
+  already correct (`x^3`, ordinary complex exponentiation). Fixed by
+  changing `square`/`sqr` to `_ew(x -> x^2)`, matching `cube`'s
+  existing pattern.
+- **`min()`/`max()`**: read the same file's `minFUNC`/`maxFUNC`
+  (`.cc:899-921`) and `Complex`/`DComplex`'s own norm-based comparison
+  operators (`casa/BasicSL/Complex.h:174-206`, ties return the first
+  argument for both precisions): real casacore's 2-argument `min`/`max`
+  compares a complex pair BY MAGNITUDE and returns the actual complex
+  value with the smaller/larger magnitude. This package's `min`/`max`
+  used Julia's plain `min`/`max`, which has no ordering defined for
+  `Complex` at all — `min(DATA, x)` on a visibility column raised a raw
+  `MethodError` (`isless` undefined for `Complex`) instead of comparing
+  by magnitude. Fixed with new `_tql_min2`/`_tql_max2` helpers
+  (`src/taql/functions.jl`) — complex-aware magnitude comparison with a
+  first-argument tie-break exactly matching casacore's operators;
+  real-valued operands fall straight through to ordinary `min`/`max`,
+  unaffected.
+
+Live-verified both fixes against real casacore via `tableCommand` for
+representative complex and real values — every case matches exactly.
+New testset "Phase 179 — square()/sqr()/min()/max() vs complex values"
+(11 assertions) plus "Phase 179 — square()/min()/max(), real-TaQL
+cross-check" (8 assertions, `_HAVE_TAQL`-gated, comparing this
+package's `query()` computed-select output directly against real
+casacore for 8 expressions). Neither bug had ANY prior test coverage
+(the entire package had zero existing references to `square`/`sqr`
+anywhere, and every existing `min`/`max` test used real-valued
+columns only) — a real, previously-invisible gap now closed.
+Standalone `taql_query_tests.jl` green in full.
+
+### Phase 180 — swept `variance()`/`stddev()`/`mean()` against a complex array cell; confirmed correct, plus a benign `rms()` permissiveness note
+
+Continuing the complex-value sweep opened by Phase 179 — a reduction
+that's wrong for complex data is exactly the same bug shape, so
+`variance`/`stddev`/`mean` (all used on `DATA`-like columns in
+practice) were checked against real casacore's actual computation, not
+just assumed fine.
+
+Read `casa/Arrays/ElementFunctions.h:218-245` (`SumSqrDiff`'s
+complex-type specialization) and `ExprFuncNode.cc:788-808`
+(`arrvariance0FUNC`/`arrstddev0FUNC`): real casacore's complex variance
+sums `(Δre)² + (Δim)²` per element — the squared magnitude of each
+deviation from the mean, the standard definition of a complex random
+variable's variance — then takes the (already-real) result. This
+turns out to be **exactly** what Julia's `Statistics.var`/`std` already
+compute for a `Complex` vector, so `_red(Statistics.var)`/`_red(
+Statistics.std)` needed no change — confirmed correct via both source
+reading and a live cross-check against real casacore
+(`variance`/`stddev`/`mean` of a 4-element complex cell all match
+exactly).
+
+Also confirmed, in passing: real casacore's `rms()` does **not** support
+a complex argument at all (`tableCommand` throws "function argument is
+not real"), while this package's `rms` computes the RMS magnitude for
+one — a benign extension, not a divergence to "fix" (there is no real
+casacore behaviour to match or diverge from).
+
+New testset "Phase 180 — variance()/stddev()/mean() vs a complex array
+cell" (4 assertions) plus "Phase 180 — variance()/stddev()/mean(),
+real-TaQL cross-check" (3 assertions, `_HAVE_TAQL`-gated). Neither
+function had any prior complex-argument test coverage. Standalone
+`taql_query_tests.jl` green in full.

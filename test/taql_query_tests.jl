@@ -2610,6 +2610,128 @@ end
     end
 end
 
+# Phase 178: `normangle()`/`angdist()` real-TaQL cross-check -- neither
+# had ever been checked against a real oracle by direct value comparison
+# before (only hand-computed unit tests, plus one indirect row-selection
+# check for `normangle`). Following the Phase 175-177 "check every
+# function in this file the same way" discipline: both turn out already
+# correct -- `normangleFUNC`'s `fmod`-based range reduction
+# (`tables/TaQL/ExprFuncNode.cc:849-853`) matches `rem2pi(x,
+# RoundNearest)` to floating-point precision, and `_tql_angdist` (the
+# SOFA `seps`-style atan2 form) matches real casacore's own
+# `angdistFUNC`/`angdist()` (`.cc:835-847`) to floating-point precision
+# across ordinary points, near-antipodal points, and a near-pole pair.
+@testset "Phase 178 — normangle()/angdist(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    for x in (-Float64(pi), Float64(pi), 3pi, -3pi, 0.0, 100.0, -100.0, 2pi, -2pi,
+              pi - 1e-12, pi + 1e-12, -pi - 1e-12)
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT normangle($x) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        @test column(readtable(rdir), "X")[1] ≈ MSv2._TQL_FUNCS["normangle"][1](x) atol = 1e-12
+    end
+    for (l1, b1, l2, b2) in ((0.0, 0.0, 0.0, pi / 2), (0.0, 0.0, Float64(pi), 0.0),
+                             (1.0, 0.5, 1.2, 0.3), (0.1, -0.4, 3.0, 0.8))
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT angdist([$l1,$b1],[$l2,$b2]) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        @test column(readtable(rdir), "X")[1] ≈ MSv2._tql_angdist(l1, b1, l2, b2) atol = 1e-9
+    end
+end
+
+# Phase 179: `square()`/`sqr()` and `min()`/`max()` vs COMPLEX values --
+# both found by checking real casacore source rather than a live probe
+# first this time (the "invented, never checked" pattern struck again,
+# one function away from the just-closed date/time corner). Real
+# `squareFUNC` computes ordinary complex multiplication `x*x` (a
+# complex result) for a complex argument, NOT the magnitude-squared
+# `abs2` (real result) this package's `square`/`sqr` were wrongly
+# aliased to -- `norm()` is the actual real casacore function for
+# `abs2`, a genuinely different one (`ExprFuncNode.cc:658-661,
+# 678-683,889-892`). Real `minFUNC`/`maxFUNC` compare a complex pair by
+# magnitude (`Complex`/`DComplex`'s own norm-based `operator<`/`>`,
+# `casa/BasicSL/Complex.h:174-206`) and this package's plain `min`/`max`
+# had no such ordering at all -- `min(complexcol, x)` raised a raw
+# `MethodError` (`isless` undefined for `Complex`) instead of comparing
+# by magnitude like real casacore does.
+@testset "Phase 179 — square()/sqr()/min()/max() vs complex values" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    z = ComplexF32(3.0, 4.0)
+    @test f("square")(z) == z^2                  # -7+24i, NOT abs2(z)=25
+    @test f("sqr")(z) == z^2
+    @test f("cube")(z) == z^3                    # already correct before this phase
+    @test f("norm")(z) == abs2(z)                # the REAL abs2 function -- unaffected
+    @test f("square")(5.0) == 25.0                # real values unaffected
+    @test f("square")(-7) == 49
+    a, b = ComplexF32(1.0, 1.0), ComplexF32(2.0, 0.0)   # |a|²=2, |b|²=4
+    @test MSv2._tql_min2(a, b) == a
+    @test MSv2._tql_max2(a, b) == b
+    @test MSv2._tql_min2(3.0, 5.0) == 3.0         # real values still plain min/max
+    @test MSv2._tql_max2(3.0, 5.0) == 5.0
+    @test MSv2._tql_min2(a, a) == a               # tie -> first argument
+end
+
+@testset "Phase 179 — square()/min()/max(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [ComplexF32(3.0, 4.0)],
+                                                "B" => [ComplexF32(1.0, 1.0)],
+                                                "C" => [ComplexF32(2.0, 0.0)],
+                                                "D" => [5.0], "E" => [3.0]];
+                nrow=1)
+    t = readtable(tabpath)
+    for expr in ("square(A)", "sqr(A)", "cube(A)", "norm(A)",
+                 "min(B, C)", "max(B, C)", "min(D, E)", "max(D, E)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa ≈ ours
+    end
+end
+
+# Phase 180: `variance()`/`stddev()`/`mean()` vs a COMPLEX array cell --
+# checked because a wrong-for-complex reduction is exactly the kind of
+# bug Phase 179 just found in `square`/`min`/`max`, and `variance`/
+# `stddev` in particular have a real, non-obvious subtlety: real
+# casacore's complex variance uses a SPECIALIZED accumulator
+# (`SumSqrDiff<complex<T>>`, `casa/Arrays/ElementFunctions.h:236-245`)
+# that sums `(Δre)² + (Δim)²` per element -- i.e. the squared MAGNITUDE
+# of each deviation from the mean, the standard definition of a complex
+# random variable's variance -- then keeps only the (already-real)
+# result (`ExprFuncNode.cc:791-795`, `real(variance(complexArray,
+# ddof))`). This turns out to be EXACTLY what Julia's `Statistics.var`
+# already computes for a `Complex` vector, so `_red(Statistics.var)`
+# needed no change -- confirmed correct, not a bug. Also confirmed:
+# real casacore's `rms()` does NOT support a complex argument at all
+# (throws "function argument is not real") -- this package's `rms` is
+# more permissive (computes the RMS magnitude), a benign extension, not
+# a divergence to "fix" since there is no real casacore behaviour to
+# match.
+@testset "Phase 180 — variance()/stddev()/mean() vs a complex array cell" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    cell = ComplexF32[1.0+2.0im 3.0-1.0im 0.5+0.5im 2.0+0.0im]
+    @test f("mean")(cell) ≈ Statistics.mean(cell)
+    @test f("variance")(cell) ≈ 2.09375
+    @test f("stddev")(cell) ≈ 1.4469796128487782
+    @test f("mean")(cell) ≈ ComplexF32(1.625, 0.375)
+end
+
+@testset "Phase 180 — variance()/stddev()/mean(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    cell = ComplexF32[1.0+2.0im 3.0-1.0im 0.5+0.5im 2.0+0.0im]
+    write_table(tabpath, "T", Pair{String,Any}["A" => [cell]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+    for expr in ("variance(A)", "stddev(A)", "mean(A)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa ≈ ours atol = 1e-4
+    end
+end
+
 @testset "Phase 69 — angdist / array literal" begin
     @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
     @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi
