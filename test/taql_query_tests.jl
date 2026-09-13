@@ -2558,6 +2558,58 @@ end
     end
 end
 
+# Phase 177: `week()` -- found right after Phase 176's date/time-format
+# fixes, by checking the numeric date-component functions
+# (year/month/day/weekday/week) the same way against real casacore.
+# `year`/`month`/`day`/`weekday`/`dow` were all already correct
+# (`Dates.year`/`month`/`day`/`dayofweek` happen to agree with
+# casacore's `MVTime::year/month/monthday/weekday` exactly), but
+# `week()` used Julia's `Dates.week` (ISO-8601), which is NOT what
+# casacore's `MVTime::yearweek()` computes: at a year boundary where
+# the ISO week wraps to week 52/53 of the *previous* year, casacore's
+# own (non-ISO) algorithm instead returns 0 for those early-January
+# days.
+@testset "Phase 177 — week() (casacore's non-ISO MVTime::yearweek)" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    # 2022-01-01 is a Saturday: ISO week 52 of 2021, but casacore's own
+    # week() gives 0 -- this is the actual divergence found live.
+    @test f("week")(59580.0) == 0
+    @test f("week")(58891.0) == 7            # 2020-02-12, unaffected case
+    @test f("week")(58849.0) == 1            # 2020-01-01 (a Wednesday)
+    @test f("week")(59214.0) == 53           # 2020-12-31 (year has a week 53)
+    @test f("week")(60310.0) == 1            # 2024-01-01 (a Monday)
+    @test f("year")(58891.0) == 2020
+    @test f("month")(58891.0) == 2
+    @test f("day")(58891.0) == 12
+    @test f("weekday")(58891.0) == 3         # Wed, Mon=1..Sun=7
+    @test f("dow")(58891.0) == 3
+end
+
+@testset "Phase 177 — week(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    # a window around each of several consecutive year boundaries, plus
+    # the fixed set above -- exercises every ISO-vs-casacore edge case
+    mjds = Float64[]
+    for base in (58849.0, 59214.0, 59580.0, 59945.0, 60310.0)
+        append!(mjds, collect((base - 5):(base + 8)))
+    end
+    append!(mjds, [58891.0, 58000.0, 60000.0, 58487.0, 58489.0])
+    for mjd in mjds
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT year(mjdtodate($mjd)) AS Y, month(mjdtodate($mjd)) AS M, " *
+                 "day(mjdtodate($mjd)) AS D, weekday(mjdtodate($mjd)) AS WD, " *
+                 "week(mjdtodate($mjd)) AS W FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        tab = readtable(rdir)
+        @test column(tab, "Y")[1] == MSv2._TQL_FUNCS["year"][1](mjd)
+        @test column(tab, "M")[1] == MSv2._TQL_FUNCS["month"][1](mjd)
+        @test column(tab, "D")[1] == MSv2._TQL_FUNCS["day"][1](mjd)
+        @test column(tab, "WD")[1] == MSv2._TQL_FUNCS["weekday"][1](mjd)
+        @test column(tab, "W")[1] == MSv2._TQL_FUNCS["week"][1](mjd)
+    end
+end
+
 @testset "Phase 69 — angdist / array literal" begin
     @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
     @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi

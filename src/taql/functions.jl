@@ -186,6 +186,36 @@ function _tql_time_of_day_str(mjd::Real)
     string(_pad2(h), ":", _pad2(m), ":", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 
+# `week()` -- casacore's `MVTime::yearweek()` (`casa/Quanta/MVTime.cc:
+# 198-206`, on top of `yearday()`, `.cc:185-193`) is NOT the ISO-8601
+# week Julia's `Dates.week` computes: at a year boundary where the ISO
+# week wraps to week 52/53 of the *previous* year, casacore's own
+# algorithm instead returns **0** for those early-January days (found
+# by live-checking `Dates.week` against real casacore's `week()` --
+# 2022-01-01, a Saturday, is ISO week 52 of 2021 but casacore's own
+# `week()` gives 0, not 52). `yearday()`/`yearweek()` ported verbatim
+# (integer division/remainder below are Julia `div`/`rem`, which -- like
+# C++'s `/`/`%` on `Int` -- truncate toward zero and keep the dividend's
+# sign, so this is a direct translation, not a re-derivation).
+function _tql_yearday(dt::Dates.DateTime)
+    yyyy, e, a = Dates.year(dt), Dates.month(dt), Dates.day(dt)
+    c = (yyyy % 4 == 0 && (yyyy % 100 != 0 || yyyy % 400 == 0)) ?
+        div(e + 9, 12) : 2 * div(e + 9, 12)
+    return div(275 * e, 9) - c + a - 30
+end
+function _tql_yearweek(dt::Dates.DateTime)
+    yd = _tql_yearday(dt) - 4
+    yw = div(yd + 7, 7)
+    yd = rem(yd, 7)
+    wd = Dates.dayofweek(dt)             # casacore's weekday(): Mon=1..Sun=7, same as Dates
+    if yd >= 0
+        yd >= wd && return yw + 1
+    elseif yd + 7 >= wd
+        return yw + 1
+    end
+    return yw
+end
+
 # great-circle angular distance between two `[lon, lat]` radian points
 # (SOFA `seps` -- the atan2 form, numerically stable near 0 and π).
 function _tql_angdist(lon1::Real, lat1::Real, lon2::Real, lat2::Real)
@@ -337,7 +367,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "year" => (x -> Dates.year(_tql_dt_of(x)), 1:1),
     "month" => (x -> Dates.month(_tql_dt_of(x)), 1:1),
     "day" => (x -> Dates.day(_tql_dt_of(x)), 1:1),
-    "week" => (x -> Dates.week(_tql_dt_of(x)), 1:1),
+    "week" => (x -> _tql_yearweek(_tql_dt_of(x)), 1:1),
     "weekday" => (x -> Dates.dayofweek(_tql_dt_of(x)), 1:1),
     "dow" => (x -> Dates.dayofweek(_tql_dt_of(x)), 1:1),
     "cdate" => (x -> Dates.format(_tql_dt_of(x), "dd-uuu-yyyy"), 1:1),

@@ -5013,3 +5013,40 @@ assertions) plus "Phase 176 — ctime()/ctod()/cdatetime(), real-TaQL
 cross-check" (30 assertions across 5 MJDs × 6 functions, `_HAVE_TAQL`-
 gated, covering the already-correct `cdate`/`cmonth`/`cdow` too as a
 regression guard). Standalone `taql_query_tests.jl` green in full.
+
+### Phase 177 — found and fixed a real bug: `week()` used ISO-8601 week numbering, but casacore's own `MVTime::yearweek()` is a different, non-ISO convention
+
+**Another real bug found**, continuing the same "check the sibling
+functions in this file" sweep from Phases 175-176: checked the numeric
+date-component functions (`year`/`month`/`day`/`weekday`/`dow`/`week`)
+against `TableExprFuncNode`'s `yearFUNC`/`monthFUNC`/`dayFUNC`/
+`weekdayFUNC`/`weekFUNC` (`tables/TaQL/ExprFuncNode.cc:558-566`) and
+the underlying `MVTime` methods (`casa/Quanta/MVTime.cc:156-206`).
+
+`year()`, `month()`, `day()`, `weekday()`, `dow()` were all already
+correct — Julia's `Dates.year`/`month`/`day`/`dayofweek` happen to
+agree exactly with casacore's `MVTime::year`/`month`/`monthday`/
+`weekday` (both use the same Mon=1..Sun=7 weekday numbering). But
+`week()` used `Dates.week` — ISO-8601 week numbering — while casacore's
+`MVTime::yearweek()` (built on `yearday()`, a classic day-of-year
+formula) is a **different, non-ISO convention**: at a year boundary
+where the ISO week wraps to week 52/53 of the *previous* year,
+casacore's own algorithm instead returns **0** for those early-January
+days that don't yet belong to a "full" week of the new year. Found
+live: `2022-01-01` (a Saturday) is ISO week 52 of 2021, but real
+casacore's `week()` gives `0`, not `52`.
+
+Fixed with a direct port of `MVTime::yearday`/`yearweek`
+(`_tql_yearday`/`_tql_yearweek`, `src/taql/functions.jl`) — Julia's
+`div`/`rem` truncate toward zero and preserve the dividend's sign
+exactly like C++'s `/`/`%` on `Int`, so this is a literal translation,
+not a re-derivation. Live-verified against real casacore across a
+75-date sweep spanning five consecutive year boundaries (2020-2024) —
+every value matches, including every ISO-vs-non-ISO edge case.
+
+New testset "Phase 177 — week() (casacore's non-ISO MVTime::yearweek)"
+(10 assertions, incl. the confirmed 2022-01-01 divergence and a
+regression check on the already-correct `year`/`month`/`day`/`weekday`/
+`dow`) plus "Phase 177 — week(), real-TaQL cross-check" (375
+assertions across 75 dates × 5 functions, `_HAVE_TAQL`-gated).
+Standalone `taql_query_tests.jl` green in full.
