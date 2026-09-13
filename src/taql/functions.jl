@@ -15,6 +15,22 @@ _ew2(f) = (x, y) -> _bcast(f, x, y)
 # reduction: a scalar arg is wrapped in a 1-tuple so `f` still applies
 _red(f) = x -> f(x isa TQLMArray ? _mvalid(x) : x isa AbstractArray ? x : (x,))
 
+# `min(x,y)`/`max(x,y)` (`minFUNC`/`maxFUNC`, `ExprFuncNode.cc:899-921`)
+# compare a COMPLEX pair by magnitude (`Complex`/`DComplex`'s own
+# `operator<`/`>`, `casa/BasicSL/Complex.h:174-206`, are norm-based --
+# ties return the first argument, matching both overloads exactly) --
+# Julia's plain `min`/`max` has no ordering for `Complex` at all and
+# raises a raw `MethodError` instead. Real-valued operands are
+# unaffected (falls straight through to ordinary `min`/`max`).
+function _tql_min2(a, b)
+    (a isa Complex || b isa Complex) && return abs2(a) > abs2(b) ? b : a
+    return min(a, b)
+end
+function _tql_max2(a, b)
+    (a isa Complex || b isa Complex) && return abs2(a) < abs2(b) ? b : a
+    return max(a, b)
+end
+
 _tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y))(x))
 _tql_nelem(x) = x isa TQLMArray ? count(!, x.mask) : x isa AbstractArray ? length(x) : 1
 _tql_ndim(x) = x isa TQLMArray ? ndims(x.data) : x isa AbstractArray ? ndims(x) : 0
@@ -304,7 +320,16 @@ _boxed_sum(x, w) = (a = _require_array(x); _boxed_reduce(sum, eltype(a), a, w))
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- unary elementwise numeric ---
     "abs" => (_ew(abs), 1:1), "amplitude" => (_ew(abs), 1:1), "ampl" => (_ew(abs), 1:1),
-    "sqrt" => (_ew(sqrt), 1:1), "square" => (_ew(abs2), 1:1), "sqr" => (_ew(abs2), 1:1),
+    # `square`/`sqr` (`squareFUNC`) compute `x*x` -- for a complex `x`
+    # that is ordinary complex multiplication (a complex result), NOT
+    # the magnitude-squared `abs2` (real result) -- confirmed via
+    # `ExprFuncNode.cc:658-661,889-892` (the Double/DComplex overloads)
+    # and live-verified against real casacore: `square(3+4i) ==
+    # -7+24i`, not `25`. `norm()` (`normFUNC`, `.cc:678-683`) IS the
+    # abs2/magnitude-squared function -- a genuinely different real
+    # casacore function this package's `sqr`/`square` were wrongly
+    # aliased to.
+    "sqrt" => (_ew(sqrt), 1:1), "square" => (_ew(x -> x^2), 1:1), "sqr" => (_ew(x -> x^2), 1:1),
     "cube" => (_ew(x -> x^3), 1:1),
     "exp" => (_ew(exp), 1:1), "log" => (_ew(log), 1:1), "ln" => (_ew(log), 1:1),
     "log10" => (_ew(log10), 1:1),
@@ -809,7 +834,7 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         return TQLLit(ℯ)
     elseif name == "min" || name == "max"
         n in 1:2 || throw(ArgumentError("TaQL-lite: $name() takes 1 or 2 arguments in \"$src\""))
-        base = name == "min" ? min : max
+        base = name == "min" ? _tql_min2 : _tql_max2
         fn = n == 1 ? _red(x -> (name == "min" ? minimum : maximum)(x)) : _ew2(base)
         return TQLFunc(fn, args)
     elseif name in ("angdist", "angdistx", "angulardistance", "angulardistancex")

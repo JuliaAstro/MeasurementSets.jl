@@ -5084,3 +5084,52 @@ oracle check either function has ever had. Standalone
 Phase 174 — every function in that corner of the file has now been
 either fixed (174-177) or confirmed correct (178) against a real
 oracle.
+
+### Phase 179 — found and fixed two more real bugs: `square()`/`sqr()` computed the wrong thing for complex values, and `min()`/`max()` couldn't compare complex values at all
+
+**Two more real bugs found**, in a different part of `src/taql/
+functions.jl` (the general math-function table, not the date/time
+corner) — but the exact same "invented, never checked" root cause that
+produced Phases 174-178's findings, and both bugs directly affect
+`DATA`/`MODEL_DATA`/`CORRECTED_DATA` columns (complex-valued) in
+ordinary MS queries, not just an obscure edge case.
+
+- **`square()`/`sqr()`**: read `TableExprFuncNode`'s `squareFUNC`
+  (`tables/TaQL/ExprFuncNode.cc:505-508` (Int), `658-661` (Double),
+  `889-892` (DComplex)) directly: for a complex argument, real
+  casacore computes ordinary complex multiplication `x*x` (a COMPLEX
+  result — `square(3+4i) == -7+24i`). This package's `square`/`sqr`
+  were instead aliased to `abs2` (a REAL magnitude-squared result —
+  `abs2(3+4i) == 25`), silently discarding the phase of every
+  visibility a query squared. `norm()` (`.cc:678-683`) IS the real
+  casacore `abs2`-equivalent function — a genuinely different function
+  this package's `square`/`sqr` were conflated with. `cube()` was
+  already correct (`x^3`, ordinary complex exponentiation). Fixed by
+  changing `square`/`sqr` to `_ew(x -> x^2)`, matching `cube`'s
+  existing pattern.
+- **`min()`/`max()`**: read the same file's `minFUNC`/`maxFUNC`
+  (`.cc:899-921`) and `Complex`/`DComplex`'s own norm-based comparison
+  operators (`casa/BasicSL/Complex.h:174-206`, ties return the first
+  argument for both precisions): real casacore's 2-argument `min`/`max`
+  compares a complex pair BY MAGNITUDE and returns the actual complex
+  value with the smaller/larger magnitude. This package's `min`/`max`
+  used Julia's plain `min`/`max`, which has no ordering defined for
+  `Complex` at all — `min(DATA, x)` on a visibility column raised a raw
+  `MethodError` (`isless` undefined for `Complex`) instead of comparing
+  by magnitude. Fixed with new `_tql_min2`/`_tql_max2` helpers
+  (`src/taql/functions.jl`) — complex-aware magnitude comparison with a
+  first-argument tie-break exactly matching casacore's operators;
+  real-valued operands fall straight through to ordinary `min`/`max`,
+  unaffected.
+
+Live-verified both fixes against real casacore via `tableCommand` for
+representative complex and real values — every case matches exactly.
+New testset "Phase 179 — square()/sqr()/min()/max() vs complex values"
+(11 assertions) plus "Phase 179 — square()/min()/max(), real-TaQL
+cross-check" (8 assertions, `_HAVE_TAQL`-gated, comparing this
+package's `query()` computed-select output directly against real
+casacore for 8 expressions). Neither bug had ANY prior test coverage
+(the entire package had zero existing references to `square`/`sqr`
+anywhere, and every existing `min`/`max` test used real-valued
+columns only) — a real, previously-invisible gap now closed.
+Standalone `taql_query_tests.jl` green in full.

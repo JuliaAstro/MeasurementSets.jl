@@ -2639,6 +2639,57 @@ end
     end
 end
 
+# Phase 179: `square()`/`sqr()` and `min()`/`max()` vs COMPLEX values --
+# both found by checking real casacore source rather than a live probe
+# first this time (the "invented, never checked" pattern struck again,
+# one function away from the just-closed date/time corner). Real
+# `squareFUNC` computes ordinary complex multiplication `x*x` (a
+# complex result) for a complex argument, NOT the magnitude-squared
+# `abs2` (real result) this package's `square`/`sqr` were wrongly
+# aliased to -- `norm()` is the actual real casacore function for
+# `abs2`, a genuinely different one (`ExprFuncNode.cc:658-661,
+# 678-683,889-892`). Real `minFUNC`/`maxFUNC` compare a complex pair by
+# magnitude (`Complex`/`DComplex`'s own norm-based `operator<`/`>`,
+# `casa/BasicSL/Complex.h:174-206`) and this package's plain `min`/`max`
+# had no such ordering at all -- `min(complexcol, x)` raised a raw
+# `MethodError` (`isless` undefined for `Complex`) instead of comparing
+# by magnitude like real casacore does.
+@testset "Phase 179 — square()/sqr()/min()/max() vs complex values" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    z = ComplexF32(3.0, 4.0)
+    @test f("square")(z) == z^2                  # -7+24i, NOT abs2(z)=25
+    @test f("sqr")(z) == z^2
+    @test f("cube")(z) == z^3                    # already correct before this phase
+    @test f("norm")(z) == abs2(z)                # the REAL abs2 function -- unaffected
+    @test f("square")(5.0) == 25.0                # real values unaffected
+    @test f("square")(-7) == 49
+    a, b = ComplexF32(1.0, 1.0), ComplexF32(2.0, 0.0)   # |a|²=2, |b|²=4
+    @test MSv2._tql_min2(a, b) == a
+    @test MSv2._tql_max2(a, b) == b
+    @test MSv2._tql_min2(3.0, 5.0) == 3.0         # real values still plain min/max
+    @test MSv2._tql_max2(3.0, 5.0) == 5.0
+    @test MSv2._tql_min2(a, a) == a               # tie -> first argument
+end
+
+@testset "Phase 179 — square()/min()/max(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [ComplexF32(3.0, 4.0)],
+                                                "B" => [ComplexF32(1.0, 1.0)],
+                                                "C" => [ComplexF32(2.0, 0.0)],
+                                                "D" => [5.0], "E" => [3.0]];
+                nrow=1)
+    t = readtable(tabpath)
+    for expr in ("square(A)", "sqr(A)", "cube(A)", "norm(A)",
+                 "min(B, C)", "max(B, C)", "min(D, E)", "max(D, E)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa ≈ ours
+    end
+end
+
 @testset "Phase 69 — angdist / array literal" begin
     @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
     @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi
