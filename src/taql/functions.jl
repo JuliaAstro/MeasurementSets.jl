@@ -307,8 +307,39 @@ function _boxed_reduce(f, T::Type, arr::AbstractArray, bw)
     out
 end
 
+# casacore's plain `median()` (`arrmedianFUNC` -> `casa/Arrays/
+# ArrayMath.tcc:1066-1107`, the default overload
+# `median(a) = median(a, false, a.nelements()<=100, false)`) has an
+# odd, size-dependent quirk Julia's `Statistics.median` does not: for
+# an EVEN-length array it averages the two middle order statistics
+# ONLY when the array has <=100 elements -- above that threshold it
+# returns just the LOWER of the two, no averaging at all. Live-verified
+# against real casacore: `median(1.0:128.0) == 64.0`, not `64.5` --
+# directly relevant to any wideband spectral-window array (128/256/
+# 3840-channel bands are common and both even and >100).
+function _tql_median(v)
+    s = sort!(vec(collect(v)))
+    n = length(s)
+    n == 0 && throw(ArgumentError("TaQL-lite: median of an empty array"))
+    n2 = (n - 1) ÷ 2 + 1                       # 1-based lower-middle order statistic
+    (iseven(n) && n <= 100) ? (s[n2] + s[n2+1]) / 2 : s[n2]
+end
+
+# casacore's GENERIC `fractile()` (`.tcc:1138-1161`) -- what `gmedian()`
+# (`TableExprGroupFractileDouble(this, 0.5)`) and `running`/`boxed`
+# median (`slidingMedians`/`boxedMedians`, `MArrayMath.h:1168-1184`,
+# hardcoded `takeEvenMean=False`, no TaQL argument to change it) both
+# actually go through -- NEVER averages, regardless of size (a
+# genuinely different convention from plain `median()` above). Live-
+# verified: `gmedian` of the 4-row group `[1,2,3,4]` is `2.0` in real
+# casacore, not `2.5`.
+_tql_fractile(v, frac::Real) = (s = sort!(vec(collect(v))); n = length(s);
+    n == 0 ? throw(ArgumentError("TaQL-lite: fractile of an empty array")) :
+    s[Int(floor((n - 1) * frac + 0.01)) + 1])
+_tql_median_lo(v) = _tql_fractile(v, 0.5)
+
 _running_avg(x, w) = (a = _require_array(x); _running_reduce(Statistics.mean, Float64, a, w))
-_running_med(x, w) = (a = _require_array(x); _running_reduce(Statistics.median, Float64, a, w))
+_running_med(x, w) = (a = _require_array(x); _running_reduce(_tql_median_lo, Float64, a, w))
 _running_min(x, w) = (a = _require_array(x); _running_reduce(minimum, eltype(a), a, w))
 _running_max(x, w) = (a = _require_array(x); _running_reduce(maximum, eltype(a), a, w))
 _running_var(x, w) = (a = _require_array(x);
@@ -318,7 +349,7 @@ _running_std(x, w) = (a = _require_array(x);
 _running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, w))
 
 _boxed_avg(x, w) = (a = _require_array(x); _boxed_reduce(Statistics.mean, Float64, a, w))
-_boxed_med(x, w) = (a = _require_array(x); _boxed_reduce(Statistics.median, Float64, a, w))
+_boxed_med(x, w) = (a = _require_array(x); _boxed_reduce(_tql_median_lo, Float64, a, w))
 _boxed_min(x, w) = (a = _require_array(x); _boxed_reduce(minimum, eltype(a), a, w))
 _boxed_max(x, w) = (a = _require_array(x); _boxed_reduce(maximum, eltype(a), a, w))
 _boxed_var(x, w) = (a = _require_array(x);
@@ -363,7 +394,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- array-cell reductions ---
     "sum" => (_red(sum), 1:1), "product" => (_red(prod), 1:1),
     "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
-    "median" => (_red(Statistics.median), 1:1),
+    "median" => (_red(_tql_median), 1:1),
     "variance" => (_red(x -> Statistics.var(x; corrected=false)), 1:1),
     "stddev" => (_red(x -> Statistics.std(x; corrected=false)), 1:1),
     "rms" => (_tql_rms, 1:1),
@@ -452,7 +483,7 @@ const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
     "gcount" => (length, :scalar),
     "gsum" => (sum, :scalar), "gproduct" => (prod, :scalar),
     "gmean" => (Statistics.mean, :scalar), "gavg" => (Statistics.mean, :scalar),
-    "gmedian" => (Statistics.median, :scalar),
+    "gmedian" => (_tql_median_lo, :scalar),
     "gmin" => (minimum, :scalar), "gmax" => (maximum, :scalar),
     "gvariance" => (_pop_var, :scalar), "gsamplevariance" => (Statistics.var, :scalar),
     "gstddev" => (_pop_std, :scalar), "gsamplestddev" => (Statistics.std, :scalar),

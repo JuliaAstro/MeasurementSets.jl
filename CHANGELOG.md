@@ -5269,3 +5269,54 @@ shrinking-window values) and added a new testset "Phase 182 —
 running*() edge semantics, real-TaQL cross-check" (36 assertions,
 `_HAVE_TAQL`-gated, covering all 7 functions across 5 widths plus a
 2-D case). Standalone `taql_query_tests.jl` green in full.
+
+### Phase 183 — found and fixed two more real bugs: `median()`'s size-dependent averaging quirk, and `gmedian()`'s "never average" convention
+
+**Two more real bugs found**, reading `casa/Arrays/ArrayMath.tcc`
+directly right after Phase 182's own array-math source dive — the
+`median()` family turns out to have not one but two distinct,
+non-obvious conventions this package's uniform `Statistics.median`
+usage completely missed.
+
+- **Plain `median()`** (`arrmedianFUNC`'s default overload,
+  `median(a) = median(a, false, a.nelements()<=100, false)`,
+  `.tcc:1066-1107`): for an EVEN-length array, casacore averages the
+  two middle order statistics **only when the array has ≤100
+  elements**. Above that threshold it silently returns just the lower
+  of the two — no averaging at all. Live-verified:
+  `median(1.0:128.0) == 64.0` in real casacore, not `64.5`. This
+  directly affects any wideband spectral-window array — 128/256/
+  3840-channel bands are common, and both even and well over 100.
+- **`gmedian()`** (the GROUP BY aggregate) does not go through
+  `median()` at all — it's built on `TableExprGroupFractileDouble
+  (this, 0.5)`, i.e. casacore's GENERIC `fractile()`
+  (`.tcc:1138-1161`), which **never averages, regardless of size** —
+  a third, distinct convention from both `Statistics.median` and
+  plain `median()`'s size-gated rule. Live-verified: `gmedian` of the
+  4-row group `[1,2,3,4]` is `2.0` in real casacore, not `2.5`. Unlike
+  the >100-element trigger for plain `median()`, this one is
+  routinely hit — GROUP BY groups are very often small and even-sized.
+  The same investigation also confirmed `runningmedian`/`boxedmedian`
+  (Phase 182's own sliding-window fix) share `gmedian`'s "never
+  average" convention (`slidingMedians`/`boxedMedians` hardcode
+  `takeEvenMean=false`, with no TaQL argument to change it) — so
+  Phase 182's fix, while correct on the edge-fill semantics, still had
+  the wrong even-window tie-break for `runningmedian`/`boxedmedian`
+  specifically.
+
+Fixed with two new helpers (`src/taql/functions.jl`): `_tql_median`
+(plain `median()`'s size-dependent rule) and `_tql_fractile`/
+`_tql_median_lo` (the always-no-average convention shared by
+`gmedian`/`runningmedian`/`boxedmedian`). Live-verified against real
+casacore across the `<=100` boundary (50/100/102/128 elements) for
+plain `median()`, and against a real GROUP BY for `gmedian()`.
+
+Corrected two stale test assertions that had baked in
+`Statistics.median`'s always-average behavior (`_boxed_med`'s existing
+Phase-108 unit test, and the `groupby — correctness` testset's
+`gmedian` assertion — every group there happens to be even-sized, so
+it was silently exercising the exact bug). New testset "Phase 183 —
+median()/gmedian() vs casacore's actual (non-Statistics.median)
+conventions" (7 assertions) plus "Phase 183 — median()/gmedian(),
+real-TaQL cross-check" (8 assertions, `_HAVE_TAQL`-gated). Standalone
+`taql_query_tests.jl` green in full.

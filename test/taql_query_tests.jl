@@ -719,7 +719,14 @@ end
     @test MSv2._running_var(a, 1)[1] == 0.0
     @test MSv2._running_std(a, 1)[2] ≈ Statistics.std([1.0, 2.0, 3.0]; corrected = false)
     @test MSv2._running_std(a, 1)[1] == 0.0
-    @test MSv2._boxed_med(a, 2) == [1.5, 3.5, 5.0]
+    # Phase 183: casacore's `slidingMedians`/`boxedMedians` NEVER average
+    # the two middle elements of an even-length window (hardcoded
+    # `takeEvenMean=false`, no TaQL argument to change it) -- a
+    # genuinely different convention from plain `median()`'s
+    # size-dependent rule below. `boxedmedian([1,2],[3,4],[5])` picks
+    # the LOWER-middle element of each bin: `[1.0, 3.0, 5.0]`, not the
+    # averaged `[1.5, 3.5, 5.0]`.
+    @test MSv2._boxed_med(a, 2) == [1.0, 3.0, 5.0]
 
     # errors
     @test_throws ArgumentError MSv2._require_array(5.0)
@@ -773,6 +780,57 @@ end
     @test casa2 ≈ ours2
 end
 
+# Phase 183: `median()`'s size-dependent averaging quirk, and
+# `gmedian()`'s "never average" fractile convention -- found while
+# reading casacore's `ArrayMath.tcc` right after Phase 182's own
+# array-math source dive. `median(a)` (`arrmedianFUNC`'s default
+# overload) only averages the two middle order statistics of an
+# EVEN-length array when `nelements() <= 100`; above that it silently
+# returns just the lower one. `gmedian()` (`TableExprGroupFractileDouble
+# (this, 0.5)`) goes through the GENERIC `fractile()` instead, which
+# NEVER averages regardless of size -- a real, easily-triggered
+# divergence for any even-sized GROUP BY group, not just a >100-element
+# array.
+@testset "Phase 183 — median()/gmedian() vs casacore's actual (non-Statistics.median) conventions" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    @test f("median")(collect(1.0:128.0)) == 64.0          # even, >100 -> no averaging
+    @test f("median")(collect(1.0:50.0)) == 25.5            # even, <=100 -> averaged
+    @test f("median")(collect(1.0:100.0)) == 50.5           # even, ==100 (boundary) -> averaged
+    @test f("median")(collect(1.0:102.0)) == 51.0           # even, >100 -> no averaging
+    @test f("median")(collect(1.0:101.0)) == 51.0           # odd -> always the exact middle
+    @test MSv2._tql_median_lo([1.0, 2.0, 3.0, 4.0]) == 2.0  # gmedian/running/boxed: never averages
+    @test MSv2._tql_median_lo([1.0, 2.0, 3.0]) == 2.0       # odd -> the exact middle either way
+end
+
+@testset "Phase 183 — median()/gmedian(), real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    for n in (50, 100, 102, 128, 4, 7)
+        arr = collect(1.0:n)
+        dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+        write_table(tabpath, "T", Pair{String,Any}["A" => [arr]]; nrow=1, tsm=[["A"]])
+        t = readtable(tabpath)
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT median(A) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        @test casa == MSv2._TQL_FUNCS["median"][1](arr)
+    end
+
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    K = Int32[1, 1, 1, 1, 2, 2]
+    X = Float64[1, 2, 3, 4, 5, 6]
+    write_table(tabpath2, "T2", Pair{String,Any}["K" => K, "X" => X]; nrow=6)
+    tc2 = CCT.Table(tabpath2)
+    rdir2 = joinpath(mktempdir(), "r2")
+    _taqlcmd("SELECT K, gmedian(X) AS M FROM \$1 GROUP BY K GIVING '$rdir2'", tc2)
+    m2 = readtable(rdir2)
+    casa2 = Dict(column(m2, "K")[i] => column(m2, "M")[i] for i in 1:nrow(m2))
+    t2 = readtable(tabpath2)
+    g2 = groupby(t2, "K"; select = ["K" => "K", "M" => "gmedian(X)"])
+    for i in 1:length(g2.K)
+        @test casa2[g2.K[i]] == g2.M[i]
+    end
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)
@@ -822,7 +880,10 @@ end
     @test collect(r.MX) == [maximum(X[grp[k]]) for k in uk]
     @test collect(r.MN) == [minimum(X[grp[k]]) for k in uk]
     @test collect(r.AV) ≈ [sum(X[grp[k]]) / length(grp[k]) for k in uk]
-    @test collect(r.MED) ≈ [Statistics.median(X[grp[k]]) for k in uk]
+    # Phase 183: `gmedian()` goes through casacore's generic `fractile()`
+    # (never averages, unlike `Statistics.median`) -- every group here
+    # happens to have an even size, so this is a real, exercised case.
+    @test collect(r.MED) == [MSv2._tql_median_lo(X[grp[k]]) for k in uk]
     @test collect(r.SD) ≈ [Statistics.std(X[grp[k]]; corrected=false) for k in uk]
 
     # gcount(col) == gcount() (no null concept)
