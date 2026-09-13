@@ -4719,3 +4719,40 @@ safe, but didn't independently re-derive the full precondition
 before declaring the function safe. A targeted reproduction attempt
 (actually calling the function with a suspicious argument type) caught
 what a pure code-reading audit missed.
+
+### Phase 170 — applied Phase 169's "actually reproduce it" lesson to `copytable`/`insert!`/`write_ms`; confirmed no further instances of the pattern
+
+Following directly from Phase 169's own reinforcement ("a code-reading
+audit can miss a precondition a direct reproduction catches"), rather
+than reasoning about `copytable`/`Base.insert!`/`write_ms` from source
+alone, actually called each with the two suspicious argument shapes
+that broke `write_concattable`/`write_reftable`: an in-memory
+(unpersisted, `path == ""`) `RefTable` and a `GroupedTable`, in every
+position where a loosely-typed `AbstractTable` argument is accepted.
+
+- `copytable(dst, rt::RefTable)` with `rt.path == ""` — works correctly
+  (its `_copy_table(dir, rt::RefTable, ...)` method never touches
+  `rt.path` at all; it materialises through the flattened parent `Table`
+  and column reads, which need no directory reference).
+- `copytable(dst, gt::GroupedTable)` — has its own dedicated
+  `_copy_table(dst, gt::GroupedTable, ...)` dispatch (Phase 30); works.
+- `insert!(target, source::GroupedTable)` and `insert!(target,
+  source::RefTable)` with an empty-path `RefTable` — both work; neither
+  needs `source.path` (rows are pulled via the generic `Tables.jl` /
+  column-read interface).
+- `write_ms`/`copyms` take a typed `ms::MeasurementSet`, and
+  `MeasurementSet` has no public constructor that can wrap a
+  `GroupedTable` (only `readtable`'s `Table`/`RefTable`/`ConcatTable`) —
+  confirmed by inspection, not independently reproducible as a call
+  that type-checks in the first place.
+- `_cmd_path` (shared by `update!`/`delete!`/`insert!`'s `target`
+  argument and `taql`) already requires `t isa Table`, consistently
+  rejecting a `GroupedTable`/unpersisted-`RefTable` `target` before
+  touching `.path` anywhere.
+
+All five reproductions confirmed already-correct behaviour — no new bug
+found. This closes out the "loosely-typed `AbstractTable` argument +
+persist function" sweep opened by Phases 167-169: `write_concattable`
+and `write_reftable` were the only two gaps, both now fixed.
+
+No source or test change. Standalone suite unaffected.
