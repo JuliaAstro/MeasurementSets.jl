@@ -607,21 +607,50 @@ end
 write_reftable(dir::AbstractString, rt::RefTable) =
     write_reftable(dir, rt.parent, rt.rows; select=[nm => rt.namemap[nm] for nm in rt.order])
 
+# Phase 167: a ConcatTable part must reference a REAL on-disk table --
+# every real `.path` field this codebase constructs is genuine except a
+# `RefTable` built purely in-memory by `query()` (`path == ""`,
+# never persisted; `Table`/`ConcatTable` are only ever constructed from
+# a real directory, so they're always safe). Without this check,
+# `_strip_directory(p.path, dir)` on an empty path silently resolved via
+# `abspath("") == pwd()` -- no error at write time, but the persisted
+# `table.dat` referenced a bogus part path (the CWD), and any later
+# `readtable` on it threw a confusing `SystemError` far from the actual
+# mistake. Live-verified: `write_concattable(dst, [t1, query(t2, "...")])`
+# used to "succeed" and then fail opaquely on the next read; now errors
+# immediately, at the actual call site, naming the part.
+_ondisk_path(p::Table) = p.path
+_ondisk_path(p::ConcatTable) = p.path
+function _ondisk_path(p::RefTable)
+    isempty(p.path) && throw(ArgumentError(
+        "write_concattable: a RefTable part has not been persisted to disk " *
+        "(an in-memory `query()` result) -- write it first, e.g. " *
+        "`write_reftable(path, p)`, before concatenating"))
+    return p.path
+end
+_ondisk_path(p::AbstractTable) = throw(ArgumentError(
+    "write_concattable: a concatenation part must be an on-disk Table/RefTable/" *
+    "ConcatTable, got a $(typeof(p)) -- persist it first (e.g. via `write_table`/" *
+    "`copytable`)"))
+
 """
     write_concattable(dir, parts; subtabnames=String[]) -> dir
 
 Persist a virtual row-wise concatenation of `parts` (same-schema tables)
 at `dir`.  `subtabnames` lists keyword subtables to also concatenate
-(rarely used; default none).
+(rarely used; default none).  Each part must already be persisted to
+disk (an in-memory `query()`/`groupby()`/`join()` result is not valid —
+persist it first).
 """
 function write_concattable(dir::AbstractString, parts::AbstractVector{<:AbstractTable};
                            subtabnames::AbstractVector{<:AbstractString}=String[])
     isempty(parts) && throw(ArgumentError("write_concattable: at least one table required"))
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
+    paths = _ondisk_path.(parts)                     # validate before creating `dir`
     mkpath(dir)
 
-    names = [_strip_directory(p.path, dir) for p in parts]
+    names = [_strip_directory(p, dir) for p in paths]
     total = sum(nrow, parts)
     bytes_ = concattable_dat_bytes(names, String.(subtabnames), total)
     _atomic_write(joinpath(dir, "table.dat"), bytes_)

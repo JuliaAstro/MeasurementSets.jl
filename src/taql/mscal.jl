@@ -1792,10 +1792,26 @@ end
 # writeup's own note that these two couldn't be live-tested there
 # either). Per this project's own standing discipline, an unverified
 # source-reading hunch is not treated as a confirmed finding — recorded
-# here only as an open question for an environment where the UDF is
-# actually registered, not as an established bug. This package's own
+# here only as an open question — not as an established bug — for an
+# environment where the UDF is actually registered. This package's own
 # `mscal.corr()` (below) filters by the requested type correctly
 # regardless of what real casacore's selection condition actually does.
+#
+# Phase 164 addendum: confirmed WHY the UDF is never registered anywhere
+# to test against, precisely. `UDFMSCal::makeCorr`/`makeFeed`
+# (`derivedmscal/DerivedMC/UDFMSCal.cc:138-139,149`) exist as real C++
+# factory functions and construct a working `SELECTION`/`CORR` (resp.
+# `FEED`) object — but `derivedmscal/DerivedMC/Register.cc`'s
+# `register_derivedmscal()`, the ONLY place any `derivedmscal.*` name is
+# ever wired to a factory via `UDFBase::registerUDF`, has no call for
+# either one anywhere in it (every other `SelType` — `BASELINE`, `TIME`,
+# `SPW`, `UVDIST`, `FIELD`, `ARRAY`, `SCAN`, `STATE`, `OBS` — IS
+# registered there). So this is a genuine, permanent dead-code path in
+# upstream casacore itself (not an artifact of this particular build or
+# environment): `mscal.corr()`/`mscal.feed()` can never be reached via
+# TaQL through this `Register.cc`, in any casacore installation that
+# uses it unmodified — the Phase 148 non-selectivity question above is
+# therefore untestable against real casacore anywhere, not just here.
 
 function _parse_corr_types(spec::AbstractString)
     out = Set{Int}()

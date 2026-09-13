@@ -267,6 +267,35 @@ end
     end
 end
 
+@testset "write_concattable — non-on-disk part errors clearly (Phase 167)" begin
+    # Before this fix, an in-memory (never-persisted) RefTable part's
+    # empty `.path` silently resolved via `abspath("") == pwd()` -- no
+    # error at write time, but the persisted table.dat referenced a
+    # bogus part path, and a later `readtable` on it threw a confusing
+    # `SystemError` far from the actual mistake.
+    d = mktempdir()
+    write_table(joinpath(d, "p0"), "T", ["A" => collect(Int32, 1:5)]; nrow=5)
+    p0 = readtable(joinpath(d, "p0"))
+    rt = query(p0, "A > 2")                      # path == "" (in-memory)
+    @test rt isa RefTable && rt.path == ""
+
+    cdir = joinpath(d, "cc_bad")
+    @test_throws ArgumentError write_concattable(cdir, [p0, rt])
+    @test !ispath(cdir)                          # no partial directory left behind
+
+    gt = groupby(p0, "A"; select = ["A" => "A"])
+    @test_throws ArgumentError write_concattable(joinpath(d, "cc_gt"), [p0, gt])
+
+    # persisting the RefTable first makes it a valid part
+    rtdir = joinpath(d, "rt")
+    write_reftable(rtdir, rt)
+    cdir2 = joinpath(d, "cc_good")
+    write_concattable(cdir2, [p0, readtable(rtdir)])
+    r = readtable(cdir2)
+    @test nrow(r) == 8
+    @test column(r, "A")[:] == vcat(1:5, 3:5)
+end
+
 @testset "copytable — RefTable source, DM/engine layout preserved" begin
     d = mktempdir(); pdir = joinpath(d, "T")
     n = 20

@@ -4498,3 +4498,180 @@ Full standalone `test/taql_mscal_tests.jl` green (renders `_HAVE_TAQL`/
 casacore setup — every one of its 500+ assertions, including the new
 Phase 163 parser-unit and query cross-check tests, passes with no
 regressions).
+
+### Phase 164 — swept `derivedmscal`'s full registration table + `MSCorrParse.cc` directly; confirmed several existing findings with full certainty, no new bug
+
+Read `derivedmscal/DerivedMC/Register.cc`'s complete `register_derivedmscal()`
+function (every `UDFBase::registerUDF` call, not just the subset touched
+by Phases 77-163) and cross-checked it against this package's own
+`_MSCAL_FUNCS`/`_MSCAL_DIR_FUNCS`/`_MSSEL_FUNCS` name lists. No further
+naming mismatches beyond Phase 163's `UVWJ2000` found; confirmed the
+Phase 163 findings independently from the registration table itself
+(no bare `PA` registration or help text anywhere; the wavelength-scaled
+uvw family — `UVWWVL`/`UVWWVLS`/`UVWJ2000WVL(S)`/`UVWAPP(WVL(S))` — is
+real and genuinely unimplemented here).
+
+Also read `ms/MSSel/MSCorrParse.cc` directly (the file `mscal.corr()`
+actually calls into) to close out the Phase 148 "not independently
+confirmed live" note. Confirmed precisely WHY that live confirmation
+has never been possible anywhere: `UDFMSCal::makeCorr`/`makeFeed`
+(`derivedmscal/DerivedMC/UDFMSCal.cc`) are real, working C++ factory
+functions, but `Register.cc`'s `register_derivedmscal()` — the only
+place any `derivedmscal.*` name is ever wired to a factory — has no
+`registerUDF` call for either one, unlike every other selection type
+(`BASELINE`/`TIME`/`SPW`/`UVDIST`/`FIELD`/`ARRAY`/`SCAN`/`STATE`/`OBS`,
+all registered). This is a genuine, permanent dead-code path in
+upstream casacore itself, not an artifact of this environment's
+particular build — so the Phase 148 non-selectivity question about
+`MSCorrParse::selectCorrType`'s unfiltered `corrtype` argument is
+untestable against real casacore anywhere `Register.cc` is used
+unmodified, not just here. Recorded as an addendum to the existing
+Phase 148/152 comments in `src/taql/mscal.jl`; no behaviour change —
+this package's own read-only `mscal.corr()`/`mscal.feed()` already
+stand on their own correctness, independent of what real casacore's
+(apparently non-selective, and separately confirmed to have a real
+MS-mutation side effect via a `SELECTED_DATA` column — Phase 143) own
+implementation does.
+
+Comment-only change; no source/test behaviour affected.
+
+### Phase 165 — line-by-line re-verified Dysco's `AFTimeBlockEncoder::fitToMaximum` port (never independently re-checked since Phase 19); confirmed the frequency/wavelength unit grammars once more; no bug found
+
+`fitToMaximum` was Phase 19's own explicitly-flagged "riskiest" numerical
+port (a greedy channel/antenna hill-climb over the quantizer's dynamic
+range) and had never been independently re-verified against source since.
+Read `tables/Dysco/aftimeblockencoder.cc:100-263` directly, line by line,
+against `src/datamanagers/dysco.jl`'s `_af_fit_to_maximum!`: the initial
+flat per-(channel,polarization) normalization pass, the per-channel
+"largest cross-correlation component" search (`max(re,im,-re,-im)`,
+algebraically identical to casacore's `max(max(re,im), -min(re,im))`),
+the per-antenna maximum-component and hypothetical-increase computation,
+the antenna-vs-channel selection, and both stopping thresholds (`1.01`
+for antenna scaling, `1.001` for channel scaling) all match exactly.
+One genuinely subtle behaviour was specifically checked and confirmed
+correct rather than assumed: `changeAntennaFactor` applies its scale
+factor **twice** to an autocorrelation row of the antenna being boosted
+(`count = (a1==target) + (a2==target)`, both true for that antenna's own
+autocorrelation) — real casacore's own `changeAntennaFactor`
+(`aftimeblockencoder.cc:81-98`) does exactly the same
+(`for repeat in 0..<count`), confirming this is a faithful reproduction
+of a real (if easy to mistake for a bug) casacore quirk, not something
+introduced by the port.
+
+Also re-verified two smaller items while in the area: `mscal.spw`'s
+channel-frequency unit set (`hz`/`khz`/`mhz`/`ghz`/`thz`, Phase 151)
+still matches `ms/MSSel/MSSpwGram.ll`'s `FREQ` token definition exactly
+(an optional case-insensitive `k`/`m`/`g`/`t` prefix + case-insensitive
+`hz`). And `mscal.uvdist`'s wavelength-unit lexer
+(`ms/MSSel/MSUvDistGram.ll`'s `WAVELENGTHUNIT`) turns out to be
+case-*sensitive* within the `lambda`/`LAMBDA` word itself (only those
+two exact spellings are valid, not a mixed-case `Lambda`), while this
+package lowercases every unit string before comparison — a benign
+over-permissiveness (accepts a spelling real casacore's stricter lexer
+would reject), not a correctness bug, in the same category as the
+already-documented `>=`/`<=` leniency on `field`/`spw`/`state` (Phase 147).
+
+No source or test change. Standalone suite unaffected.
+
+### Phase 166 — swept `TiledCellStMan`'s reader/writer indexing and `update!`'s masked-pair self-reference ordering; no bug found
+
+`TiledCellStMan` (one hypercube per row, `nrCube == nrrow`) has the
+least test coverage of the three Tiled* wrappers and was flagged with a
+real risk in its own plan ("header size ∝ nrow — `@warn` only"). Traced
+`write_tiledcellstman`'s per-row cube construction against
+`_cube_for_row`'s `:cell`-kind read path (`tsm.cubes[Int(rownr)]`, a
+direct 1-based index with no interval search, unlike `TiledShapeStMan`'s
+row-map lookup) — the writer builds exactly one cube per row in row
+order and the reader indexes it the same way; consistent, no off-by-one
+found.
+
+Also re-examined `update!`'s `(D, M) = expr` masked-pair write (Phase
+59, reordered in Phase 149 so the mask entry evaluates before the data
+entry overwrites its inputs) for the specific case where `expr`
+references the *target* column itself (`SET (D, M) = D + 1`) — confirmed
+this is already handled correctly: the default mask
+(`TQLMaskOf(_taqllite_parse(de, vn))`, Phase 59/149) is pushed before
+the data entry precisely so it re-evaluates `de` against the original,
+pre-update `cols` snapshot rather than a value `D`'s own write might
+already have clobbered — already documented in the existing Phase-149
+comment in `src/taql/commands.jl`, now independently re-verified rather
+than taken on faith.
+
+No source or test change. Standalone suite unaffected.
+
+### Phase 167 — found and fixed a real bug: `write_concattable` silently accepted an unpersisted (in-memory) part, corrupting the output table
+
+**Real bug found.** `write_concattable`'s part list is written by
+computing `_strip_directory(p.path, dir)` for each part — but a
+`RefTable` built purely in-memory by `query()` (never persisted to
+disk) has `path == ""` by design (Phase 22: "an in-memory, never-
+persisted query result can carry `path=\"\"` safely"). `abspath("")`
+resolves to `pwd()` (the current working directory) rather than
+erroring, so `write_concattable(dst, [t1, query(t2, "...")])` used to
+**succeed silently**, writing a bogus part reference (the CWD) into the
+persisted `table.dat` — no error at write time. Only a *subsequent*
+`readtable(dst)` would fail, with a confusing `SystemError: opening
+file "<cwd>/table.dat": No such file or directory` — far from the
+actual mistake and easy to misdiagnose as a filesystem problem rather
+than a usage error.
+
+Fixed with a new `_ondisk_path` dispatch in `src/tables/table.jl`: a
+plain `Table`/already-persisted `ConcatTable` always has a real path
+(both are only ever constructed from a real on-disk directory,
+confirmed structurally — `ConcatTable(...)` is called from exactly two
+places in `src/`, both given a genuine directory); a `RefTable` with an
+empty path now raises a clear `ArgumentError` naming the fix (persist
+it with `write_reftable` first); anything else (e.g. a `GroupedTable`
+from `groupby`/`join`, which has no `.path` field at all) raises an
+equally clear error rather than an opaque property-access failure. The
+validation runs *before* `mkpath(dir)`, so a rejected call leaves no
+partial output directory behind.
+
+Verified live: the exact scenario now errors immediately at the
+`write_concattable` call site instead of corrupting the output;
+persisting the `RefTable` first and retrying produces a correct,
+readable concatenation. `write_reftable` itself was independently
+confirmed NOT to have this bug — its own `_flatten_to_root` (Phase 132)
+always fully unwraps any `RefTable` chain down to a genuine `Table`/
+`ConcatTable` root before touching `.path`, so it never reaches an
+empty-path object. New testset `test/reftable_tests.jl` "write_concattable
+— non-on-disk part errors clearly (Phase 167)" (6 assertions): the
+`RefTable`-part and `GroupedTable`-part error cases, no partial
+directory on error, and the legitimate persist-then-concatenate path.
+Standalone `test/reftable_tests.jl` green (all pre-existing testsets
+unaffected).
+
+### Phase 168 — audited every `.path` access site across `src/` for a repeat of the Phase 167 bug; confirmed no other instances
+
+Grepped every `.path` field access across `src/` (excluding tests) after
+Phase 167's fix — a `Table`/`RefTable`/`ConcatTable`/`GroupedTable` type
+confusion where an in-memory (unpersisted) `AbstractTable`'s `.path`
+silently resolves to a nonsensical value instead of erroring. Checked
+each site's actual type guarantee: `Table.path` is always structurally
+real (a `Table` object is only ever constructed by `readtable` from a
+genuine on-disk directory — confirmed for every internal reader/writer
+call site: `datamanagers/{standard,incremental,tiled,dysco,forwardcol,
+container}.jl`, `resync.jl`, `edit.jl`'s `EditTable.reader::Table`
+field, `concatedit.jl`, `refedit.jl`); `reference_copy` and
+`_cmd_path`/`update!`/`delete!`/`insert!`/`taql` (`taql/commands.jl`)
+already require `t isa Table` before touching `.path`; `edit(ct::
+ConcatTable)` already requires `all(p -> p isa Table, ct.parts)`;
+`edit(rt::RefTable)` already requires `rt.parent isa Table`. The one
+place that read a part's `.path` with NO such guard was exactly the one
+Phase 167 fixed (`write_concattable`'s part-name construction) — the
+readme-line construction in the same function reads `p.path` again
+further down, but by that point `_ondisk_path.(parts)` has already
+validated every part, so it's safe (confirmed by tracing the two lines'
+order, not merely by proximity).
+
+One related, deliberately-safe (not a bug) case also confirmed:
+`edit(rt::RefTable)` rejects — rather than silently mishandling — a
+genuine on-disk `RefTable`-of-`RefTable` chain (`rt.parent` itself a
+`RefTable`, possible only via a hand-authored/real-casacore-written
+nested reference, since this package's own `query()` always flattens to
+a true `Table` root at construction time) with a clear error naming the
+type, instead of attempting anything with an object that isn't
+guaranteed a real path. A documented limitation, not a fix candidate.
+
+No source or test change beyond Phase 167's own fix. Standalone suite
+unaffected.
