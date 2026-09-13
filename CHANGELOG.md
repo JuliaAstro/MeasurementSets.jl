@@ -4572,3 +4572,29 @@ would reject), not a correctness bug, in the same category as the
 already-documented `>=`/`<=` leniency on `field`/`spw`/`state` (Phase 147).
 
 No source or test change. Standalone suite unaffected.
+
+### Phase 166 — swept `TiledCellStMan`'s reader/writer indexing and `update!`'s masked-pair self-reference ordering; no bug found
+
+`TiledCellStMan` (one hypercube per row, `nrCube == nrrow`) has the
+least test coverage of the three Tiled* wrappers and was flagged with a
+real risk in its own plan ("header size ∝ nrow — `@warn` only"). Traced
+`write_tiledcellstman`'s per-row cube construction against
+`_cube_for_row`'s `:cell`-kind read path (`tsm.cubes[Int(rownr)]`, a
+direct 1-based index with no interval search, unlike `TiledShapeStMan`'s
+row-map lookup) — the writer builds exactly one cube per row in row
+order and the reader indexes it the same way; consistent, no off-by-one
+found.
+
+Also re-examined `update!`'s `(D, M) = expr` masked-pair write (Phase
+59, reordered in Phase 149 so the mask entry evaluates before the data
+entry overwrites its inputs) for the specific case where `expr`
+references the *target* column itself (`SET (D, M) = D + 1`) — confirmed
+this is already handled correctly: the default mask
+(`TQLMaskOf(_taqllite_parse(de, vn))`, Phase 59/149) is pushed before
+the data entry precisely so it re-evaluates `de` against the original,
+pre-update `cols` snapshot rather than a value `D`'s own write might
+already have clobbered — already documented in the existing Phase-149
+comment in `src/taql/commands.jl`, now independently re-verified rather
+than taken on faith.
+
+No source or test change. Standalone suite unaffected.
