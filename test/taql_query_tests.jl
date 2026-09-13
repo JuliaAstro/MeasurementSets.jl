@@ -2446,6 +2446,54 @@ end
     @test query(tr, "RA BETWEEN 8h AND 12h").rows == [1, 2, 3]
 end
 
+# Phase 174: `MVTime::read`'s dash-numeric `dd-mm-yyyy` date form (a
+# genuine gap found by reading `MVTime.cc` directly and live-verifying
+# against real casacore's own `datetime()` -- `"12-02-2020"` used to
+# throw "cannot parse datetime" instead of parsing as 2020-02-12).
+@testset "Phase 174 — dash-numeric dd-mm-yyyy date parsing" begin
+    # ISO (year-first, r > 1000) is unaffected and still wins that branch
+    @test MSv2._tql_parse_datetime("2020-02-12") ≈ 58891.0
+    # dd-mm-yyyy (day-first, r <= 1000) -- casacore's day/year swap
+    @test MSv2._tql_parse_datetime("12-02-2020") ≈ 58891.0
+    @test MSv2._tql_parse_datetime("1-1-2020") ≈ 58849.0
+    @test MSv2._tql_parse_datetime("31-12-2020") ≈ 59214.0
+    # 2-digit year expansion (<50 -> +2000, <100 -> +1900) -- this is the
+    # case a plain `Dates.DateFormat("yyyy-mm-dd")` mis-parses (it reads
+    # "12-02-20" as year=12, stopping at the first dash, since Julia's
+    # format codes don't enforce a fixed digit width on parse) unless
+    # the dash-numeric form is tried FIRST, ahead of the format list.
+    @test MSv2._tql_parse_datetime("12-02-20") ≈ 58891.0
+    @test MSv2._tql_parse_datetime("12-02-99") ≈ MSv2._tql_parse_datetime("12-02-1999")
+    # date/time separator is `/`, `-`, ` `, or `T` in real casacore
+    # (`MVTime.cc:513`), not just the ISO `T`
+    for sep in ('/', '-', ' ', 'T')
+        @test MSv2._tql_parse_datetime("12-02-2020$(sep)06:00:00") ≈ 58891.25
+    end
+    # invalid month/day still errors clearly (not silently misparsed)
+    @test_throws ArgumentError MSv2._tql_parse_datetime("13-13-2020")
+
+    d = mktempdir()
+    T = Float64[58000, 58891, 59500, 60000] .* 86400.0
+    dir = joinpath(d, "m2.tab")
+    write_table(dir, "M", Pair{String,Any}["T" => T]; nrow=4)
+    t = readtable(dir)
+    @test query(t, "T > datetime('12-02-2020') * 86400.0").rows == [3, 4]
+    @test query(t, "T > datetime('12-02-20') * 86400.0").rows == [3, 4]
+end
+
+@testset "Phase 174 — dash-numeric date, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [1]]; nrow=1)
+    for datestr in ("12-02-2020", "12-02-20", "1-1-2020", "31-12-2020",
+                    "12-02-2020/06:00:00")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT mjd(datetime('$datestr')) AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa_mjd = column(readtable(rdir), "X")[1]
+        @test MSv2._tql_parse_datetime(datestr) ≈ casa_mjd
+    end
+end
+
 @testset "Phase 69 — angdist / array literal" begin
     @test MSv2._tql_angdist(0, 0, 0, pi / 2) ≈ pi / 2
     @test MSv2._tql_angdist(0.0, 0.0, pi, 0.0) ≈ pi

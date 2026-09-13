@@ -74,18 +74,64 @@ function _parse_sexagesimal(s::AbstractString, kind::Symbol)
     return (neg ? -1.0 : 1.0) * deg2rad(v)
 end
 
+# casacore `MVTime::read`'s dash-numeric date form (`casa/Quanta/
+# MVTime.cc:465-497`) -- `r-mm-dd`, where `r` is read first and the
+# grammar disambiguates by its *magnitude*: `r > 1000` means `r` is
+# itself the year (`yyyy-mm-dd`, already covered by the ISO
+# `_TQL_DT_FORMATS` above); otherwise `r` is the DAY and the trailing
+# number is the year, with the same 2-digit-year expansion as the
+# `dd-Mon-yyyy` sibling format (`<50` -> `+2000`, `<100` -> `+1900`).
+# So `"12-02-2020"` is DD-MM-YYYY (2020-02-12), not ISO -- a valid TaQL
+# literal `Dates.DateFormat` can't express (no threshold-dependent
+# field-swap), live-verified against real casacore's own `datetime()`.
+# The date/time separator is `/`, `-`, or a space in real casacore too
+# (`in.tSkipChar('/') || in.tSkipChar('-') || in.tSkipChar(' ')`,
+# `MVTime.cc:513`), not just the ISO `T` -- also live-verified.
+function _tql_parse_dashnum_date(s::AbstractString)
+    m = match(r"^(\d{1,4})-(\d{1,2})-(\d{1,4})(?:[ /T-](\d{1,2}):(\d{1,2}):(\d{1,2}(?:\.\d+)?))?$", s)
+    m === nothing && return nothing
+    r = parse(Int, m[1]); mm = parse(Int, m[2]); dd2 = parse(Int, m[3])
+    if r > 1000
+        yyyy, mon, day = r, mm, dd2
+    else
+        dd2 < 50 && (dd2 += 2000)
+        dd2 < 100 && (dd2 += 1900)
+        yyyy, mon, day = dd2, mm, r
+    end
+    (1 <= mon <= 12 && 1 <= day <= 31) || return nothing
+    h  = m[4] === nothing ? 0   : parse(Int, m[4])
+    mi = m[5] === nothing ? 0   : parse(Int, m[5])
+    se = m[6] === nothing ? 0.0 : parse(Float64, m[6])
+    ms = round(Int, 1000 * (se - floor(se)))
+    dt = try
+        Dates.DateTime(yyyy, mon, day, h, mi, floor(Int, se), ms)
+    catch
+        return nothing
+    end
+    return _tql_mjd_of(dt)
+end
+
 function _tql_parse_datetime(s::AbstractString)
     ss = strip(String(s))
     isempty(ss) && return _tql_mjd_of(Dates.now())
+    # Tried FIRST, ahead of the `_TQL_DT_FORMATS` list below: a plain
+    # `Dates.DateFormat("yyyy-mm-dd")` will happily match a short
+    # numeric field it shouldn't (e.g. it reads "12-02-20" as year=12,
+    # stopping at the first dash, rather than raising a mismatch) --
+    # `_tql_parse_dashnum_date` applies casacore's own day/year-swap +
+    # 2-digit-year-expansion rule up front so the bare `N-N-N` shape is
+    # never handed to a format string that can silently mis-parse it.
+    m = _tql_parse_dashnum_date(ss)
+    m === nothing || return m
     for f in _TQL_DT_FORMATS
         v = tryparse(Dates.DateTime, ss, f)
         v === nothing || return _tql_mjd_of(v)
     end
     v = tryparse(Dates.DateTime, ss)
-    v === nothing && throw(ArgumentError(
+    v === nothing || return _tql_mjd_of(v)
+    throw(ArgumentError(
         "TaQL-lite: cannot parse datetime \"$s\" — try ISO " *
-        "(`2020-02-12`, `2020-02-12T03:04:05`)"))
-    return _tql_mjd_of(v)
+        "(`2020-02-12`, `2020-02-12T03:04:05`) or `dd-mm-yyyy`"))
 end
 
 _tql_datetime(a...) = isempty(a) ? _tql_mjd_of(Dates.now()) :

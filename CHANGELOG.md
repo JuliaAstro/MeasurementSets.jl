@@ -4883,3 +4883,47 @@ comparison rather than leaving it as "should be fine." Standalone
 container test suite green (unaffected — no new test needed, since the
 existing round-trip + real-fixture tests were already exercising the
 confirmed-correct code).
+
+### Phase 174 — found and fixed a real bug: TaQL-lite's `datetime()` couldn't parse casacore's own `dd-mm-yyyy` dash-numeric date form
+
+**Real bug found via direct source reading + live reproduction.**
+`_tql_parse_datetime` (Phase 69) covers ISO dates and `dd-Mon-yyyy` /
+`ddMonyyyy` (month-name) forms via a fixed `Dates.DateFormat` list, but
+casacore's real `MVTime::read` (`casa/Quanta/MVTime.cc:465-497`) also
+accepts a **dash-numeric** `r-mm-dd` form whose interpretation depends
+on the *magnitude* of the first number: `r > 1000` means `r` is the
+year (`yyyy-mm-dd`, already covered); otherwise `r` is the DAY and the
+trailing number is the year (`dd-mm-yyyy`), with the same 2-digit-year
+expansion (`<50 → +2000`, `<100 → +1900`) as the month-name sibling
+format already implements. `"12-02-2020"` — a perfectly ordinary,
+common date string — used to throw `"cannot parse datetime"` outright.
+Live-verified against real casacore's own `datetime()` via
+`tableCommand`: `"12-02-2020"`, `"1-1-2020"`, `"31-12-2020"` and the
+2-digit-year form `"12-02-20"` all resolve to 2020-02-12, matching the
+day/year-swap-plus-expansion rule exactly.
+
+Fixing this surfaced a second, more subtle issue along the way: naively
+adding the new dash-numeric parser as a *fallback*, tried only after
+the existing `_TQL_DT_FORMATS` list, was not enough — Julia's
+`Dates.DateFormat("yyyy-mm-dd")` **mis-parses** `"12-02-20"` as
+`year=12` (stopping at the first dash rather than requiring exactly 4
+digits), succeeding with a garbage answer before the correct parser
+ever got a chance to run. Fixed by trying the new
+`_tql_parse_dashnum_date` (`src/taql/functions.jl`) **first**, ahead of
+the named-format list, for exactly the bare `N-N-N` shape; genuinely
+ISO strings (`r > 1000`) still resolve to the same correct value
+through the new parser's own branch, so no format-list matches are
+lost. Also extended the date/time separator set to `/` / `-` / ` ` (not
+just the ISO `T`) after confirming live that real casacore accepts all
+four (`MVTime.cc:513`, `in.tSkipChar('/') || in.tSkipChar('-') ||
+in.tSkipChar(' ')`).
+
+New testset "Phase 174 — dash-numeric dd-mm-yyyy date parsing" (13
+assertions: ISO unaffected, day/year swap, 2-digit-year expansion, all
+four separators, an invalid-month/day still errors, and two `query()`
+row-selection checks) plus "Phase 174 — dash-numeric date, real-TaQL
+cross-check" (5 assertions, `_HAVE_TAQL`-gated, comparing this
+package's parse directly against real casacore's `datetime()` for five
+representative strings). Standalone `taql_query_tests.jl` green in
+full (every pre-existing testset in the file, including all of Phase
+22-97's query-engine coverage, unaffected).
