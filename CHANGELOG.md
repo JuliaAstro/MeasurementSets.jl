@@ -6035,3 +6035,54 @@ testset "TaQL-lite — mscal.time() doesn't throw on a non-finite
 default-row TIME (Phase 194)" (3 assertions). Standalone
 `taql_query_tests.jl` + `taql_mscal_tests.jl` both green together, no
 regressions.
+
+### Phase 195 — the same root-cause SHAPE, a fourth corner:
+### `measconvert` crashed deep inside SOFA.jl on a non-finite measure/
+### frame value; fixed with a clear early error instead of a silent
+### sentinel, since a wrong NUMBER is more dangerous than a wrong string
+
+Continuing the sweep beyond `src/taql/`: grepped the whole tree for the
+same risk shape (a raw numeric cast fed by a value that could be
+NaN/Inf) and found two more sites. `src/datamanagers/dysco.jl`'s
+`_dysco_encode_symbol`/`_dysco_encode_symbol_dither` already guard
+non-finite input explicitly (Phase 19's own work) — confirmed correct,
+no change; its WEIGHT-column quantizer (a separate function,
+`UInt32(floor(weight*scale+0.5))`) has no such guard and WOULD crash on
+a NaN weight, but writing a NaN into a Dysco-compressed WEIGHT column
+is a narrow, synthetic-data-only path — flagged, not fixed this phase.
+
+The real, reachable finding: `ext/EarthOrientationExt.jl`'s
+`_eop_lookup` called its own `_datetime` (the same unguarded
+`round(Int, mjd*MSEC_PER_DAY)` pattern as Phases 193/194) OUTSIDE the
+function's existing `try`/`catch` "no IERS coverage" fallback, so a
+non-finite epoch's crash escaped that fallback entirely instead of
+hitting it. Moved the call inside the `try` — cheap, always-correct
+defense in depth.
+
+But live-verifying `measconvert` end to end (`measconvert(MDirection,
+AZEL; frame=MeasFrame(epoch=MEpoch{UTC}(NaN), position=...))`) found
+the *actual* crash site is upstream of `_eop_lookup` entirely: SOFA.jl
+own `utctai`→`jd2cal` raises `AssertionError: Day is out of range.`
+from deep inside the UTC→TAI epoch-scale conversion, many stack frames
+below the `measconvert` call a user actually wrote — a genuinely
+confusing place to learn "your TIME value is NaN." **Different fix
+from Phase 193/194's "degrade to a defined sentinel," and deliberately
+so**: `hms(NaN)` returning an all-zero STRING is harmless (obviously a
+placeholder), but `measconvert` returning a physically-meaningless
+*number* that looks like a real answer would be actively misleading —
+this package's own numbers get consumed by real calculations, not just
+displayed. So the fix is a clear, early `ArgumentError` instead: a new
+`_all_finite(x)` helper (checks every `Float64` field of a measure
+struct via `fieldnames` — works uniformly across `MEpoch`/`MDirection`/
+`MPosition`/`MFrequency`/`MRadialVelocity`/`MBaseline`/`MuvW`/
+`MEarthMagnetic`/`MDoppler` with no per-type method needed) is checked
+at `measconvert`'s own entry point against both the measure being
+converted AND every non-`nothing` field of `frame` (`epoch`/
+`position`/`direction`), before any SOFA call happens. New testset
+"measures — measconvert rejects a non-finite measure/frame (Phase 195)"
+(15 assertions: a bad value in the measure itself, a bad value in each
+frame field, finite inputs still convert normally, and `_eop_lookup`'s
+own defense-in-depth checked directly). Standalone `measures_tests.jl`
+(153 assertions total, incl. the 79-assertion `casatools` oracle
+cross-check) and `taql_query_tests.jl` + `taql_mscal_tests.jl` together
+all green, no regressions.
