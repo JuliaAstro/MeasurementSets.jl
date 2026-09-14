@@ -6498,3 +6498,68 @@ callers that already pass real, always-valid `ism=` sets —
 Dysco/reftable/container fixtures that use `ism=` — all still green.
 Standalone `ism_writer_tests.jl`, `writer_tests.jl`, `edit_tests.jl`,
 `schema_tests.jl`, and `container_tests.jl` together, no regressions.
+
+### Phase 203 — `readtable(refpath; precision=...)` was silently ignored on a persisted `RefTable`/`ConcatTable`
+
+Continuing the `src/tables/` sweep, in `column.jl` this time — read it
+in full against the `_eltype`/`_narrowtarget`/`Column`/`MappedColumn`/
+`ConcatColumn` machinery, no bug found (the `ConcatColumn` duplicate-
+offset/empty-part `searchsortedlast` behaviour, already documented as
+correct since Phase 14, was re-derived by hand and reconfirmed). While
+tracing how a `RefTable`'s effective read precision is actually
+determined (`column(t::RefTable, name)` delegates to `t.parent`'s own
+`.precision`), found the real bug one file over, in `table.jl`:
+`readtable` computes its own resolved `prec` (`:half`/`:full`/…) right
+at the top, from the table's own `table.info` `Type` — but the moment
+the table being opened turns out to be a `RefTable`/`ConcatTable`, it
+dispatches to `_read_reftable`/`_read_concattable`, and **neither ever
+received `prec` (or the raw `precision` argument) at all** — the
+parent(s)/part(s) were always reopened via a plain `readtable(p)`
+buried inside `_open_referenced`, so `readtable(refpath;
+precision=:full)` on a *persisted* RefTable/ConcatTable was a silent
+no-op: the parent still opened at ITS OWN auto-derived default.
+
+This one stayed hidden longer than most of this sweep's findings
+because the *common* case looked completely correct: a RefTable's own
+`table.info` `Type` is always copied verbatim from its parent (Phase
+15's `write_reftable`/real casacore's `RefTable::setup` both do this),
+so the auto-derived default the RefTable's own `readtable` call would
+have computed (had it been threaded through) is *identical* to what
+the parent independently re-derives on its own — the bug is entirely
+invisible unless you pass an *explicit* `precision=` override, which no
+existing test did for this specific read path (`query()`'s in-memory
+`RefTable` construction, and `column(t::RefTable,...)`'s own delegation
+to `t.parent.precision`, are different code paths that already worked
+correctly and masked the gap in the *persisted* `readtable(refpath;
+precision=...)` path specifically). Live-verified: `readtable(rdir;
+precision=:full)` on a `write_reftable`-persisted selection over a real
+MS's MAIN gave back `ComplexF16` `DATA` regardless of the override.
+
+Fixed by threading the *raw* (possibly `nothing`) `precision` argument
+— not the pre-normalized `prec` — through `_read_reftable`/
+`_read_concattable`/`_open_referenced` into the parent/part `readtable`
+calls: a deliberately conservative choice, so the default (`nothing`)
+case is byte-for-byte unchanged (each parent/part still independently
+re-derives its own default from its own `table.info` `Type`, exactly as
+before — relevant for the edge case of a `ConcatTable` whose parts
+happen to have heterogeneous `Type` strings, which a "always inherit
+one resolved value" version of this fix would have quietly changed),
+while an *explicit* override now genuinely propagates. `resync` needed
+the mirror-image fix: a `RefTable`/`ConcatTable` carries no `precision`
+field of its own (it lives entirely on the underlying `Table`(s)), so
+`resync(t::Union{RefTable,ConcatTable})`'s own `readtable(t.path)` call
+(no `precision` at all) would have silently reverted an explicitly-
+opened `:full`/`BFloat16` RefTable back to the auto-derived default on
+every resync — the exact same "explicit override lost across a re-read"
+shape, one level further out. Fixed with a new `_effective_precision`
+helper (`Table` → `.precision`; `RefTable` → recurse into `.parent`;
+`ConcatTable` → recurse into `.parts[1]`; `GroupedTable` → `nothing`,
+handling a nested RefTable-of-RefTable chain too) whose result `resync`
+now passes through explicitly, mirroring how `resync(::Table)` already
+preserves `t.precision`. New testset "precision — readtable(refpath;
+precision=...) on a persisted RefTable/ConcatTable (Phase 203)" (8
+assertions: default unchanged for both RefTable and ConcatTable, an
+explicit `:full` and `BFloat16` both now take effect, and `resync`
+preserves an explicitly-opened `:full` RefTable's precision).
+Standalone `reftable_tests.jl` and `precision_tests.jl` together, no
+regressions.

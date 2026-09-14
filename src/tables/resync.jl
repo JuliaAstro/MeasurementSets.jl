@@ -41,6 +41,20 @@ function resync(t::Table)
     return fresh
 end
 
+# A RefTable / ConcatTable carries no `precision` field of its own -- it
+# lives entirely on the underlying `Table`(s), and is recoverable from
+# `t.parent`/`t.parts[1]` (recursing through a nested RefTable-of-RefTable
+# chain). Re-reading with it preserves whatever precision was actually in
+# effect, exactly like `resync(::Table)` preserving `t.precision` --
+# without this, a RefTable opened with an *explicit* `precision=:full`
+# would silently fall back to the auto-derived default on the next
+# `resync`, the same "explicit override lost across the read" shape as
+# the bug just fixed in `_read_reftable`/`_read_concattable` themselves.
+_effective_precision(t::Table) = t.precision
+_effective_precision(t::RefTable) = _effective_precision(t.parent)
+_effective_precision(t::ConcatTable) = isempty(t.parts) ? nothing : _effective_precision(t.parts[1])
+_effective_precision(::GroupedTable) = nothing
+
 # A RefTable / ConcatTable is re-opened wholesale (its parent(s) too); the
 # stale parent's cached data managers are evicted.
 function resync(t::Union{RefTable,ConcatTable})
@@ -50,7 +64,7 @@ function resync(t::Union{RefTable,ConcatTable})
             p isa Table && delete!(_DM_CACHE, p)
         end
     end
-    return readtable(t.path)
+    return readtable(t.path; precision = _effective_precision(t))
 end
 
 resync(gt::GroupedTable) = gt
