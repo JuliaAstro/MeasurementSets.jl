@@ -414,6 +414,25 @@ function read_tableinfo(dir::String)
 end
 
 """
+    _normalize_precision(p) -> Symbol | Type
+
+Validate and normalize a non-`nothing` `precision` value (`Float32` ->
+`:full`); throws a clear `ArgumentError` for anything else. Shared by
+`readtable` and every `column`/`getcolumn`/`getcell` `precision=`
+override (via `_narrowtarget`) so a mistyped value errors clearly
+instead of silently narrowing nothing — found live: `column(t, "DATA";
+precision=:hal)` (a typo for `:half`) used to read back full
+`ComplexF32`/no error at all, since `_narrowtarget`'s own checks simply
+fell through to "no narrowing" for anything they didn't recognize.
+"""
+function _normalize_precision(p)
+    q = p === Float32 ? :full : p
+    q in (:half, :full, Float16, BFloat16) || throw(ArgumentError(
+        "precision must be :half, :full, Float16, BFloat16 or Float32, got $(repr(p))"))
+    return q
+end
+
+"""
     readtable(path) -> Table | RefTable | ConcatTable
 
 Read the metadata (description, keywords, data-manager bindings, row count)
@@ -449,9 +468,7 @@ function readtable(path::AbstractString; precision::Union{Nothing,Symbol,Type}=n
     lockpath = joinpath(dir, "table.lock")
     tp, st, readme = read_tableinfo(dir)
     prec = precision === nothing ? (tp == "Measurement Set" ? :half : :full) :
-           precision === Float32 ? :full : precision
-    prec in (:half, :full, Float16, BFloat16) || throw(ArgumentError(
-        "readtable: precision must be :half, :full, Float16, BFloat16 or Float32, got $(repr(prec))"))
+           _normalize_precision(precision)
     container = open_container(dir)
 
     local datbytes, sync

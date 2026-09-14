@@ -6244,3 +6244,41 @@ Extended `test/units_tests.jl`'s existing testsets (12 new assertions
 across `_normalize_unit`, the casacore-vocabulary parse check, and
 `_ms_ustring`, plus a full `write_table`/`readtable` round-trip).
 Standalone `units_tests.jl` green in full (90/90), no regressions.
+
+### Phase 198 — a real bug in `src/tables/column.jl`: `column()`/
+### `getcolumn()`/`getcell()`'s `precision=` override was never
+### validated, so a typo silently narrowed nothing instead of erroring
+### the way `readtable`'s identical check already did
+
+Continuing the sweep of `src/tables/`. `readtable(path; precision=…)`
+validates its argument against `(:half, :full, Float16, BFloat16,
+Float32)` and raises a clear `ArgumentError` for anything else — but
+the identical `precision=` kwarg on `column`/`getcolumn`/`getcell` (the
+common per-column override, `column(t, name; precision=…)`) had no such
+check at all. `_narrowtarget` (the function that turns an "effective
+precision" into a narrow scalar target or `nothing`) is three
+`if`-style branches that each test for one specific value and fall
+through to `return nothing` (= "no narrowing") for anything they don't
+recognize — so a mistyped `precision=:hal` (for `:half`) or
+`precision=:HALF` (wrong case) silently read back full `ComplexF32`
+instead of the requested `ComplexF16`, with **no error at all**. Live-
+verified: `column(t, "DATA"; precision=:hal)` gave `Matrix{ComplexF32}`
+with no warning, while `readtable(t; precision=:hal)` on the exact same
+typo correctly threw.
+
+Fixed by extracting `readtable`'s validation into a shared
+`_normalize_precision(p)` (in `table.jl`) and having `_narrowtarget`
+call it first — every `precision=` entry point (`column`, `getcolumn`,
+`getcell`, and — since they all funnel through `column(::Table, …)` —
+a `RefTable`'s `MappedColumn` and a `ConcatTable`'s `ConcatColumn` too)
+now validates identically, with no separate fix needed per table kind.
+Live-verified end to end: all 6 valid values (`nothing`, `:half`,
+`:full`, `Float16`, `BFloat16`, `Float32`) still behave exactly as
+before; `:hal`, `:HALF`, and `Int32` now all raise the same clear
+`ArgumentError` on `column`/`getcolumn`/`getcell` directly *and*
+through a `RefTable`. New testset "precision — column()/getcolumn()/
+getcell() validate precision= too (Phase 198)" (11 assertions).
+`precision_tests.jl` standalone green (74/74), plus a broader
+core-data-dependent-file sweep (`metadata`/`ssm`/`tsm`/`ism`/`api`/
+`tables`/`schema`/`precision_tests.jl` together, 184/184) confirming no
+regressions.
