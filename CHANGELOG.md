@@ -6606,3 +6606,43 @@ Standalone `writer_tests.jl`, `ism_writer_tests.jl`, `reftable_tests.jl`,
 `edit_tests.jl`, `container_tests.jl`, and `schema_tests.jl` together
 (covering every other `subtables=`/`subtable_rows=` caller in the test
 suite), no regressions.
+
+### Phase 205 — `reference_copy`'s `writable=` had the same unvalidated-name shape, with a real aliasing consequence
+
+Continuing the `src/tables/` sweep, applying standing methodology note
+#12 for a third time in this batch. Read `edit.jl`/`concatedit.jl` in
+full first, looking for the same shape — no bug found there (every
+`EditColumn`/`RefEditColumn`/`ConcatEditColumn` code path, the
+`removerows!`/`addrows!` row-index bookkeeping, and `_materialize!`/
+`_resolve`'s override-vs-tsmedit split all re-verified mutually
+consistent; also resolved a standing question from earlier in the
+sweep — `EditColumn{T}` is *always* instantiated with `T = Any`
+regardless of the real column type, by design, which is why a
+`ConcatEditColumn`'s per-part `EditColumn`s never hit a type-mismatch
+even when parts have heterogeneous schemas). Found the actual instance
+in `reference_copy`: `writable=` (the set of column names that should
+be real independent copies rather than `ForwardColumnEngine`
+references) is checked only via `c.name in w` while iterating the
+SOURCE's real column names — a typo'd name in `writable=` is simply
+never matched, with **no error, no warning, and no effect at all**:
+the column silently stays forwarded instead of becoming the
+independent copy the caller explicitly asked for.
+
+This one has a more consequential failure mode than Phase 202/204's
+own findings: `writable=` exists specifically to prevent aliasing (a
+forwarded column's reads track the *source* table forever, a writable
+one is a real independent snapshot), so silently ignoring the request
+doesn't just produce wrong metadata or an unrestricted copy — it
+leaves a column ALIASED when the caller explicitly asked for
+independence. Live-verified: `reference_copy(dst, src;
+writable=["AA"])` (typo for `"A"`) left `A` forwarded; a subsequent
+`edit(src)` changing `A` silently changed `dst`'s `A` too — exactly
+the surprise `writable=` is supposed to prevent. Fixed by validating
+every name in `writable` against the source's real column-name set
+before proceeding, erroring clearly on a mismatch. New testset
+"engine — reference_copy's writable= is validated (Phase 205)" (6
+assertions: the typo'd case errors with no stray directory, valid
+`writable=` usage still correctly isolates the requested column while
+a non-writable one still tracks the source). Standalone
+`engine_tests.jl` (including the pre-existing "engine —
+ForwardColumnEngine / reference_copy" testset), no regressions.
