@@ -110,6 +110,8 @@ mutable struct TableLock
     noop::Bool                       # locking disabled -> every op succeeds
     inuse::Bool                      # holding the byte-1 "in use" read lock
     depth::Int                       # registry reference count
+    tlock::ReentrantLock             # serializes concurrent `withlock` calls
+                                      # WITHIN this process -- see `withlock`
 end
 
 _rawfd(lk::TableLock) = Base.cconvert(Cint, fd(lk.io::IOStream))
@@ -279,7 +281,7 @@ catch
     abspath(String(dir))
 end
 
-_noop_lock(dir, path) = TableLock(String(dir), path, nothing, :none, false, true, false, 1)
+_noop_lock(dir, path) = TableLock(String(dir), path, nothing, :none, false, true, false, 1, ReentrantLock())
 
 """
     open_lock(dir; create) -> TableLock
@@ -291,14 +293,33 @@ handle when locking is unavailable.
 """
 function open_lock(dir::AbstractString; create::Bool)
     key = _lockkey(dir)
+    # The registry lookup, the file open (+ its own tlock allocation),
+    # and the insert must be ONE atomic step under _REG_LOCK -- doing the
+    # check and the insert as two separate `@lock` blocks (the previous
+    # code) left a window where two tasks racing on the very first
+    # `open_lock` for a directory could each see `existing === nothing`,
+    # each build their OWN `TableLock` (hence their own, independent
+    # `tlock`), and then overwrite each other in the registry -- silently
+    # defeating `withlock`'s in-process serialization entirely (found
+    # live: the `tlock` fix alone did not stop the two-`edit()`-sessions
+    # race described below, because the two sessions were never actually
+    # sharing one lock object in the first place).
     Base.@lock _REG_LOCK begin
         existing = get(_HELD_LOCKS, key, nothing)
         if existing !== nothing
             existing.depth += 1
             return existing
         end
+        lk = _open_lock_new(dir, create)
+        _HELD_LOCKS[key] = lk
+        return lk
     end
+end
 
+# The actual file-open + TableLock construction, factored out of
+# `open_lock` so it can run inside the SAME `_REG_LOCK` critical section
+# as the registry check/insert above (see the comment there).
+function _open_lock_new(dir::AbstractString, create::Bool)
     path = joinpath(String(dir), "table.lock")
     LOCK_SUPPORTED || return _noop_lock(dir, path)
 
@@ -321,16 +342,13 @@ function open_lock(dir::AbstractString; create::Bool)
     end
     io === nothing && return _noop_lock(dir, path)
 
-    lk = TableLock(String(dir), path, io, :none, writable, false, false, 1)
+    lk = TableLock(String(dir), path, io, :none, writable, false, false, 1, ReentrantLock())
     finalizer(close_lock!, lk)
     # best-effort "in use" marker
     try
         rc, _ = _fcntl(lk, F_SETLK, Ref(_mkflock(F_RDLCK, LOCK_USE_BYTE, 1)))
         lk.inuse = rc == 0
     catch
-    end
-    Base.@lock _REG_LOCK begin
-        _HELD_LOCKS[key] = lk
     end
     return lk
 end
@@ -352,14 +370,35 @@ end
 Run `f(lk::TableLock)` with a shared (`:read`) or exclusive (`:write`)
 lock on `<dir>/table.lock` held for the duration, always released
 afterwards.
+
+**In-process serialization, not just cross-process.** `fcntl` byte-range
+locks are advisory *per process* — a second `F_SETLK` from the SAME
+process on a range it already holds trivially succeeds (POSIX never
+blocks a process against itself), and `open_lock`'s one-fd-per-directory
+registry means two concurrent `withlock` calls for the same directory
+(e.g. two `Threads.@spawn`ed `edit()` sessions on the same table) get
+the SAME `TableLock` object. Found live: without `lk.tlock`, two such
+calls ran their bodies genuinely concurrently — one `edit()` silently
+lost its own committed writes (clobbered by the other's regenerated
+file, materialised from the same stale pre-edit snapshot) and the other
+crashed with a raw `IOError` on its own atomic-rename racing the first's
+temp file. `lk.tlock` (a per-`TableLock`, hence per-directory,
+`ReentrantLock`) fixes this: held for the WHOLE critical section below
+(the `fcntl` acquire, `f(lk)`, and the release), it genuinely blocks a
+second same-process caller until the first is done — while still
+allowing the SAME task to re-enter (`ReentrantLock` is task-reentrant),
+which the existing nested-`withlock` pattern (e.g. `write_table_files`
+calling `withlock` again from inside a `flush`) already relies on.
 """
 function withlock(f, dir::AbstractString, mode::Symbol; create::Bool)
     lk = open_lock(dir; create)
+    Base.lock(lk.tlock)
     try
         mode === :write ? lock_write!(lk) : lock_read!(lk)
         return f(lk)
     finally
         _release!(lk)
+        Base.unlock(lk.tlock)
     end
 end
 

@@ -35,6 +35,8 @@ mutable struct EditTable
     addcols::Vector{Tuple{ColumnDesc,Symbol,Vector{Any}}}   # (desc, :ssm|:ism|:tsm, data)
     dropcols::Set{String}
     flushed::Bool
+    lk::TableLock         # the write lock, held for the WHOLE session -- see `edit`'s docstring
+    released::Bool        # guards against releasing `lk` twice (flush + an error path)
 end
 
 struct EditColumn{T} <: AbstractVector{T}
@@ -47,29 +49,79 @@ end
     edit(f, path)            # runs `f(t)`, then `flush(t)`
 
 Open the CTDS table at `path` for update.
+
+**The write lock is acquired here, for the whole session — not just
+inside `flush`.** Two concurrent `edit()` sessions on the same table
+(from different `Task`s / `Threads.@spawn`ed callers) each materialise
+their own in-memory snapshot of the untouched columns and, if either
+outlives the other, `flush` regenerates a whole storage-manager file
+from that snapshot — so a `flush`-only lock (the earlier design) let a
+second session start *reading* before the first had *written*, and
+whichever session flushed last would silently overwrite the other's
+already-committed changes to any row/column it hadn't itself touched
+(found live, via `Threads.@spawn`-ing two `edit()` sessions on disjoint
+row ranges of the same table: one session's writes were silently lost,
+and — depending on flush order — the other could also crash on a
+colliding atomic-rename). Holding the lock from `edit(path)` through
+`flush` makes a second session's own `edit(path)` call — specifically
+its own lock acquisition, before it ever reads a byte of table data —
+block until the first session's `flush` has completed, so the second
+session's snapshot is taken *after* the first session's writes, not
+concurrently with them. `edit(f, path)` releases the lock in a
+`finally` even if `f` throws, so an aborted edit never leaves the table
+locked for the rest of the process.
 """
 function edit(path::AbstractString)
-    r = readtable(String(rstrip(path, '/')); precision=:full)   # edits work at native precision
-    r isa Table || error("edit: $(r isa RefTable ? "RefTable" : "ConcatTable") " *
-                         "at $path — in-place edit is not supported")
-    r.container === nothing ||
-        error("edit: $path uses a MultiFile/MultiHDF5 container — in-place edit " *
-             "is not supported (Phase 20 is read-only)")
-    any(m -> _is_forward_dm(m.name), r.managers) &&
-        error("edit: $path has ForwardColumnEngine columns that reference another " *
-              "table — edit that table instead")
-    any(m -> _is_virtualtaql_dm(m.name), r.managers) &&
-        error("edit: $path has VirtualTaQLColumn columns computed from a stored " *
-              "TaQL expression — edit the source columns instead")
-    EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
-              Dict{String,Dict{Int,Any}}(),
-              Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false)
+    dir = String(rstrip(path, '/'))
+    lk = open_lock(dir; create=true)
+    Base.lock(lk.tlock)
+    try
+        lock_write!(lk)
+        r = readtable(dir; precision=:full)   # edits work at native precision
+        r isa Table || error("edit: $(r isa RefTable ? "RefTable" : "ConcatTable") " *
+                             "at $path — in-place edit is not supported")
+        r.container === nothing ||
+            error("edit: $path uses a MultiFile/MultiHDF5 container — in-place edit " *
+                 "is not supported (Phase 20 is read-only)")
+        any(m -> _is_forward_dm(m.name), r.managers) &&
+            error("edit: $path has ForwardColumnEngine columns that reference another " *
+                  "table — edit that table instead")
+        any(m -> _is_virtualtaql_dm(m.name), r.managers) &&
+            error("edit: $path has VirtualTaQLColumn columns computed from a stored " *
+                  "TaQL expression — edit the source columns instead")
+        return EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
+                  Dict{String,Dict{Int,Any}}(),
+                  Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false,
+                  lk, false)
+    catch
+        _release_edit_lock!(lk)
+        rethrow()
+    end
 end
 function edit(f::Function, path::AbstractString)
     t = edit(path)
-    f(t)
-    flush(t)
+    try
+        f(t)
+        flush(t)
+    catch
+        _release_edit_lock!(t)
+        rethrow()
+    end
     return t
+end
+
+# Release the session-long write lock exactly once, whether via a
+# normal `flush` or an aborted (exception-raising) session. `x` is
+# either the `EditTable` (once constructed) or, for a failure during
+# construction itself, the raw `TableLock`.
+function _release_edit_lock!(t::EditTable)
+    t.released && return
+    t.released = true
+    _release_edit_lock!(t.lk)
+end
+function _release_edit_lock!(lk::TableLock)
+    _release!(lk)
+    Base.unlock(lk.tlock)
 end
 
 _nrows(t::EditTable) = length(t.rowmap)
@@ -472,10 +524,10 @@ end
 
 function Base.flush(t::EditTable)
     t.flushed && return t
-    dir = t.reader.path
     newrows = length(t.rowmap)
     grew = newrows > t.reader.rows
-    withlock(dir, :write; create=true) do lk
+    lk = t.lk
+    try
         old = read_syncinfo(lk)
         if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
            !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
@@ -486,6 +538,8 @@ function Base.flush(t::EditTable)
             _flush_regen(t)
         end
         write_syncinfo(lk, newrows; modifycounter = (old.present ? old.modifycounter : 0) + 1)
+    finally
+        _release_edit_lock!(t)
     end
     t.flushed = true
     return t

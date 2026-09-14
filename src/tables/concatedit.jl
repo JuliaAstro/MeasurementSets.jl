@@ -75,13 +75,31 @@ IS supported — it adds the column to every part, matching
 function edit(ct::ConcatTable)
     all(p -> p isa Table, ct.parts) || error(
         "edit(::ConcatTable): every part must be a plain Table")
-    ConcatEditTable([edit(p.path) for p in ct.parts], ct.offsets)
+    parts = EditTable[]
+    try
+        for p in ct.parts
+            push!(parts, edit(p.path))
+        end
+    catch
+        for p in parts
+            _release_edit_lock!(p)
+        end
+        rethrow()
+    end
+    ConcatEditTable(parts, ct.offsets)
 end
 function edit(f::Function, ct::ConcatTable)
     t = edit(ct)
-    f(t)
-    for p in t.parts
-        flush(p)
+    try
+        f(t)
+        for p in t.parts
+            flush(p)
+        end
+    catch
+        for p in t.parts
+            _release_edit_lock!(p)
+        end
+        rethrow()
     end
     return t
 end
