@@ -6800,3 +6800,72 @@ regardless of scheduling order. Full suite green — 4952/4952 for the
 pre-existing suite (no count change to it, since this phase fixes a
 concurrency bug rather than adding API surface), plus the 7 new
 assertions above. README/memory updated, merge on the user's word.
+
+### Phase 208 — one more `src/io/` sweep: a second, subtler registry-key bug in the locking layer
+
+User asked for one last sweep of `src/io/` before moving on. `aips.jl`
+re-read line-by-line once more: the "multiple sequential top-level
+AipsIO objects sharing one stream" pattern used by `StandardStMan`'s
+`read_ssmindex` loop (`h.nrinx` separate `SSMIndex` records read off
+ONE `AipsIO` instance) looked suspicious at first — does each one
+really need/get its own magic-value check, or is the whole combined
+byte stream really ONE object that this package's per-call `a.level ==
+0` check would wrongly treat as `h.nrinx` separate root objects? Read
+real casacore's `AipsIO::putstart` (`casa/IO/AipsIO.cc:483-505`)
+directly: `if (level_p == 0) { ... write magic value; }` fires on
+**every** top-level `putstart`, not just the very first one in a
+physical file — confirmed against `SSMBase::readIndexBuckets` (which
+does exactly this: one shared `AipsIO`, a loop calling
+`itsPtrIndex[i]->get(anMOs)` `nrIdx` times) that casacore's own writer
+genuinely emits a fresh magic before each of the `nrinx` `SSMIndex`
+records. This package's `getnexttype`'s `if a.level == 0` check
+(true again after every `getend` returns to level 0) already matches
+this exactly — investigated, not a bug.
+
+The real finding is a second, more subtle instance of Phase 207's own
+root-cause SHAPE (a registry key that can silently change identity):
+`_lockkey(dir)` falls back to `abspath(dir)` when `realpath(dir)`
+throws — which it does whenever `dir` doesn't exist yet. But on this
+machine (and any macOS system — `/tmp` and `/var` are themselves
+symlinks to `/private/tmp`/`/private/var`), `abspath` of a not-yet-
+created path and the `realpath` computed once that SAME path exists
+are **different strings** whenever any path component is a symlink —
+live-confirmed: `abspath` of a fresh `mktempdir()`-nested path gives
+`/var/folders/.../newtable.ms`, while `realpath` of the identical path
+once created gives `/private/var/folders/.../newtable.ms`. Since
+`open_lock`'s registry is keyed by this string, calling it once
+*before* a directory exists and once *after* — e.g. `edit(path)`
+(Phase 207's own new up-front lock acquisition) racing a concurrent
+`write_table`/`mkpath` for the same not-yet-created path, or simply
+opening the same brand-new directory twice across two calls that
+straddle its creation — silently produces **two different
+`TableLock`s, with two different `tlock`s**, for what is really one
+directory: exactly the kind of key-identity split Phase 207 already
+fixed for the check-then-insert race, but via a different mechanism
+(the KEY itself changing, not a TOCTOU on one fixed key). Live-
+reproduced directly: `open_lock` called on the same path before and
+after `mkpath` (no release in between, simulating two callers racing
+the creation) returned `lk1 !== lk2`, `lk1.tlock !== lk2.tlock`, before
+this fix; the same sequence gives `lk1 === lk2` after. Fixed
+`_lockkey` to resolve the *parent* directory via `realpath` (almost
+always already real) and append the leaf name when `dir` itself
+doesn't exist yet, so the key is identical whether the call lands
+before or after the directory is created — only truly falls back to
+`abspath` if even the parent is missing (a multi-level `mkpath`, the
+same pathological case the old code already couldn't fully handle).
+New testset "lock — registry key is stable across a not-yet-created
+directory (Phase 208)" (`test/lock_tests.jl`, 5 assertions) reproduces
+the discrepancy deterministically via an explicit symlink (rather than
+relying on the platform's own temp-dir layout happening to contain
+one, so it's portable to Linux CI too) — confirmed to genuinely FAIL
+against the pre-fix code (3 assertion failures) and pass after.
+
+While in `aips.jl`, also finally cleaned up the long-documented dead
+branch in `getend` (`endpos == AIPS_MAGIC || seek(...)`, noted as
+inert since Phase 1/6/9 — `a.ends` is only ever pushed a real computed
+offset, never the sentinel, confirmed again via grep) — an unconditional
+`seek(a.io, endpos)` now, with a comment recording why, instead of a
+confusing dead condition sitting in a hot read path.
+
+Full suite green (baseline 4959, +5 from the new testset = 4964/4964,
+no regressions). README/memory updated, merge on the user's word.

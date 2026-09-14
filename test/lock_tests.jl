@@ -28,6 +28,40 @@ end
     @test isempty(MSv2L._HELD_LOCKS)
 end
 
+@testset "lock — registry key is stable across a not-yet-created directory (Phase 208)" begin
+    # `_lockkey` used to fall back to a bare `abspath` when `realpath`
+    # throws (the directory doesn't exist yet) -- but `abspath` and the
+    # eventual `realpath` can disagree whenever ANY path component is a
+    # symlink (macOS: `/tmp`/`/var` -> `/private/tmp`/`/private/var`),
+    # silently splitting one real directory into two registry entries
+    # (two independent `TableLock`s, two independent `tlock`s) if
+    # `open_lock` is ever called both before and after the directory is
+    # created -- e.g. a `write_table` racing an `edit` on the same
+    # not-yet-existing path, or `edit`'s own up-front lock acquisition
+    # (Phase 207) landing before `mkpath` has run. Reproduced here with
+    # an explicit symlink so the test doesn't depend on the platform's
+    # own temp-dir layout happening to contain one.
+    base = realpath(mktempdir())
+    link = joinpath(dirname(base), "msv2_locktest_link_" * basename(base))
+    symlink(base, link)
+    sub = joinpath(link, "newtable.ms")
+
+    key_before = MSv2L._lockkey(sub)
+    lk1 = MSv2L.open_lock(sub; create=true)      # dir doesn't exist -> noop lock
+    mkpath(sub)
+    key_after = MSv2L._lockkey(sub)
+    lk2 = MSv2L.open_lock(sub; create=true)      # dir now exists
+
+    @test key_before == key_after
+    @test key_after == realpath(sub)             # the stable key IS the eventual realpath
+    @test lk1 === lk2                            # same registry entry -> same `tlock`
+    @test lk1.tlock === lk2.tlock
+
+    MSv2L._release!(lk1)
+    MSv2L._release!(lk2)
+    @test isempty(MSv2L._HELD_LOCKS)
+end
+
 @testset "lock — sync blob round-trip" begin
     d = mktempdir()
     MSv2L.withlock(d, :write; create=true) do lk

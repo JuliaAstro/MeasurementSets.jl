@@ -83,7 +83,16 @@ function getend(a::AipsIO)
     a.level > 0 || error("AipsIO.getend: no matching getstart")
     endpos = pop!(a.ends)
     a.level -= 1
-    endpos == AIPS_MAGIC || seek(a.io, endpos)
+    # Unconditional seek to the declared end position, regardless of what
+    # was actually consumed -- a deliberate, more-forgiving simplification
+    # of casacore's own incremental per-primitive byte tracking (which
+    # throws "part of object not read" on a mismatch); this seek would
+    # silently "correct" an internal under/over-read bug in a specific
+    # object-type reader, rather than raising casacore's own explicit
+    # error, but the seek itself is not conditional on anything: `endpos`
+    # is always a real, computed offset (`getnexttype` only ever pushes
+    # `lenpos + Int(len)` onto `a.ends`, never a sentinel value).
+    seek(a.io, endpos)
     return nothing
 end
 

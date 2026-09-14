@@ -275,10 +275,36 @@ end
 const _HELD_LOCKS = Dict{String,TableLock}()
 const _REG_LOCK   = ReentrantLock()
 
-_lockkey(dir::AbstractString) = try
-    realpath(String(dir))
-catch
-    abspath(String(dir))
+function _lockkey(dir::AbstractString)
+    d = String(dir)
+    try
+        return realpath(d)
+    catch
+        # `dir` doesn't exist YET (e.g. `open_lock` called for a table
+        # that's about to be `mkpath`'d, or racing a concurrent creator)
+        # -- `realpath` of the PARENT is resolved instead and the leaf
+        # name appended, so the key is the SAME whether or not `dir`
+        # itself exists at call time. A bare `abspath(d)` fallback (the
+        # previous behaviour) does NOT have this property whenever any
+        # path component is a symlink -- on macOS, `/tmp`/`/var` are
+        # themselves symlinks to `/private/tmp`/`/private/var`, so
+        # `abspath` of a not-yet-created directory under either
+        # disagrees with the `realpath` computed once it exists,
+        # silently splitting one real directory into two registry
+        # entries (two independent `TableLock`s, two independent
+        # `tlock`s) if `open_lock` is ever called both before and after
+        # the directory is created -- e.g. a `write_table` racing an
+        # `edit` on the same not-yet-existing path. Only truly
+        # pathological cases (the parent ALSO missing, e.g. a multi-
+        # level `mkpath`) fall through to the old `abspath` behaviour.
+        parent = dirname(rstrip(d, '/'))
+        leaf = basename(rstrip(d, '/'))
+        try
+            return joinpath(realpath(parent), leaf)
+        catch
+            return abspath(d)
+        end
+    end
 end
 
 _noop_lock(dir, path) = TableLock(String(dir), path, nothing, :none, false, true, false, 1, ReentrantLock())
