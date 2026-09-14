@@ -553,10 +553,13 @@ end
     ma2 = MSv2.TQLMArray(Float64[10 20; 30 40], Bool[true false; false false])
     b2 = MSv2._bcast(*, ma, ma2)
     @test b2.mask == (m .| ma2.mask)          # [true true; true false]
-    # reductions skip masked, nelements counts unmasked
+    # reductions skip masked; nelements is mask-agnostic (live-verified
+    # against real casacore, Phase 190 continuation: `nelements`/`count`
+    # on a masked array give the array's total size, not the unmasked
+    # count)
     @test MSv2._red(sum)(ma) == 5.0
     @test MSv2._red(Statistics.mean)(ma) == 2.5
-    @test MSv2._tql_nelem(ma) == 2
+    @test MSv2._tql_nelem(ma) == 4
     @test MSv2._tql_ndim(ma) == 2
     # shape mismatch errors
     @test_throws ArgumentError MSv2.TQLMArray(d, Bool[true, false])
@@ -571,15 +574,20 @@ end
         nrow=4, tsm=[["V"], ["F"]])
     t = readtable(dir)
 
-    # V[F] is a masked selection: reductions use only the F-true elements
+    # `V[F]` masks OUT the elements where `F` is true (live-verified
+    # against real casacore, Phase 190 continuation: `arraymask(A[A>2])`
+    # for `A=1:5` is `[F,F,T,T,T]` -- masked exactly where the condition
+    # holds), so a reduction over `V[F]` uses the F-FALSE elements; and
+    # `nelements`/`count` on a masked array is mask-agnostic (the total
+    # element count).
     r = query(t; select=["K" => "K", "mv" => "mean(V[F])", "sv" => "sum(V[F])",
                          "n" => "nelements(V[F])"]) do row
         true
     end
     for i in 1:4
-        @test collect(r.mv)[i] ≈ Statistics.mean(V[i][F[i]])
-        @test collect(r.sv)[i] == sum(V[i][F[i]])
-        @test collect(r.n)[i] == count(F[i])
+        @test collect(r.mv)[i] ≈ Statistics.mean(V[i][.!F[i]])
+        @test collect(r.sv)[i] == sum(V[i][.!F[i]])
+        @test collect(r.n)[i] == length(V[i])
     end
 
     # arraydata / arraymask
@@ -587,7 +595,7 @@ end
         true
     end
     @test collect(r2.d)[1] == V[1]
-    @test collect(r2.m)[1] == .!F[1]
+    @test collect(r2.m)[1] == F[1]
 
     # marray(data, mask): mask is taken as-is (true = masked out)
     r3 = query(t; select=["x" => "sum(marray(V, F))"]) do row
@@ -599,11 +607,11 @@ end
     r4 = query(t; select=["s" => "sum(V[V > 4.0])"]) do row
         true
     end
-    @test collect(r4.s)[1] == sum(V[1][V[1].>4.0])
+    @test collect(r4.s)[1] == sum(V[1][.!(V[1].>4.0)])
 
     # groupby: masked reduction inside a g* aggregate
     g = groupby(t, "K"; select=["K" => :K, "mm" => "gmax(mean(V[F]))"], orderby=["K"])
-    @test collect(g.mm) == [Statistics.mean(V[i][F[i]]) for i in 1:4]
+    @test collect(g.mm) == [Statistics.mean(V[i][.!F[i]]) for i in 1:4]
 
     # a computed select column of masked arrays persists as plain data
     dst = joinpath(mktempdir(), "MO")
@@ -624,7 +632,7 @@ end
     r6 = query(t, "K >= 1"; select=["K" => "K", ("D", "M") => "V[V > 4.0]"])
     @test columnnames(r6) == ["K", "D", "M"]
     @test collect(r6.D)[1] == V[2]
-    @test collect(r6.M)[1] == .!(V[2] .> 4.0)
+    @test collect(r6.M)[1] == (V[2] .> 4.0)
 
     # non-masked RHS -> mask column is the non-finite flag
     r7 = query(t; select=[("D", "M") => "1.0 / (V - 5.0)"]) do row
@@ -1120,6 +1128,215 @@ end
     end
 end
 
+@testset "Phase 190 — sweeping functions.jl to completion: hms/dms array bug + hdms + the rest of running*/boxed*" begin
+    # a real, confirmed bug: hms()/dms() threw a MethodError on an
+    # array argument, but real casacore applies them ELEMENTWISE
+    # (ExprFuncNodeArray.cc:2424-2454). hdms() (alternating hms/dms by
+    # 0-based index) was entirely missing.
+    PD = [1.0, 0.5]
+    @test MSv2._TQL_FUNCS["hms"][1](PD) == [MSv2._tql_hms(1.0), MSv2._tql_hms(0.5)]
+    @test MSv2._TQL_FUNCS["dms"][1](PD) == [MSv2._tql_dms(1.0), MSv2._tql_dms(0.5)]
+    @test MSv2._tql_hdms(PD) == [MSv2._tql_hms(1.0), MSv2._tql_dms(0.5)]
+    @test MSv2._tql_hdms([1.0, 0.5, 0.2, -0.3]) ==
+          [MSv2._tql_hms(1.0), MSv2._tql_dms(0.5), MSv2._tql_hms(0.2), MSv2._tql_dms(-0.3)]
+
+    # completing running*/boxed*: full diff of TableParseFunc.cc's
+    # "running.../boxed..." chain found 8 more missing pairs + 2
+    # missing aliases (runningavg/boxedavg).
+    a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    b = Bool[true, true, false, true, true, false, true, true]
+    @test MSv2._TQL_FUNCS["runningavg"][1](a, 2) == MSv2._running_avg(a, 2)
+    @test MSv2._TQL_FUNCS["boxedavg"][1](a, 2) == MSv2._boxed_avg(a, 2)
+    @test MSv2._running_product(a, 2)[3] == prod(a[1:5])
+    @test MSv2._running_product(a, 2)[1] == 0.0
+    @test MSv2._boxed_product(a, 2)[1] == prod(a[1:2])
+    @test MSv2._running_fractile(a, 0.5, 2)[3] == MSv2._tql_fractile(a[1:5], 0.5)
+    @test MSv2._boxed_fractile(a, 0.5, 2)[1] == MSv2._tql_fractile(a[1:2], 0.5)
+    @test MSv2._running_med(a, 2) == MSv2._running_fractile(a, 0.5, 2)   # median IS fractile(0.5)
+    @test MSv2._running_any(b, 2)[3] == any(b[1:5])
+    @test MSv2._running_any(b, 2)[1] == false
+    @test MSv2._boxed_any(b, 2)[1] == any(b[1:2])
+    @test MSv2._running_all(b, 2)[3] == all(b[1:5])
+    @test MSv2._boxed_all(b, 2)[1] == all(b[1:2])
+    @test MSv2._running_ntrue(b, 2)[3] == count(identity, b[1:5])
+    @test MSv2._boxed_ntrue(b, 2)[1] == count(identity, b[1:2])
+    @test MSv2._running_nfalse(b, 2)[3] == count(!, b[1:5])
+    @test MSv2._boxed_nfalse(b, 2)[1] == count(!, b[1:2])
+
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a], "B" => [b], "PD" => [PD]];
+                nrow=1, tsm=[["A"], ["B"], ["PD"]])
+    t = readtable(tabpath)
+    r = query(t, "rownumber() == 1"; select = [
+        "h" => "hms(PD)", "hd" => "hdms(PD)",
+        "rp" => "runningproduct(A,[2])", "bp" => "boxedproduct(A,[2])",
+        "rf" => "runningfractile(A,0.5,[2])", "bf" => "boxedfractile(A,0.5,[2])",
+        "ra" => "runningany(B,[2])", "ba" => "boxedany(B,[2])",
+        "rall" => "runningall(B,[2])", "ball" => "boxedall(B,[2])",
+        "rnt" => "runningntrue(B,[2])", "bnt" => "boxedntrue(B,[2])",
+        "rnf" => "runningnfalse(B,[2])", "bnf" => "boxednfalse(B,[2])"])
+    @test r.h[1] == [MSv2._tql_hms(1.0), MSv2._tql_hms(0.5)]   # hms alone == elementwise hms, not alternating
+    @test r.hd[1] == MSv2._tql_hdms(PD)
+    @test r.rp[1] == MSv2._running_product(a, 2)
+    @test r.bp[1] == MSv2._boxed_product(a, 2)
+    @test r.rf[1] == MSv2._running_fractile(a, 0.5, 2)
+    @test r.bf[1] == MSv2._boxed_fractile(a, 0.5, 2)
+    @test r.ra[1] == MSv2._running_any(b, 2)
+    @test r.ba[1] == MSv2._boxed_any(b, 2)
+    @test r.rall[1] == MSv2._running_all(b, 2)
+    @test r.ball[1] == MSv2._boxed_all(b, 2)
+    @test r.rnt[1] == MSv2._running_ntrue(b, 2)
+    @test r.bnt[1] == MSv2._boxed_ntrue(b, 2)
+    @test r.rnf[1] == MSv2._running_nfalse(b, 2)
+    @test r.bnf[1] == MSv2._boxed_nfalse(b, 2)
+
+    # c() / near() / nearabs() / gfractile() / countall() / mask() / cweekday()
+    @test MSv2._tql_nearabs(5.0, 5.05, 0.1) == true
+    @test MSv2._tql_nearabs(5.0, 5.2, 0.1) == false
+    r2 = query(t, "rownumber() == 1"; select = [
+        "cc" => "c()", "n1" => "near(5.0, 5.1)", "n2" => "near(5.0, 5.1, 0.5)",
+        "na1" => "nearabs(5.0, 5.05, 0.1)", "na2" => "nearabs(5.0, 5.2, 0.1)",
+        "mk" => "mask(A)", "cw" => "cweekday(datetime('2020-02-12'))"])
+    @test r2.cc[1] == MSv2.C_LIGHT
+    @test r2.n1[1] == false
+    @test r2.n2[1] == true
+    @test r2.na1[1] == true
+    @test r2.na2[1] == false
+    @test r2.mk[1] == MSv2._tql_arraymask(a)
+    @test r2.cw[1] == query(t, "rownumber() == 1"; select = ["X" => "cdow(datetime('2020-02-12'))"]).X[1]
+
+    K = Int32[1, 1, 1, 1, 2, 2]
+    X = Float64[1, 2, 3, 4, 5, 6]
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    write_table(tabpath2, "T2", Pair{String,Any}["K" => K, "X" => X]; nrow=6)
+    tg = readtable(tabpath2)
+    g = groupby(tg, "K"; select = ["K" => "K", "GF" => "gfractile(X, 0.25)", "CA" => "countall()"])
+    order = sortperm(collect(g.K))
+    @test collect(g.K)[order] == [1, 2]
+    @test collect(g.GF)[order] == [MSv2._tql_fractile([1.0, 2, 3, 4], 0.25),
+                                   MSv2._tql_fractile([5.0, 6], 0.25)]
+    @test collect(g.CA)[order] == [4, 2]
+
+    # errors
+    @test_throws ArgumentError MSv2._taqllite_parse("gfractile(X)", Set(["X"]))
+    @test_throws ArgumentError MSv2._taqllite_parse("countall(X)", Set(["X"]))
+end
+
+@testset "Phase 190 — completing functions.jl, real-TaQL cross-check" begin
+    _HAVE_TAQL || return
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:8)
+    b = Bool[true, true, false, true, true, false, true, true]
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a], "B" => [b]]; nrow=1,
+                tsm=[["A"], ["B"]])
+    t = readtable(tabpath)
+    for expr in ("runningproduct(A,[2])", "boxedproduct(A,[2])",
+                 "runningfractile(A,0.5,[2])", "boxedfractile(A,0.5,[2])",
+                 "runningany(B,[2])", "boxedany(B,[2])",
+                 "runningall(B,[2])", "boxedall(B,[2])",
+                 "runningntrue(B,[2])", "boxedntrue(B,[2])",
+                 "runningnfalse(B,[2])", "boxednfalse(B,[2])",
+                 "runningavg(A,[2])", "boxedavg(A,[2])",
+                 "near(5.0,5.1,0.5)", "nearabs(5.0,5.2,0.1)", "c()", "mask(A)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa isa AbstractArray ? all(casa .== ours) : casa == ours
+    end
+
+    dir2 = mktempdir(); tabpath2 = joinpath(dir2, "t2.tab")
+    PD = [1.0, 0.5, 0.2, -0.3]
+    write_table(tabpath2, "T2", Pair{String,Any}["PD" => [PD]]; nrow=1, tsm=[["PD"]])
+    t2 = readtable(tabpath2)
+    for expr in ("hms(PD)", "dms(PD)", "hdms(PD)")
+        rdir = joinpath(mktempdir(), "r")
+        _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath2)
+        casa = column(readtable(rdir), "X")[1]
+        ours = query(t2, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test casa == ours
+    end
+
+    K = Int32[1, 1, 1, 1, 2, 2]
+    X = Float64[1, 2, 3, 4, 5, 6]
+    dir3 = mktempdir(); tabpath3 = joinpath(dir3, "t3.tab")
+    write_table(tabpath3, "T3", Pair{String,Any}["K" => K, "X" => X]; nrow=6)
+    tc3 = CCT.Table(tabpath3)
+    rdir3 = joinpath(mktempdir(), "r3")
+    _taqlcmd("SELECT K, gfractile(X, 0.25) AS GF, countall() AS CA FROM \$1 GROUP BY K GIVING '$rdir3'", tc3)
+    m3 = readtable(rdir3)
+    casaK = column(m3, "K")[:]
+    casaGF = Dict(casaK[i] => column(m3, "GF")[i] for i in 1:nrow(m3))
+    casaCA = Dict(casaK[i] => column(m3, "CA")[i] for i in 1:nrow(m3))
+    tg3 = readtable(tabpath3)
+    g3 = groupby(tg3, "K"; select = ["K" => "K", "GF" => "gfractile(X, 0.25)", "CA" => "countall()"])
+    for i in 1:length(g3.K)
+        @test casaGF[g3.K[i]] == g3.GF[i]
+        @test casaCA[g3.K[i]] == g3.CA[i]
+    end
+end
+
+@testset "Phase 190 continuation — masked-array natives: negatemask/replacemasked/replaceunmasked" begin
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    a = Float64.(1:5)
+    write_table(tabpath, "T", Pair{String,Any}["A" => [a]]; nrow=1, tsm=[["A"]])
+    t = readtable(tabpath)
+
+    m = MSv2.TQLMArray(a, BitArray([false, false, true, true, true]))   # A[A>2]
+    @test MSv2._tql_negatemask(m).data == a
+    @test MSv2._tql_negatemask(m).mask == .!m.mask
+
+    r1 = MSv2._tql_negatemask(a)      # a plain (unmasked) array -> fully masked
+    @test r1.data == a
+    @test all(r1.mask)
+
+    rm1 = MSv2._tql_replacemasked(m, 0.0)
+    @test rm1.data == [1.0, 2.0, 0.0, 0.0, 0.0]
+    @test rm1.mask == m.mask
+    ru1 = MSv2._tql_replaceunmasked(m, -1.0)
+    @test ru1.data == [-1.0, -1.0, 3.0, 4.0, 5.0]
+    @test ru1.mask == m.mask
+
+    rm2 = MSv2._tql_replacemasked(m, a .* 0)   # array operand
+    @test rm2.data == [1.0, 2.0, 0.0, 0.0, 0.0]
+
+    # unmasked input: replaceunmasked replaces everything, replacemasked is a no-op
+    @test MSv2._tql_replaceunmasked(a, 9.0) == fill(9.0, 5)
+    @test MSv2._tql_replacemasked(a, 9.0) == a
+
+    @test_throws ArgumentError MSv2._tql_replacemasked(m, [1.0, 2.0])   # shape mismatch
+
+    q = query(t, "rownumber() == 1"; select = [
+        "nd" => "arraydata(negatemask(A[A>2]))", "nm" => "arraymask(negatemask(A[A>2]))",
+        "rd" => "arraydata(replacemasked(A[A>2], 0.0))",
+        "rmk" => "arraymask(replacemasked(A[A>2], 0.0))",
+        "ud" => "arraydata(replaceunmasked(A[A>2], -1.0))",
+        "umk" => "arraymask(replaceunmasked(A[A>2], -1.0))"])
+    @test q.nd[1] == a
+    @test q.nm[1] == .!m.mask
+    @test q.rd[1] == [1.0, 2.0, 0.0, 0.0, 0.0]
+    @test q.rmk[1] == m.mask
+    @test q.ud[1] == [-1.0, -1.0, 3.0, 4.0, 5.0]
+    @test q.umk[1] == m.mask
+
+    if _HAVE_TAQL
+        for expr in ("negatemask(A[A>2])", "arraymask(negatemask(A[A>2]))",
+                     "arraydata(replacemasked(A[A>2], 0.0))",
+                     "arraymask(replacemasked(A[A>2], 0.0))",
+                     "arraydata(replaceunmasked(A[A>2], -1.0))",
+                     "arraymask(replaceunmasked(A[A>2], -1.0))",
+                     "arraydata(replacemasked(A[A>2], A*0))",
+                     "arraymask(negatemask(A))", "arraydata(negatemask(A))",
+                     "replaceunmasked(A, 9.0)", "replacemasked(A, 9.0)")
+            rdir = joinpath(mktempdir(), "r")
+            _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
+            casa = column(readtable(rdir), "X")[1]
+            ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+            @test all(casa .== ours)
+        end
+    end
+end
+
 @testset "TaQL-lite parser — aggregate unit" begin
     validnames = Set(["K", "X", "V"])
     parse(s) = MSv2._taqllite_parse(s, validnames)
@@ -1290,9 +1507,13 @@ end
                 "gsm" => "gmeans(V[!F])",
                 "gnt" => "gsum(ntrue(F))"])
     for (row, k) in enumerate(Int32[0, 1])
+        # `V[!F]` masks OUT elements where `!F` holds (i.e. where `F` is
+        # false) -- live-verified real-casacore mask polarity, Phase 190
+        # continuation -- so the valid/unmasked elements are where `F`
+        # is TRUE.
         pooled = Float64[]
         for i in grp[k]
-            append!(pooled, V[i][.!F[i]])
+            append!(pooled, V[i][F[i]])
         end
         @test collect(g.gm)[row] ≈ Statistics.mean(pooled)
         @test collect(g.gs)[row] == sum(pooled)
@@ -1303,7 +1524,7 @@ end
 
         want = Matrix{Float64}(undef, 2, 2)
         for p in CartesianIndices((2, 2))
-            vs = [V[i][p] for i in grp[k] if !F[i][p]]
+            vs = [V[i][p] for i in grp[k] if F[i][p]]
             want[p] = isempty(vs) ? NaN : Statistics.mean(vs)
         end
         @test isequal(collect(g.gsm)[row], want)
@@ -3336,9 +3557,14 @@ end
 end
 
 @testset "Phase 184 — int()/integer() saturate instead of throwing" begin
-    # casacore's int()/integer() is a raw C++ Int64(double) cast --
-    # NaN/out-of-range SATURATES rather than raising; Julia's own
-    # `trunc(Int, ...)` throws an InexactError in all three cases.
+    # casacore's int()/integer() is a raw C++ Int64(double) cast -- for
+    # a NaN/out-of-range argument this is genuinely undefined behavior
+    # and architecture-dependent in REAL casacore (ARM64 saturates
+    # piecewise, x86-64 gives one fixed sentinel for all of them --
+    # see `_tql_int`'s comment and the real-TaQL cross-check testset
+    # below); this package picks its own well-defined, portable,
+    # saturating convention rather than either CPU's raw UB. Julia's
+    # own `trunc(Int, ...)` throws an InexactError in all three cases.
     # Specifically triggered by the sqrt/log/asin/acos fixes above:
     # int(sqrt(-1.0)) now flows a real NaN into int(), a combination
     # that used to be unreachable (the old sqrt would already throw).
@@ -3361,13 +3587,29 @@ end
     dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
     write_table(tabpath, "T", Pair{String,Any}["A" => [-1.0]]; nrow=1)
     t = readtable(tabpath)
-    for expr in ("int(sqrt(A))", "int(1.0/0.0)", "int(-1.0/0.0)", "int(0.0/0.0)",
-                 "int(1e18)", "integer(2.9)", "integer(-2.9)")
+    # `int()`/`integer()` of a NaN/±Inf argument is a raw C++
+    # `static_cast<Int64>(double)` in real casacore -- genuinely
+    # undefined behavior. Confirmed via a real CI failure (Phase 191
+    # continuation) plus a direct compiled-C++ probe: ARM64 (`FCVTZS`)
+    # saturates piecewise (`int(0.0/0.0)==0`, `int(1.0/0.0)==typemax`,
+    # `int(-1.0/0.0)==typemin`), but x86-64 (`CVTTSD2SI`, what GitHub
+    # Actions CI actually runs) gives `typemin(Int64)` for EVERY one of
+    # them uniformly. There is no portable "real casacore" ground truth
+    # for these -- only cross-check the well-defined, in-range values
+    # live against casacore; the NaN/±Inf cases are checked against
+    # this package's own documented, architecture-independent
+    # saturating convention instead (see `_tql_int`'s comment).
+    for expr in ("int(1e18)", "integer(2.9)", "integer(-2.9)")
         rdir = joinpath(mktempdir(), "r")
         _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
         casa = column(readtable(rdir), "X")[1]
         ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
         @test casa == ours
+    end
+    for (expr, want) in (("int(sqrt(A))", Int64(0)), ("int(1.0/0.0)", typemax(Int64)),
+                         ("int(-1.0/0.0)", typemin(Int64)), ("int(0.0/0.0)", Int64(0)))
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test ours == want
     end
 end
 

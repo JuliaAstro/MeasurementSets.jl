@@ -226,7 +226,7 @@ end
     r = taql(mt, "SELECT V[V > 2.0] AS (D, M)")
     @test columnnames(r) == ["D", "M"]
     @test collect(r.D)[1] == V[1]
-    @test collect(r.M)[1] == .!(V[1] .> 2.0)
+    @test collect(r.M)[1] == (V[1] .> 2.0)   # mask = the selector itself (live-verified vs real casacore)
 
     # malformed
     @test_throws ArgumentError taql(p3, "FROBNICATE x")
@@ -558,7 +558,7 @@ end
     v7 = column(readtable(p7), "V"); m7 = column(readtable(p7), "M")
     for r in 1:3
         @test v7[r] == V0[r]                       # data unchanged (V[cond] keeps the cell)
-        @test m7[r] == .!(V0[r] .> 5.0)            # mask = where the selector is false
+        @test m7[r] == (V0[r] .> 5.0)               # mask = the selector itself
     end
 end
 

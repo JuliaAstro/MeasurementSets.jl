@@ -5718,3 +5718,230 @@ via a full function-name-table diff)" (12 assertions, including a
 real-TaQL cross-check (6 assertions, covering the scalar, running,
 boxed, and group-aggregate forms). Standalone `taql_query_tests.jl`
 green in full.
+
+### Phase 190 — sweeping `src/taql/functions.jl` to completion (user request):
+### a real `hms()`/`dms()` bug, missing `hdms()`, the rest of `running*`/`boxed*`,
+### and six more standalone functions
+
+At the user's explicit direction, continued sweeping
+`src/taql/functions.jl` toward genuine completion rather than stopping
+at the next isolated finding. Two threads:
+
+**A real, confirmed bug, found while checking `hdms()`'s implementation
+against `hms()`/`dms()`'s:** casacore's `getArrayString`
+(`ExprFuncNodeArray.cc:2424-2454`) shows `hms()`/`dms()` apply
+ELEMENTWISE to an array argument, not just a scalar — but this
+package's registration called `_tql_hms(float(x))` directly with no
+`_ew` wrapping, so `hms(a_PHASE_DIR_column)` threw a `MethodError`
+instead of formatting each element. Live-verified: `hms([1.0, 0.5]) ==
+["03h49m10.987", "01h54m35.494"]` in real casacore. Fixed by wrapping
+both in `_ew` (the standard elementwise-or-scalar dispatch already
+used throughout this file). While there, found **`hdms()`** — an
+array-only sky-position formatter that alternates `hms`/`dms` by
+(0-based) index (`hdms([ra1,dec1,ra2,dec2]) == [hms(ra1), dms(dec1),
+hms(ra2), dms(dec2)]`) — entirely missing; added `_tql_hdms`.
+
+**Completed the `running*`/`boxed*` family**: a full diff of
+`TableParseFunc.cc`'s `funcName == "running..."`/`"boxed..."` chain
+(`.cc:353-488`) — the same technique Phase 189 introduced — against
+`_TQL_FUNCS` turned up EIGHT more entirely missing pairs (16 functions)
+plus two missing aliases:
+- `runningproduct`/`boxedproduct` — product per window/bin.
+- `runningfractile`/`boxedfractile` — a THIRD argument (the fraction,
+  0–1) inserted before the half-width/box-width, using the SAME
+  never-average `fractile()` convention already implemented for
+  `gmedian`/`runningmedian`/`boxedmedian` (`_tql_fractile`, Phase 183)
+  — `runningmedian(arr,[h])` is in fact just
+  `runningfractile(arr,0.5,[h])` under the hood in casacore itself.
+- `runningany`/`runningall`/`boxedany`/`boxedall` and
+  `runningntrue`/`runningnfalse`/`boxedntrue`/`boxednfalse` — plain
+  `any`/`all`/count-true/count-false per window over a `Bool` array;
+  the Phase-182 edge zero-fill naturally becomes `false`/`0`.
+- `runningavg`/`boxedavg` — real casacore ALIASES for
+  `runningmean`/`boxedmean` this package never registered.
+
+Live-verified every one against real casacore: `runningproduct(1:8,[2])[3]
+== 120.0`, `runningfractile(1:8,0.5,[2])[3] == 3.0` (matches
+`_tql_fractile([1,2,3,4,5],0.5)` exactly), `runningany`/`runningall`/
+`runningntrue`/`runningnfalse` on a `[T,T,F,T,T,F,T,T]` array all match
+a hand count.
+
+**Six more standalone functions**, found continuing the same
+`TableParseFunc.cc` name-table sweep past the `running*`/`boxed*`
+chain:
+- **`c()`** — the speed of light (`cFUNC`), the same value already in
+  `src/constants.jl` as `C_LIGHT`.
+- **`near(a,b[,tol])`/`nearabs(a,b[,tol])`** — standalone
+  FUNCTION-CALL forms of approximate equality. `near` is the SAME
+  relative-magnitude algorithm as the `~=` operator (`_tql_near`,
+  Phase 47), but with a much tighter DEFAULT tolerance (`1.0e-13`, not
+  `~=`'s `1e-5`) when no 3rd argument is given. `nearabs` is a
+  different, ABSOLUTE-difference check (`|a-b| <= tol`, casacore's own
+  `nearAbs`) with no default tolerance concept shared with `near` at
+  all — a bare `nearabs(a,b)` also uses `1.0e-13`. Live-verified:
+  `near(5.0, 5.1) == false` (tol `1e-13`, `|5.0-5.1|=0.1` far too big),
+  `near(5.0, 5.1, 0.5) == true`, `nearabs(5.0, 5.05, 0.1) == true`,
+  `nearabs(5.0, 5.2, 0.1) == false`. Fixed with a new `_tql_nearabs`
+  (`_tql_near` already existed and slotted in directly).
+- **`gfractile(col, frac)`** — the group-aggregate sibling of
+  `gmedian`, with an explicit constant fraction instead of the
+  hardcoded `0.5` (`gmedian` is literally
+  `TableExprGroupFractileDouble(this, 0.5)` internally in casacore,
+  `gfractile` is the same class with `frac` supplied). The fraction is
+  evaluated once, not per row, so it must be a numeric-literal
+  argument — mirrors how this file already handles a handful of other
+  constant-argument functions (`mscal.pbresponse`'s beam spec,
+  `mscal.riseset`'s elevation cutoff). Live-verified:
+  `gfractile([1,2,3,4], 0.25) == 1.0`, matching `_tql_fractile`'s
+  existing formula exactly.
+- **`countall()`** — the SQL-standard `COUNT(*)` spelling, byte-for-byte
+  the same row count `gcount()` computes (`TableExprGroupCountAll` vs
+  `TableExprGroupCount` — casacore's own two classes do the identical
+  thing), just never taking a column argument.
+- **`mask`** — a missing alias for the already-implemented
+  `arraymask()`.
+- **`cweekday`** — a missing alias for the already-implemented
+  `cdow()`.
+
+New testset "Phase 190 — sweeping functions.jl to completion: hms/dms
+array bug + hdms + the rest of running*/boxed*" (49 assertions) + its
+real-TaQL cross-check (25 assertions). Standalone `taql_query_tests.jl`
+green in full — the whole file's ~116 testsets ran end to end with no
+failures.
+
+Remaining `functions.jl` names not yet resolved this phase (continuing
+next): `bool`/`boolean`, `str`/`string` (needs a `getPrintFormat`-style
+width/precision spec), `rand`, `rowid`, `cones`/`anycone`/`findcone`
+(needs a spatial cone-search index), the rest of the masked-array
+native functions (`negatemask`/`replacemasked`/`replaceunmasked`/
+`nullarray`), the array-reshaping family (`array`/`arrayflatten`/
+`flatten`/`diagonal`/`diagonals`/`resize`/`transpose`/`reversearray`),
+`regex`/`pattern`/`sqlpattern` (Phase 188, needs a new value type),
+`isdefined`/`isnull`/`iscolumn`/`iskeyword` (Phase 188, needs a
+null-cell concept or table-level context), `substr`/`substring`/
+`replace` (the Phase 25 "string index-base rabbit hole" non-goal),
+`gaggr`/`ghist`/`ghistogram`/`growid`/`gstack` (the Phase 26 non-goal),
+and the "s"-suffixed axis-collapse family (Phase 186's flagged larger
+feature).
+
+### Phase 191 — masked-array natives (`negatemask`/`replacemasked`/
+### `replaceunmasked`), and a real, significant bug found while
+### live-verifying them: `V[boolexpr]`'s mask polarity was backwards
+
+Continuing Phase 190's own "Remaining names" list at the user's
+direction: `negatemask(arr)` / `replacemasked(arr, val)` /
+`replaceunmasked(arr, val)` — casacore's `TEFMASKneg`/`TEFMASKrepl`
+(`ExprFuncNodeArray.cc:210-272`). `negatemask` flips a masked array's
+mask (an unmasked input becomes FULLY masked, not an error —
+casacore's own `!arr.hasMask()` branch). `replacemasked`/
+`replaceunmasked` replace the elements where the mask is `True`/`False`
+respectively with a scalar or same-shape array, preserving the
+original mask; on an unmasked input, `replaceunmasked` replaces
+EVERYTHING (an unmasked array is "all unmasked") while `replacemasked`
+is a no-op. `nullarray()` — a genuinely absent-array sentinel
+(`MArray<Bool>()`) with no clean mapping onto this package's
+always-a-concrete-array `TQLMArray` design — stays deliberately
+deferred, per Phase 190's own note.
+
+**While live-verifying these three against real casacore, found the
+actual bug was upstream of them, in `V[boolexpr]` itself (`_tql_do_index`,
+`src/taql/ast.jl`, dating to Phase 60): this package computed the
+masked array's mask as `!boolexpr`, but real casacore's mask is
+`boolexpr` DIRECTLY — no negation.** Live-verified beyond doubt:
+`arraymask(A[A>2])` for `A=1:5` is `[F,F,T,T,T]` in real casacore
+(masked exactly where the condition holds), so `mean(A[A>2]) == 1.5`
+(the mean of `[1,2]`, the elements where the condition is FALSE) — not
+`4.0` (the mean of `[3,4,5]`) as this package's inverted mask produced.
+This is not a cosmetic detail: it silently inverted the result of
+every `V[cond]` masked-selection expression since Phase 60 — `mean`/
+`sum`/`min`/`max`/`variance`/`stddev`/`median`/`any`/`all`/`ntrue`/
+`nfalse`/`arraymask`/`arraydata` over a masked selection, the masked
+`g*`/`gs*` group aggregates (Phase 62), and the faithful `SET (D, M) =
+V[cond]` update (Phase 59) all inherited the inversion. `marray(d, m)`
+(mask given explicitly, never through `V[cond]`) was unaffected and
+already correct. Fixed by dropping the negation:
+`TQLMArray(collect(arr), BitArray(collect(m)))` instead of
+`BitArray(.!m)`.
+
+**A second, smaller bug found in the same live-verification pass**:
+`nelements()`/`count()` on a masked array is mask-AGNOSTIC in real
+casacore — `nelements(A[A>3])` on an 8-element `A` is `8`, the total
+array size, not the unmasked-element count this package's `_tql_nelem`
+computed (`count(!, x.mask)`). Fixed to `length(x.data)`.
+
+Both fixes verified together against real casacore across `mean`/
+`sum`/`min`/`max`/`variance`/`stddev`/`median`/`any`/`all`/`ntrue`/
+`nfalse`/`nelements`/`count`/`arraymask` on a masked selection — every
+one now matches exactly. Updated the stale hand-computed expectations
+in the pre-existing "TaQL-lite — masked arrays (TQLMArray) unit",
+"TaQL-lite query — masked-array expressions", "groupby — masked g*
+aggregates" (`test/taql_query_tests.jl`), and the `SELECT ... AS (val,
+mask)` / `(col, maskcol)` update-pair tests (`test/taql_command_tests.jl`)
+that had baked in the old, backwards convention. New testset "Phase 190
+continuation — masked-array natives: negatemask/replacemasked/
+replaceunmasked" (29 assertions, unit + real-TaQL cross-check).
+Standalone `taql_query_tests.jl` and `taql_command_tests.jl` both green
+in full, end to end, with no other regressions.
+
+### Phase 192 — a genuine GitHub Actions CI failure, sitting undetected
+### on `main` since PR #56: `int()`/`integer()` on a NaN/±Inf argument
+### is architecture-dependent undefined behavior in real casacore
+
+A user-reported CI failure (`Phase 184 — int()/integer(), real-TaQL
+cross-check`) turned out to be real and already present on `main` — a
+genuine gap in this project's own workflow: the "merged" step never
+checks GitHub Actions' own CI status, only a local `Pkg.test()` run, so
+a real CI failure on the merge commit itself (and on the
+`phase184-sweep` branch that introduced it) had been sitting
+undetected since PR #56. Confirmed via GitHub's public REST API
+(reachable unauthenticated for a public repo, no `gh` CLI needed): the
+`main` branch's own CI run at `a2aeba9` fails this exact test on all
+three Julia versions (1.10 / 1.12 / pre), Linux x64.
+
+**Root cause, confirmed with a direct compiled-C++ probe on real
+x86-64 hardware (Docker, `--platform=linux/amd64`) before touching any
+code**: real casacore's `int()`/`integer()` (`intFUNC`) is a bare C++
+`static_cast<Int64>(double)` — for a NaN or out-of-range argument this
+is genuinely UNDEFINED BEHAVIOR, and the two architectures this
+package has actually been tested on implement it differently:
+- **ARM64** (`FCVTZS`, what every earlier "live-verified against real
+  casacore" claim in this file was tested on, on an Apple Silicon Mac):
+  saturates piecewise — `int(0.0/0.0) == 0`, `int(1.0/0.0) ==
+  typemax(Int64)`, `int(-1.0/0.0) == typemin(Int64)`.
+- **x86-64** (`CVTTSD2SI`, what GitHub Actions CI — and the
+  overwhelming majority of real casacore/CASA deployments — actually
+  run on): gives the SAME "integer indefinite" sentinel,
+  `typemin(Int64)`, for EVERY one of NaN / +Inf / -Inf / any
+  out-of-range value, uniformly. Verified two ways: a standalone C++
+  program compiled with g++ on x86-64 Linux
+  (`(int64_t)(0.0/0.0)==(int64_t)(1.0/0.0)==(int64_t)(-1.0/0.0)==
+  INT64_MIN`), and a live `Casacore.jl`/`tableCommand` run on the same
+  architecture — `int(sqrt(-1.0))`, `int(1.0/0.0)`, `int(-1.0/0.0)`,
+  `int(0.0/0.0)` all give `-9223372036854775808` in real casacore on
+  x86-64, where this package's ARM64-derived `_tql_int` gave `0`,
+  `typemax(Int64)`, `typemin(Int64)` (matched by coincidence), and `0`
+  respectively — three of the four genuinely diverge.
+
+There is no single portable "real casacore" ground truth for a
+NaN/±Inf argument to `int()`, so **chasing bit-for-bit equality with
+whatever one CPU's raw undefined behavior happens to produce is the
+wrong target.** `_tql_int` keeps its existing well-defined, documented,
+architecture-independent saturating convention unchanged (NaN→0,
++Inf→`typemax(Int64)`, -Inf→`typemin(Int64)`) — a real, useful,
+*designed* behavior, not an attempt to replicate either CPU's garbage.
+The fix is to the **test's methodology**, not the implementation: the
+real-TaQL cross-check now only asserts exact equality against live
+casacore for the well-defined, in-range values (`int(1e18)`,
+`integer(±2.9)`, which have no UB on any platform), and checks the
+NaN/±Inf cases against this package's own documented sentinel values
+directly instead of against an architecture-dependent live oracle.
+`_tql_int`'s comment records both architectures' actual behavior (with
+the compiled-C++ evidence) so a future sweep doesn't re-discover this
+by re-breaking it.
+
+Re-verified end to end on real x86-64 Linux (Docker) after the fix:
+the full `Casacore.jl` cross-check suite (141 assertions) plus the
+targeted `int()`/`integer()` testset (7 assertions) both pass — the
+fix genuinely resolves the CI failure, not just a local ARM64
+rationalization. Standalone `taql_query_tests.jl` unaffected on ARM64
+(still 0 failures, full file).

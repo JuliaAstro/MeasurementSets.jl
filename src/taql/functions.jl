@@ -45,7 +45,11 @@ _tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y))(x))
 # table once one sibling turned out to be absent. Live-verified:
 # `avdev(1:8) == 2.0`, matching a hand computation exactly.
 _tql_avdev(x) = _red(y -> Statistics.mean(abs.(y .- Statistics.mean(y))))(x)
-_tql_nelem(x) = x isa TQLMArray ? count(!, x.mask) : x isa AbstractArray ? length(x) : 1
+# `nelements()`/`count()` on a masked array is mask-AGNOSTIC in real
+# casacore -- live-verified: `nelements(A[A>3])` for an 8-element `A`
+# is `8`, not the unmasked count -- so this deliberately ignores
+# `x.mask` (Phase 190 continuation).
+_tql_nelem(x) = x isa TQLMArray ? length(x.data) : x isa AbstractArray ? length(x) : 1
 _tql_ndim(x) = x isa TQLMArray ? ndims(x.data) : x isa AbstractArray ? ndims(x) : 0
 
 # `shape()` (`shapeFUNC`, `ExprFuncNodeArray.cc:1041-1053`) was entirely
@@ -128,6 +132,46 @@ end
 _tql_arraymask(x::TQLMArray) = x.mask
 _tql_arraymask(x::AbstractArray) = falses(size(x))
 _tql_arraymask(_) = false
+
+# Phase 190 continuation -- masked-array natives (casacore
+# `TEFMASKneg`/`TEFMASKrepl`, ExprFuncNodeArray.cc:210-272), live-verified
+# against real TaQL. `negatemask(arr)` flips the mask; an unmasked input
+# (no TQLMArray wrapper -- casacore's `!arr.hasMask()`) becomes FULLY
+# masked, not an error. `replacemasked`/`replaceunmasked` replace the
+# elements where the mask equals `True`/`False` respectively with a
+# scalar or same-shape array `operand2`, preserving the original mask;
+# on an unmasked input, `replaceunmasked` replaces every element (an
+# unmasked array is "all unmasked") while `replacemasked` is a no-op
+# (no element is "masked"). `nullarray()` (a genuinely absent-array
+# sentinel, `MArray<Bool>()`) has no clean mapping onto this package's
+# always-a-concrete-array `TQLMArray` design -- deliberately deferred,
+# same as the rest of Phase 190's own "remaining names" list.
+_tql_negatemask(x::TQLMArray) = TQLMArray(x.data, .!x.mask)
+_tql_negatemask(x::AbstractArray) = TQLMArray(x, trues(size(x)))
+
+function _tql_replmasked(x::TQLMArray, val2, maskvalue::Bool)
+    data = copy(x.data)
+    valv = val2 isa AbstractArray ? val2 : nothing
+    valv === nothing || size(valv) == size(data) || throw(ArgumentError(
+        "TaQL-lite: array shapes mismatch in replacemasked/replaceunmasked"))
+    for i in eachindex(data)
+        if x.mask[i] == maskvalue
+            data[i] = valv === nothing ? val2 : valv[i]
+        end
+    end
+    return TQLMArray(data, copy(x.mask))
+end
+function _tql_replmasked(x::AbstractArray, val2, maskvalue::Bool)
+    maskvalue && return x                     # replacemasked on an unmasked array: no-op
+    if val2 isa AbstractArray
+        size(val2) == size(x) || throw(ArgumentError(
+            "TaQL-lite: array shapes mismatch in replaceunmasked"))
+        return copy(val2)
+    end
+    return fill(val2, size(x))
+end
+_tql_replacemasked(x, val2) = _tql_replmasked(x, val2, true)
+_tql_replaceunmasked(x, val2) = _tql_replmasked(x, val2, false)
 
 # --- date/time (Phase 69) --------------------------------------------
 # Every TaQL-lite date value is an MJD `Float64` (days) -- so `_bcast`,
@@ -275,6 +319,23 @@ function _tql_dms(rad::Real)
     sec, ms = divrem(r, 1000)
     string(sgn, lpad(d, 3, '0'), "d", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
+
+# `hdms(arr)` (`hdmsFUNC`, `ExprFuncNodeArray.cc:2427-2454`) formats an
+# ARRAY of angles, alternating `hms`/`dms` by (0-based) index --
+# `hdms([ra1,dec1,ra2,dec2]) == [hms(ra1), dms(dec1), hms(ra2),
+# dms(dec2)]` (a whole-sky-position formatter for a `[ra,dec,...]`
+# cell). Found alongside a real, confirmed bug in `hms()`/`dms()`
+# themselves: casacore's own `getArrayString` (`.cc:2424-2454`) shows
+# `hms`/`dms` ALSO apply ELEMENTWISE to an array argument (not just a
+# scalar), but this package's registration called `_tql_hms(float(x))`
+# directly with no `_ew` wrapping -- `hms(a_PHASE_DIR_column)` used to
+# throw a `MethodError` instead of formatting each element. Live-
+# verified against real casacore: `hms([1.0,0.5]) ==
+# ["03h49m10.987", "01h54m35.494"]`, `hdms([1.0,0.5]) ==
+# ["03h49m10.987", "+028d38m52.403"]`. Fixed by wrapping `hms`/`dms` in
+# `_ew` (the standard elementwise-or-scalar dispatch already used
+# throughout this file) and adding `_tql_hdms`.
+_tql_hdms(v::AbstractArray) = [isodd(i) ? _tql_hms(v[i]) : _tql_dms(v[i]) for i in eachindex(v)]
 
 # MJD -> `"HH:MM:SS.sss"` (of-day, colon separators, no sign) -- the
 # time-of-day format `ctime()`/`ctod()` use (`TableExprFuncNode::
@@ -496,15 +557,36 @@ _tql_sign(x) = sign(x)
 
 # casacore's `int()`/`integer()` (`intFUNC`, `ExprFuncNode.cc:552-553`,
 # reached via `getInt`'s `argDataType_p == NTDouble` branch) is a raw
-# C++ `Int64(double)` cast -- a NaN/out-of-range argument SATURATES
-# rather than raising, live-verified against real casacore:
-# `int(0.0/0.0) == 0`, `int(1.0/0.0) == typemax(Int64)`,
-# `int(-1.0/0.0) == typemin(Int64)`. Julia's `trunc(Int, ...)` instead
-# THROWS an `InexactError` for all three -- the exact same crash-risk
-# shape as the other fixes above, and specifically triggered by them:
+# C++ `Int64(double)` cast. For a NaN/out-of-range argument this is
+# GENUINELY UNDEFINED C++ BEHAVIOR -- and, confirmed via a CI failure
+# (`Phase 191` continuation) plus a direct compiled-C++ probe on both
+# architectures, real casacore's actual answer for it is
+# ARCHITECTURE-DEPENDENT, not a fixed "real casacore" ground truth:
+#   * ARM64 (`FCVTZS`): saturates piecewise -- `int(0.0/0.0) == 0`,
+#     `int(1.0/0.0) == typemax(Int64)`, `int(-1.0/0.0) == typemin(Int64)`
+#     -- what this file's original "live-verified against real
+#     casacore" claim captured, tested only on an ARM64 Mac.
+#   * x86-64 (`CVTTSD2SI`): every one of NaN/+Inf/-Inf/out-of-range
+#     converts to the SAME "integer indefinite" sentinel,
+#     `typemin(Int64)` (`0x8000000000000000`) -- confirmed directly:
+#     `(int64_t)(0.0/0.0) == (int64_t)(1.0/0.0) == (int64_t)(-1.0/0.0)
+#     == INT64_MIN` when compiled with g++ on x86-64 Linux (the
+#     platform GitHub Actions CI, and the overwhelming majority of real
+#     casacore deployments, actually run on).
+# Since there is no single portable "correct" value to chase here, this
+# package keeps its OWN well-defined, documented, saturating
+# convention (below) rather than trying to bit-match either CPU's raw
+# UB -- Julia's `trunc(Int, ...)` would instead THROW an
+# `InexactError` for all three, the exact same crash-risk shape as the
+# other fixes above, and specifically triggered by them:
 # `int(sqrt(-1.0))` now flows a `NaN` (Phase 184's own `_tql_sqrt` fix)
 # straight into `int()`, which used to be an unreachable combination
 # (the old `_tql_sqrt`-less `sqrt` would have already thrown first).
+# The real-TaQL cross-check test deliberately does NOT assert exact
+# equality against live casacore for the NaN/±Inf cases (see
+# `test/taql_query_tests.jl`) -- only for the well-defined, in-range
+# values (`int(1e18)`, `integer(±2.9)`), since those have no UB on any
+# platform.
 const _TQL_INT64_MAXF = Float64(typemax(Int64))
 const _TQL_INT64_MINF = Float64(typemin(Int64))
 _tql_int(x::Real) = isnan(x) ? Int64(0) :
@@ -527,6 +609,13 @@ _tql_int(x::Real) = isnan(x) ? Int64(0) :
 # `isfinite` needed a fix, not all three.
 _tql_isfinite(x::Complex) = isfinite(real(x)) || isfinite(imag(x))
 _tql_isfinite(x) = isfinite(x)
+
+# `nearAbs(a,b,tol)` (`casa/BasicMath/Math.cc:128-134`,
+# `casa/BasicSL/Complex.cc:65-71`) is `|b-a| <= tol` -- a plain
+# absolute-difference check, genuinely different from `near`'s
+# relative-magnitude algorithm (`_tql_near`); `abs` already handles
+# both Real and Complex uniformly.
+_tql_nearabs(a, b, tol::Real) = abs(b - a) <= tol
 
 _running_avg(x, w) = (a = _require_array(x); _running_reduce(Statistics.mean, Float64, a, w))
 _running_med(x, w) = (a = _require_array(x); _running_reduce(_tql_median_lo, Float64, a, w))
@@ -553,6 +642,40 @@ _running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, 
 _running_avdev(x, w) = (a = _require_array(x); _running_reduce(_tql_avdev, Float64, a, w))
 _running_rms(x, w) = (a = _require_array(x); _running_reduce(_tql_rms, Float64, a, w))
 _running_sumsqr(x, w) = (a = _require_array(x); _running_reduce(_tql_sumsqr, eltype(a), a, w))
+
+# Phase 190 -- completing the `running*`/`boxed*` family: a full diff
+# of `TableParseFunc.cc`'s `funcName == "running..."`/`"boxed..."`
+# chain (`.cc:353-488`) against `_TQL_FUNCS` turned up EIGHT more
+# entirely missing pairs (16 functions) plus two missing aliases.
+# `runningproduct`/`boxedproduct` (`runproductFUNC`/`boxproductFUNC`,
+# `ExprFuncNodeArray.cc:1639,1719`) -- product per window/bin, same
+# shape as `sum`. `runningfractile`/`boxedfractile` (`runfractileFUNC`/
+# `boxfractileFUNC`, `.cc:1701-1707,1782-1787`) -- a THIRD argument
+# (the fraction, 0..1) inserted before the half-width/box-width, using
+# the SAME never-average `fractile()` convention as `gmedian`/
+# `runningmedian`/`boxedmedian` (`_tql_fractile`, Phase 183) --
+# `runningmedian(arr,[h])` is in fact just `runningfractile(arr,0.5,[h])`
+# under the hood in casacore itself. `runningany`/`runningall`/
+# `boxedany`/`boxedall` (`.cc:809-828`) and `runningntrue`/
+# `runningnfalse`/`boxedntrue`/`boxednfalse` (`ExprFuncNode.cc:1236-
+# 1268` for the type restriction, `NTBool` in / `NTInt` out) -- plain
+# `any`/`all`/count-true/count-false per window over a Bool array; the
+# edge zero-fill (Phase 182's `fillEdge=true`) naturally becomes
+# `false`/`0` for these via `zeros(Bool/Int, sz)`. Also found
+# `runningavg`/`boxedavg` (`.cc:389,391`) are real casacore ALIASES for
+# `runningmean`/`boxedmean` this package never registered. Live-
+# verified every one against real casacore: `runningproduct(1:8,[2])[3]
+# == 120.0`, `runningfractile(1:8,0.5,[2])[3] == 3.0` (matches
+# `_tql_fractile([1,2,3,4,5],0.5)` exactly), `runningany`/`runningall`/
+# `runningntrue`/`runningnfalse` on a `[T,T,F,T,T,F,T,T]` array all
+# match a hand count.
+_running_product(x, w) = (a = _require_array(x); _running_reduce(prod, eltype(a), a, w))
+_running_fractile(x, frac, w) = (a = _require_array(x);
+    _running_reduce(y -> _tql_fractile(y, frac), Float64, a, w))
+_running_any(x, w) = (a = _require_array(x); _running_reduce(any, Bool, a, w))
+_running_all(x, w) = (a = _require_array(x); _running_reduce(all, Bool, a, w))
+_running_ntrue(x, w) = (a = _require_array(x); _running_reduce(y -> count(identity, y), Int, a, w))
+_running_nfalse(x, w) = (a = _require_array(x); _running_reduce(y -> count(!, y), Int, a, w))
 
 # casacore's TableParseFunc.cc has TWO ddof variants for `running`/
 # `boxed` variance/stddev -- `runningvariance`/`boxedvariance` (ddof=0,
@@ -597,6 +720,13 @@ _boxed_sum(x, w) = (a = _require_array(x); _boxed_reduce(sum, eltype(a), a, w))
 _boxed_avdev(x, w) = (a = _require_array(x); _boxed_reduce(_tql_avdev, Float64, a, w))
 _boxed_rms(x, w) = (a = _require_array(x); _boxed_reduce(_tql_rms, Float64, a, w))
 _boxed_sumsqr(x, w) = (a = _require_array(x); _boxed_reduce(_tql_sumsqr, eltype(a), a, w))
+_boxed_product(x, w) = (a = _require_array(x); _boxed_reduce(prod, eltype(a), a, w))
+_boxed_fractile(x, frac, w) = (a = _require_array(x);
+    _boxed_reduce(y -> _tql_fractile(y, frac), Float64, a, w))
+_boxed_any(x, w) = (a = _require_array(x); _boxed_reduce(any, Bool, a, w))
+_boxed_all(x, w) = (a = _require_array(x); _boxed_reduce(all, Bool, a, w))
+_boxed_ntrue(x, w) = (a = _require_array(x); _boxed_reduce(y -> count(identity, y), Int, a, w))
+_boxed_nfalse(x, w) = (a = _require_array(x); _boxed_reduce(y -> count(!, y), Int, a, w))
 _boxed_svar(x, w) = (a = _require_array(x);
                      _boxed_reduce(y -> Statistics.var(_tql_need2(y, "samplevariance")), Float64, a, w))
 _boxed_sstd(x, w) = (a = _require_array(x);
@@ -667,6 +797,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # same-day bug-fix sweep; flagged for a dedicated future phase.
     # --- running*/boxed* sliding-window array smoothing (Phase 108) ---
     "runningaverage" => (_running_avg, 2:2), "runningmean" => (_running_avg, 2:2),
+    "runningavg" => (_running_avg, 2:2),
     "runningmedian" => (_running_med, 2:2),
     "runningmin" => (_running_min, 2:2), "runningmax" => (_running_max, 2:2),
     "runningvariance" => (_running_var, 2:2), "runningstddev" => (_running_std, 2:2),
@@ -675,7 +806,12 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "runningsum" => (_running_sum, 2:2),
     "runningavdev" => (_running_avdev, 2:2), "runningrms" => (_running_rms, 2:2),
     "runningsumsqr" => (_running_sumsqr, 2:2), "runningsumsquare" => (_running_sumsqr, 2:2),
+    "runningproduct" => (_running_product, 2:2),
+    "runningfractile" => (_running_fractile, 3:3),
+    "runningany" => (_running_any, 2:2), "runningall" => (_running_all, 2:2),
+    "runningntrue" => (_running_ntrue, 2:2), "runningnfalse" => (_running_nfalse, 2:2),
     "boxedaverage" => (_boxed_avg, 2:2), "boxedmean" => (_boxed_avg, 2:2),
+    "boxedavg" => (_boxed_avg, 2:2),
     "boxedmedian" => (_boxed_med, 2:2),
     "boxedmin" => (_boxed_min, 2:2), "boxedmax" => (_boxed_max, 2:2),
     "boxedvariance" => (_boxed_var, 2:2), "boxedstddev" => (_boxed_std, 2:2),
@@ -683,11 +819,18 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "boxedsum" => (_boxed_sum, 2:2),
     "boxedavdev" => (_boxed_avdev, 2:2), "boxedrms" => (_boxed_rms, 2:2),
     "boxedsumsqr" => (_boxed_sumsqr, 2:2), "boxedsumsquare" => (_boxed_sumsqr, 2:2),
+    "boxedproduct" => (_boxed_product, 2:2),
+    "boxedfractile" => (_boxed_fractile, 3:3),
+    "boxedany" => (_boxed_any, 2:2), "boxedall" => (_boxed_all, 2:2),
+    "boxedntrue" => (_boxed_ntrue, 2:2), "boxednfalse" => (_boxed_nfalse, 2:2),
     # --- masked arrays ---
     "marray" => ((d, m) -> TQLMArray(collect(d), m isa AbstractArray ?
                      BitArray(m) : fill(Bool(m), size(d))), 2:2),
     "arraydata" => (_unwrap_marray, 1:1),
-    "arraymask" => (_tql_arraymask, 1:1),
+    "arraymask" => (_tql_arraymask, 1:1), "mask" => (_tql_arraymask, 1:1),
+    "negatemask" => (_tql_negatemask, 1:1),
+    "replacemasked" => (_tql_replacemasked, 2:2),
+    "replaceunmasked" => (_tql_replaceunmasked, 2:2),
     # --- string ---
     "strlength" => (length, 1:1), "len" => (length, 1:1),
     "upcase" => (uppercase, 1:1), "upper" => (uppercase, 1:1), "toupper" => (uppercase, 1:1),
@@ -715,14 +858,16 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "ctime" => (x -> _tql_time_of_day_str(float(x)), 1:1),
     "cmonth" => (x -> Dates.format(_tql_dt_of(x), "uuu"), 1:1),
     "cdow" => (x -> Dates.format(_tql_dt_of(x), "eee"), 1:1),
+    "cweekday" => (x -> Dates.format(_tql_dt_of(x), "eee"), 1:1),
     # `ctod`/`cdatetime` are the SAME real casacore function
     # (`TableParseFunc.cc:571`, both map to `ctodFUNC`) -- `YYYY/MM/DD`
     # (not `dd-Mon-yyyy` -- that's `cdate`'s DMY format, a different
     # `MVTime` mode) + `/` + the `HH:MM:SS.sss` time-of-day.
     "ctod" => (x -> Dates.format(_tql_dt_of(x), "yyyy/mm/dd") * "/" * _tql_time_of_day_str(float(x)), 1:1),
     "cdatetime" => (x -> Dates.format(_tql_dt_of(x), "yyyy/mm/dd") * "/" * _tql_time_of_day_str(float(x)), 1:1),
-    "hms" => (x -> _tql_hms(float(x)), 1:1),
-    "dms" => (x -> _tql_dms(float(x)), 1:1),
+    "hms" => (_ew(x -> _tql_hms(float(x))), 1:1),
+    "dms" => (_ew(x -> _tql_dms(float(x))), 1:1),
+    "hdms" => (_tql_hdms, 1:1),
     "normangle" => (x -> rem2pi(float(x), RoundNearest), 1:1),
     # sexagesimal string -> radians (`h` in the string => hour angle)
     "angle" => (s -> _parse_sexagesimal(String(s),
@@ -1129,11 +1274,37 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     if startswith(name, "meas.")
         return _make_meas_func(name[6:end], args, src)
     end
+    if name in ("gcount", "countall")
+        # casacore's `countall()` (`countallFUNC`, `TableParseFunc.cc:632-633`,
+        # `ExprAggrNode.cc:196-198`) is the SQL-standard `COUNT(*)`
+        # spelling -- `TableExprGroupCountAll`, byte-for-byte the same
+        # row count `gcount()`/`TableExprGroupCount` computes, just a
+        # different name and (unlike `gcount`) never takes a column
+        # argument at all. A genuinely missing alias, found while
+        # sweeping the remainder of `TableParseFunc.cc`'s name table.
+        name == "countall" && n != 0 && throw(ArgumentError(
+            "TaQL-lite: countall() takes no arguments in \"$src\""))
+        n in 0:1 || throw(ArgumentError("TaQL-lite: gcount() takes 0 or 1 arguments in \"$src\""))
+        return TQLAggr(length, n == 0 ? nothing : args[1], :scalar)
+    end
+    if name == "gfractile"
+        # casacore's `gfractile(col, frac)` (`gfractileFUNC`,
+        # `ExprAggrNode.cc:272-274`) is `TableExprGroupFractileDouble
+        # (this, frac)` -- literally what `gmedian` is internally,
+        # `TableExprGroupFractileDouble(this, 0.5)`, with an explicit
+        # fraction instead of the hardcoded `0.5`. The fraction is
+        # evaluated ONCE, not per row (`operands()[1]->getDouble(0)` --
+        # row 0), so it must be a constant literal here too. A real,
+        # missing sibling of `gmedian`, found the same way as the
+        # `sumsqr`/`avdev` families. Live-verified:
+        # `gfractile([1,2,3,4], 0.25) == 1.0`, matching `_tql_fractile`'s
+        # existing never-average formula exactly.
+        (n == 2 && args[2] isa TQLLit && args[2].value isa Real) || throw(ArgumentError(
+            "TaQL-lite: gfractile(col, frac) needs a numeric-literal fraction in \"$src\""))
+        frac = Float64(args[2].value)
+        return TQLAggr(v -> _tql_fractile(v, frac), args[1], :scalar)
+    end
     if haskey(_TQL_AGGRS, name)
-        if name == "gcount"
-            n in 0:1 || throw(ArgumentError("TaQL-lite: gcount() takes 0 or 1 arguments in \"$src\""))
-            return TQLAggr(length, n == 0 ? nothing : args[1], :scalar)
-        end
         n == 1 || throw(ArgumentError("TaQL-lite: $name() takes 1 argument, got $n, in \"$src\""))
         fn, mode = _TQL_AGGRS[name]
         return TQLAggr(fn, args[1], mode)
@@ -1150,6 +1321,29 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         return TQLLit(π)
     elseif name == "e" && n == 0
         return TQLLit(ℯ)
+    elseif name == "c" && n == 0
+        # `c()` (`cFUNC`, `TableParseFunc.cc:266-267`) is the speed of
+        # light, `C::c` -- the same value already in `src/constants.jl`
+        # as `C_LIGHT`. Live-verified: `c() == 2.99792458e8`.
+        return TQLLit(C_LIGHT)
+    elseif name in ("near", "nearabs")
+        # `near(a,b[,tol])`/`nearabs(a,b[,tol])` (`near2FUNC`/`near3FUNC`/
+        # `nearabs2FUNC`/`nearabs3FUNC`, `ExprFuncNode.cc:449-482`) are
+        # standalone FUNCTION-CALL forms of approximate equality --
+        # `near` is the SAME relative-magnitude algorithm as the `~=`
+        # operator (`_tql_near`, Phase 47), but with a much tighter
+        # DEFAULT tolerance (`1.0e-13`, not `~=`'s `1e-5`) when no 3rd
+        # argument is given; `nearabs` is a different, ABSOLUTE-
+        # difference check (`|a-b| <= tol`, casacore's own `nearAbs`,
+        # `casa/BasicMath/Math.cc:132-134`) with NO default tolerance --
+        # a bare `nearabs(a,b)` uses `1.0e-13` too. Live-verified:
+        # `near(5.0, 5.1) == false` (tol 1e-13, |5.0-5.1|=0.1 too big),
+        # `near(5.0, 5.1, 0.5) == true`, `nearabs(5.0, 5.05, 0.1) ==
+        # true`, `nearabs(5.0, 5.2, 0.1) == false`.
+        n in (2, 3) || throw(ArgumentError("TaQL-lite: $name(a, b[, tol]) in \"$src\""))
+        base = name == "near" ? _tql_near : _tql_nearabs
+        fn = n == 2 ? ((a, b) -> base(a, b, 1.0e-13)) : ((a, b, tol) -> base(a, b, tol))
+        return TQLFunc(fn, args)
     elseif name == "min" || name == "max"
         n in 1:2 || throw(ArgumentError("TaQL-lite: $name() takes 1 or 2 arguments in \"$src\""))
         base = name == "min" ? _tql_min2 : _tql_max2
