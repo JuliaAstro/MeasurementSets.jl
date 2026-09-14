@@ -226,5 +226,42 @@ getcell(t::AbstractTable, name::AbstractString, row::Integer;
 Base.getindex(t::AbstractTable, name::AbstractString) = column(t, name)
 Base.getindex(t::AbstractTable, name::Symbol) = column(t, String(name))
 
-getcolumn(ms::MeasurementSet, sub::AbstractString, name::AbstractString) =
-    column(subtable(ms, sub), name)[:]
+"""
+    getcolumn(ms, sub, name; precision=nothing) -> Vector / Vector{Array}
+
+Read an entire column of subtable `sub` (a `MeasurementSet` convenience
+for `getcolumn(subtable(ms, sub), name; precision)`). Found missing
+`precision=` — its 2-arg sibling `getcolumn(t, name; precision)` has had
+it since Phase 34; this overload silently had no way to request a
+narrowed (or explicitly `:full`) read of a subtable column, forcing a
+fallback to the more verbose `column(subtable(ms,sub), name;
+precision)[:]`.
+"""
+getcolumn(ms::MeasurementSet, sub::AbstractString, name::AbstractString;
+         precision::Union{Nothing,Symbol,Type}=nothing) =
+    _pcolumn(subtable(ms, sub), name, precision)[:]
+
+"""
+    getcell(ms, sub, name, row; precision=nothing) -> value
+
+Read one cell of subtable `sub` (a `MeasurementSet` convenience for
+`getcell(subtable(ms, sub), name, row; precision)`) — the `getcell`
+sibling `getcolumn(ms, sub, name)` already had, found missing in the
+same sweep as the `precision=` gap above.
+"""
+getcell(ms::MeasurementSet, sub::AbstractString, name::AbstractString, row::Integer;
+       precision::Union{Nothing,Symbol,Type}=nothing) =
+    _pcolumn(subtable(ms, sub), name, precision)[row]
+
+"""
+    column(ms, sub, name; precision=nothing) -> Column
+
+A lazy `AbstractVector` over subtable `sub`'s column `name` (a
+`MeasurementSet` convenience for `column(subtable(ms, sub), name;
+precision)`) — completes the `getcolumn(ms, sub, name)` /
+`getcell(ms, sub, name, row)` family with the lazy verb they're both
+built on, found missing in the same sweep.
+"""
+column(ms::MeasurementSet, sub::AbstractString, name::AbstractString;
+      precision::Union{Nothing,Symbol,Type}=nothing) =
+    _pcolumn(subtable(ms, sub), name, precision)

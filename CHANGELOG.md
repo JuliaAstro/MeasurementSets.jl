@@ -6646,3 +6646,51 @@ assertions: the typo'd case errors with no stray directory, valid
 a non-writable one still tracks the source). Standalone
 `engine_tests.jl` (including the pre-existing "engine —
 ForwardColumnEngine / reference_copy" testset), no regressions.
+
+### Phase 206 — a final `src/tables/` pass, explicitly including feature gaps this time, completed the `column`/`getcolumn`/`getcell` `MeasurementSet` convenience family
+
+The user asked for one last `src/tables/` sweep, this time explicitly
+covering feature gaps as well as bugs (the earlier phases in this
+batch stayed strictly bug-focused). Started from a gap noted but
+deliberately deferred during Phase 203's investigation:
+`getcolumn(ms::MeasurementSet, sub, name)` — a convenience for reading
+a subtable column without spelling out `subtable(ms, sub)` — had no
+`precision=` kwarg at all, unlike its 2-arg sibling `getcolumn(t,
+name; precision)` (which has had one since Phase 34) and unlike
+`column`/`getcell`'s own `precision=` support. Fixed by threading it
+through, and — while at it — auditing the whole `column`/`getcolumn`/
+`getcell` family for the SAME "one arity has a convenience, its
+siblings don't" asymmetry (methodology note #12's shape, applied to a
+whole *function family* rather than a single kwarg this time) found
+two more real gaps: `getcell(ms, sub, name, row)` didn't exist at all
+(only its `getcolumn(ms, sub, name)` sibling did), and neither did
+`column(ms, sub, name)` — the LAZY verb `getcolumn`/`getcell` are both
+themselves built on. Added both, each a thin wrapper over
+`_pcolumn(subtable(ms, sub), name, precision)`, matching the existing
+pattern exactly. All three (`column`/`getcolumn`/`getcell`) already
+exported by name, so no export list change was needed — these are new
+*methods* on already-public functions. Investigated several other
+candidate gaps and ruled each out as already working or genuinely
+out of scope: `EditColumn`/`RefEditColumn`/`ConcatEditColumn` lack an
+explicit `getindex`/`setindex!` method for an `AbstractVector{<:Integer}`
+range, but Julia's generic `AbstractArray` interface already provides
+this via the existing `Int`-indexed methods (`t[:TIME][1:3]` and
+`t[:TIME][1:3] = [...]` both live-verified to already work correctly —
+not a gap); every `AbstractTable` subtype (`Table`/`RefTable`/
+`ConcatTable`/`GroupedTable`) already has full `nrow`/`columnnames`/
+`columndesc`/`keywords`/`subtables` coverage (no missing method found);
+a public convenience constructor for building a `Record` from pairs
+(rather than mutating the public fields of an empty `Record()`) is a
+plausible but speculative API-ergonomics improvement with no concrete
+evidence anyone's been blocked by it — left alone as out of scope for
+a bug/gap sweep rather than a deliberate new-API design decision;
+`resync(::EditTable)` doesn't exist, but an in-progress edit session
+resyncing against an external change has no obviously-safe semantic
+(you'd either lose pending edits or need an undefined merge policy) —
+concluded a deliberate non-goal, not a gap. New testset assertions
+added to "precision — getcolumn(ms, sub, name; precision=...) (Phase
+206)" (grew from 4 to 12, covering all three of `column`/`getcolumn`/
+`getcell`'s new/fixed 3-4-arg forms against `FEED.POL_RESPONSE`, a
+real `TpComplex` subtable column in the sample MS). Standalone
+`precision_tests.jl`, `api_tests.jl`, `tables_tests.jl`, and
+`reftable_tests.jl` together, no regressions.
