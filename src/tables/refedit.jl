@@ -98,8 +98,13 @@ function edit(rt::RefTable)
 end
 function edit(f::Function, rt::RefTable)
     t = edit(rt)
-    f(t)
-    flush(t.parent)
+    try
+        f(t)
+        flush(t.parent)
+    catch
+        _release_edit_lock!(t.parent)
+        rethrow()
+    end
     return t
 end
 

@@ -28,6 +28,40 @@ end
     @test isempty(MSv2L._HELD_LOCKS)
 end
 
+@testset "lock — registry key is stable across a not-yet-created directory (Phase 208)" begin
+    # `_lockkey` used to fall back to a bare `abspath` when `realpath`
+    # throws (the directory doesn't exist yet) -- but `abspath` and the
+    # eventual `realpath` can disagree whenever ANY path component is a
+    # symlink (macOS: `/tmp`/`/var` -> `/private/tmp`/`/private/var`),
+    # silently splitting one real directory into two registry entries
+    # (two independent `TableLock`s, two independent `tlock`s) if
+    # `open_lock` is ever called both before and after the directory is
+    # created -- e.g. a `write_table` racing an `edit` on the same
+    # not-yet-existing path, or `edit`'s own up-front lock acquisition
+    # (Phase 207) landing before `mkpath` has run. Reproduced here with
+    # an explicit symlink so the test doesn't depend on the platform's
+    # own temp-dir layout happening to contain one.
+    base = realpath(mktempdir())
+    link = joinpath(dirname(base), "msv2_locktest_link_" * basename(base))
+    symlink(base, link)
+    sub = joinpath(link, "newtable.ms")
+
+    key_before = MSv2L._lockkey(sub)
+    lk1 = MSv2L.open_lock(sub; create=true)      # dir doesn't exist -> noop lock
+    mkpath(sub)
+    key_after = MSv2L._lockkey(sub)
+    lk2 = MSv2L.open_lock(sub; create=true)      # dir now exists
+
+    @test key_before == key_after
+    @test key_after == realpath(sub)             # the stable key IS the eventual realpath
+    @test lk1 === lk2                            # same registry entry -> same `tlock`
+    @test lk1.tlock === lk2.tlock
+
+    MSv2L._release!(lk1)
+    MSv2L._release!(lk2)
+    @test isempty(MSv2L._HELD_LOCKS)
+end
+
 @testset "lock — sync blob round-trip" begin
     d = mktempdir()
     MSv2L.withlock(d, :write; create=true) do lk
@@ -181,6 +215,64 @@ end
     mc0 = MSv2L.read_syncinfo(p).modifycounter
     edit(p) do t; t[:DATA][1] = fill(ComplexF32(1), 2, 2) end
     @test MSv2L.read_syncinfo(p).modifycounter != mc0
+end
+
+@testset "lock — edit() serializes whole concurrent sessions (Phase 207)" begin
+    # Live-reproduced before this fix (via `julia -t 4` genuine multi-
+    # threading): two `Threads.@spawn`ed `edit()` sessions on disjoint
+    # rows of the SAME table each materialise their own pre-edit column
+    # snapshot, and whichever session `flush`ed last silently overwrote
+    # the other's already-committed changes to any row it hadn't itself
+    # touched (and sometimes crashed on a colliding atomic-rename). The
+    # fix holds the write lock for the WHOLE `edit()` session, not just
+    # `flush`, so a second session's own `edit(path)` call blocks until
+    # the first has fully flushed. `@async`/`timedwait` here demonstrate
+    # the actual blocking (works under cooperative single-threaded task
+    # scheduling too — a `ReentrantLock` blocks a different `Task`
+    # regardless of `Threads.nthreads()`); the multi-session stress test
+    # below demonstrates the corrected end result.
+    d = mktempdir(); p = joinpath(d, "T")
+    write_table(p, "T", ["A" => collect(1:20)]; nrow=20)
+
+    t1 = edit(p)                                    # holds the session lock
+    t1[:A][1] = 999
+    blocked = @async begin
+        edit(p) do t
+            t[:A][11] = 5555
+        end
+    end
+    @test timedwait(() -> istaskdone(blocked), 0.3) !== :ok   # still blocked on t1
+    flush(t1)                                                 # releases the session lock
+    @test timedwait(() -> istaskdone(blocked), 5) === :ok
+    fetch(blocked)                                            # rethrows if it errored
+    @test column(readtable(p), "A")[:] ==
+          [999; collect(2:10); 5555; collect(12:20)]
+
+    # An aborted session (the do-block body throws) must still release
+    # the lock, or every subsequent `edit()` on this table would hang.
+    p2 = joinpath(d, "T2")
+    write_table(p2, "T", ["A" => collect(1:5)]; nrow=5)
+    @test_throws ErrorException edit(p2) do t
+        t[:A][1] = 111
+        error("boom")
+    end
+    edit(p2) do t; t[:A][2] = 222 end                # would hang forever pre-fix leak
+    final2 = column(readtable(p2), "A")[:]
+    @test final2[1] == 1                             # aborted edit discarded
+    @test final2[2] == 222
+
+    # A many-session stress test: every session must see the effect of
+    # every session scheduled before it (full serialization), not a
+    # stale snapshot -- the exact property the data-loss bug violated.
+    p3 = joinpath(d, "T3")
+    write_table(p3, "T", ["A" => zeros(Int, 10)]; nrow=10)
+    tasks = [(@async edit(p3) do t
+                 for i in 1:10
+                     t[:A][i] = t[:A][i] + k
+                 end
+             end) for k in 1:6]
+    foreach(wait, tasks)
+    @test column(readtable(p3), "A")[:] == fill(sum(1:6), 10)
 end
 
 @testset "lock — is_stale / resync" begin

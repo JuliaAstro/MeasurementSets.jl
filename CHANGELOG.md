@@ -6694,3 +6694,178 @@ added to "precision — getcolumn(ms, sub, name; precision=...) (Phase
 real `TpComplex` subtable column in the sample MS). Standalone
 `precision_tests.jl`, `api_tests.jl`, `tables_tests.jl`, and
 `reftable_tests.jl` together, no regressions.
+
+### Phase 207 — `src/io/` sweep: a severe concurrency bug in the cooperative-locking layer (silent data loss / crashes under ordinary Julia multi-threading)
+
+Redirected from `src/tables/` to `src/io/` (`aips.jl`, `lock.jl`) per
+the user's direction. `aips.jl` re-read in full against real casacore's
+`AipsIO.cc` — two apparent discrepancies both confirmed sound design
+choices, not bugs (casacore's `putstart` double-writing `magicval_p`
+for a root object is its own length-placeholder pattern, equivalent to
+this package's `wr_u32(w, 0)` placeholder later patched by `putend`;
+casacore's `getend()` tracks bytes-read incrementally and throws on a
+mismatch, where this package's `getend()` unconditionally seeks to the
+declared end — a deliberate, more-forgiving simplification, battle-
+tested across 200+ phases, not a bug). One genuinely dead branch found
+(`getend`'s `endpos == AIPS_MAGIC` check — `a.ends` is only ever pushed
+a real computed offset, confirmed via grep, never the sentinel — inert,
+not fixed, low priority).
+
+The real finding is in `lock.jl`: the cooperative-locking layer did
+**not** actually serialize concurrent `edit()`/`flush()` calls on the
+SAME table from the SAME Julia **process** — only genuinely protected
+against a different OS process. Root cause: `TableLock`'s registry
+reuses one `TableLock` (one fd) per directory within a process, but
+POSIX `fcntl` byte-range locks are scoped *per process*, not per-task —
+a second `F_SETLK` from the same process on a range it already holds
+trivially succeeds (no blocking), which `fcntl` was never designed to
+prevent. So two Julia `Task`s (`Threads.@spawn`, genuine OS-thread
+parallelism, `julia -t 4`) both calling `edit(path).flush()` on the
+SAME table concurrently both acquired what looked like an exclusive
+write lock, and their bodies ran genuinely concurrently with no
+synchronization — live-reproduced: a raw `IOError` (ENOENT) on one
+task's atomic `rename` colliding with the other's temp file, **and**
+silent data loss (one task's already-committed writes clobbered by the
+other's full-file regeneration from its own stale pre-edit snapshot).
+
+**First fix attempt — a per-`TableLock` `ReentrantLock` (`tlock`) held
+across `withlock`'s critical section — confirmed insufficient by live
+re-test.** The crash and data loss still occurred, in a different form
+each time (which task crashed, which task's edits were lost, flipped).
+Root cause of *that*: `open_lock`'s own registry check-then-insert was
+itself a TOCTOU race — the registry lookup and the later
+`_HELD_LOCKS[key] = lk` insert were two separate `@lock _REG_LOCK`
+blocks, so two tasks racing on the very first `open_lock` call for a
+directory could each see `existing === nothing`, each build their OWN
+`TableLock` (hence their own, independent `tlock`), and overwrite each
+other in the registry — silently defeating the `tlock` fix, since the
+two concurrent `withlock` calls were never actually sharing one lock
+object. Fixed by folding the registry check, the file-open (+ `tlock`
+allocation), and the insert into ONE atomic `@lock _REG_LOCK` critical
+section (`open_lock`/`_open_lock_new` in `src/io/lock.jl`) — the file
+I/O now runs while holding the registry lock, a short local-disk op,
+acceptable for correctness. As a side effect, a `LOCK_SUPPORTED=false`
+("noop") lock is now also registered (previously it bypassed the
+registry entirely, so even a single-*threaded* process never shared a
+`tlock` across two edit sessions when the OS locking mechanism itself
+was unavailable — now fixed too).
+
+Re-testing after the TOCTOU fix showed the crash and data loss gone,
+but a subtler form of data loss remained: even with `tlock` correctly
+serializing the `flush()`-time critical sections, each `edit()`
+session's `readtable`-based materialisation of column data happens
+*before* `flush` is ever called, with **no locking at all** — so two
+concurrent edit sessions still captured independent stale pre-edit
+snapshots before either flushed, and the session that flushed *last*
+still silently overwrote the first's committed changes to any row it
+hadn't itself touched, using its own stale data for the rest. Fixed by
+moving lock acquisition from `flush` to `edit(path)` itself — the
+write lock (`open_lock` + `tlock` + `lock_write!`) is now held for the
+**whole session**, from `edit(path)`'s own `readtable` call through
+`flush`, so a second session's `edit(path)` call blocks (on `tlock`,
+before it reads a single byte of table data) until the first session's
+`flush` has fully completed; the second session's snapshot is then
+taken *after* the first's writes, not concurrently with them. `flush`
+now reuses the session's own `lk` instead of opening a fresh
+`withlock`; the pre-existing nested-`withlock` pattern (e.g.
+`write_table_files` calling `withlock` again from inside a flush)
+continues to work unchanged, since `tlock` is task-reentrant and the
+registry's `depth` refcount already handles nested `open_lock` calls
+correctly. **A new correctness requirement this introduces**: since
+the lock is now acquired *before* `f(t)` runs in `edit(f, path)`
+(previously the lock was only ever touched inside `flush`, so an
+exception in `f` had nothing to release), every `edit(f, ...)`-style
+wrapper (`edit(f, path)`, `edit(f, rt::RefTable)`, `edit(f,
+ct::ConcatTable)`, and `edit(ct::ConcatTable)`'s own per-part loop)
+needed a `try`/`catch` releasing the session lock (via a new, idempotent
+`_release_edit_lock!`, guarded by a `released::Bool` field on
+`EditTable`) before rethrowing — otherwise an aborted edit (the
+do-block body throwing) would leave the table locked for the rest of
+the process, hanging every subsequent `edit()` call on it. Live-
+verified with the exact `julia -t 4` `Threads.@spawn`-two-concurrent-
+`edit()`-sessions reproduction from the investigation: zero exceptions,
+final data exactly correct (`[1001..1010, 2011..2020]`), across 6
+repeated runs; also verified an aborted (throwing) do-block session
+releases its lock cleanly and does not deadlock a subsequent `edit()`
+on the same table. New testset "lock — edit() serializes whole
+concurrent sessions (Phase 207)" (`test/lock_tests.jl`, 7 assertions,
+`@async`/`timedwait`-based so it exercises the real blocking behaviour
+under Julia's cooperative task scheduler without needing multiple OS
+threads): a second session visibly blocks until the first flushes; an
+aborted session's lock release doesn't hang a later `edit()`; a
+6-session stress test (each session reads-current-adds-its-own-
+constant-then-writes, over overlapping rows) confirms full
+serialization gives the commutative, order-independent correct result
+regardless of scheduling order. Full suite green — 4952/4952 for the
+pre-existing suite (no count change to it, since this phase fixes a
+concurrency bug rather than adding API surface), plus the 7 new
+assertions above. README/memory updated, merge on the user's word.
+
+### Phase 208 — one more `src/io/` sweep: a second, subtler registry-key bug in the locking layer
+
+User asked for one last sweep of `src/io/` before moving on. `aips.jl`
+re-read line-by-line once more: the "multiple sequential top-level
+AipsIO objects sharing one stream" pattern used by `StandardStMan`'s
+`read_ssmindex` loop (`h.nrinx` separate `SSMIndex` records read off
+ONE `AipsIO` instance) looked suspicious at first — does each one
+really need/get its own magic-value check, or is the whole combined
+byte stream really ONE object that this package's per-call `a.level ==
+0` check would wrongly treat as `h.nrinx` separate root objects? Read
+real casacore's `AipsIO::putstart` (`casa/IO/AipsIO.cc:483-505`)
+directly: `if (level_p == 0) { ... write magic value; }` fires on
+**every** top-level `putstart`, not just the very first one in a
+physical file — confirmed against `SSMBase::readIndexBuckets` (which
+does exactly this: one shared `AipsIO`, a loop calling
+`itsPtrIndex[i]->get(anMOs)` `nrIdx` times) that casacore's own writer
+genuinely emits a fresh magic before each of the `nrinx` `SSMIndex`
+records. This package's `getnexttype`'s `if a.level == 0` check
+(true again after every `getend` returns to level 0) already matches
+this exactly — investigated, not a bug.
+
+The real finding is a second, more subtle instance of Phase 207's own
+root-cause SHAPE (a registry key that can silently change identity):
+`_lockkey(dir)` falls back to `abspath(dir)` when `realpath(dir)`
+throws — which it does whenever `dir` doesn't exist yet. But on this
+machine (and any macOS system — `/tmp` and `/var` are themselves
+symlinks to `/private/tmp`/`/private/var`), `abspath` of a not-yet-
+created path and the `realpath` computed once that SAME path exists
+are **different strings** whenever any path component is a symlink —
+live-confirmed: `abspath` of a fresh `mktempdir()`-nested path gives
+`/var/folders/.../newtable.ms`, while `realpath` of the identical path
+once created gives `/private/var/folders/.../newtable.ms`. Since
+`open_lock`'s registry is keyed by this string, calling it once
+*before* a directory exists and once *after* — e.g. `edit(path)`
+(Phase 207's own new up-front lock acquisition) racing a concurrent
+`write_table`/`mkpath` for the same not-yet-created path, or simply
+opening the same brand-new directory twice across two calls that
+straddle its creation — silently produces **two different
+`TableLock`s, with two different `tlock`s**, for what is really one
+directory: exactly the kind of key-identity split Phase 207 already
+fixed for the check-then-insert race, but via a different mechanism
+(the KEY itself changing, not a TOCTOU on one fixed key). Live-
+reproduced directly: `open_lock` called on the same path before and
+after `mkpath` (no release in between, simulating two callers racing
+the creation) returned `lk1 !== lk2`, `lk1.tlock !== lk2.tlock`, before
+this fix; the same sequence gives `lk1 === lk2` after. Fixed
+`_lockkey` to resolve the *parent* directory via `realpath` (almost
+always already real) and append the leaf name when `dir` itself
+doesn't exist yet, so the key is identical whether the call lands
+before or after the directory is created — only truly falls back to
+`abspath` if even the parent is missing (a multi-level `mkpath`, the
+same pathological case the old code already couldn't fully handle).
+New testset "lock — registry key is stable across a not-yet-created
+directory (Phase 208)" (`test/lock_tests.jl`, 5 assertions) reproduces
+the discrepancy deterministically via an explicit symlink (rather than
+relying on the platform's own temp-dir layout happening to contain
+one, so it's portable to Linux CI too) — confirmed to genuinely FAIL
+against the pre-fix code (3 assertion failures) and pass after.
+
+While in `aips.jl`, also finally cleaned up the long-documented dead
+branch in `getend` (`endpos == AIPS_MAGIC || seek(...)`, noted as
+inert since Phase 1/6/9 — `a.ends` is only ever pushed a real computed
+offset, never the sentinel, confirmed again via grep) — an unconditional
+`seek(a.io, endpos)` now, with a comment recording why, instead of a
+confusing dead condition sitting in a hot read path.
+
+Full suite green (baseline 4959, +5 from the new testset = 4964/4964,
+no regressions). README/memory updated, merge on the user's word.
