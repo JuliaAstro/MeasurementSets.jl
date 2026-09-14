@@ -220,6 +220,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            tablename::AbstractString="",
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
+    _check_storage(storage)
     mkpath(dir)
     tsmg = _tsm_groups(tsm)
 
@@ -324,6 +325,15 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
     dyscon = Set{String}()
     for g in dyscog, n in g
         push!(dyscon, n)
+    end
+    # `tsm=`/`tcm=`/`tcell=`/`dysco=` all validate every referenced name
+    # (Phase 201's fix pattern, applied here too — a typo used to be
+    # silently dropped by `findall`'s own "no match = no index" behaviour
+    # instead of erroring like its siblings do, live-verified: `ism =
+    # Set(["A", "TYPO"])` on a table with no "TYPO" column succeeded with
+    # no error and no warning, TYPO simply never became an ISM column).
+    for nm in ism
+        any(c -> c.name == nm, descs) || error("ism: unknown column \"$nm\"")
     end
     ism_i = findall(c -> c.name in ism, descs)
     ssm_i = setdiff(1:length(descs),
@@ -820,6 +830,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
                   rows=Colon(), subtables=Colon(),
                   subtable_rows::AbstractDict=Dict{String,Any}(),
                   storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+    _check_storage(storage)
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
@@ -968,6 +979,7 @@ variable-shape array columns (`CHAN_FREQ`, `CORR_TYPE`, `POLARIZATION_TYPE`,
 function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
                    ncorr::Integer=2, nant::Integer=3, nrec::Integer=2,
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+    _check_storage(storage)
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)

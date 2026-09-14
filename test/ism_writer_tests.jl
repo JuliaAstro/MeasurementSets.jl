@@ -69,6 +69,28 @@ end
     end
 end
 
+@testset "ism= an unknown column name errors (Phase 202)" begin
+    # `tsm=`/`tcm=`/`tcell=`/`dysco=` all validate every referenced name
+    # and raise "unknown column ..." -- `ism=` was the one sibling with
+    # no validation at all: `findall(c -> c.name in ism, descs)` simply
+    # drops a name that matches no column with no error and no warning,
+    # unlike every other group kwarg. Live-verified reachable:
+    # `write_table(dir, "T", ["A"=>...]; nrow, ism=Set(["A","TYPO"]))`
+    # used to succeed silently, writing "A" to ISM and just discarding
+    # "TYPO". Fixed to error the same way its siblings already do.
+    # (matches the pre-existing, unchanged `tsm=`/`tcm=`/`tcell=`/`dysco=`
+    # behaviour: the error fires from inside `with_container_sink`, after
+    # `_write_table_core`'s own `mkpath(dir)` — a stray empty directory
+    # is left behind either way; not something this fix changes.)
+    dir = joinpath(mktempdir(), "ism_bad")
+    @test_throws ErrorException write_table(dir, "T", ["A" => collect(1:5)];
+        nrow = 5, ism = Set(["A", "NOTACOLUMN"]))
+
+    dir2 = joinpath(mktempdir(), "ism_ok")
+    write_table(dir2, "T", ["A" => collect(1:5)]; nrow = 5, ism = Set(["A"]))
+    @test columndesc(readtable(dir2), "A").manager == "IncrementalStMan"
+end
+
 if isdir(SAMPLE_MS)
     @testset "copyms keeps ISM columns" begin
         n = 150

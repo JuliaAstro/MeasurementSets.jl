@@ -112,6 +112,49 @@ end
     @test eltype(column(q, "DATA")) == Matrix{ComplexF16}
 end
 
+@testset "precision — readtable(refpath; precision=...) on a persisted RefTable/ConcatTable (Phase 203)" begin
+    # `readtable` computed its own resolved `prec` but never threaded it
+    # into `_read_reftable`/`_read_concattable` at all -- so
+    # `readtable(refpath; precision=:full)` on a *persisted*
+    # RefTable/ConcatTable silently reopened the parent(s) at THEIR OWN
+    # auto-derived default instead, a real no-op for the explicit-override
+    # case. Masked in the common case because a RefTable's own
+    # `table.info` Type is always copied verbatim from its parent (Phase
+    # 15), so the auto-derived DEFAULT happened to already agree with
+    # what the parent would derive on its own -- only an *explicit*
+    # `precision=` was silently dropped. Live-verified reachable via
+    # `write_reftable`/`write_concattable` + `readtable(...;
+    # precision=:full)`. Fixed by threading the raw (possibly `nothing`)
+    # `precision` argument through `_read_reftable`/`_read_concattable`/
+    # `_open_referenced`, so the default case re-derives exactly as
+    # before (unchanged) and an explicit value now genuinely propagates.
+    dir = mktempdir()
+    rdir = joinpath(dir, "RT")
+    write_reftable(rdir, query(readtable(SAMPLE_MS), "rownumber() <= 5"))
+
+    @test eltype(column(readtable(rdir), "DATA")) == Matrix{ComplexF16}         # default unchanged
+    @test eltype(column(readtable(rdir; precision=:full), "DATA")) == Matrix{ComplexF32}
+    @test eltype(column(readtable(rdir; precision=BFloat16), "DATA")) == Matrix{Complex{BFloat16}}
+
+    # `resync` preserves whatever precision was actually in effect (a
+    # RefTable/ConcatTable has no `precision` field of its own -- it's
+    # recovered from the underlying Table(s), the same fix needed on the
+    # `resync` side as on the initial-open side).
+    rt_full = readtable(rdir; precision=:full)
+    @test MSv2._effective_precision(rt_full) == :full
+    @test resync(rt_full) === rt_full                    # not stale yet
+    @test eltype(column(resync(rt_full), "DATA")) == Matrix{ComplexF32}
+
+    # ConcatTable
+    cdir = joinpath(dir, "C")
+    p1 = joinpath(dir, "p1"); p2 = joinpath(dir, "p2")
+    copyms(SAMPLE_MS, p1; rows=1:3, subtables=String[])
+    copyms(SAMPLE_MS, p2; rows=4:6, subtables=String[])
+    write_concattable(cdir, [readtable(p1), readtable(p2)])
+    @test eltype(column(readtable(cdir), "DATA")) == Matrix{ComplexF16}
+    @test eltype(column(readtable(cdir; precision=:full), "DATA")) == Matrix{ComplexF32}
+end
+
 @testset "precision — copies stay byte-exact, half writes upcast" begin
     dir = mktempdir()
     dst = joinpath(dir, "c.ms")

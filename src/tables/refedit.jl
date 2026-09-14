@@ -169,6 +169,7 @@ end
 
 function addcolumn!(t::RefEditTable, name::AbstractString, data::AbstractVector;
                     kind::Symbol=:ssm, type::Union{CasaType,Nothing}=nothing, shape=nothing)
+    _check_kind(kind)
     haskey(t.namemap, name) && error("addcolumn!: \"$name\" already exists in this view")
     _check_new_col(t.parent, name)
     length(data) == length(t.rows) ||

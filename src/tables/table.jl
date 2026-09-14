@@ -489,8 +489,8 @@ function readtable(path::AbstractString; precision::Union{Nothing,Symbol,Type}=n
     endian = format == 0 ? :big : :little
     subtype = read_string(a)                         # "PlainTable" | "RefTable" | "ConcatTable"
 
-    subtype == "RefTable"    && return _read_reftable(a, dir, tp, st, readme)
-    subtype == "ConcatTable" && return _read_concattable(a, dir, tp, st, readme)
+    subtype == "RefTable"    && return _read_reftable(a, dir, tp, st, readme, precision)
+    subtype == "ConcatTable" && return _read_concattable(a, dir, tp, st, readme, precision)
 
     desc = read_tabledesc(a)
     version == 1 && read_record(a)                  # legacy separate keyword set
@@ -512,20 +512,30 @@ function readtable(path::AbstractString; precision::Union{Nothing,Symbol,Type}=n
                  lockpath, container, prec)
 end
 
-# open a parent / part table, adding context on failure
-function _open_referenced(stored::AbstractString, selfdir::AbstractString, what::AbstractString)
+# open a parent / part table, adding context on failure.  `precision` is
+# threaded straight through (found live-unreachable before: `readtable`
+# computed its own `prec` and then never passed it to `_read_reftable`/
+# `_read_concattable` at all, so `readtable(refpath; precision=:full)`
+# silently reopened the parent at ITS OWN default precision instead —
+# `:half` whenever the parent's `table.info` Type is "Measurement Set",
+# which a RefTable's own `table.info` always copies verbatim from the
+# parent (Phase 15), so the wrong-but-plausible-looking default masked
+# the gap in the common case and only showed up as a silent no-op for an
+# *explicit* override).
+function _open_referenced(stored::AbstractString, selfdir::AbstractString, what::AbstractString,
+                          precision)
     p = _resolve_tabpath(stored, selfdir)
     isdir(p) || throw(ArgumentError(
         "$what table not found: \"$p\" (stored as \"$stored\", referenced by $selfdir)"))
-    return readtable(p)
+    return readtable(p; precision)
 end
 
 # RefTable body: str parent; SimpleOrderedMap nameMap; (rver>1) Array<str>
 # names; rootNrow; u8 rowOrder; nrrow; nrrow raw parent row numbers.
-function _read_reftable(a::AipsIO, dir::String, tp, st, readme)
+function _read_reftable(a::AipsIO, dir::String, tp, st, readme, precision)
     rver = Int(getstart(a, "RefTable"))
     rver <= 3 || error("RefTable version $rver not supported")
-    parent = _open_referenced(read_string(a), dir, "RefTable parent")
+    parent = _open_referenced(read_string(a), dir, "RefTable parent", precision)
     namemap = Dict{String,String}(read_map(a, String, String))
     order = rver > 1 ? read_array(a, String)[2] : sort!(collect(keys(namemap)))
     T = rver > 2 ? UInt64 : UInt32
@@ -542,7 +552,7 @@ end
 
 # ConcatTable body: u32 nrtab; nrtab str subtable names; Block<str> keyword
 # subtable names.  Row offsets are recomputed from each part's nrow.
-function _read_concattable(a::AipsIO, dir::String, tp, st, readme)
+function _read_concattable(a::AipsIO, dir::String, tp, st, readme, precision)
     cver = Int(getstart(a, "ConcatTable"))
     cver == 0 || error("ConcatTable version $cver not supported")
     nrtab = Int(read_u32(a))
@@ -550,7 +560,7 @@ function _read_concattable(a::AipsIO, dir::String, tp, st, readme)
     subs = read_block(a, String)
     getend(a)
     isempty(names) && error("ConcatTable at $dir references no tables")
-    parts = AbstractTable[_open_referenced(n, dir, "ConcatTable part") for n in names]
+    parts = AbstractTable[_open_referenced(n, dir, "ConcatTable part", precision) for n in names]
     offsets = zeros(Int, length(parts) + 1)
     for (i, p) in enumerate(parts)
         offsets[i+1] = offsets[i] + nrow(p)

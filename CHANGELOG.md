@@ -6282,3 +6282,284 @@ getcell() validate precision= too (Phase 198)" (11 assertions).
 core-data-dependent-file sweep (`metadata`/`ssm`/`tsm`/`ism`/`api`/
 `tables`/`schema`/`precision_tests.jl` together, 184/184) confirming no
 regressions.
+
+### Phase 199 — a real bug found applying the Phase 198 methodology note
+### broadly: `storage=` (the `:multifile`/`:multihdf5` container option)
+### was validated in only ONE place, deep inside the write pipeline —
+### `write_ms`/`copyms` turned a caller's own typo into 18 misleading
+### "unsupported source" warnings before the true cause ever surfaced
+
+Continuing the sweep, applying Phase 198's own freshly-added standing
+note (a validation check written in one function is not automatically
+inherited by a sibling entry point accepting the "same" parameter) —
+grepped for every other validated-parameter shape in the codebase and
+found `storage=` (`write_table`/`copytable`/`write_ms`/`copyms`/
+`create_ms`/`reference_copy` all accept it) had the exact same
+disease, in a more consequential form. The only place `storage` was
+actually checked was deep inside `with_container_sink`, called
+partway through the per-DM-writer section of `_write_table_core` — well
+AFTER `_write_table_core`/`write_ms`/`create_ms` had already `mkpath`'d
+the destination directory.
+
+Live-verified the immediate symptom first: `create_ms(dir;
+storage=:bogus)` correctly threw an `ArgumentError`, but left an empty
+directory behind at `dir` that didn't exist before the call — the same
+"claims to have failed, but silently created state anyway" shape this
+codebase's whole atomic-write design (Phase 13/21's `table.dat`-is-the-
+commit-point philosophy) exists specifically to avoid.
+
+Then found something much worse live-verifying `write_ms`: its subtable
+loop wraps each subtable's `_copy_table` call in a broad `catch e;
+@warn "skipping subtable $kw (unsupported source)" typeof(sub) err=e`
+— which catches ANY error, including a caller's own invalid `storage=`
+value. On the sample MS this produced **18 separate misleading
+warnings** ("skipping subtable ANTENNA (unsupported source)",
+"skipping subtable FIELD (unsupported source)", …), each blaming the
+wrong thing (subtable data compatibility) for what was actually one
+single, unrelated, global configuration typo — before the real
+`ArgumentError` finally surfaced only when MAIN (which has no such
+catch) was reached. A user staring at 18 "unsupported source" warnings
+would have no reason to suspect their own `storage=` argument.
+
+Fixed with a shared `_check_storage(storage)` (mirroring Phase 198's
+`_normalize_precision` pattern exactly), called FIRST — before any
+directory is created or any subtable is touched — in every one of the
+five top-level entry points that accept `storage=`
+(`_write_table_core`, `write_ms`, `create_ms`; `write_table`/
+`copytable`/`reference_copy` needed no separate fix since they delegate
+straight into `_write_table_core` with no `mkpath` of their own).
+`with_container_sink` now calls the same shared check instead of its
+own inline duplicate. Live-verified across all 5 entry points: an
+invalid `storage=` now fails immediately with no directory created and
+(for `write_ms`) zero misleading warnings; all 3 valid values
+(`:sepfile`/`:multifile`/`:multihdf5`) still behave exactly as before,
+confirmed via a full `create_ms(...; storage=:multifile)` →
+`readtable` → subtable round-trip. New testset "storage= bad value: no
+stray directory, no misleading warnings (Phase 199)" (11 assertions,
+using `Test.collect_test_logs` to positively confirm zero warnings
+fire, not just that the eventual error is correct). Standalone
+`container_tests.jl` green (75/75), plus a broader `writer_tests.jl` +
+`edit_tests.jl` + `container_tests.jl` sweep together, no regressions.
+
+### Phase 200 — a fourth `mscal.time()` NaN/Inf crash corner: a literal `nan`/`inf` *in the WHERE-string spec itself*, not just a non-finite column value
+
+Continuing the Phase 192–195/128 standing methodology note (once one
+function in a corner has a "raw `Int(...)`/`round(Int,...)` on a value
+that can be NaN/Inf" bug shape, grep the rest of that corner for the
+same shape) — swept `src/taql/mscal.jl`'s date/time helpers once more
+for a spot Phase 194 hadn't covered. Phase 194 fixed `_mssel_time`'s
+*default-row TIME* (a column value) going non-finite; this phase found
+a completely independent reachability path through the *spec string
+itself*: `tryparse(Float64, "nan")` succeeds in Julia (and `"inf"` too),
+so a literal `mscal.time('nan~01/02')` — an ordinary WHERE-string typo
+or a copy-pasted placeholder, nothing to do with the underlying data —
+parses to a genuine `NaN`/`Inf` token value and used to crash the whole
+predicate two different ways:
+
+- `_mstime_incl_hi` (a `~`-range's upper bound, when it needs to
+  inherit missing calendar fields from the lower bound) fed a
+  non-finite `lo_secs` straight into `round(Int, lo_secs * 1000)` — the
+  by-now-familiar `InexactError`. Live-verified reachable via
+  `mscal.time('nan~01/02')` on an ordinary table with a perfectly
+  finite `TIME` column.
+- **A second, more fundamental site**, found by tracing the fix one
+  level deeper: `_mstime_secs` (the shared "fill wildcard fields from a
+  default calendar, then convert to seconds" helper every partial `Y/M/D`
+  token goes through) tests `fields[k] < 0` to decide whether a field is
+  a wildcard needing the default substituted in — but `NaN < 0` is
+  `false` in Julia, so a NaN field silently *survived* the substitution
+  meant to catch exactly this case and reached `Int(f[1])` unguarded.
+  Live-verified reachable via `mscal.time('nan/02')` alone (no range,
+  no default-row involvement at all — a bare partial token with one NaN
+  field is enough).
+
+Fixed both, same "degrade to a well-defined sentinel rather than crash"
+convention as Phases 193–195: `_mstime_incl_hi` now guards
+`isfinite(lo_secs)` before the `round`; `_mstime_secs`'s wildcard test
+became `fields[k] < 0 || !isfinite(fields[k])`, so a NaN/Inf field is
+treated exactly like an omitted/`*` field and falls back to the
+(always-finite) default calendar — giving a sensible resolved date
+rather than propagating `NaN` further, and strictly more useful than a
+NaN-sentinel degrade would have been here. New testset "TaQL-lite —
+mscal.time() doesn't throw on a NaN/Inf SPEC token (Phase 200)" (13
+assertions) covering both crash sites plus the wildcard-fallback
+behaviour (`>nan/02` legitimately matches every row, since the NaN day
+field falls back to the resolved default day). Standalone
+`taql_mscal_tests.jl` green in full (every existing testset, including
+the Phase 121/128/194 time-family ones), no regressions.
+
+### Phase 201 — `addcolumn!`'s `kind=` was validated nowhere: a typo silently produced a column whose declared manager disagreed with its actual on-disk encoding
+
+**Start of a `src/tables/` sweep** (the user asked to focus there until
+it's complete — this and the phases that follow stay in that
+directory). Investigated `src/tables/record.jl`/`writer.jl` first
+(the `Record`/`TableRecord`/keyword-set AipsIO framing) against
+`casa/Containers/RecordRep.cc` + `RecordDesc.cc` +
+`tables/Tables/TableRecordRep.cc` line by line — every read/write
+pairing (the `TpRecord`-nested-empty-subdesc convention, the
+`version>1`-gated comment field, the old-style scalar/array keyset
+type-order tables, the `Map<String,void>` framing) matches exactly, no
+bug. One genuine-looking lead (`_write_aipsarray` always emitting the
+object type name `"Array<void>"`, where casacore's own `putDataField`
+uses a distinct name per element type — `"Array<Int>"`, `"Array<uChar>"`,
+…) turned out to be harmless on investigation: casacore's own generic
+`operator>>(AipsIO&, Array<T>&)` reads whatever type string is
+*actually on disk* and uses it purely for `getstart`/`getend` framing
+depth-bookkeeping — it never cross-checks that string against the
+static C++ type `T` the caller declared, so the element type dispatch
+comes entirely from the RecordDesc's own type enum (known ahead of
+time), not from the Array object's name. This package's own
+`read_array` is equally permissive (accepts any `"Array"`/`"Array<…>"`
+prefix). Confirmed both directions live (our writer → real
+`Casacore.jl`, and — implicitly, since every existing keyword-array
+round-trip test already exercises it — real casacore → our reader) with
+no divergence. Also re-verified `_resolve_tabpath`/`_strip_directory`
+(RefTable/ConcatTable relative-path resolution) against
+`casa/OS/Path.cc`'s `addDirectory`/`stripDirectory` in full — the
+0/2/≥4-leading-"./"-characters case split matches exactly; the one
+form we don't implement (a trailing `"/."` reverse-relative reference,
+`stripDirectory`'s "target is a prefix of the referencing table's own
+path" branch) was already a documented limitation from Phases 14/15,
+not a new find, and our own writer never produces it.
+
+The actual find was in `src/tables/edit.jl`: `addcolumn!`'s `kind=`
+kwarg (`:ssm`/`:ism`/`:tsm`/`:tcm`/`:tcell`) was accepted with **no
+validation anywhere**, and — worse than a simple silent-fallback — an
+invalid value fell through **two independent unguarded ternaries that
+default to DIFFERENT branches for the same unrecognised symbol**:
+`_normalize_desc`'s `kind === :ism ? "IncrementalStMan" :
+"StandardStMan"` (defaults to `:ssm`'s manager string) and
+`_flush_regen`'s writer dispatch `k === :ssm ? write_standardstman(...) :
+write_incrementalstman(...)` (defaults to `:ism`'s writer). Live-verified:
+`addcolumn!(t, "B", data; kind=:ssn)` (a typo for `:ssm`) produced a
+column whose `ColumnDesc.manager` field claims `"StandardStMan"` while
+the bytes on disk are genuinely `IncrementalStMan`-encoded — a real
+metadata/data mismatch. Both this package's own reader and a real
+`Casacore.jl` cross-check still opened the resulting table and read the
+right values, because the data-manager type actually used for dispatch
+on read comes from the per-*instance* string in `table.dat`'s
+ColumnSet, not the per-*column* `manager` field — the same "informational,
+not load-bearing" role `ColumnDesc.manager` already has documented at
+`_source_dm` (`create.jl:799-805`, added specifically because a real
+reference MS mislabels its own ISM columns as `StandardStMan`) — but
+the wrong metadata is still real and user-visible
+(`columndesc(t,"B").manager` lies about the column's actual encoding).
+
+Fixed with a shared `_check_kind(kind)` (same "validate at the API
+boundary, not deep in the pipeline" pattern as Phase 198's
+`_normalize_precision` / Phase 199's `_check_storage`), called at
+every `addcolumn!` entry point: both `EditTable` methods, and — found
+by tracing the delegation chain — `RefEditTable`'s *with-data* method,
+which pushes straight onto `t.parent.addcols` rather than calling
+`addcolumn!(::EditTable, ...)` and so needed its own separate call
+(`RefEditTable`'s no-data method and both `ConcatEditTable` methods
+already delegate through the now-guarded `EditTable` path). New
+testset "edit — addcolumn! kind= is validated (Phase 201)" (10
+assertions) covering all four entry points rejecting an invalid `kind`,
+plus a positive check that `:ssm`/`:ism` still work and produce
+metadata that genuinely matches the encoding (cross-checked against
+real `Casacore.jl`). Standalone `edit_tests.jl` green in full (every
+existing testset, including the Phase 125-133 RefEditTable/
+ConcatEditTable ones), no regressions.
+
+### Phase 202 — `write_table`'s `ism=` kwarg was the one sibling of `tsm=`/`tcm=`/`tcell=`/`dysco=` with no name validation at all
+
+Continuing the `src/tables/` sweep. `_write_table_core`'s `tsm=`/
+`tcm=`/`tcell=`/`dysco=` kwargs (each a set of column-name groups) all
+validate every referenced name and raise a clear "unknown column"
+error — confirmed by reading the tiled-group and Dysco-group write
+loops directly. `ism=` (a plain set of column names, no grouping) is
+the one sibling that skipped this: it's consumed only via `ism_i =
+findall(c -> c.name in ism, descs)`, and `findall` simply omits a name
+that matches nothing — no error, no warning, the column is silently
+never bound to `IncrementalStMan`. Live-verified: `write_table(dir, "T",
+["A" => ...]; nrow, ism = Set(["A", "NOTACOLUMN"]))` used to succeed
+outright, writing `"A"` to ISM and quietly discarding the typo'd
+`"NOTACOLUMN"` with no indication anything was wrong.
+
+Fixed with a small validation loop (mirroring `tsm=`'s own pattern),
+placed right before `ism_i` is computed: every name in `ism` must
+match a real column, else a clear `"ism: unknown column ..."` error.
+Confirmed this matches — not diverges from — the existing `tsm=`/
+`tcm=`/`tcell=`/`dysco=` behaviour in one respect worth noting: all of
+these checks run *after* `_write_table_core`'s own `mkpath(dir)`, so
+an invalid name (in `ism=` now, same as its siblings already) still
+leaves a stray empty directory behind — a real, `Phase-199`-shaped gap,
+but one that already applied uniformly to every group kwarg before
+this phase, not something this fix introduces or was scoped to close
+(closing it for all five kwargs at once would mean restructuring
+`with_container_sink`'s relationship to `mkpath`, a larger, separate
+change). New testset "ism= an unknown column name errors (Phase 202)"
+(2 assertions: the typo'd case errors, a valid `ism=` set still binds
+correctly) in `test/ism_writer_tests.jl`, right next to the existing
+ISM writer round-trip tests. Confirmed no regression to the internal
+callers that already pass real, always-valid `ism=` sets —
+`create_ms`, `copyms` of the sample MS's MAIN scalar columns, and the
+Dysco/reftable/container fixtures that use `ism=` — all still green.
+Standalone `ism_writer_tests.jl`, `writer_tests.jl`, `edit_tests.jl`,
+`schema_tests.jl`, and `container_tests.jl` together, no regressions.
+
+### Phase 203 — `readtable(refpath; precision=...)` was silently ignored on a persisted `RefTable`/`ConcatTable`
+
+Continuing the `src/tables/` sweep, in `column.jl` this time — read it
+in full against the `_eltype`/`_narrowtarget`/`Column`/`MappedColumn`/
+`ConcatColumn` machinery, no bug found (the `ConcatColumn` duplicate-
+offset/empty-part `searchsortedlast` behaviour, already documented as
+correct since Phase 14, was re-derived by hand and reconfirmed). While
+tracing how a `RefTable`'s effective read precision is actually
+determined (`column(t::RefTable, name)` delegates to `t.parent`'s own
+`.precision`), found the real bug one file over, in `table.jl`:
+`readtable` computes its own resolved `prec` (`:half`/`:full`/…) right
+at the top, from the table's own `table.info` `Type` — but the moment
+the table being opened turns out to be a `RefTable`/`ConcatTable`, it
+dispatches to `_read_reftable`/`_read_concattable`, and **neither ever
+received `prec` (or the raw `precision` argument) at all** — the
+parent(s)/part(s) were always reopened via a plain `readtable(p)`
+buried inside `_open_referenced`, so `readtable(refpath;
+precision=:full)` on a *persisted* RefTable/ConcatTable was a silent
+no-op: the parent still opened at ITS OWN auto-derived default.
+
+This one stayed hidden longer than most of this sweep's findings
+because the *common* case looked completely correct: a RefTable's own
+`table.info` `Type` is always copied verbatim from its parent (Phase
+15's `write_reftable`/real casacore's `RefTable::setup` both do this),
+so the auto-derived default the RefTable's own `readtable` call would
+have computed (had it been threaded through) is *identical* to what
+the parent independently re-derives on its own — the bug is entirely
+invisible unless you pass an *explicit* `precision=` override, which no
+existing test did for this specific read path (`query()`'s in-memory
+`RefTable` construction, and `column(t::RefTable,...)`'s own delegation
+to `t.parent.precision`, are different code paths that already worked
+correctly and masked the gap in the *persisted* `readtable(refpath;
+precision=...)` path specifically). Live-verified: `readtable(rdir;
+precision=:full)` on a `write_reftable`-persisted selection over a real
+MS's MAIN gave back `ComplexF16` `DATA` regardless of the override.
+
+Fixed by threading the *raw* (possibly `nothing`) `precision` argument
+— not the pre-normalized `prec` — through `_read_reftable`/
+`_read_concattable`/`_open_referenced` into the parent/part `readtable`
+calls: a deliberately conservative choice, so the default (`nothing`)
+case is byte-for-byte unchanged (each parent/part still independently
+re-derives its own default from its own `table.info` `Type`, exactly as
+before — relevant for the edge case of a `ConcatTable` whose parts
+happen to have heterogeneous `Type` strings, which a "always inherit
+one resolved value" version of this fix would have quietly changed),
+while an *explicit* override now genuinely propagates. `resync` needed
+the mirror-image fix: a `RefTable`/`ConcatTable` carries no `precision`
+field of its own (it lives entirely on the underlying `Table`(s)), so
+`resync(t::Union{RefTable,ConcatTable})`'s own `readtable(t.path)` call
+(no `precision` at all) would have silently reverted an explicitly-
+opened `:full`/`BFloat16` RefTable back to the auto-derived default on
+every resync — the exact same "explicit override lost across a re-read"
+shape, one level further out. Fixed with a new `_effective_precision`
+helper (`Table` → `.precision`; `RefTable` → recurse into `.parent`;
+`ConcatTable` → recurse into `.parts[1]`; `GroupedTable` → `nothing`,
+handling a nested RefTable-of-RefTable chain too) whose result `resync`
+now passes through explicitly, mirroring how `resync(::Table)` already
+preserves `t.precision`. New testset "precision — readtable(refpath;
+precision=...) on a persisted RefTable/ConcatTable (Phase 203)" (8
+assertions: default unchanged for both RefTable and ConcatTable, an
+explicit `:full` and `BFloat16` both now take effect, and `resync`
+preserves an explicitly-opened `:full` RefTable's precision).
+Standalone `reftable_tests.jl` and `precision_tests.jl` together, no
+regressions.

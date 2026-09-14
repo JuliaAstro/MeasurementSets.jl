@@ -84,6 +84,38 @@ function _dmkind(inst)
 end
 
 const _TILED_KINDS = (:tsm, :tcm, :tcell)
+const _ADDCOLUMN_KINDS = (:ssm, :ism, :tsm, :tcm, :tcell)
+
+"""
+    _check_kind(kind::Symbol)
+
+Validate `addcolumn!`'s `kind=` — found unvalidated anywhere: an
+invalid value (a typo like `:ssn` for `:ssm`) used to fall all the way
+through `_normalize_desc`'s own unguarded fallback (`kind === :ism ?
+"IncrementalStMan" : "StandardStMan"`) *and* `_flush_regen`'s writer
+dispatch (`k === :ssm ? write_standardstman(...) :
+write_incrementalstman(...)`) — two *independent* ternaries that both
+default to a DIFFERENT branch for the same unrecognised symbol
+(`_normalize_desc` defaults to `:ssm`'s manager string,
+`_flush_regen`'s dispatch defaults to `:ism`'s writer), so a typo'd
+`kind=` silently produced a column whose `ColumnDesc.manager` field
+claims `"StandardStMan"` while the actual on-disk bytes are
+`IncrementalStMan`-encoded — live-verified. Neither this package's own
+reader nor real casacore's happen to be tripped up by the mismatch
+(both dispatch a column's data manager from the per-instance type
+string in `table.dat`'s ColumnSet, not from the per-column `manager`
+field — the same "cosmetic, not load-bearing" role `ColumnDesc.manager`
+already has documented at `_source_dm`, `create.jl:799-805`, for
+exactly this reason), but the wrong metadata is real and surprising.
+Same "validate at the API boundary, not deep in the pipeline" fix as
+`_normalize_precision`/`_check_storage` (Phases 198/199).
+"""
+function _check_kind(kind::Symbol)
+    kind in _ADDCOLUMN_KINDS || throw(ArgumentError(
+        "addcolumn!: kind must be one of $(_ADDCOLUMN_KINDS), got $(repr(kind))"))
+    return kind
+end
+
 _tsm_dmname(k) = k === :tsm ? "TiledShapeStMan" :
                  k === :tcm ? "TiledColumnStMan" : "TiledCellStMan"
 _tsm_writer(k) = k === :tsm ? write_tiledshapestman :
@@ -316,6 +348,7 @@ new/shared StandardStMan (`:ssm`), IncrementalStMan (`:ism`) or a
 per-column TiledShapeStMan (`:tsm`).
 """
 function addcolumn!(t::EditTable, name::AbstractString; kind::Symbol=:ssm)
+    _check_kind(kind)
     _check_new_col(t, name)
     sc = _lookup_stdcol(name)
     kw = name == "FLAG_CATEGORY" ? _flag_category_kw() : Record()
@@ -359,6 +392,7 @@ end
 function addcolumn!(t::EditTable, name::AbstractString, data::AbstractVector;
                     kind::Symbol=:ssm, type::Union{CasaType,Nothing}=nothing,
                     shape=nothing)
+    _check_kind(kind)
     _check_new_col(t, name)
     length(data) == length(t.rowmap) ||
         error("addcolumn!: expected $(length(t.rowmap)) values, got $(length(data))")
