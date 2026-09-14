@@ -1288,6 +1288,31 @@ end
     @test kw.values[findfirst(==("CATEGORY"), kw.names)] == String[]
 end
 
+@testset "TaQL-lite — mscal.time() doesn't throw on a non-finite default-row TIME (Phase 194)" begin
+    # Same Phase 192/193 finding, a third corner: `_mssel_time` built the
+    # default row's calendar via a raw `round(Int, tm[r0]*1000)` with no
+    # NaN/Inf guard -- a synthetic/malformed MS whose default row's own
+    # TIME is non-finite (e.g. a genuinely blank/uninitialised row) used
+    # to crash the whole predicate instead of just not-matching that
+    # row. Fixed to degrade to the MJD epoch, same convention as the
+    # rest of the date/time family.
+    dir = mktempdir(); p = joinpath(dir, "T")
+    write_table(p, "T", Pair{String,Any}["TIME" => [0.0 / 0.0, 5.0e9]]; nrow = 2)
+    tt = readtable(p)
+    cn = Set(columnnames(tt))
+    @test MSv2._mssel_time(tt, ">0", cn, 2) == Bool[0, 1]   # NaN row never matches, no throw
+    @test MSv2._mssel_time(tt, "<1e12", cn, 2) == Bool[0, 1]
+
+    # the default row itself (r0) is the NaN one -- `def` must still
+    # resolve to *something* (the MJD epoch) rather than propagate NaN
+    # into the calendar fields used for incomplete-spec defaulting
+    p2 = joinpath(dir, "T2")
+    write_table(p2, "T2", Pair{String,Any}["TIME" => [1.0 / 0.0, -1.0 / 0.0]]; nrow = 2)
+    tt2 = readtable(p2)
+    cn2 = Set(columnnames(tt2))
+    @test MSv2._mssel_time(tt2, "2020/01/01", cn2, 2) == Bool[0, 0]   # neither +-Inf row matches a real date
+end
+
 # Phase 128: `*` wildcard fields + the `N[t0~t1]` explicit edge-buffer
 # form. A live oracle is blocked (see the doc comment above
 # `_mssel_time` for the two independent reasons found — a real

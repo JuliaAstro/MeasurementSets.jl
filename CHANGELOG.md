@@ -6006,3 +6006,32 @@ a non-finite argument" (66 assertions, all twelve `_tql_dt_of`-based
 functions plus `hms`/`dms`/`ctime`/`hdms` plus the three already-fine
 pass-through functions, across NaN/+Inf/-Inf/`sqrt(-1)`). Standalone
 `taql_query_tests.jl` green in full, no regressions.
+
+### Phase 194 — the same NaN-crash finding, a third corner:
+### `mscal.time()`'s default-row TIME
+
+Continuing the sweep for the risk shape Phase 192 flagged: found one
+more site with it in `src/taql/mscal.jl` — `_mssel_time` (the
+`mscal.time('spec')` MSSelection-lite time-range predicate, Phase 94)
+built its "default row" calendar via `round(Int, tm[r0] * 1000)` with
+no NaN/Inf guard, where `tm[r0]` is the default row's own `TIME`
+column value. Live-verified reachable: a synthetic/malformed table
+whose default row's `TIME` is `0.0/0.0` makes `mscal.time(...)` throw a
+raw `InexactError` for the WHOLE predicate (every row, not just the bad
+one) — real MS `TIME` data essentially never hits this, but this
+package's own writers let a user store an arbitrary `Float64` including
+NaN, so it's a real, reachable path, not a hypothetical. A second call
+site in the same file, `_mstime_incl_hi`'s `round(Int, lo_secs * 1000)`,
+is fed only by a parsed literal from the query STRING itself (never raw
+column data) and was confirmed unreachable with a non-finite value —
+left unchanged.
+
+Fixed with the same convention as Phase 193: a non-finite default-row
+`TIME` degrades the default calendar to the MJD epoch instead of
+throwing (the per-row predicate comparisons themselves were already
+safe — a `NaN` row just naturally fails every `>=`/`<=`/`abs(x-c)<=dT`
+comparison instead of matching, no separate fix needed there). New
+testset "TaQL-lite — mscal.time() doesn't throw on a non-finite
+default-row TIME (Phase 194)" (3 assertions). Standalone
+`taql_query_tests.jl` + `taql_mscal_tests.jl` both green together, no
+regressions.
