@@ -112,6 +112,40 @@ end
     @test eltype(column(q, "DATA")) == Matrix{ComplexF16}
 end
 
+@testset "precision — getcolumn(ms, sub, name; precision=...) (Phase 206)" begin
+    # the 3-arg `getcolumn(ms, sub, name)` convenience overload had no
+    # `precision=` kwarg at all -- its 2-arg sibling `getcolumn(t, name;
+    # precision)` has had one since Phase 34, and `column(t, name;
+    # precision)`/`getcell(t, name, row; precision)` both have it too --
+    # found via the "one last sweep, look for feature gaps too" pass.
+    # `FEED.POL_RESPONSE` is a real `TpComplex` subtable column (both in
+    # the sample MS and a synthetic `create_ms`), so it's a genuine
+    # narrowing candidate even though subtables default to `:full`.
+    ms = MeasurementSet(SAMPLE_MS)
+    @test eltype(getcolumn(ms, "FEED", "POL_RESPONSE")) == Matrix{ComplexF32}   # subtable default: :full
+    @test eltype(getcolumn(ms, "FEED", "POL_RESPONSE"; precision=:half)) == Matrix{ComplexF16}
+    @test eltype(getcolumn(ms, "FEED", "POL_RESPONSE"; precision=:full)) == Matrix{ComplexF32}
+    @test getcolumn(ms, "FEED", "POL_RESPONSE") ==
+          getcolumn(subtable(ms, "FEED"), "POL_RESPONSE")   # unchanged default behaviour
+
+    # `getcell(ms, sub, name, row)` was missing entirely -- an asymmetry
+    # with `getcolumn(ms, sub, name)`, which already existed; added
+    # alongside it in the same phase.
+    @test eltype(getcell(ms, "FEED", "POL_RESPONSE", 1)) == ComplexF32
+    @test eltype(getcell(ms, "FEED", "POL_RESPONSE", 1; precision=:half)) == ComplexF16
+    @test getcell(ms, "FEED", "POL_RESPONSE", 1) ==
+          getcell(subtable(ms, "FEED"), "POL_RESPONSE", 1)
+
+    # `column(ms, sub, name)` — the lazy verb `getcolumn`/`getcell` are
+    # both built on — was missing too, completing the family.
+    lcol = column(ms, "FEED", "POL_RESPONSE")
+    @test lcol isa MSv2.Column
+    @test eltype(lcol) == Array{ComplexF32}
+    @test eltype(column(ms, "FEED", "POL_RESPONSE"; precision=:half)) == Array{ComplexF16}
+    @test lcol[1] == getcell(ms, "FEED", "POL_RESPONSE", 1)
+    @test collect(lcol) == getcolumn(ms, "FEED", "POL_RESPONSE")
+end
+
 @testset "precision — readtable(refpath; precision=...) on a persisted RefTable/ConcatTable (Phase 203)" begin
     # `readtable` computed its own resolved `prec` but never threaded it
     # into `_read_reftable`/`_read_concattable` at all -- so
