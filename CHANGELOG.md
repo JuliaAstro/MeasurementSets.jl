@@ -6461,3 +6461,40 @@ metadata that genuinely matches the encoding (cross-checked against
 real `Casacore.jl`). Standalone `edit_tests.jl` green in full (every
 existing testset, including the Phase 125-133 RefEditTable/
 ConcatEditTable ones), no regressions.
+
+### Phase 202 — `write_table`'s `ism=` kwarg was the one sibling of `tsm=`/`tcm=`/`tcell=`/`dysco=` with no name validation at all
+
+Continuing the `src/tables/` sweep. `_write_table_core`'s `tsm=`/
+`tcm=`/`tcell=`/`dysco=` kwargs (each a set of column-name groups) all
+validate every referenced name and raise a clear "unknown column"
+error — confirmed by reading the tiled-group and Dysco-group write
+loops directly. `ism=` (a plain set of column names, no grouping) is
+the one sibling that skipped this: it's consumed only via `ism_i =
+findall(c -> c.name in ism, descs)`, and `findall` simply omits a name
+that matches nothing — no error, no warning, the column is silently
+never bound to `IncrementalStMan`. Live-verified: `write_table(dir, "T",
+["A" => ...]; nrow, ism = Set(["A", "NOTACOLUMN"]))` used to succeed
+outright, writing `"A"` to ISM and quietly discarding the typo'd
+`"NOTACOLUMN"` with no indication anything was wrong.
+
+Fixed with a small validation loop (mirroring `tsm=`'s own pattern),
+placed right before `ism_i` is computed: every name in `ism` must
+match a real column, else a clear `"ism: unknown column ..."` error.
+Confirmed this matches — not diverges from — the existing `tsm=`/
+`tcm=`/`tcell=`/`dysco=` behaviour in one respect worth noting: all of
+these checks run *after* `_write_table_core`'s own `mkpath(dir)`, so
+an invalid name (in `ism=` now, same as its siblings already) still
+leaves a stray empty directory behind — a real, `Phase-199`-shaped gap,
+but one that already applied uniformly to every group kwarg before
+this phase, not something this fix introduces or was scoped to close
+(closing it for all five kwargs at once would mean restructuring
+`with_container_sink`'s relationship to `mkpath`, a larger, separate
+change). New testset "ism= an unknown column name errors (Phase 202)"
+(2 assertions: the typo'd case errors, a valid `ism=` set still binds
+correctly) in `test/ism_writer_tests.jl`, right next to the existing
+ISM writer round-trip tests. Confirmed no regression to the internal
+callers that already pass real, always-valid `ism=` sets —
+`create_ms`, `copyms` of the sample MS's MAIN scalar columns, and the
+Dysco/reftable/container fixtures that use `ism=` — all still green.
+Standalone `ism_writer_tests.jl`, `writer_tests.jl`, `edit_tests.jl`,
+`schema_tests.jl`, and `container_tests.jl` together, no regressions.

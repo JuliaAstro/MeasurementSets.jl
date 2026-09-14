@@ -326,6 +326,15 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
     for g in dyscog, n in g
         push!(dyscon, n)
     end
+    # `tsm=`/`tcm=`/`tcell=`/`dysco=` all validate every referenced name
+    # (Phase 201's fix pattern, applied here too — a typo used to be
+    # silently dropped by `findall`'s own "no match = no index" behaviour
+    # instead of erroring like its siblings do, live-verified: `ism =
+    # Set(["A", "TYPO"])` on a table with no "TYPO" column succeeded with
+    # no error and no warning, TYPO simply never became an ISM column).
+    for nm in ism
+        any(c -> c.name == nm, descs) || error("ism: unknown column \"$nm\"")
+    end
     ism_i = findall(c -> c.name in ism, descs)
     ssm_i = setdiff(1:length(descs),
                     vcat(findall(c -> c.name in tiledn || c.name in engine_virtual ||
