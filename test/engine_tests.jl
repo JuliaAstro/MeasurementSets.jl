@@ -314,6 +314,35 @@ end
     @test [column(rp, "V")[i] for i in 1:6] == V
 end
 
+@testset "engine — reference_copy's writable= is validated (Phase 205)" begin
+    # `w = Set(String.(writable))` was checked only via `c.name in w`
+    # while iterating the SOURCE's real column names — a typo'd
+    # `writable=` name was never matched and had NO EFFECT AT ALL: the
+    # column silently stayed a `ForwardColumnEngine` reference instead
+    # of becoming the independent copy the caller asked for (defeating
+    # the whole point of `writable=`), with zero error or warning. Same
+    # shape as Phase 202's `ism=` / Phase 204's `subtables=`/
+    # `subtable_rows=`. Live-verified: `reference_copy(dst, src;
+    # writable=["AA"])` (typo for `"A"`) left `A` forwarded — editing
+    # `src` afterward silently mutated `dst`'s `A` too, exactly the
+    # aliasing `writable=` exists to prevent.
+    src2 = joinpath(mktempdir(), "src2.tab")
+    write_table(src2, "S", ["A" => collect(1.0:5.0), "B" => collect(Int32, 1:5)]; nrow=5)
+
+    dir1 = joinpath(mktempdir(), "rc_bad.tab")
+    @test_throws ErrorException reference_copy(dir1, src2; writable=["AA"])
+    @test !ispath(dir1)
+
+    dst2 = joinpath(mktempdir(), "rc_ok.tab")
+    reference_copy(dst2, src2; writable=["A"])
+    r2 = readtable(dst2)
+    @test _engine_manager(r2, "A").name != "ForwardColumnEngine"
+    @test _engine_manager(r2, "B").name == "ForwardColumnEngine"
+    edit(src2) do t; t[:A][1] = -99.0; t[:B][1] = Int32(-99); end
+    @test column(readtable(dst2), "A")[1] == 1.0     # independent, unchanged
+    @test column(readtable(dst2), "B")[1] == Int32(-99)  # forwarded, tracks src
+end
+
 @testset "engine — unsupported (RetypedArray / ForwardColumnIndexedRow)" begin
     @test MSv2E._dmtype("RetypedArrayEngine<Float>") === MSv2E._UnsupportedDM
     @test MSv2E._dmtype("ForwardColumnIndexedRowEngine") === MSv2E._UnsupportedDM

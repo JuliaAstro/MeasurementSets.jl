@@ -91,6 +91,34 @@ if isdir(SAMPLE_MS)
                   getcell(readtable(joinpath(SAMPLE_MS, "SPECTRAL_WINDOW")), "CHAN_FREQ", 1)
         end
     end
+
+    @testset "write_ms/copyms: an unknown subtables=/subtable_rows= name errors (Phase 204)" begin
+        # `want(kw) = ... kw in subtables` and `get(subtable_rows, kw,
+        # ...)` are both checked only by iterating the SOURCE's own real
+        # keyword names -- neither ever confirmed a name the caller
+        # supplied was actually used. Live-verified: a typo (missing
+        # underscore, `"SPECTRALWINDOW"`) used to be silently dropped --
+        # `want` is never true for it, so that subtable was skipped with
+        # zero error/warning (the same "one sibling of a validated-
+        # parameter family skips the check" shape as Phase 202's `ism=`),
+        # and a `subtable_rows` typo silently left that subtable
+        # unrestricted (fell back to its own `1:nrow(sub)` default).
+        dir1 = joinpath(mktempdir(), "wms_bad1.ms")
+        @test_throws ErrorException copyms(SAMPLE_MS, dir1; subtables=["ANTENA"])
+        @test !ispath(dir1)   # caught before mkpath -- no stray directory at all
+
+        dir2 = joinpath(mktempdir(), "wms_bad2.ms")
+        @test_throws ErrorException copyms(SAMPLE_MS, dir2;
+            subtable_rows = Dict("ANTENA" => 1:1))
+        @test !ispath(dir2)
+
+        # valid usage still restricts exactly the requested subtable
+        dir3 = joinpath(mktempdir(), "wms_ok.ms")
+        copyms(SAMPLE_MS, dir3; subtables = ["ANTENNA"],
+              subtable_rows = Dict("ANTENNA" => 1:2))
+        @test subtablenames(MeasurementSet(dir3)) == ["ANTENNA"]
+        @test nrow(readtable(joinpath(dir3, "ANTENNA"))) == 2
+    end
 end
 
 @testset "copyms stamps a missing FLAG_CATEGORY CATEGORY keyword (Phase 147)" begin

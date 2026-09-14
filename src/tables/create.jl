@@ -762,6 +762,20 @@ function reference_copy(dst::AbstractString, src::Union{AbstractString,AbstractT
     s = src isa AbstractTable ? src : readtable(String(rstrip(src, '/')))
     s isa Table || error("reference_copy: `src` must be a plain on-disk Table")
     w = Set(String.(writable))
+    # Same "unvalidated set-of-names kwarg" shape as Phase 202's `ism=` /
+    # Phase 204's `subtables=`/`subtable_rows=`: `c.name in w` is checked
+    # only by iterating the SOURCE's real column names, so a typo'd
+    # `writable=` name was never matched and silently had NO EFFECT AT
+    # ALL — the column stayed a `ForwardColumnEngine` reference instead
+    # of becoming the independent copy the caller asked for (the whole
+    # point of `writable=`), with no error or warning. Live-verified:
+    # `reference_copy(dst, src; writable=["AA"])` (typo for `"A"`) left
+    # `A` forwarded — editing `src` afterward silently changed `dst`'s
+    # `A` too, exactly the aliasing `writable=` exists to prevent.
+    for nm in w
+        nm in Set(c.name for c in s.desc.columns) ||
+            error("reference_copy: no column \"$nm\"")
+    end
     descs = ColumnDesc[c for c in s.desc.columns]
     data  = Any[c.name in w ? _pcolumn(s, c.name, :full)[:] : _pcolumn(s, c.name, :full)
                 for c in s.desc.columns]        # writable -> materialised, forwarded -> lazy Column
@@ -831,11 +845,30 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
                   subtable_rows::AbstractDict=Dict{String,Any}(),
                   storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     _check_storage(storage)
+    main0 = getfield(ms, :data)
+    realkws = Set(kw for (kw, _) in MeasurementSets.subtables(main0))
+    # `subtables=`/`subtable_rows=` name subtables by keyword, matched only
+    # by iterating the SOURCE's own real keywords (`want(kw) = ... kw in
+    # subtables`; `get(subtable_rows, kw, ...)`) — neither side ever checked
+    # that a name the caller supplied was actually used. A typo (e.g.
+    # `subtables=["SPECTRALWINDOW"]`, missing the underscore) used to be
+    # silently dropped: `want` is never true for it (no real `kw` equals
+    # it), so the whole subtable was skipped with zero error/warning — the
+    # same "one sibling of a validated-parameter family skips the check"
+    # shape as Phase 202's `ism=`, live-verified reachable for both kwargs.
+    subtables === Colon() || for kw in subtables
+        kw in realkws || error("write_ms: no subtable \"$kw\" (have $(sort(collect(realkws))))")
+    end
+    for kw in keys(subtable_rows)
+        kw in realkws || error("write_ms: subtable_rows has no matching subtable \"$kw\" " *
+                               "(have $(sort(collect(realkws))))")
+    end
+
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
 
-    main = getfield(ms, :data)
+    main = main0
     mrows = rows === Colon() ? (1:nrow(main)) : rows
     want(kw) = subtables === Colon() || kw in subtables
 
