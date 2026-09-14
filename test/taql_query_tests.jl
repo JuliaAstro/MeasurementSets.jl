@@ -3723,3 +3723,47 @@ end
         @test query(t, w).rows == readtable(rdir).rows
     end
 end
+
+@testset "Phase 193 — date/time functions don't throw on a non-finite argument" begin
+    # A NaN/±Inf MJD/angle used to throw a raw `InexactError` (`round(Int,
+    # NaN*...)`) in every one of `hms`/`dms`/`ctime`/`year`/`month`/`day`/
+    # `week`/`weekday`/`dow`/`cdate`/`cmonth`/`cdow`/`cweekday`/`ctod`/
+    # `cdatetime` -- live-verified real casacore never throws on one, but
+    # its own answer is genuinely self-INCONSISTENT (`cdate(0.0/0.0) ==
+    # "17-Nov-1858"`, the MJD epoch, while `year(0.0/0.0) == -4712` and
+    # `month(0.0/0.0) == 1` don't agree with that date at all -- clear
+    # undefined-behavior noise, not a portable target, echoing the Phase
+    # 192 finding in a different corner of this file). This package picks
+    # its own well-defined, self-consistent fallback: every one degrades
+    # to the MJD epoch itself (`1858-11-17T00:00:00.000`, MJD 0).
+    dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
+    write_table(tabpath, "T", Pair{String,Any}["A" => [-1.0]]; nrow=1)
+    t = readtable(tabpath)
+    q(expr) = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+    for nanexpr in ("0.0/0.0", "1.0/0.0", "-1.0/0.0", "sqrt(A)")
+        @test q("hms($nanexpr)") == "00h00m00.000"
+        @test q("dms($nanexpr)") == "+000d00m00.000"
+        @test q("ctime($nanexpr)") == "00:00:00.000"
+        @test q("year($nanexpr)") == 1858
+        @test q("month($nanexpr)") == 11
+        @test q("day($nanexpr)") == 17
+        @test q("weekday($nanexpr)") == 3   # 1858-11-17 is a Wednesday
+        @test q("dow($nanexpr)") == 3
+        @test q("cdate($nanexpr)") == "17-Nov-1858"
+        @test q("cmonth($nanexpr)") == "Nov"
+        @test q("cdow($nanexpr)") == q("cweekday($nanexpr)")
+        @test q("ctod($nanexpr)") == "1858/11/17/00:00:00.000"
+        @test q("cdatetime($nanexpr)") == "1858/11/17/00:00:00.000"
+        # `mjd`/`date`/`time` propagate a non-finite value cleanly
+        # already (no `round` call in their path) -- confirm they still
+        # do, unchanged (`mjd`/`date` pass the raw value through as-is;
+        # `time` is `2pi*frac`, +-Inf for +-Inf, NaN for NaN).
+        @test !isfinite(q("mjd($nanexpr)"))
+        @test !isfinite(q("date($nanexpr)"))
+        @test !isfinite(q("time($nanexpr)"))
+    end
+    # `hdms` degrades per-element (mixing a non-finite and a finite angle)
+    hd = q("hdms([0.0/0.0, 1.0])")
+    @test hd[1] == "00h00m00.000"
+    @test hd[2] == MSv2._tql_dms(1.0)
+end

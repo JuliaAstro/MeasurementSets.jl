@@ -850,3 +850,49 @@ _unitvec(lon, lat) = (cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
     d0a = 2 * asin(min(sqrt(sum((_unitvec(lon0, lat0) .- _unitvec(a...)) .^ 2)) / 2, 1.0))
     @test d0a ≈ 0.75 * full atol = 1e-9
 end
+
+@testset "measures — measconvert rejects a non-finite measure/frame (Phase 195)" begin
+    # Same Phase 192/193/194 root-cause SHAPE, a fourth corner: a
+    # non-finite value anywhere in a measure or its frame used to crash
+    # deep inside SOFA.jl's own numeric routines (`jd2cal`'s
+    # `AssertionError: Day is out of range.`, many stack frames below
+    # the actual `measconvert` call) instead of a clear message at the
+    # real entry point. Unlike the purely presentational date/time
+    # STRING functions (Phase 193/194), a `measconvert` RESULT is a real
+    # number consumed by real astronomy code, so this one raises a
+    # clear `ArgumentError` early rather than silently returning a
+    # physically-meaningless-but-plausible sentinel value.
+    good_epoch = MEpoch{UTC}(60454.42255)
+    good_pos = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150)
+    good_dir = MDirection{J2000}(1.0, 0.5)
+
+    # a non-finite value in the measure being converted
+    for bad in (NaN, Inf, -Inf)
+        @test_throws ArgumentError measconvert(MEpoch{UTC}(bad), TAI)
+        @test_throws ArgumentError measconvert(MDirection{J2000}(bad, 0.5), AZEL;
+            frame = MeasFrame(epoch = good_epoch, position = good_pos))
+        @test_throws ArgumentError measconvert(MFrequency{TOPO}(bad), BARY;
+            frame = MeasFrame(epoch = good_epoch, position = good_pos, direction = good_dir))
+    end
+
+    # a non-finite value in the FRAME instead of the measure itself
+    @test_throws ArgumentError measconvert(good_dir, AZEL;
+        frame = MeasFrame(epoch = MEpoch{UTC}(NaN), position = good_pos))
+    @test_throws ArgumentError measconvert(good_dir, AZEL;
+        frame = MeasFrame(epoch = good_epoch, position = MPosition{ITRF}(NaN, 0.0, 0.0)))
+    @test_throws ArgumentError measconvert(MFrequency{TOPO}(1.4e9), BARY;
+        frame = MeasFrame(epoch = good_epoch, position = good_pos,
+                          direction = MDirection{J2000}(Inf, 0.5)))
+
+    # finite input, unaffected -- still converts normally
+    @test measconvert(good_epoch, TAI) isa MEpoch{TAI}
+    @test measconvert(good_dir, AZEL; frame = MeasFrame(epoch = good_epoch, position = good_pos)) isa
+          MDirection{AZEL}
+
+    # `_eop_lookup` itself (EarthOrientationExt) also no longer crashes
+    # on a non-finite MJD -- falls into its existing "no coverage"
+    # zero-fallback instead (defense in depth; `measconvert`'s own guard
+    # above is what a normal caller actually hits first).
+    eoext = Base.get_extension(MSv2, :EarthOrientationExt)
+    @test eoext._eop_lookup(NaN) == (dut1 = 0.0, xp = 0.0, yp = 0.0)
+end

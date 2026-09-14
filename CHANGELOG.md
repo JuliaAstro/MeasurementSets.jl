@@ -5945,3 +5945,144 @@ targeted `int()`/`integer()` testset (7 assertions) both pass — the
 fix genuinely resolves the CI failure, not just a local ARM64
 rationalization. Standalone `taql_query_tests.jl` unaffected on ARM64
 (still 0 failures, full file).
+
+### Phase 193 — the Phase 192 finding recurs in a different corner:
+### every date/time formatting function threw on a NaN/±Inf argument;
+### real casacore's own NaN handling turns out to be self-inconsistent
+
+Investigated the array-reshaping function family (`array`/`transpose`/
+`reversearray`/`diagonal`/`resize`/`flatten`) from Phase 190's own
+"remaining names" list, and found it genuinely out of scope for a
+single phase: casacore's own argument-parsing machinery for these
+(`getOrder`/`getReverseAxes`/`getDiagonalArg`/`getAlternate`) threads a
+C-order-vs-Fortran-order `STYLE` toggle and a 0/1-based `origin_p`
+through every one of them, plumbing this package's TaQL-lite engine
+has no concept of at all — a real, substantial future feature, not a
+quick add. Flagged for a dedicated phase; not implemented here.
+
+Redirected to the standing methodology note this session's own Phase
+192 finding just added: "a live cross-check verified on only one
+architecture can itself be wrong — check whether a formula's raw
+numeric conversion is architecture-dependent UB before chasing bit-for-
+bit equality." Searched `src/taql/functions.jl` for the SAME risk
+shape (a `round(Int, ...)`/`Int64(...)` call fed directly by a
+column/expression value, not just general float math) and found the
+entire date/time formatting family shares it: `_tql_dt_of` (the shared
+choke point for `year`/`month`/`day`/`week`/`weekday`/`dow`/`cdate`/
+`cmonth`/`cdow`/`cweekday`/`ctod`/`cdatetime`) plus `_tql_hms`/
+`_tql_dms`/`_tql_time_of_day_str` (used by `hms`/`dms`/`hdms`/`ctime`)
+all did a raw `round(Int, ...)` with no NaN/Inf guard — live-verified
+on this ARM64 Mac: `hms(0.0/0.0)` threw `InexactError: Int64(NaN)`,
+and likewise for every one of the twelve functions above.
+
+**Live-verifying real casacore's own NaN behavior for a fix, following
+the exact Phase 192 discipline, immediately surfaced why chasing it
+bit-for-bit is the wrong target here too — but for a NEW reason this
+time: real casacore's own answer is self-INCONSISTENT, not just
+architecture-dependent.** `cdate(0.0/0.0) == "17-Nov-1858"` — exactly
+the MJD epoch (MJD 0) — while `year(0.0/0.0) == -4712` and
+`month(0.0/0.0) == 1` don't correspond to that date (or to each other)
+at all, and `hms`/`dms`/`ctime` embed a literal `"nan"` substring
+inside an otherwise fixed-width numeric field
+(`hms(0.0/0.0) == "00h00m000nan"`, `dms(1.0/0.0) == "+***d00m000nan"` —
+the `"***"` is a genuine, DEFINED "field overflow" sentinel in
+`MVTime::print`, but the trailing `"000nan"` is not). Different
+`funcName` branches clearly hit different, mutually-contradictory
+undefined-behavior manifestations within the SAME casacore build — not
+a single "real" oracle value to replicate at all, even setting the
+Phase 192 cross-architecture question aside entirely.
+
+Fixed by giving this package its own well-defined, portable,
+self-CONSISTENT convention instead of chasing any of that: a non-finite
+argument to any of the twelve `_tql_dt_of`-based functions, or to
+`hms`/`dms`/`ctime`/`hdms`, degrades to the MJD epoch itself
+(`1858-11-17T00:00:00.000` / an all-zero `"00h00m00.000"` /
+`"+000d00m00.000"` / `"00:00:00.000"`) — crash-free, predictable, and
+internally consistent (unlike real casacore's own answer for the same
+input). `mjd()`/`date()`/`time()` already propagated a non-finite value
+cleanly with no `round` in their path and needed no change — confirmed
+unchanged. New testset "Phase 193 — date/time functions don't throw on
+a non-finite argument" (66 assertions, all twelve `_tql_dt_of`-based
+functions plus `hms`/`dms`/`ctime`/`hdms` plus the three already-fine
+pass-through functions, across NaN/+Inf/-Inf/`sqrt(-1)`). Standalone
+`taql_query_tests.jl` green in full, no regressions.
+
+### Phase 194 — the same NaN-crash finding, a third corner:
+### `mscal.time()`'s default-row TIME
+
+Continuing the sweep for the risk shape Phase 192 flagged: found one
+more site with it in `src/taql/mscal.jl` — `_mssel_time` (the
+`mscal.time('spec')` MSSelection-lite time-range predicate, Phase 94)
+built its "default row" calendar via `round(Int, tm[r0] * 1000)` with
+no NaN/Inf guard, where `tm[r0]` is the default row's own `TIME`
+column value. Live-verified reachable: a synthetic/malformed table
+whose default row's `TIME` is `0.0/0.0` makes `mscal.time(...)` throw a
+raw `InexactError` for the WHOLE predicate (every row, not just the bad
+one) — real MS `TIME` data essentially never hits this, but this
+package's own writers let a user store an arbitrary `Float64` including
+NaN, so it's a real, reachable path, not a hypothetical. A second call
+site in the same file, `_mstime_incl_hi`'s `round(Int, lo_secs * 1000)`,
+is fed only by a parsed literal from the query STRING itself (never raw
+column data) and was confirmed unreachable with a non-finite value —
+left unchanged.
+
+Fixed with the same convention as Phase 193: a non-finite default-row
+`TIME` degrades the default calendar to the MJD epoch instead of
+throwing (the per-row predicate comparisons themselves were already
+safe — a `NaN` row just naturally fails every `>=`/`<=`/`abs(x-c)<=dT`
+comparison instead of matching, no separate fix needed there). New
+testset "TaQL-lite — mscal.time() doesn't throw on a non-finite
+default-row TIME (Phase 194)" (3 assertions). Standalone
+`taql_query_tests.jl` + `taql_mscal_tests.jl` both green together, no
+regressions.
+
+### Phase 195 — the same root-cause SHAPE, a fourth corner:
+### `measconvert` crashed deep inside SOFA.jl on a non-finite measure/
+### frame value; fixed with a clear early error instead of a silent
+### sentinel, since a wrong NUMBER is more dangerous than a wrong string
+
+Continuing the sweep beyond `src/taql/`: grepped the whole tree for the
+same risk shape (a raw numeric cast fed by a value that could be
+NaN/Inf) and found two more sites. `src/datamanagers/dysco.jl`'s
+`_dysco_encode_symbol`/`_dysco_encode_symbol_dither` already guard
+non-finite input explicitly (Phase 19's own work) — confirmed correct,
+no change; its WEIGHT-column quantizer (a separate function,
+`UInt32(floor(weight*scale+0.5))`) has no such guard and WOULD crash on
+a NaN weight, but writing a NaN into a Dysco-compressed WEIGHT column
+is a narrow, synthetic-data-only path — flagged, not fixed this phase.
+
+The real, reachable finding: `ext/EarthOrientationExt.jl`'s
+`_eop_lookup` called its own `_datetime` (the same unguarded
+`round(Int, mjd*MSEC_PER_DAY)` pattern as Phases 193/194) OUTSIDE the
+function's existing `try`/`catch` "no IERS coverage" fallback, so a
+non-finite epoch's crash escaped that fallback entirely instead of
+hitting it. Moved the call inside the `try` — cheap, always-correct
+defense in depth.
+
+But live-verifying `measconvert` end to end (`measconvert(MDirection,
+AZEL; frame=MeasFrame(epoch=MEpoch{UTC}(NaN), position=...))`) found
+the *actual* crash site is upstream of `_eop_lookup` entirely: SOFA.jl
+own `utctai`→`jd2cal` raises `AssertionError: Day is out of range.`
+from deep inside the UTC→TAI epoch-scale conversion, many stack frames
+below the `measconvert` call a user actually wrote — a genuinely
+confusing place to learn "your TIME value is NaN." **Different fix
+from Phase 193/194's "degrade to a defined sentinel," and deliberately
+so**: `hms(NaN)` returning an all-zero STRING is harmless (obviously a
+placeholder), but `measconvert` returning a physically-meaningless
+*number* that looks like a real answer would be actively misleading —
+this package's own numbers get consumed by real calculations, not just
+displayed. So the fix is a clear, early `ArgumentError` instead: a new
+`_all_finite(x)` helper (checks every `Float64` field of a measure
+struct via `fieldnames` — works uniformly across `MEpoch`/`MDirection`/
+`MPosition`/`MFrequency`/`MRadialVelocity`/`MBaseline`/`MuvW`/
+`MEarthMagnetic`/`MDoppler` with no per-type method needed) is checked
+at `measconvert`'s own entry point against both the measure being
+converted AND every non-`nothing` field of `frame` (`epoch`/
+`position`/`direction`), before any SOFA call happens. New testset
+"measures — measconvert rejects a non-finite measure/frame (Phase 195)"
+(15 assertions: a bad value in the measure itself, a bad value in each
+frame field, finite inputs still convert normally, and `_eop_lookup`'s
+own defense-in-depth checked directly). Standalone `measures_tests.jl`
+(153 assertions total, incl. the 79-assertion `casatools` oracle
+cross-check) and `taql_query_tests.jl` + `taql_mscal_tests.jl` together
+all green, no regressions.

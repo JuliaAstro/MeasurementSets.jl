@@ -311,8 +311,28 @@ polar-motion accuracy (otherwise ~1 arcsecond, with a one-time warning).
 `frame` supplies whatever auxiliary epoch / position / source direction
 the target frame requires -- see [`MeasFrame`](@ref).
 """
+# A non-finite (NaN/±Inf) field anywhere in a measure or its frame used
+# to crash deep inside SOFA.jl's own numeric routines with a confusing,
+# unrelated-looking error (e.g. SOFA's `jd2cal` raising `AssertionError:
+# Day is out of range.` from many stack frames down) instead of a clear,
+# actionable message at the actual call site -- Phase 192/193/194's
+# same root-cause SHAPE recurring a fourth time, but a different fix:
+# unlike a purely presentational date/time STRING (where a defined
+# sentinel like the MJD epoch is harmless), a `measconvert` result is a
+# real number used in real astronomy calculations, so silently
+# returning a physically-meaningless-but-plausible-looking answer would
+# be actively misleading, not just cosmetically odd -- a clear early
+# error is the right choice here, not a silent fallback.
+_all_finite(x) = all(isfinite(getfield(x, f)) for f in fieldnames(typeof(x)))
+
 function measconvert(m::Measure, R::Type{<:RefFrame}; frame::MeasFrame=MeasFrame())
     reftype(m) === R && return m
+    _all_finite(m) || throw(ArgumentError(
+        "measconvert: $(typeof(m)) has a non-finite (NaN/±Inf) value — cannot convert"))
+    for (nm, v) in ((:epoch, frame.epoch), (:position, frame.position), (:direction, frame.direction))
+        v === nothing || _all_finite(v) || throw(ArgumentError(
+            "measconvert: frame.$nm ($(typeof(v))) has a non-finite (NaN/±Inf) value — cannot convert"))
+    end
     _mconv(m, R, frame)
 end
 

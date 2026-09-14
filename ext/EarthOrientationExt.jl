@@ -30,12 +30,17 @@ end
 
 ΔUT1 (seconds) and polar motion (radians) at a UTC MJD, from the IERS
 `finals2000A` table via `EarthOrientation.jl`.  Falls back to zeros (with
-one warning) if the table has no coverage for the date.
+one warning) if the table has no coverage for the date -- including a
+non-finite `mjd_utc` (a NaN/±Inf epoch, e.g. from a malformed `TIME`
+cell): `_datetime` used to be called OUTSIDE the `try` below, so a raw
+`round(Int, NaN*...)`-derived crash (Phase 192/193/194's same finding,
+a fourth corner) escaped the existing "no coverage" fallback entirely
+instead of hitting it. Moved inside the `try` so it does.
 """
 function _eop_lookup(mjd_utc::Float64)
     _ensure!()
-    dt = _datetime(mjd_utc)
     try
+        dt = _datetime(mjd_utc)
         dut1 = EO.getΔUT1(dt; outside_range=:nothing)
         xp = EO.getxp(dt; outside_range=:nothing)
         yp = EO.getyp(dt; outside_range=:nothing)

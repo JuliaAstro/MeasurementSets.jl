@@ -1526,7 +1526,12 @@ function _mssel_time(t::AbstractTable, spec::AbstractString, cn::AbstractSet, n:
     # which would make `mscal.time` unusable on a fully-flagged MS (a
     # real, common state -- the committed test fixture is one).
     r0 = "FLAG_ROW" in cn ? something(findfirst(!, Bool.(column(t, "FLAG_ROW")[:])), 1) : 1
-    d0 = MJD_EPOCH + Dates.Millisecond(round(Int, tm[r0] * 1000))   # default row's time
+    # A non-finite default-row TIME (a malformed/synthetic MS -- real
+    # data essentially never has one) used to throw a raw `InexactError`
+    # here; same Phase 192/193 finding, same fix: degrade to the MJD
+    # epoch rather than crash the whole `mscal.time()` predicate.
+    t0 = tm[r0]
+    d0 = MJD_EPOCH + Dates.Millisecond(isfinite(t0) ? round(Int, t0 * 1000) : 0)   # default row's time
     def = (Dates.year(d0), Dates.month(d0), Dates.day(d0),
            Dates.hour(d0), Dates.minute(d0), Dates.second(d0))
     epdef = (1858, 11, 17, 0, 0, 0.0)
