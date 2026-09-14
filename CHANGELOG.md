@@ -6086,3 +6086,84 @@ own defense-in-depth checked directly). Standalone `measures_tests.jl`
 (153 assertions total, incl. the 79-assertion `casatools` oracle
 cross-check) and `taql_query_tests.jl` + `taql_mscal_tests.jl` together
 all green, no regressions.
+
+### Phase 196 — the wavelength-scaled uvw family Phase 163 flagged as a
+### real, unimplemented gap: `mscal.uvwwvl()`/`uvwwvls()`,
+### `uvwj2000wvl()`/`uvwj2000wvls()`, `uvwapp()`/`uvwappwvl()`/
+### `uvwappwvls()` — and a real bug found while writing the live
+### cross-check for the last of these
+
+Continuing the phase-by-phase sweep. Read `derivedmscal/DerivedMC/
+{Register,UDFMSCal,MSCalEngine}.cc` directly for the wavelength-scaled
+uvw functions Phase 163 identified but left unimplemented. `UVWWVL()`/
+`UVWWVLS()` (`UDFMSCal::setupWvls`+`toWvls`) scale the STORED `UVW`
+column by the row's spw reference/channel frequency divided by `c`
+(`itsWavel[spw] = refFreq/c`, confirmed via `itsTmpVector *=
+itsWavel[...]` to have units of 1/metre, so `uvw_metres * itsWavel` is
+`uvw_metres / wavelength_metres` — "uvw in units of wavelengths").
+`UVWJ2000()`/`UVWAPP()` (`ColType NEWUVW`, the ctor's second int arg
+selects `asApp` in `getNewUVW`) and their `*WVL(S)` siblings are the
+same per-baseline computation `mscal.uvw_j2000()` already does (Phase
+137's `_mvuvw_construct`), with `UVWAPP` adding one more step:
+`getNewUVW`'s `asApp` branch converts the freshly-built J2000 `Muvw`
+via `Muvw::Convert(..., Muvw::Ref(Muvw::APP,...))` — i.e.
+`measconvert(::MuvW{J2000}, APP; frame)` (Phase 75) applied to the
+J2000 baseline uvw. Also found: `UVWJ2000()`/`UVWAPP()` (and their
+`*WVL(S)` siblings) DO take casacore's usual optional direction
+argument (`setupDir` — they are not in `setup()`'s
+`{STOKES,SELECTION,GETVALUE,UVWWVL,UVWWVLS}` exclusion list, unlike the
+wvl-only pair, which take none), so `mscal.uvw_j2000()` gained that too
+(it previously always used `FIELD.PHASE_DIR` unconditionally, since it
+predates this investigation) — a pre-existing test asserting
+`mscal.uvw_j2000('SUN')` *throws* was corrected to assert it now works.
+
+A shared `_uvw_j2000_cols3`/`_uvw_j2000_row` pair (factored out of the
+Phase 137 `uvw_j2000` branch, now reused by the wvl siblings) memoizes
+the per-baseline ITRF→J2000 linear map per (direction, TIME) — valid
+because that whole hop (an `MBaseline` rotation composed with `MVuvw`'s
+own construction) genuinely is one consistent linear rotation applied
+to the antenna-difference vector, so converting 3 orthonormal ITRF
+basis vectors once and recombining linearly with the real baseline
+gives the exact same answer as converting the baseline directly.
+
+**A real bug, found while live-verifying `uvwapp()` against real
+casacore for the first time**: an initial `_uvw_app_cols3` implementation
+tried to reuse that SAME "convert 3 basis columns, recombine linearly"
+trick for the J2000→APP step — but real casacore's `MCuvw::
+toPole`/`fromPole` is documented as a pure rotation, while THIS
+package's own `measconvert(::MuvW/::MBaseline, APP; frame)` (Phase 75)
+composes through `measconvert(::MDirection, APP; frame)`, whose
+J2000→APP step applies annual/diurnal ABERRATION — a direction-
+dependent additive shift, not a fixed rotation matrix. Applying that
+conversion independently to 3 basis vectors pointing in very different
+sky directions, then linearly recombining, does NOT reconstruct the
+same result as converting the actual combined baseline vector directly
+— caught immediately by an internal self-consistency check
+(`hypot(uvwapp()) ≈ hypot(uvw_j2000())`, expected exact to float
+precision for a pure rotation) failing at ~1e-5 relative. Fixed by
+computing `uvwapp()` via one direct `measconvert` call per row on the
+actual J2000 baseline vector (`_uvw_app_row`, no cols3 memoization for
+this step) — mathematically correct regardless of whether the
+underlying conversion is a pure rotation or not, since `MuvW`'s own
+construction explicitly preserves the input magnitude through the
+`MBaseline` step (`r*ux,r*uy,r*uz` with `r` unchanged).
+
+Live-verified against real casacore (a sweep over 11 rows spanning
+~130 m to ~7200 m baselines): `wvl`/`wvls` (a pure scalar scaling of
+the stored `UVW` column, no SOFA involved) match to float precision;
+`uj`/`ujwvl(s)` match to ~3e-5–7.5e-5 relative (the same SOFA-vs-
+casacore ephemeris scale seen elsewhere in this codebase's frequency/
+direction cross-checks); `app`/`appwvl(s)` — even after the cols3 fix
+— run measurably higher and more variable, ~4e-5–1.8e-4 relative, a
+genuine architectural difference (this package's APP conversion
+includes aberration; real casacore's uvw-specific one does not), not a
+further ephemeris-precision effect, documented explicitly rather than
+papered over with a looser blanket tolerance.
+
+New testset "TaQL-lite — mscal.*wvl* wavelength-scaled uvw family
+(Phase 196)" (66 assertions: structural + internal-consistency checks
+for all 7 new functions, the direction-argument extension, and the
+real-TaQL cross-check above); corrected the stale
+`mscal.uvw_j2000('SUN')`-throws assertion in the existing parser-unit
+testset. Standalone `taql_mscal_tests.jl` (plus `measures_tests.jl`,
+which it depends on) green in full (1133/1133), no regressions.

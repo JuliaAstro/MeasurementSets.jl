@@ -24,14 +24,46 @@
 # registered) -- this package's suffix-less `mscal.pa()` (an "array-
 # centre parallactic angle", added for symmetry with `ha`/`azel`/…) is
 # a MeasurementSets-only extension with no real casacore counterpart,
-# not a divergence from one; and the wavelength-scaled uvw variants
-# (`UVWWVL`/`UVWWVLS`/`UVWJ2000WVL(S)`/`UVWAPP(WVL(S))` -- the last also
-# in the APP frame rather than J2000) are a genuine, real, unimplemented
-# gap, left for a future phase.
+# not a divergence from one.
+#
+# Phase 196 (the wavelength-scaled uvw family Phase 163 flagged as a
+# real, unimplemented gap): `UVWWVL()`/`UVWWVLS()` scale the STORED
+# `UVW` column by the row's spw reference/channel frequency divided by
+# c (`UDFMSCal::setupWvls`+`toWvls`, `UDFMSCal.cc:315-347,702-715`) --
+# `itsWavel[spw] = refFreq/c` has units of 1/metre, so `uvw_metres *
+# itsWavel` really is `uvw_metres / wavelength_metres`, i.e. "uvw in
+# units of wavelengths"; confirmed via `itsTmpVector *=
+# itsWavel[...]`, `.cc:861-862`. `UVWJ2000()`/`UVWAPP()` (`ColType
+# NEWUVW`, arg 0/1 selects `asApp` in `getNewUVW`, `.cc:111-142`) and
+# their `*WVL(S)` siblings are the SAME per-baseline computation as
+# `mscal.uvw_j2000()` (Phase 137's `_mvuvw_construct`), with `UVWAPP`
+# adding one more step: `getNewUVW`'s `asApp` branch converts the
+# freshly-built J2000 `Muvw` via `Muvw::Convert(...,
+# Muvw::Ref(Muvw::APP,...))` -- i.e. `measconvert(::MuvW{J2000}, APP;
+# frame)` (Phase 75) applied to the J2000 baseline uvw. **Unlike** the
+# ITRF->J2000 step, this is applied to the ACTUAL differenced baseline
+# vector directly, NOT decomposed into 3 basis columns and recombined
+# linearly -- real casacore's own `MCuvw::toPole`/`fromPole` is a pure
+# rotation (so per-antenna-convert-then-difference and difference-
+# then-convert would agree exactly there), but THIS package's own
+# `measconvert(::MuvW, APP; frame)` composes through `measconvert(::
+# MDirection, APP; frame)`, whose J2000->APP step includes annual/
+# diurnal ABERRATION -- a direction-dependent additive shift, not a
+# fixed rotation matrix -- so the two orderings do NOT agree exactly
+# here (found live: the basis-column version broke length preservation
+# by ~1e-5 relative). Unlike the wvl-only pair, `UVWJ2000`/`UVWAPP` (and
+# their wvl siblings) DO take casacore's usual optional direction
+# argument (`setupDir`, since they are NOT in `setup()`'s
+# `{STOKES,SELECTION,GETVALUE,UVWWVL,UVWWVLS}` exclusion list) --
+# `mscal.uvw_j2000()` gained that too here (it previously always used
+# `FIELD.PHASE_DIR`, ignoring any argument, since it predates this
+# investigation).
 
 struct TQLMScal <: TQLExpr
     fn::String        # "ha"/"ha1"/"ha2" "hadec*" "azel*" "az*"/"el*"
                       # "pa*" "last*" "itrf" "uvw_j2000"
+                      # "uvwwvl"/"uvwwvls" "uvwj2000wvl"/"uvwj2000wvls"
+                      # "uvwapp" "uvwappwvl"/"uvwappwvls" (Phase 196)
                       # "delay"/"delay1"/"delay2" (delay* defaults to
                       # FIELD.DELAY_DIR, everything else to PHASE_DIR)
                       # "riseset[1|2]:<elev0>" (Phase 105)
@@ -47,13 +79,17 @@ _mscal_key(e::TQLMScal) = "mscal." * e.fn * (isempty(e.dir) ? "" : "::" * e.dir)
 const _MSCAL_DIR_FUNCS = Set([
     "ha", "ha1", "ha2", "hadec", "hadec1", "hadec2",
     "azel", "azel1", "azel2", "az1", "az2", "el1", "el2",
-    "pa", "pa1", "pa2", "itrf", "delay", "delay1", "delay2"])
+    "pa", "pa1", "pa2", "itrf", "delay", "delay1", "delay2",
+    "uvw_j2000", "uvwj2000wvl", "uvwj2000wvls",
+    "uvwapp", "uvwappwvl", "uvwappwvls"])
 
 const _MSCAL_FUNCS = Set([
     "ha", "ha1", "ha2", "hadec", "hadec1", "hadec2",
     "azel", "azel1", "azel2", "az1", "az2", "el1", "el2",
     "pa", "pa1", "pa2", "last", "last1", "last2",
-    "itrf", "uvw_j2000", "delay", "delay1", "delay2"])
+    "itrf", "uvw_j2000", "delay", "delay1", "delay2",
+    "uvwwvl", "uvwwvls", "uvwj2000wvl", "uvwj2000wvls",
+    "uvwapp", "uvwappwvl", "uvwappwvls"])
 
 _tqleval(e::TQLMScal, cols, i) = cols[_mscal_key(e)][i]
 _geval(e::TQLMScal, cols, g)   = cols[_mscal_key(e)][g[1]]
@@ -192,7 +228,8 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         "mscal.* needs a MAIN table with ANTENNA1, FIELD_ID and TIME columns")
     bases = [first(_mscal_split_dir(f)) for f in fns]
     need2 = any(f -> endswith(f, "2") || startswith(f, "delay") || f == "uvw_j2000" ||
-                     startswith(f, "pbresponsebl:") || startswith(f, "riseset2:"), bases)
+                     startswith(f, "pbresponsebl:") || startswith(f, "riseset2:") ||
+                     startswith(f, "uvwj2000wvl") || startswith(f, "uvwapp"), bases)
     (need2 && !("ANTENNA2" in cn)) && error(
         "mscal.* needs an ANTENNA2 column for a `*2` / delay function")
 
@@ -256,6 +293,26 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         end
         p
     end
+
+    # Phase 196: `*wvl*` functions scale a uvw (metres) into wavelengths
+    # via the row's spw reference/channel frequency / c
+    # (`itsWavel`/`itsWavels`, `UDFMSCal::setupWvls`).
+    needwvl = any(f -> f in ("uvwwvl", "uvwwvls", "uvwj2000wvl", "uvwj2000wvls",
+                             "uvwappwvl", "uvwappwvls"), bases)
+    local ddid, dd2spw, wvl_reff, wvl_chan
+    if needwvl
+        (haskey(subs, "DATA_DESCRIPTION") && haskey(subs, "SPECTRAL_WINDOW")) || error(
+            "mscal.*wvl*: needs DATA_DESCRIPTION + SPECTRAL_WINDOW subtables")
+        ddid = Int.(column(t, "DATA_DESC_ID")[:])
+        dd2spw = Int.(column(readtable(subs["DATA_DESCRIPTION"]), "SPECTRAL_WINDOW_ID")[:])
+        spwtab = readtable(subs["SPECTRAL_WINDOW"])
+        wvl_reff = Float64.(column(spwtab, "REF_FREQUENCY")[:]) ./ C_LIGHT
+        wvl_chan = [Float64.(v) ./ C_LIGHT for v in column(spwtab, "CHAN_FREQ")[:]]
+    end
+    _wvlfac(i) = wvl_reff[dd2spw[ddid[i] + 1] + 1]
+    _wvlvec(i) = wvl_chan[dd2spw[ddid[i] + 1] + 1]
+    _towvls(u::AbstractVector, wv::AbstractVector) = [u[j] * wv[k] for j in 1:3, k in eachindex(wv)]
+
     fdir = Dict{Int,Any}()                            # static field id -> J2000 direction
     fdir_t = Dict{Tuple{Int,Float64},Any}()           # (moving field, TIME) -> J2000
     feph = Dict{Int,Any}()                            # field id -> Ephemeris | nothing
@@ -425,6 +482,59 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
         end
     end
 
+    # Phase 196 (previously inlined in the `uvw_j2000` branch, now
+    # shared with `uvwj2000wvl(s)`/`uvwapp*`): the per-baseline linear
+    # map from an arbitrary-origin ITRF baseline to J2000 uvw -- rotate
+    # each of the 3 ITRF unit vectors to J2000 (`MBaseline`, a pure
+    # rotation) and construct via `MVuvw`'s own convention
+    # (`_mvuvw_construct`); apply to `antpos[a2]-antpos[a1]` (the common
+    # origin cancels). Memoized per (direction key, TIME) -- unchanged
+    # across the whole row for a fixed direction and epoch.
+    uvwmemo = Dict{Tuple{Any,Float64},NTuple{3,NTuple{3,Float64}}}()
+    refpos = antpos[1]
+    function _uvw_j2000_cols3(dir::AbstractString, i::Int)
+        dj, dkey = _djfor(dir, i)
+        get!(uvwmemo, (dkey, tsec[i])) do
+            fr = MeasFrame(epoch = epochs[i], position = refpos, direction = dj)
+            map(((x, y, z),) -> begin
+                    bj = measconvert(MBaseline{ITRF}(x, y, z), J2000; frame = fr)
+                    _mvuvw_construct(_pvec(bj), dj)
+                end,
+                ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+        end
+    end
+    function _uvw_j2000_row(dir::AbstractString, i::Int)
+        cols3 = _uvw_j2000_cols3(dir, i)
+        d = _pvec(antpos[a2[i] + 1]) .- _pvec(antpos[a1[i] + 1])
+        [cols3[1][k] * d[1] + cols3[2][k] * d[2] + cols3[3][k] * d[3] for k in 1:3]
+    end
+    # `UVWAPP`: `getNewUVW`'s `asApp` branch converts the freshly-built
+    # J2000 `Muvw` via `Muvw::Convert(..., APP)`. Real casacore's
+    # `MCuvw::toPole`/`fromPole` is itself a pure rotation -- but
+    # unlike the ITRF->J2000 hop above, THIS package's own
+    # `measconvert(::MuvW/::MBaseline, ..., APP; frame)` (Phase 75)
+    # composes through `measconvert(::MDirection, APP; frame)`, whose
+    # J2000->APP step applies annual/diurnal ABERRATION -- a direction-
+    # dependent additive shift, not a fixed rotation matrix. So the
+    # "convert 3 orthonormal basis columns separately, then recombine
+    # linearly with the real baseline's components" trick used above
+    # (valid there because ITRF->J2000 genuinely IS one consistent
+    # rotation applied to the whole triple) does NOT carry over here --
+    # found live: it broke length preservation by ~1e-5 relative (a
+    # `hypot(uvwapp) ≈ hypot(uvw_j2000)` self-consistency check failing
+    # at rtol=1e-9). Fixed by converting the ACTUAL per-row baseline
+    # vector directly (one `measconvert` per row, no cols3 memo) --
+    # `MuvW{B}(...)`'s own construction explicitly preserves the input
+    # magnitude through the `MBaseline` step (`r*ux,r*uy,r*uz` with `r`
+    # unchanged), so THIS path is exactly length-preserving.
+    function _uvw_app_row(dir::AbstractString, i::Int)
+        dj, _ = _djfor(dir, i)
+        u = _uvw_j2000_row(dir, i)
+        fr = MeasFrame(epoch = epochs[i], position = refpos, direction = dj)
+        a = measconvert(MuvW{J2000}(u[1], u[2], u[3]), APP; frame = fr)
+        [a.u, a.v, a.w]
+    end
+
     out = Dict{String,AbstractVector}()
     for spec in fns
         f, dir = _mscal_split_dir(spec)
@@ -476,20 +586,8 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
             # Phase 136): real casacore's `mscal.uvw_j2000()`
             # (`MSCalEngine::getNewUVW`) does NOT transform the stored
             # UVW column at all -- it recomputes uvw fresh from the
-            # ANTENNA POSITIONS: rotate each antenna's ITRF baseline
-            # (from an arbitrary common origin -- casacore uses antenna
-            # 0) to J2000 via a pure `MBaseline` rotation, construct a
-            # per-antenna uvw via `MVuvw`'s OWN convention
-            # (`_mvuvw_construct`, NOT `MCuvw::toPole`/`fromPole` --
-            # genuinely different rotation bases, confirmed by direct
-            # numeric comparison against `casa/Quanta/{RotMatrix,
-            # MVuvw}.cc`), then differences `ant2 - ant1`. Both the
-            # `MBaseline` rotation and the `MVuvw` construction are
-            # linear in the baseline vector, so the common origin
-            # cancels in the difference and this collapses to one
-            # combined linear map (memoized per (field,TIME), like the
-            # old code's 3x3-matrix trick) applied directly to
-            # `antpos[a2]-antpos[a1]`. **Note**: this genuinely differs
+            # ANTENNA POSITIONS (see `_uvw_j2000_row`'s comment above
+            # for the full derivation). **Note**: this genuinely differs
             # in SIGN from the *stored* UVW column's own convention on a
             # real MS (confirmed on the sample fixture: stored UVW's `w`
             # matches `dot(dir, ap1-ap2)`, i.e. ANTENNA1-ANTENNA2, while
@@ -498,24 +596,23 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
             # data and `NewMSSimulator`'s simulated output, not a bug on
             # either side; `mscal.uvw_j2000()` matches `getNewUVW`
             # exactly, as it must to agree with real casacore.
-            umemo = Dict{Tuple{Int,Float64},NTuple{3,NTuple{3,Float64}}}()
-            refpos = antpos[1]
-            v = Vector{Vector{Float64}}(undef, n)
-            for i in 1:n
-                cols3 = get!(umemo, (fid[i], tsec[i])) do
-                    dj = _fielddir(fid[i], i)
-                    fr = MeasFrame(epoch = epochs[i], position = refpos, direction = dj)
-                    map(((x, y, z),) -> begin
-                            bj = measconvert(MBaseline{ITRF}(x, y, z), J2000; frame = fr)
-                            _mvuvw_construct(_pvec(bj), dj)
-                        end,
-                        ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
-                end
-                d = _pvec(antpos[a2[i] + 1]) .- _pvec(antpos[a1[i] + 1])
-                v[i] = [cols3[1][k] * d[1] + cols3[2][k] * d[2] + cols3[3][k] * d[3]
-                        for k in 1:3]
-            end
-            out[_mscal_key(spec)] = v
+            out[_mscal_key(spec)] = [_uvw_j2000_row(dir, i) for i in 1:n]
+        elseif f == "uvwwvl"
+            uvw = column(t, "UVW")[:]
+            out[_mscal_key(spec)] = [collect(Float64, uvw[i]) .* _wvlfac(i) for i in 1:n]
+        elseif f == "uvwwvls"
+            uvw = column(t, "UVW")[:]
+            out[_mscal_key(spec)] = [_towvls(collect(Float64, uvw[i]), _wvlvec(i)) for i in 1:n]
+        elseif f == "uvwj2000wvl"
+            out[_mscal_key(spec)] = [_uvw_j2000_row(dir, i) .* _wvlfac(i) for i in 1:n]
+        elseif f == "uvwj2000wvls"
+            out[_mscal_key(spec)] = [_towvls(_uvw_j2000_row(dir, i), _wvlvec(i)) for i in 1:n]
+        elseif f == "uvwapp"
+            out[_mscal_key(spec)] = [_uvw_app_row(dir, i) for i in 1:n]
+        elseif f == "uvwappwvl"
+            out[_mscal_key(spec)] = [_uvw_app_row(dir, i) .* _wvlfac(i) for i in 1:n]
+        elseif f == "uvwappwvls"
+            out[_mscal_key(spec)] = [_towvls(_uvw_app_row(dir, i), _wvlvec(i)) for i in 1:n]
         elseif startswith(f, "hadec")
             out[_mscal_key(spec)] = [collect(_cache(_antid(f, i), dir, i).hadec) for i in 1:n]
         elseif startswith(f, "azel")
