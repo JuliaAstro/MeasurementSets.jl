@@ -5945,3 +5945,64 @@ targeted `int()`/`integer()` testset (7 assertions) both pass — the
 fix genuinely resolves the CI failure, not just a local ARM64
 rationalization. Standalone `taql_query_tests.jl` unaffected on ARM64
 (still 0 failures, full file).
+
+### Phase 193 — the Phase 192 finding recurs in a different corner:
+### every date/time formatting function threw on a NaN/±Inf argument;
+### real casacore's own NaN handling turns out to be self-inconsistent
+
+Investigated the array-reshaping function family (`array`/`transpose`/
+`reversearray`/`diagonal`/`resize`/`flatten`) from Phase 190's own
+"remaining names" list, and found it genuinely out of scope for a
+single phase: casacore's own argument-parsing machinery for these
+(`getOrder`/`getReverseAxes`/`getDiagonalArg`/`getAlternate`) threads a
+C-order-vs-Fortran-order `STYLE` toggle and a 0/1-based `origin_p`
+through every one of them, plumbing this package's TaQL-lite engine
+has no concept of at all — a real, substantial future feature, not a
+quick add. Flagged for a dedicated phase; not implemented here.
+
+Redirected to the standing methodology note this session's own Phase
+192 finding just added: "a live cross-check verified on only one
+architecture can itself be wrong — check whether a formula's raw
+numeric conversion is architecture-dependent UB before chasing bit-for-
+bit equality." Searched `src/taql/functions.jl` for the SAME risk
+shape (a `round(Int, ...)`/`Int64(...)` call fed directly by a
+column/expression value, not just general float math) and found the
+entire date/time formatting family shares it: `_tql_dt_of` (the shared
+choke point for `year`/`month`/`day`/`week`/`weekday`/`dow`/`cdate`/
+`cmonth`/`cdow`/`cweekday`/`ctod`/`cdatetime`) plus `_tql_hms`/
+`_tql_dms`/`_tql_time_of_day_str` (used by `hms`/`dms`/`hdms`/`ctime`)
+all did a raw `round(Int, ...)` with no NaN/Inf guard — live-verified
+on this ARM64 Mac: `hms(0.0/0.0)` threw `InexactError: Int64(NaN)`,
+and likewise for every one of the twelve functions above.
+
+**Live-verifying real casacore's own NaN behavior for a fix, following
+the exact Phase 192 discipline, immediately surfaced why chasing it
+bit-for-bit is the wrong target here too — but for a NEW reason this
+time: real casacore's own answer is self-INCONSISTENT, not just
+architecture-dependent.** `cdate(0.0/0.0) == "17-Nov-1858"` — exactly
+the MJD epoch (MJD 0) — while `year(0.0/0.0) == -4712` and
+`month(0.0/0.0) == 1` don't correspond to that date (or to each other)
+at all, and `hms`/`dms`/`ctime` embed a literal `"nan"` substring
+inside an otherwise fixed-width numeric field
+(`hms(0.0/0.0) == "00h00m000nan"`, `dms(1.0/0.0) == "+***d00m000nan"` —
+the `"***"` is a genuine, DEFINED "field overflow" sentinel in
+`MVTime::print`, but the trailing `"000nan"` is not). Different
+`funcName` branches clearly hit different, mutually-contradictory
+undefined-behavior manifestations within the SAME casacore build — not
+a single "real" oracle value to replicate at all, even setting the
+Phase 192 cross-architecture question aside entirely.
+
+Fixed by giving this package its own well-defined, portable,
+self-CONSISTENT convention instead of chasing any of that: a non-finite
+argument to any of the twelve `_tql_dt_of`-based functions, or to
+`hms`/`dms`/`ctime`/`hdms`, degrades to the MJD epoch itself
+(`1858-11-17T00:00:00.000` / an all-zero `"00h00m00.000"` /
+`"+000d00m00.000"` / `"00:00:00.000"`) — crash-free, predictable, and
+internally consistent (unlike real casacore's own answer for the same
+input). `mjd()`/`date()`/`time()` already propagated a non-finite value
+cleanly with no `round` in their path and needed no change — confirmed
+unchanged. New testset "Phase 193 — date/time functions don't throw on
+a non-finite argument" (66 assertions, all twelve `_tql_dt_of`-based
+functions plus `hms`/`dms`/`ctime`/`hdms` plus the three already-fine
+pass-through functions, across NaN/+Inf/-Inf/`sqrt(-1)`). Standalone
+`taql_query_tests.jl` green in full, no regressions.

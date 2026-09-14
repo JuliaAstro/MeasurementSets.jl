@@ -178,7 +178,27 @@ _tql_replaceunmasked(x, val2) = _tql_replmasked(x, val2, false)
 # `isless`, ORDER BY all keep working. casacore's `datetime`/`mjd`/... are
 # built-in (`casa/Quanta` only). `Dates` (stdlib) does the parsing.
 _tql_mjd_of(dt::Dates.DateTime) = (dt - MJD_EPOCH) / Dates.Millisecond(MSEC_PER_DAY)
-_tql_dt_of(m::Real) = MJD_EPOCH + Dates.Millisecond(round(Int, float(m) * MSEC_PER_DAY))
+# A NaN/±Inf MJD used to throw a raw `InexactError` here (`round(Int,
+# NaN*...)`) -- real casacore's own date/time functions never throw on
+# one (Phase 193, continuing the Phase 192 finding into this file's
+# other corner). But casacore's OWN NaN handling turns out to be
+# genuinely inconsistent WITHIN ITSELF, not just across architectures
+# -- live-verified: `cdate(0.0/0.0) == "17-Nov-1858"` (the MJD EPOCH
+# itself) while `year(0.0/0.0) == -4712` and `month(0.0/0.0) == 1`
+# (neither matches 1858-11-17 at all), and `hms`/`dms`/`ctime` embed a
+# literal "nan" substring inside a fixed-width field
+# (`hms(0.0/0.0) == "00h00m000nan"`) -- clearly undefined-behavior
+# noise from raw-cast/no-cast code-path differences between casacore's
+# own functions, not a single "real" target to bit-match (the exact
+# shape of the Phase 192 finding, recurring in a different corner). So
+# this package picks its OWN well-defined, portable, documented
+# fallback instead of chasing any of that: a non-finite MJD degrades
+# to the MJD EPOCH itself (`1858-11-17T00:00:00.000`, MJD 0) --
+# matching the one casacore answer (`cdate`'s) that's actually
+# self-consistent, and giving every date/time function a single,
+# predictable, crash-free answer for a NaN/Inf input.
+_tql_dt_of(m::Real) = isfinite(m) ?
+    MJD_EPOCH + Dates.Millisecond(round(Int, float(m) * MSEC_PER_DAY)) : MJD_EPOCH
 
 const _TQL_DT_FORMATS = (
     Dates.DateFormat("yyyy-mm-ddTHH:MM:SS.s"),
@@ -304,7 +324,16 @@ _pad2(n) = lpad(n, 2, '0')
 # neither of which `stringHMS` sets). The angle is quantised to
 # milliseconds/milliarcsec as an integer first so rounding never leaves
 # a `60` in a field.
+# A NaN/±Inf angle used to throw a raw `InexactError` here too (Phase
+# 193 -- same finding as `_tql_dt_of` above: real casacore's own
+# `hms`/`dms` embed a literal "nan"/"***" substring inside an
+# otherwise-fixed-width field for a non-finite input, which is
+# undefined-behavior noise, not a portable target -- see `_tql_dt_of`'s
+# comment). This package's own convention: a non-finite angle formats
+# as all-zero (`"00h00m00.000"` / `"+000d00m00.000"`), crash-free and
+# predictable.
 function _tql_hms(rad::Real)
+    isfinite(rad) || return "00h00m00.000"
     tms = mod(round(Int, mod(float(rad) * (12 / pi), 24) * 3_600_000), 24 * 3_600_000)
     h, r = divrem(tms, 3_600_000)
     m, r = divrem(r, 60_000)
@@ -312,6 +341,7 @@ function _tql_hms(rad::Real)
     string(_pad2(h), "h", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 function _tql_dms(rad::Real)
+    isfinite(rad) || return "+000d00m00.000"
     sgn = signbit(float(rad)) ? "-" : "+"
     tmas = round(Int, abs(float(rad)) * (180 / pi) * 3_600_000)
     d, r = divrem(tmas, 3_600_000)
@@ -343,8 +373,11 @@ _tql_hdms(v::AbstractArray) = [isodd(i) ? _tql_hms(v[i]) : _tql_dms(v[i]) for i 
 # digits, `casa/Quanta/MVTime.cc:366-434`'s `MVAngle::print` TIME
 # branch). Distinct from `_tql_hms` (which takes a *radian angle*, not
 # an MJD, and uses `h`/`m` letter separators): both quantise to
-# milliseconds first so rounding never leaves a `60` in a field.
+# milliseconds first so rounding never leaves a `60` in a field. A
+# non-finite `mjd` -- same Phase 193 finding as `_tql_hms`/`_tql_dms`
+# above -- degrades to the all-zero time rather than throwing.
 function _tql_time_of_day_str(mjd::Real)
+    isfinite(mjd) || return "00:00:00.000"
     frac = mod(float(mjd), 1.0)
     tms = mod(round(Int, frac * 24 * 3_600_000), 24 * 3_600_000)
     h, r = divrem(tms, 3_600_000)
