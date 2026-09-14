@@ -6340,3 +6340,50 @@ using `Test.collect_test_logs` to positively confirm zero warnings
 fire, not just that the eventual error is correct). Standalone
 `container_tests.jl` green (75/75), plus a broader `writer_tests.jl` +
 `edit_tests.jl` + `container_tests.jl` sweep together, no regressions.
+
+### Phase 200 — a fourth `mscal.time()` NaN/Inf crash corner: a literal `nan`/`inf` *in the WHERE-string spec itself*, not just a non-finite column value
+
+Continuing the Phase 192–195/128 standing methodology note (once one
+function in a corner has a "raw `Int(...)`/`round(Int,...)` on a value
+that can be NaN/Inf" bug shape, grep the rest of that corner for the
+same shape) — swept `src/taql/mscal.jl`'s date/time helpers once more
+for a spot Phase 194 hadn't covered. Phase 194 fixed `_mssel_time`'s
+*default-row TIME* (a column value) going non-finite; this phase found
+a completely independent reachability path through the *spec string
+itself*: `tryparse(Float64, "nan")` succeeds in Julia (and `"inf"` too),
+so a literal `mscal.time('nan~01/02')` — an ordinary WHERE-string typo
+or a copy-pasted placeholder, nothing to do with the underlying data —
+parses to a genuine `NaN`/`Inf` token value and used to crash the whole
+predicate two different ways:
+
+- `_mstime_incl_hi` (a `~`-range's upper bound, when it needs to
+  inherit missing calendar fields from the lower bound) fed a
+  non-finite `lo_secs` straight into `round(Int, lo_secs * 1000)` — the
+  by-now-familiar `InexactError`. Live-verified reachable via
+  `mscal.time('nan~01/02')` on an ordinary table with a perfectly
+  finite `TIME` column.
+- **A second, more fundamental site**, found by tracing the fix one
+  level deeper: `_mstime_secs` (the shared "fill wildcard fields from a
+  default calendar, then convert to seconds" helper every partial `Y/M/D`
+  token goes through) tests `fields[k] < 0` to decide whether a field is
+  a wildcard needing the default substituted in — but `NaN < 0` is
+  `false` in Julia, so a NaN field silently *survived* the substitution
+  meant to catch exactly this case and reached `Int(f[1])` unguarded.
+  Live-verified reachable via `mscal.time('nan/02')` alone (no range,
+  no default-row involvement at all — a bare partial token with one NaN
+  field is enough).
+
+Fixed both, same "degrade to a well-defined sentinel rather than crash"
+convention as Phases 193–195: `_mstime_incl_hi` now guards
+`isfinite(lo_secs)` before the `round`; `_mstime_secs`'s wildcard test
+became `fields[k] < 0 || !isfinite(fields[k])`, so a NaN/Inf field is
+treated exactly like an omitted/`*` field and falls back to the
+(always-finite) default calendar — giving a sensible resolved date
+rather than propagating `NaN` further, and strictly more useful than a
+NaN-sentinel degrade would have been here. New testset "TaQL-lite —
+mscal.time() doesn't throw on a NaN/Inf SPEC token (Phase 200)" (13
+assertions) covering both crash sites plus the wildcard-fallback
+behaviour (`>nan/02` legitimately matches every row, since the NaN day
+field falls back to the resolved default day). Standalone
+`taql_mscal_tests.jl` green in full (every existing testset, including
+the Phase 121/128/194 time-family ones), no regressions.

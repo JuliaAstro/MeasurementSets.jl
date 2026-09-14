@@ -1605,8 +1605,20 @@ function _mstime_fields(tok::AbstractString)
 end
 
 # fill -1 fields from `def` (a 6-tuple), then -> seconds since MJD 0.
+#
+# `fields[k] < 0` is how a wildcard/missing field ("`*`" or an omitted
+# `Y/M/D` component, `_mstime_fields`'s `_f`) is spelled -- but a field
+# can also be a genuine NaN, reachable through a literal like
+# `"nan/02"` (`tryparse(Float64, "nan")` succeeds in Julia) fed to
+# `_f`'s own `parse(Float64, x)`. `NaN < 0` is `false`, so that field
+# used to survive the substitution untouched and crash `Int(NaN)`
+# below (live-verified: `_mssel_time(t, "nan/02", ...)`) -- the same
+# Phase 192-195/200 `InexactError` shape, one field-level deeper than
+# `_mstime_incl_hi`'s own `lo_secs` guard. `!isfinite` catches it the
+# same way a wildcard is caught, falling back to `def` (always finite --
+# it only ever holds real `Dates.year`/etc. components).
 function _mstime_secs(fields, def)
-    f = ntuple(k -> fields[k] < 0 ? def[k] : fields[k], 6)
+    f = ntuple(k -> (fields[k] < 0 || !isfinite(fields[k])) ? def[k] : fields[k], 6)
     dt = Dates.DateTime(Int(f[1]), Int(f[2]), Int(f[3]), Int(f[4]), Int(f[5]),
                         Int(floor(f[6])), Int(round((f[6] - floor(f[6])) * 1000)))
     ((dt - MJD_EPOCH) / Dates.Millisecond(1)) / 1000
@@ -1679,10 +1691,21 @@ end
 
 # t1 of a `~` range: its wildcard/missing fields inherit from t0's
 # resolved calendar (casacore `copyDefaults`), not the MS default.
+#
+# `lo_secs` is only touched when `tok` itself is a *partial* (Y/M/D-
+# wildcard) token needing a calendar to fill in from -- an absolute
+# `:mjd` token (a bare number, or an ISO/dash-numeric date) returns
+# before ever reaching it, which is why a literal `nan~2020-01-01` spec
+# (Phase 200's own first probe) didn't crash. `nan~01/02` does: `lo_secs`
+# is NaN and the partial-token branch fed it straight into
+# `round(Int, lo_secs*1000)`, the same Phase 192/193/194 `InexactError`
+# shape one call site further out -- live-verified reachable via
+# `_mssel_time(t, "nan~01/02", ...)`. Same fix: a non-finite `lo_secs`
+# degrades to the MJD epoch instead of crashing the whole predicate.
 function _mstime_incl_hi(tok::AbstractString, lo_secs::Float64)
     k, v = _mstime_fields(tok)
     k === :mjd && return v * SEC_PER_DAY
-    d = MJD_EPOCH + Dates.Millisecond(round(Int, lo_secs * 1000))
+    d = MJD_EPOCH + Dates.Millisecond(isfinite(lo_secs) ? round(Int, lo_secs * 1000) : 0)
     _mstime_secs(v, (Dates.year(d), Dates.month(d), Dates.day(d),
                      Dates.hour(d), Dates.minute(d), Dates.second(d)))
 end

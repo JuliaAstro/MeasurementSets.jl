@@ -1448,6 +1448,35 @@ end
     @test MSv2._mssel_time(tt2, "2020/01/01", cn2, 2) == Bool[0, 0]   # neither +-Inf row matches a real date
 end
 
+@testset "TaQL-lite — mscal.time() doesn't throw on a NaN/Inf SPEC token (Phase 200)" begin
+    # Same Phase 192-195 shape, one call site further out than Phase 194
+    # (which guarded the *default-row TIME*): a `nan`/`inf` LITERAL
+    # written directly into the WHERE-string spec itself is a separate,
+    # independently reachable path — `tryparse(Float64, "nan")` succeeds
+    # in Julia, so `mscal.time('nan~01/02')` / `mscal.time('nan/02')`
+    # used to crash with a raw `InexactError` two calls deep
+    # (`_mstime_incl_hi`'s `round(Int, lo_secs*1000)`, and — the more
+    # fundamental site — `_mstime_secs`'s own `Int(f[1])` when a parsed
+    # field is NaN: `NaN < 0` is `false`, so the wildcard-substitution
+    # check that would normally catch a missing field never fired).
+    # Live-verified reachable via a direct table with an ordinary,
+    # finite TIME column (this is a spec-string bug, not a data bug).
+    dir = mktempdir(); p = joinpath(dir, "T")
+    write_table(p, "T", Pair{String,Any}["TIME" => [5.0e9, 5.0e9 + 10, 5.0e9 + 20]]; nrow = 3)
+    tt = readtable(p)
+    cn = Set(columnnames(tt))
+    for spec in ("nan~01/02", "inf~01/02", "nan~2020-01-01", "nan/02", "nan/02~03/04", ">nan/02")
+        r = MSv2._mssel_time(tt, spec, cn, 3)   # must not throw
+        @test r isa Vector{Bool}
+        @test length(r) == 3
+    end
+    # a NaN datepart field falls back to the resolved default calendar
+    # (the same wildcard-substitution path a bare omitted field takes),
+    # not to an all-false result — `>nan/02` (day=2, month=default) then
+    # legitimately matches every row whose TIME is at/after that day.
+    @test all(MSv2._mssel_time(tt, ">nan/02", cn, 3))
+end
+
 # Phase 128: `*` wildcard fields + the `N[t0~t1]` explicit edge-buffer
 # form. A live oracle is blocked (see the doc comment above
 # `_mssel_time` for the two independent reasons found — a real
