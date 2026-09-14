@@ -16,6 +16,25 @@ const U = Unitful
     @test n("Jy.m/s") == "Jy*m/s"
     @test n("") == "" && n("_") == "" && n(" ") == ""
     @test n("AE") == "AU" && n("UA") == "AU"
+    # Phase 197: "M0"/"S0" are casacore's own literal unit NAMES (solar
+    # mass -- `casa/Quanta/UnitMap4.cc`, `M0 := 1*S0`), not an implicit
+    # exponent -- found dead (the old digit-free token regex could never
+    # even SEE "M0" as a whole token to alias-substitute it) while
+    # checking casacore's own unit-string grammar directly.
+    @test n("M0") == "Msun" && n("S0") == "Msun"
+    # casacore's OWN general grammar: a bare digit run directly after a
+    # unit name (no `**`/`^`) is an implicit exponent (`UnitVal::power`,
+    # `casa/Quanta/UnitVal.cc`) -- "m2" == m², "cm3" == cm³ -- a real,
+    # broader gap the old regex (letters only) couldn't express at all.
+    @test n("m2") == "m^2" && n("cm3") == "cm^3" && n("hm2") == "hm^2"
+    @test n("m**2") == "m**2" && n("m^2") == "m^2"   # already explicit, untouched
+    # the underscore-prefixed squared-angle forms are a SEPARATE, still-
+    # unsupported casacore convention (`UnitMap5.cc`'s own literal
+    # "deg_2"/"arcmin_2"/"arcsec_2" names) -- not touched by the new
+    # digit rule (the digit here follows `_`, not a letter), pre-existing
+    # behavior unchanged: `deg` alias-substitutes on its own, "_2" is
+    # left for `UNITS_NO_JULIA_COUNTERPART`'s `:unsupported` handling.
+    @test n("deg_2") == "°_2"
 end
 
 @testset "units — extension loaded" begin
@@ -67,6 +86,14 @@ end
     @test up("_") == U.NoUnits && up("") == U.NoUnits
     # unsupported -> a clear, actionable error
     @test_throws ErrorException up("WU")
+    # Phase 197: "M0"/"S0" (solar mass) and the implicit-exponent
+    # grammar ("m2" == m², "cm3" == cm³)
+    @test U.dimension(up("M0")) == U.dimension(UnitfulAstro.Msun)
+    @test U.dimension(up("S0")) == U.dimension(UnitfulAstro.Msun)
+    @test up("M0") == up("S0")            # M0 := 1*S0 in casacore
+    @test U.dimension(up("m2")) == U.dimension(U.u"m^2")
+    @test U.dimension(up("cm3")) == U.dimension(U.u"cm^3")
+    @test U.dimension(up("hm2")) == U.dimension(U.u"hm^2")
 end
 
 @testset "units — UNITS_NO_JULIA_COUNTERPART" begin
@@ -99,6 +126,13 @@ end
     @test us(U.u"°") == "deg"
     @test us(U.u"arcsecond") == "arcsec"
     @test us(U.NoUnits) == ""
+    # Phase 197: `UnitfulAstro.Msun` prints as the SYMBOL "M⊙"
+    # (`string(Msun) == "M⊙"`), not the identifier name -- the general
+    # "atomic unit" heuristic below only ever checked `_UNIT_ALIASES_INV`
+    # for the STRING "Msun", so this unconditionally errored before
+    # (found live: no prior test exercised writing a solar-mass column).
+    @test us(UnitfulAstro.Msun) == "M0"
+    @test ext._ms_uparse(us(UnitfulAstro.Msun)) == UnitfulAstro.Msun
     # every emitted string re-parses to the same unit
     for u in (U.u"Hz", U.u"GHz", U.u"m", U.u"m/s", U.u"rad", U.u"°", U.u"arcsecond", U.u"Jy")
         @test MSv2._ms_ustring(u) |> ext._ms_uparse == u
@@ -128,4 +162,14 @@ end
     tab2 = joinpath(dir, "T2")
     write_table(tab2, "T2", Pair{String,Any}["F" => F]; nrow = 3, units = Dict("F" => "Hz"))
     @test columndesc(readtable(tab2), "F").keywords["QuantumUnits"] == ["Hz"]
+
+    # Phase 197: a Msun-typed column round-trips through write_table too
+    # (end-to-end coverage of the `_ms_ustring` fix above)
+    tab3 = joinpath(dir, "T3")
+    MASS = [1.0, 2.5, 4.0] .* UnitfulAstro.Msun
+    write_table(tab3, "T3", Pair{String,Any}["MASS" => MASS]; nrow = 3)
+    t3 = readtable(tab3)
+    @test columndesc(t3, "MASS").keywords["QuantumUnits"] == ["M0"]
+    @test columnunit(t3, "MASS") == UnitfulAstro.Msun
+    @test column(t3, "MASS")[:] == [1.0, 2.5, 4.0]
 end

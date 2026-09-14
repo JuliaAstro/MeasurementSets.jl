@@ -6167,3 +6167,80 @@ real-TaQL cross-check above); corrected the stale
 `mscal.uvw_j2000('SUN')`-throws assertion in the existing parser-unit
 testset. Standalone `taql_mscal_tests.jl` (plus `measures_tests.jl`,
 which it depends on) green in full (1133/1133), no regressions.
+
+### Phase 197 — two real bugs in `src/tables/units.jl`'s casacore↔Unitful
+### mapping, both dead code since Phase 65/70: `"M0"`/`"S0"` (solar mass)
+### were unreachable on read, and writing an `Msun`-unit column
+### unconditionally errored — plus a real, broader gap: casacore's own
+### implicit unit-exponent grammar (`"m2"` == m²) had no handling at all
+
+At the user's direction, swept `src/tables/` (not yet covered by the
+recent phase-by-phase bug hunt, which had been focused on `src/taql/`
+and `src/measures/`). Read `casa/Quanta/UnitVal.cc`/`UnitMap4.cc`
+directly, checking `_normalize_unit`'s token-substitution regex against
+casacore's own actual unit-string grammar.
+
+**Read-side bug 1**: `_UNIT_ALIASES` has an `"M0" => "Msun"` entry (M0
+being casacore's spelling of the solar mass unit — confirmed real,
+`casa/Quanta/UnitMap4.cc:107-111`), but `_normalize_unit`'s
+token-substitution regex was `r"[A-Za-z°µ%]+"` — **letters only, no
+digits** — so it could only ever match the bare letter `"M"` out of the
+string `"M0"`, never the whole two-character unit name. The alias was
+provably dead code since it was added: `_normalize_unit("M0")` returned
+`"M0"` unchanged, and `Unitful.uparse("M0")` (Unitful has no such
+symbol) would then fail with an unhelpful error — any real MS column
+tagged `QuantumUnits=["M0"]` (plausible for a simulation or derived
+catalog with a mass column) would have hit this. No existing test
+exercised `"M0"`/`Msun` at all, on either the read or write side.
+
+**A real, much broader read-side gap, found while investigating why the
+regex excludes digits at all**: casacore's `UnitVal::field`/`::power`
+(`casa/Quanta/UnitVal.cc:181-247`, read in full) show a genuine, general
+grammar feature this package had zero support for — a unit name
+immediately followed by a bare digit run, with **no** `**`/`^`
+separator, is an **implicit exponent**: `"m2"` parses as m², `"cm3"` as
+cm³, `"hm2"` as hm² — this is how casacore represents *any* squared/
+cubed unit compactly, not a fixed list of named units. (The one
+deliberate carve-out: the literal character `'0'` is explicitly
+whitelisted as a *name* character in `UnitVal::field`'s own `un2`
+regex, which is exactly why `"M0"`/`"S0"` are atomic unit names and not
+`M^0`/`S^0` — confirming `_UNIT_ALIASES`'s `"M0"` entry's own intent
+was correct, just unreachable.) Fixed `_normalize_unit` to: (1)
+substitute `"M0"`/`"S0"` (added — `S0` is casacore's more fundamental
+"solar mass" definition, `M0 := 1*S0`, previously entirely unmapped)
+as whole tokens *before* the generic rule, since digits are now in
+play; (2) insert Unitful's `^` before any remaining bare digit run
+directly following a letter/`°`/`µ`/`%` character. Confirmed the
+existing `"deg_2"`/`"arcmin_2"`/`"arcsec_2"` handling (a *different*
+casacore convention — real, separately-registered unit names,
+`UnitMap5.cc`, already correctly flagged `:unsupported` in
+`UNITS_NO_JULIA_COUNTERPART`) is untouched by the new rule, since the
+digit there follows an underscore, not a letter.
+
+**Write-side bug 2**, found live-verifying bug 1's fix end to end (the
+practically relevant direction — a `Vector{Quantity}` column with
+`Msun` units): `_ms_ustring(UnitfulAstro.Msun)` unconditionally raised
+"no known casacore spelling". Root cause: `string(UnitfulAstro.Msun)`
+prints the *symbol* `"M⊙"`, not the identifier `"Msun"` — the general
+"atomic unit" fallback path looks up `_UNIT_ALIASES_INV` by the printed
+string, which only had the key `"Msun"`, never `"M⊙"`. The codebase
+already has an established pattern for exactly this printed-symbol-vs-
+identifier-name mismatch (`"″" => "arcsec"`, `"′" => "arcmin"` — how
+`UnitfulAngles` prints arcsecond/arcminute) — followed it, adding
+`"M⊙" => "M0"` to `_UNIT_ALIASES_INV` rather than widening
+`_MS_USTRING_KNOWN`'s documented (compound-unit-only) scope. No prior
+test exercised writing a solar-mass-unit column either.
+
+Live-verified end to end: `_normalize_unit`/`_ms_uparse` for `"M0"`,
+`"S0"`, `"m2"`, `"cm3"`, `"hm2"` (dimension checks + `up("M0") ==
+up("S0")`); `_ms_ustring(Msun)` now returns `"M0"` and round-trips; a
+real `write_table`/`readtable` round-trip of an `Msun`-typed column
+(`QuantumUnits == ["M0"]`, `columnunit` reads back `Msun`, values
+unchanged). `m²`/`cm³` write-side round-tripping (`_ms_ustring` on a
+*computed* squared unit) is left as a documented, clearly-erroring gap
+— speculative (no real MS column plausibly needs it) and would need a
+separate, more general superscript-printing fix, out of scope here.
+Extended `test/units_tests.jl`'s existing testsets (12 new assertions
+across `_normalize_unit`, the casacore-vocabulary parse check, and
+`_ms_ustring`, plus a full `write_table`/`readtable` round-trip).
+Standalone `units_tests.jl` green in full (90/90), no regressions.
