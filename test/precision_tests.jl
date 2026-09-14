@@ -73,6 +73,34 @@ end
     @test MSv2._narrowtype(ComplexF64, BFloat16) === ComplexF64
 end
 
+# Phase 198: found live -- an invalid `precision=` on `column`/
+# `getcolumn`/`getcell` (a typo like `:hal` for `:half`) used to be
+# silently accepted as "no narrowing" instead of erroring, unlike the
+# identical check `readtable` already made on the same set of values.
+# `_narrowtarget`'s own three branches simply fell through to `nothing`
+# for anything they didn't recognize -- no validation at all. Fixed by
+# routing every `precision=` override through the same
+# `_normalize_precision` `readtable` uses.
+@testset "precision — column()/getcolumn()/getcell() validate precision= too (Phase 198)" begin
+    t = readtable(SAMPLE_MS)
+    # valid values still work identically to before
+    @test eltype(column(t, "DATA"; precision = :half)) == Matrix{ComplexF16}
+    @test eltype(column(t, "DATA"; precision = :full)) == Matrix{ComplexF32}
+    @test eltype(column(t, "DATA"; precision = Float32)) == Matrix{ComplexF32}   # alias for :full
+    @test eltype(column(t, "DATA"; precision = BFloat16)) == Matrix{Complex{BFloat16}}
+    # an invalid value now errors on every precision-accepting entry point
+    @test_throws ArgumentError column(t, "DATA"; precision = :hal)      # typo
+    @test_throws ArgumentError column(t, "DATA"; precision = :HALF)     # wrong case
+    @test_throws ArgumentError column(t, "DATA"; precision = Int32)
+    @test_throws ArgumentError getcolumn(t, "DATA"; precision = :bogus)
+    @test_throws ArgumentError getcell(t, "DATA", 1; precision = :bogus)
+    # propagates through a RefTable's MappedColumn (forwards to
+    # `column(::Table, …)`, so no separate fix was needed there)
+    rt = query(t, "ANTENNA1 == 0")
+    @test_throws ArgumentError column(rt, "DATA"; precision = :bogus)
+    @test_throws ArgumentError getcolumn(rt, "DATA"; precision = :bogus)
+end
+
 @testset "precision — MeasurementSet + views" begin
     ms  = MeasurementSet(SAMPLE_MS)
     msf = MeasurementSet(SAMPLE_MS; precision=:full)

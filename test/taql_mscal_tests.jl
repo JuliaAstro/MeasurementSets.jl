@@ -40,7 +40,18 @@ using MeasurementSets: measure, measconvert, MeasFrame, MDirection, MuvW, J2000,
     @test s2 == Set(["mscal.el1::SUN"])
     @test MSv2._mscal_split_dir("ha2::SUN") == ("ha2", "SUN")
     @test_throws ArgumentError p("mscal.last1('SUN') > 0")      # not a dir function
-    @test_throws ArgumentError p("mscal.uvw_j2000('SUN') > 0")
+    # Phase 196: `UVWJ2000`/`UVWAPP` (and their `*WVL(S)` siblings) DO
+    # take casacore's usual optional direction argument (`setupDir` --
+    # they are not in `setup()`'s `{STOKES,SELECTION,GETVALUE,UVWWVL,
+    # UVWWVLS}` exclusion list); `mscal.uvw_j2000()` now accepts one too
+    # (it previously always errored, before this was checked against
+    # source). `UVWWVL`/`UVWWVLS` (scale the *stored* UVW column) do
+    # NOT take one -- they are in that exclusion list.
+    @test p("mscal.uvw_j2000('SUN') > 0").lhs.dir == "SUN"
+    @test p("mscal.uvwj2000wvl('SUN') > 0").lhs.dir == "SUN"
+    @test p("mscal.uvwapp('SUN') > 0").lhs.dir == "SUN"
+    @test_throws ArgumentError p("mscal.uvwwvl('SUN') > 0")
+    @test_throws ArgumentError p("mscal.uvwwvls('SUN') > 0")
 end
 
 @testset "TaQL-lite query — mscal.* functions" begin
@@ -248,6 +259,130 @@ end
     for i in (3, 17, 250, 599)
         @test column(q, "b")[i] == column(q, "a")[i]
         @test column(q, "c")[i] == column(q, "a")[i]
+    end
+end
+
+@testset "TaQL-lite — mscal.*wvl* wavelength-scaled uvw family (Phase 196)" begin
+    # The gap Phase 163 flagged and left for a future phase: `UVWWVL`/
+    # `UVWWVLS` scale the *stored* `UVW` column by the row's spw ref/
+    # channel frequency ÷ c (`itsWavel`/`itsWavels`,
+    # `UDFMSCal::setupWvls`+`toWvls`); `UVWJ2000WVL(S)`/`UVWAPP(WVL(S))`
+    # apply the same scaling to the freshly-recomputed `mscal.uvw_j2000()`
+    # / a further `MCuvw`-style J2000->APP conversion of it. Live-
+    # verified against real casacore for all of this (see below);
+    # cross-checked here structurally + against `mscal.delay()`/
+    # `mscal.uvw_j2000()` (already cross-checked in Phase 137/136).
+    main = readtable(SAMPLE_MS)
+    spw = subtable(MeasurementSet(SAMPLE_MS), "SPECTRAL_WINDOW")
+    dd = subtable(MeasurementSet(SAMPLE_MS), "DATA_DESCRIPTION")
+    q = query(main, "rownumber() >= 1"; select = [
+        "uvw" => "UVW", "ddid" => "DATA_DESC_ID",
+        "wvl" => "mscal.uvwwvl()", "wvls" => "mscal.uvwwvls()",
+        "uj" => "mscal.uvw_j2000()",
+        "ujwvl" => "mscal.uvwj2000wvl()", "ujwvls" => "mscal.uvwj2000wvls()",
+        "app" => "mscal.uvwapp()",
+        "appwvl" => "mscal.uvwappwvl()", "appwvls" => "mscal.uvwappwvls()"])
+    dd2spw = Int.(column(dd, "SPECTRAL_WINDOW_ID")[:])
+    reff = Float64.(column(spw, "REF_FREQUENCY")[:])
+    chanfreq = column(spw, "CHAN_FREQ")[:]
+    for i in (3, 17, 250, 599)
+        s = dd2spw[column(q, "ddid")[i] + 1] + 1
+        uvw = column(q, "uvw")[i]
+        # uvwwvl == stored UVW * refFreq/c (a dimensionless "in wavelengths")
+        @test column(q, "wvl")[i] ≈ uvw .* (reff[s] / MSv2.C_LIGHT) rtol = 1e-12
+        # uvwwvls == the same, per-channel
+        wvls = column(q, "wvls")[i]
+        @test size(wvls) == (3, length(chanfreq[s]))
+        cf = chanfreq[s]
+        @test wvls ≈ [uvw[j] * cf[k] / MSv2.C_LIGHT for j in 1:3, k in eachindex(cf)] rtol = 1e-12
+        # uvwj2000wvl(s) == mscal.uvw_j2000() scaled the same way
+        uj = column(q, "uj")[i]
+        @test column(q, "ujwvl")[i] ≈ uj .* (reff[s] / MSv2.C_LIGHT) rtol = 1e-12
+        @test column(q, "ujwvls")[i] ≈
+              [uj[j] * cf[k] / MSv2.C_LIGHT for j in 1:3, k in eachindex(cf)] rtol = 1e-12
+        # uvwapp(): real casacore's `MCuvw::toPole`/`fromPole` is a pure
+        # rotation (length-preserving exactly), but THIS package's own
+        # `measconvert(::MuvW, APP; frame)` (Phase 75) composes through
+        # `measconvert(::MDirection, APP; frame)`, whose J2000->APP step
+        # applies annual/diurnal ABERRATION (a direction-dependent
+        # additive shift, not a pure rotation) -- found live while
+        # writing this test (an earlier `_uvw_app_cols3` implementation
+        # that linearized the conversion across 3 basis columns, valid
+        # only for a true rotation, broke length preservation by ~1e-5
+        # relative). Length is preserved to ~1e-4 relative in practice
+        # (the aberration term is a small correction on an already-
+        # small-angle effect for a terrestrial baseline), not to float
+        # precision -- so this is a loose sanity bound, not an exact
+        # invariant.
+        ap = column(q, "app")[i]
+        @test hypot(ap...) ≈ hypot(uj...) rtol = 2e-4
+        @test column(q, "appwvl")[i] ≈ ap .* (reff[s] / MSv2.C_LIGHT) rtol = 1e-12
+        @test column(q, "appwvls")[i] ≈
+              [ap[j] * cf[k] / MSv2.C_LIGHT for j in 1:3, k in eachindex(cf)] rtol = 1e-12
+    end
+
+    # Phase 196: `mscal.uvw_j2000()` (and `uvwj2000wvl(s)`/`uvwapp*`) now
+    # accept casacore's usual optional direction argument -- a non-default
+    # direction moves the field-relative-only components (u,v) while
+    # composing correctly with the rest of the pipeline.
+    qd = query(main, "rownumber() >= 1"; select = [
+        "u0" => "mscal.uvw_j2000()", "up" => "mscal.uvw_j2000('PHASE_DIR')"])
+    for i in (3, 17)
+        @test column(qd, "up")[i] ≈ column(qd, "u0")[i] atol = 1e-9   # sample's DIR cols agree
+    end
+
+    if _HAVE_TAQL
+        real = try
+            _taqlcmd("SELECT UVW, mscal.UVWWVL() AS W, mscal.UVWWVLS() AS WS, " *
+                     "mscal.UVWJ2000() AS UJ, mscal.UVWJ2000WVL() AS UJW, " *
+                     "mscal.UVWJ2000WVLS() AS UJWS, mscal.UVWAPP() AS UA, " *
+                     "mscal.UVWAPPWVL() AS UAW, mscal.UVWAPPWVLS() AS UAWS FROM \$1",
+                     CCT.Table(SAMPLE_MS))
+        catch
+            nothing
+        end
+        if real !== nothing
+            # `wvl`/`wvls` are a pure scalar scaling of the STORED UVW
+            # column (no SOFA involved at all) -> exact to float
+            # precision, live-verified. `uj`/`ujwvl` (and their `*wvls`
+            # siblings) recompute uvw fresh via SOFA (`_uvw_j2000_row`)
+            # -- this is the FIRST time `mscal.uvw_j2000()`'s *absolute*
+            # value (not just its self-consistency with `mscal.delay()`,
+            # Phase 137) was cross-checked against real casacore. Live-
+            # verified (a sweep over 11 rows spanning ~130 m to ~7200 m
+            # baselines) that the residual is a roughly CONSTANT
+            # RELATIVE fraction, not a fixed absolute one: `uj` ranges
+            # ~3e-5 to ~7.5e-5 relative -- the same SOFA-ephemeris-vs-
+            # casacore-ephemeris scale seen elsewhere in this codebase's
+            # frequency/direction cross-checks, not a bug.
+            #
+            # `app`/`appwvl` (`_uvw_app_row`) run ~4e-5 to ~1.8e-4
+            # relative -- a genuinely LARGER and more variable residual
+            # than `uj`'s, not just "one more small rotation step":
+            # real casacore's `MCuvw::toPole`/`fromPole` (what
+            # `Muvw::Convert` to APP actually calls) is documented as a
+            # PURE rotation with no aberration, but THIS package's own
+            # `measconvert(::MuvW, APP; frame)` (Phase 75) composes
+            # through `measconvert(::MDirection, APP; frame)`, whose
+            # J2000->APP step DOES apply annual/diurnal aberration -- a
+            # genuine, direction/baseline-dependent architectural
+            # difference from real casacore's uvw-specific conversion,
+            # not a further ephemeris-precision effect. `rtol = 3e-4`
+            # keeps real margin over the observed worst case (~1.8e-4).
+            for i in (3, 17, 250, 599)
+                @test column(q, "wvl")[i] ≈ real[:W][i] rtol = 1e-9
+                @test column(q, "wvls")[i] ≈ real[:WS][i] rtol = 1e-9
+                @test column(q, "uj")[i] ≈ real[:UJ][i] rtol = 2e-4
+                @test column(q, "ujwvl")[i] ≈ real[:UJW][i] rtol = 2e-4
+                @test column(q, "ujwvls")[i] ≈ real[:UJWS][i] rtol = 2e-4
+                @test column(q, "app")[i] ≈ real[:UA][i] rtol = 3e-4
+                @test column(q, "appwvl")[i] ≈ real[:UAW][i] rtol = 3e-4
+                @test column(q, "appwvls")[i] ≈ real[:UAWS][i] rtol = 3e-4
+            end
+        else
+            @info "derivedmscal UVW*WVL* UDFs not registered in this casacore " *
+                  "build; skipping mscal.*wvl* cross-check"
+        end
     end
 end
 

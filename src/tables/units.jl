@@ -23,7 +23,7 @@ const _UNIT_ALIASES = Dict{String,String}(
     "as"       => "arcsecond",        # casacore alias
     "arcmin"   => "arcminute",
     "AE"       => "AU", "UA" => "AU",  # casacore spellings of the astronomical unit
-    "M0"       => "Msun",
+    "M0"       => "Msun", "S0" => "Msun",  # both "solar mass" (M0 := 1*S0 in casacore)
     "Angstrom" => "angstrom",
     "deg"      => "°",                # UnitfulAngles spells degree as `°`
 )
@@ -33,14 +33,30 @@ const _UNIT_ALIASES = Dict{String,String}(
 
 Turn a casacore `QuantumUnits` string into one `Unitful.uparse` accepts:
 trim, `"." -> "*"` (casacore multiply), whole-token alias substitution,
-and map casacore's dimensionless markers (`""`, `" "`, `"_"`) to `""`.
+casacore's implicit trailing-digit exponent (`"m2"` == m², `"cm3"` ==
+cm³ — `UnitVal::power`, `casa/Quanta/UnitVal.cc`: a bare digit run with
+no `**`/`^` after a unit name is a power) rewritten to Unitful's `^`
+syntax, and casacore's dimensionless markers (`""`, `" "`, `"_"`)
+mapped to `""`.
 """
 function _normalize_unit(s::AbstractString)
     t = strip(String(s))
     (isempty(t) || t == "_" || t == "_2") && return ""
     t = replace(t, "." => "*")
-    # substitute whole tokens (letters/digits/°/µ runs) via the alias map
-    return replace(t, r"[A-Za-z°µ%]+" => m -> get(_UNIT_ALIASES, m, m))
+    # casacore's own carve-out (`UnitVal::field`'s `un2` char class
+    # explicitly whitelists the literal character '0', unlike any other
+    # digit): "M0"/"S0" are literal unit NAMES (solar mass), where the
+    # trailing "0" is part of the name, not an implicit exponent -- must
+    # run BEFORE the generic trailing-digit-exponent rule below, else
+    # it would turn them into the dimensionless nonsense `M^0`/`S^0`.
+    t = replace(t, r"\bM0\b" => "Msun", r"\bS0\b" => "Msun")
+    # substitute whole tokens (letters/°/µ/% runs) via the alias map --
+    # note: deliberately digit-free, so a genuine implicit-exponent
+    # suffix (handled next) is never mistaken for part of the name.
+    t = replace(t, r"[A-Za-z°µ%]+" => m -> get(_UNIT_ALIASES, m, m))
+    # casacore's implicit exponent: a unit name immediately followed by
+    # a bare digit run (no separator) is that unit raised to that power.
+    return replace(t, r"([A-Za-z°µ%])([0-9]+)" => s"\1^\2")
 end
 
 # `columnunit` / `qcolumn` get their real (table, name) methods from
@@ -123,7 +139,8 @@ const _UNIT_ALIASES_INV = Dict{String,String}(
     "arcsecond" => "arcsec", "arcminute" => "arcmin",
     "″" => "arcsec", "′" => "arcmin",        # how UnitfulAngles prints them
     "°" => "deg", "angstrom" => "Angstrom",
-    "percent" => "%", "permille" => "%%", "Msun" => "M0")
+    "percent" => "%", "permille" => "%%",
+    "Msun" => "M0", "M⊙" => "M0")            # "M⊙" is how UnitfulAstro prints it
 
 _ms_ustring(args...) = _unitful_load_hint()
 

@@ -96,12 +96,16 @@ function column(t::Table, name::AbstractString;
 end
 
 # resolve an effective precision setting + a column's Julia type to the
-# narrow scalar target (Float16 / BFloat16) or `nothing` (no narrowing)
+# narrow scalar target (Float16 / BFloat16) or `nothing` (no narrowing).
+# `_normalize_precision` validates `eff` -- an invalid value (a typo'd
+# `precision=` on `column`/`getcolumn`/`getcell`, not just `readtable`)
+# now errors clearly instead of silently returning `nothing` (no
+# narrowing) here.
 function _narrowtarget(eff, jt::Type)
-    (eff === :full || eff === Float32) && return nothing
+    eff = _normalize_precision(eff)
+    eff === :full && return nothing
     eff === :half && return jt === ComplexF32 ? Float16 : nothing
-    eff isa Type && jt in (Float32, ComplexF32) && return eff
-    return nothing
+    return jt in (Float32, ComplexF32) ? eff : nothing   # eff is Float16/BFloat16 here
 end
 
 Base.size(c::Column) = (c.table.rows,)

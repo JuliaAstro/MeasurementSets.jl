@@ -6086,3 +6086,199 @@ own defense-in-depth checked directly). Standalone `measures_tests.jl`
 (153 assertions total, incl. the 79-assertion `casatools` oracle
 cross-check) and `taql_query_tests.jl` + `taql_mscal_tests.jl` together
 all green, no regressions.
+
+### Phase 196 — the wavelength-scaled uvw family Phase 163 flagged as a
+### real, unimplemented gap: `mscal.uvwwvl()`/`uvwwvls()`,
+### `uvwj2000wvl()`/`uvwj2000wvls()`, `uvwapp()`/`uvwappwvl()`/
+### `uvwappwvls()` — and a real bug found while writing the live
+### cross-check for the last of these
+
+Continuing the phase-by-phase sweep. Read `derivedmscal/DerivedMC/
+{Register,UDFMSCal,MSCalEngine}.cc` directly for the wavelength-scaled
+uvw functions Phase 163 identified but left unimplemented. `UVWWVL()`/
+`UVWWVLS()` (`UDFMSCal::setupWvls`+`toWvls`) scale the STORED `UVW`
+column by the row's spw reference/channel frequency divided by `c`
+(`itsWavel[spw] = refFreq/c`, confirmed via `itsTmpVector *=
+itsWavel[...]` to have units of 1/metre, so `uvw_metres * itsWavel` is
+`uvw_metres / wavelength_metres` — "uvw in units of wavelengths").
+`UVWJ2000()`/`UVWAPP()` (`ColType NEWUVW`, the ctor's second int arg
+selects `asApp` in `getNewUVW`) and their `*WVL(S)` siblings are the
+same per-baseline computation `mscal.uvw_j2000()` already does (Phase
+137's `_mvuvw_construct`), with `UVWAPP` adding one more step:
+`getNewUVW`'s `asApp` branch converts the freshly-built J2000 `Muvw`
+via `Muvw::Convert(..., Muvw::Ref(Muvw::APP,...))` — i.e.
+`measconvert(::MuvW{J2000}, APP; frame)` (Phase 75) applied to the
+J2000 baseline uvw. Also found: `UVWJ2000()`/`UVWAPP()` (and their
+`*WVL(S)` siblings) DO take casacore's usual optional direction
+argument (`setupDir` — they are not in `setup()`'s
+`{STOKES,SELECTION,GETVALUE,UVWWVL,UVWWVLS}` exclusion list, unlike the
+wvl-only pair, which take none), so `mscal.uvw_j2000()` gained that too
+(it previously always used `FIELD.PHASE_DIR` unconditionally, since it
+predates this investigation) — a pre-existing test asserting
+`mscal.uvw_j2000('SUN')` *throws* was corrected to assert it now works.
+
+A shared `_uvw_j2000_cols3`/`_uvw_j2000_row` pair (factored out of the
+Phase 137 `uvw_j2000` branch, now reused by the wvl siblings) memoizes
+the per-baseline ITRF→J2000 linear map per (direction, TIME) — valid
+because that whole hop (an `MBaseline` rotation composed with `MVuvw`'s
+own construction) genuinely is one consistent linear rotation applied
+to the antenna-difference vector, so converting 3 orthonormal ITRF
+basis vectors once and recombining linearly with the real baseline
+gives the exact same answer as converting the baseline directly.
+
+**A real bug, found while live-verifying `uvwapp()` against real
+casacore for the first time**: an initial `_uvw_app_cols3` implementation
+tried to reuse that SAME "convert 3 basis columns, recombine linearly"
+trick for the J2000→APP step — but real casacore's `MCuvw::
+toPole`/`fromPole` is documented as a pure rotation, while THIS
+package's own `measconvert(::MuvW/::MBaseline, APP; frame)` (Phase 75)
+composes through `measconvert(::MDirection, APP; frame)`, whose
+J2000→APP step applies annual/diurnal ABERRATION — a direction-
+dependent additive shift, not a fixed rotation matrix. Applying that
+conversion independently to 3 basis vectors pointing in very different
+sky directions, then linearly recombining, does NOT reconstruct the
+same result as converting the actual combined baseline vector directly
+— caught immediately by an internal self-consistency check
+(`hypot(uvwapp()) ≈ hypot(uvw_j2000())`, expected exact to float
+precision for a pure rotation) failing at ~1e-5 relative. Fixed by
+computing `uvwapp()` via one direct `measconvert` call per row on the
+actual J2000 baseline vector (`_uvw_app_row`, no cols3 memoization for
+this step) — mathematically correct regardless of whether the
+underlying conversion is a pure rotation or not, since `MuvW`'s own
+construction explicitly preserves the input magnitude through the
+`MBaseline` step (`r*ux,r*uy,r*uz` with `r` unchanged).
+
+Live-verified against real casacore (a sweep over 11 rows spanning
+~130 m to ~7200 m baselines): `wvl`/`wvls` (a pure scalar scaling of
+the stored `UVW` column, no SOFA involved) match to float precision;
+`uj`/`ujwvl(s)` match to ~3e-5–7.5e-5 relative (the same SOFA-vs-
+casacore ephemeris scale seen elsewhere in this codebase's frequency/
+direction cross-checks); `app`/`appwvl(s)` — even after the cols3 fix
+— run measurably higher and more variable, ~4e-5–1.8e-4 relative, a
+genuine architectural difference (this package's APP conversion
+includes aberration; real casacore's uvw-specific one does not), not a
+further ephemeris-precision effect, documented explicitly rather than
+papered over with a looser blanket tolerance.
+
+New testset "TaQL-lite — mscal.*wvl* wavelength-scaled uvw family
+(Phase 196)" (66 assertions: structural + internal-consistency checks
+for all 7 new functions, the direction-argument extension, and the
+real-TaQL cross-check above); corrected the stale
+`mscal.uvw_j2000('SUN')`-throws assertion in the existing parser-unit
+testset. Standalone `taql_mscal_tests.jl` (plus `measures_tests.jl`,
+which it depends on) green in full (1133/1133), no regressions.
+
+### Phase 197 — two real bugs in `src/tables/units.jl`'s casacore↔Unitful
+### mapping, both dead code since Phase 65/70: `"M0"`/`"S0"` (solar mass)
+### were unreachable on read, and writing an `Msun`-unit column
+### unconditionally errored — plus a real, broader gap: casacore's own
+### implicit unit-exponent grammar (`"m2"` == m²) had no handling at all
+
+At the user's direction, swept `src/tables/` (not yet covered by the
+recent phase-by-phase bug hunt, which had been focused on `src/taql/`
+and `src/measures/`). Read `casa/Quanta/UnitVal.cc`/`UnitMap4.cc`
+directly, checking `_normalize_unit`'s token-substitution regex against
+casacore's own actual unit-string grammar.
+
+**Read-side bug 1**: `_UNIT_ALIASES` has an `"M0" => "Msun"` entry (M0
+being casacore's spelling of the solar mass unit — confirmed real,
+`casa/Quanta/UnitMap4.cc:107-111`), but `_normalize_unit`'s
+token-substitution regex was `r"[A-Za-z°µ%]+"` — **letters only, no
+digits** — so it could only ever match the bare letter `"M"` out of the
+string `"M0"`, never the whole two-character unit name. The alias was
+provably dead code since it was added: `_normalize_unit("M0")` returned
+`"M0"` unchanged, and `Unitful.uparse("M0")` (Unitful has no such
+symbol) would then fail with an unhelpful error — any real MS column
+tagged `QuantumUnits=["M0"]` (plausible for a simulation or derived
+catalog with a mass column) would have hit this. No existing test
+exercised `"M0"`/`Msun` at all, on either the read or write side.
+
+**A real, much broader read-side gap, found while investigating why the
+regex excludes digits at all**: casacore's `UnitVal::field`/`::power`
+(`casa/Quanta/UnitVal.cc:181-247`, read in full) show a genuine, general
+grammar feature this package had zero support for — a unit name
+immediately followed by a bare digit run, with **no** `**`/`^`
+separator, is an **implicit exponent**: `"m2"` parses as m², `"cm3"` as
+cm³, `"hm2"` as hm² — this is how casacore represents *any* squared/
+cubed unit compactly, not a fixed list of named units. (The one
+deliberate carve-out: the literal character `'0'` is explicitly
+whitelisted as a *name* character in `UnitVal::field`'s own `un2`
+regex, which is exactly why `"M0"`/`"S0"` are atomic unit names and not
+`M^0`/`S^0` — confirming `_UNIT_ALIASES`'s `"M0"` entry's own intent
+was correct, just unreachable.) Fixed `_normalize_unit` to: (1)
+substitute `"M0"`/`"S0"` (added — `S0` is casacore's more fundamental
+"solar mass" definition, `M0 := 1*S0`, previously entirely unmapped)
+as whole tokens *before* the generic rule, since digits are now in
+play; (2) insert Unitful's `^` before any remaining bare digit run
+directly following a letter/`°`/`µ`/`%` character. Confirmed the
+existing `"deg_2"`/`"arcmin_2"`/`"arcsec_2"` handling (a *different*
+casacore convention — real, separately-registered unit names,
+`UnitMap5.cc`, already correctly flagged `:unsupported` in
+`UNITS_NO_JULIA_COUNTERPART`) is untouched by the new rule, since the
+digit there follows an underscore, not a letter.
+
+**Write-side bug 2**, found live-verifying bug 1's fix end to end (the
+practically relevant direction — a `Vector{Quantity}` column with
+`Msun` units): `_ms_ustring(UnitfulAstro.Msun)` unconditionally raised
+"no known casacore spelling". Root cause: `string(UnitfulAstro.Msun)`
+prints the *symbol* `"M⊙"`, not the identifier `"Msun"` — the general
+"atomic unit" fallback path looks up `_UNIT_ALIASES_INV` by the printed
+string, which only had the key `"Msun"`, never `"M⊙"`. The codebase
+already has an established pattern for exactly this printed-symbol-vs-
+identifier-name mismatch (`"″" => "arcsec"`, `"′" => "arcmin"` — how
+`UnitfulAngles` prints arcsecond/arcminute) — followed it, adding
+`"M⊙" => "M0"` to `_UNIT_ALIASES_INV` rather than widening
+`_MS_USTRING_KNOWN`'s documented (compound-unit-only) scope. No prior
+test exercised writing a solar-mass-unit column either.
+
+Live-verified end to end: `_normalize_unit`/`_ms_uparse` for `"M0"`,
+`"S0"`, `"m2"`, `"cm3"`, `"hm2"` (dimension checks + `up("M0") ==
+up("S0")`); `_ms_ustring(Msun)` now returns `"M0"` and round-trips; a
+real `write_table`/`readtable` round-trip of an `Msun`-typed column
+(`QuantumUnits == ["M0"]`, `columnunit` reads back `Msun`, values
+unchanged). `m²`/`cm³` write-side round-tripping (`_ms_ustring` on a
+*computed* squared unit) is left as a documented, clearly-erroring gap
+— speculative (no real MS column plausibly needs it) and would need a
+separate, more general superscript-printing fix, out of scope here.
+Extended `test/units_tests.jl`'s existing testsets (12 new assertions
+across `_normalize_unit`, the casacore-vocabulary parse check, and
+`_ms_ustring`, plus a full `write_table`/`readtable` round-trip).
+Standalone `units_tests.jl` green in full (90/90), no regressions.
+
+### Phase 198 — a real bug in `src/tables/column.jl`: `column()`/
+### `getcolumn()`/`getcell()`'s `precision=` override was never
+### validated, so a typo silently narrowed nothing instead of erroring
+### the way `readtable`'s identical check already did
+
+Continuing the sweep of `src/tables/`. `readtable(path; precision=…)`
+validates its argument against `(:half, :full, Float16, BFloat16,
+Float32)` and raises a clear `ArgumentError` for anything else — but
+the identical `precision=` kwarg on `column`/`getcolumn`/`getcell` (the
+common per-column override, `column(t, name; precision=…)`) had no such
+check at all. `_narrowtarget` (the function that turns an "effective
+precision" into a narrow scalar target or `nothing`) is three
+`if`-style branches that each test for one specific value and fall
+through to `return nothing` (= "no narrowing") for anything they don't
+recognize — so a mistyped `precision=:hal` (for `:half`) or
+`precision=:HALF` (wrong case) silently read back full `ComplexF32`
+instead of the requested `ComplexF16`, with **no error at all**. Live-
+verified: `column(t, "DATA"; precision=:hal)` gave `Matrix{ComplexF32}`
+with no warning, while `readtable(t; precision=:hal)` on the exact same
+typo correctly threw.
+
+Fixed by extracting `readtable`'s validation into a shared
+`_normalize_precision(p)` (in `table.jl`) and having `_narrowtarget`
+call it first — every `precision=` entry point (`column`, `getcolumn`,
+`getcell`, and — since they all funnel through `column(::Table, …)` —
+a `RefTable`'s `MappedColumn` and a `ConcatTable`'s `ConcatColumn` too)
+now validates identically, with no separate fix needed per table kind.
+Live-verified end to end: all 6 valid values (`nothing`, `:half`,
+`:full`, `Float16`, `BFloat16`, `Float32`) still behave exactly as
+before; `:hal`, `:HALF`, and `Int32` now all raise the same clear
+`ArgumentError` on `column`/`getcolumn`/`getcell` directly *and*
+through a `RefTable`. New testset "precision — column()/getcolumn()/
+getcell() validate precision= too (Phase 198)" (11 assertions).
+`precision_tests.jl` standalone green (74/74), plus a broader
+core-data-dependent-file sweep (`metadata`/`ssm`/`tsm`/`ism`/`api`/
+`tables`/`schema`/`precision_tests.jl` together, 184/184) confirming no
+regressions.
