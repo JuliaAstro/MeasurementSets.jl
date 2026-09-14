@@ -6563,3 +6563,46 @@ explicit `:full` and `BFloat16` both now take effect, and `resync`
 preserves an explicitly-opened `:full` RefTable's precision).
 Standalone `reftable_tests.jl` and `precision_tests.jl` together, no
 regressions.
+
+### Phase 204 — `write_ms`/`copyms`'s `subtables=`/`subtable_rows=` silently dropped an unmatched name, same shape as Phase 202's `ism=`
+
+Continuing the `src/tables/` sweep, applying standing methodology note
+#12 directly: once a "sibling parameter family, one outlier skips
+validation" shape shows up once (Phase 202's `ism=` vs `tsm=`/`tcm=`/
+`tcell=`/`dysco=`), check other places the SAME shape could recur.
+Read `edit.jl`/`concatedit.jl` in full first (no bug found — the
+`RefEditColumn`/`ConcatEditColumn`/`EditColumn` machinery, the
+`removerows!`/`addrows!`/`_materialize!`/`_resolve` row-index
+bookkeeping, and the `EditColumn{T}`-is-always-`T=Any` design all
+re-verified correct and mutually consistent), then found it in
+`create.jl`'s `write_ms`: `subtables=` (a collection of subtable
+keyword names to include) is checked only via `want(kw) = subtables
+=== Colon() || kw in subtables`, iterating the SOURCE's own real
+keyword list — a name the caller supplies that never matches any real
+`kw` is simply never `true`, so that subtable is silently skipped with
+zero error or warning; `subtable_rows=` (a `Dict` from keyword name to
+a row range) has the identical shape via `get(subtable_rows, kw,
+1:nrow(sub))` — a typo'd key is never looked up, so that subtable
+silently gets NO row restriction at all instead of the one the caller
+asked for. Live-verified both: `copyms(src, dst;
+subtables=["SPECTRALWINDOW"])` (missing underscore) wrote ZERO
+subtables with no indication anything was wrong;
+`copyms(src, dst; subtable_rows=Dict("ANTENA"=>1:1))` wrote the FULL
+`ANTENNA` subtable (2 rows) instead of the requested 1 row, again
+silently.
+
+Fixed by pre-computing the source's real keyword-name set once
+(`MeasurementSets.subtables(main0)`) and validating every name in both
+`subtables=` and `keys(subtable_rows)` against it, clearly erroring on
+any mismatch — and, unlike Phase 199/202's own precedent (both of
+which validate after `_write_table_core`'s `mkpath(dir)`, leaving a
+stray empty directory on error), this check runs BEFORE `write_ms`'s
+own `mkpath(dir)` entirely, so an invalid name now fails cleanly with
+no directory created at all. New testset "write_ms/copyms: an unknown
+subtables=/subtable_rows= name errors (Phase 204)" (6 assertions: both
+typo'd forms error with no stray directory, valid usage still
+correctly restricts to exactly the requested subtable + row range).
+Standalone `writer_tests.jl`, `ism_writer_tests.jl`, `reftable_tests.jl`,
+`edit_tests.jl`, `container_tests.jl`, and `schema_tests.jl` together
+(covering every other `subtables=`/`subtable_rows=` caller in the test
+suite), no regressions.

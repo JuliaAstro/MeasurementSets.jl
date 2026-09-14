@@ -831,11 +831,30 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
                   subtable_rows::AbstractDict=Dict{String,Any}(),
                   storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     _check_storage(storage)
+    main0 = getfield(ms, :data)
+    realkws = Set(kw for (kw, _) in MeasurementSets.subtables(main0))
+    # `subtables=`/`subtable_rows=` name subtables by keyword, matched only
+    # by iterating the SOURCE's own real keywords (`want(kw) = ... kw in
+    # subtables`; `get(subtable_rows, kw, ...)`) — neither side ever checked
+    # that a name the caller supplied was actually used. A typo (e.g.
+    # `subtables=["SPECTRALWINDOW"]`, missing the underscore) used to be
+    # silently dropped: `want` is never true for it (no real `kw` equals
+    # it), so the whole subtable was skipped with zero error/warning — the
+    # same "one sibling of a validated-parameter family skips the check"
+    # shape as Phase 202's `ism=`, live-verified reachable for both kwargs.
+    subtables === Colon() || for kw in subtables
+        kw in realkws || error("write_ms: no subtable \"$kw\" (have $(sort(collect(realkws))))")
+    end
+    for kw in keys(subtable_rows)
+        kw in realkws || error("write_ms: subtable_rows has no matching subtable \"$kw\" " *
+                               "(have $(sort(collect(realkws))))")
+    end
+
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
 
-    main = getfield(ms, :data)
+    main = main0
     mrows = rows === Colon() ? (1:nrow(main)) : rows
     want(kw) = subtables === Colon() || kw in subtables
 
