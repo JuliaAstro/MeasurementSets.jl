@@ -551,3 +551,60 @@ end
         @test_throws ErrorException removecolumn!(cv, "K")
     end
 end
+
+@testset "edit — addcolumn! kind= is validated (Phase 201)" begin
+    # `kind=` was accepted nowhere: an invalid symbol (a typo like
+    # `:ssn` for `:ssm`) fell through TWO independent unguarded
+    # ternaries — `_normalize_desc`'s `kind === :ism ? "IncrementalStMan"
+    # : "StandardStMan"` and `_flush_regen`'s writer dispatch `k ===
+    # :ssm ? write_standardstman(...) : write_incrementalstman(...)` —
+    # that default to DIFFERENT branches for the same unrecognised
+    # symbol, so a typo silently produced a column whose declared
+    # `ColumnDesc.manager` ("StandardStMan") disagreed with the actual
+    # on-disk encoding (IncrementalStMan bytes). Live-verified reachable
+    # before the fix (both our own reader and real casacore still opened
+    # it, since the data-manager type used for actual dispatch comes
+    # from the per-instance string in the ColumnSet, not the per-column
+    # `manager` field — but the metadata was still wrong). Fixed with a
+    # shared `_check_kind`, validated at every `addcolumn!` entry point
+    # (`EditTable`, and the `RefEditTable`/`ConcatEditTable` views that
+    # delegate to or push directly onto it).
+    dir = joinpath(mktempdir(), "e201.tab")
+    write_table(dir, "T", ["A" => collect(Int32, 1:5)]; nrow = 5)
+    @test_throws ArgumentError edit(t -> addcolumn!(t, "TIME"; kind = :ssn), dir)
+    @test_throws ArgumentError edit(t -> addcolumn!(t, "B", collect(1:5); kind = :ssn), dir)
+
+    # a RefEditTable's with-data method pushes onto the parent's
+    # `addcols` directly (doesn't call `addcolumn!(::EditTable, ...)`)
+    # -- needed its own, separate `_check_kind` call.
+    rdir = joinpath(mktempdir(), "e201r.tab")
+    write_table(rdir, "T", ["A" => collect(Int32, 1:5)]; nrow = 5)
+    rt = query(readtable(rdir), "A > 2")
+    @test_throws ArgumentError edit(v -> addcolumn!(v, "B", collect(1:nrow(rt)); kind = :bogus), rt)
+
+    cdir = joinpath(mktempdir(), "e201c.tab")
+    p1 = joinpath(cdir, "p1"); p2 = joinpath(cdir, "p2")
+    write_table(p1, "T", ["A" => collect(Int32, 1:2)]; nrow = 2)
+    write_table(p2, "T", ["A" => collect(Int32, 3:4)]; nrow = 2)
+    ct = readtable(write_concattable(joinpath(cdir, "c"), [readtable(p1), readtable(p2)]))
+    @test_throws ArgumentError edit(v -> addcolumn!(v, "B"; kind = :oops), ct)
+
+    # every valid kind still works, and the metadata now genuinely
+    # matches the encoding (no mismatch left behind by the fix itself)
+    dir2 = joinpath(mktempdir(), "e201v.tab")
+    write_table(dir2, "T", ["A" => collect(Int32, 1:5)]; nrow = 5)
+    edit(dir2) do t
+        addcolumn!(t, "B", collect(6:10); kind = :ssm)
+        addcolumn!(t, "C", collect(11:15); kind = :ism)
+    end
+    r = readtable(dir2)
+    @test column(r, "B")[:] == 6:10
+    @test column(r, "C")[:] == 11:15
+    @test columndesc(r, "B").manager == "StandardStMan"
+    @test columndesc(r, "C").manager == "IncrementalStMan"
+    if _HAVE_CASACORE
+        ct2 = CCT.Table(dir2)
+        @test collect(ct2[:B][:]) == 6:10
+        @test collect(ct2[:C][:]) == 11:15
+    end
+end

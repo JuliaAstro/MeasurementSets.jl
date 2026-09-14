@@ -6387,3 +6387,77 @@ behaviour (`>nan/02` legitimately matches every row, since the NaN day
 field falls back to the resolved default day). Standalone
 `taql_mscal_tests.jl` green in full (every existing testset, including
 the Phase 121/128/194 time-family ones), no regressions.
+
+### Phase 201 — `addcolumn!`'s `kind=` was validated nowhere: a typo silently produced a column whose declared manager disagreed with its actual on-disk encoding
+
+**Start of a `src/tables/` sweep** (the user asked to focus there until
+it's complete — this and the phases that follow stay in that
+directory). Investigated `src/tables/record.jl`/`writer.jl` first
+(the `Record`/`TableRecord`/keyword-set AipsIO framing) against
+`casa/Containers/RecordRep.cc` + `RecordDesc.cc` +
+`tables/Tables/TableRecordRep.cc` line by line — every read/write
+pairing (the `TpRecord`-nested-empty-subdesc convention, the
+`version>1`-gated comment field, the old-style scalar/array keyset
+type-order tables, the `Map<String,void>` framing) matches exactly, no
+bug. One genuine-looking lead (`_write_aipsarray` always emitting the
+object type name `"Array<void>"`, where casacore's own `putDataField`
+uses a distinct name per element type — `"Array<Int>"`, `"Array<uChar>"`,
+…) turned out to be harmless on investigation: casacore's own generic
+`operator>>(AipsIO&, Array<T>&)` reads whatever type string is
+*actually on disk* and uses it purely for `getstart`/`getend` framing
+depth-bookkeeping — it never cross-checks that string against the
+static C++ type `T` the caller declared, so the element type dispatch
+comes entirely from the RecordDesc's own type enum (known ahead of
+time), not from the Array object's name. This package's own
+`read_array` is equally permissive (accepts any `"Array"`/`"Array<…>"`
+prefix). Confirmed both directions live (our writer → real
+`Casacore.jl`, and — implicitly, since every existing keyword-array
+round-trip test already exercises it — real casacore → our reader) with
+no divergence. Also re-verified `_resolve_tabpath`/`_strip_directory`
+(RefTable/ConcatTable relative-path resolution) against
+`casa/OS/Path.cc`'s `addDirectory`/`stripDirectory` in full — the
+0/2/≥4-leading-"./"-characters case split matches exactly; the one
+form we don't implement (a trailing `"/."` reverse-relative reference,
+`stripDirectory`'s "target is a prefix of the referencing table's own
+path" branch) was already a documented limitation from Phases 14/15,
+not a new find, and our own writer never produces it.
+
+The actual find was in `src/tables/edit.jl`: `addcolumn!`'s `kind=`
+kwarg (`:ssm`/`:ism`/`:tsm`/`:tcm`/`:tcell`) was accepted with **no
+validation anywhere**, and — worse than a simple silent-fallback — an
+invalid value fell through **two independent unguarded ternaries that
+default to DIFFERENT branches for the same unrecognised symbol**:
+`_normalize_desc`'s `kind === :ism ? "IncrementalStMan" :
+"StandardStMan"` (defaults to `:ssm`'s manager string) and
+`_flush_regen`'s writer dispatch `k === :ssm ? write_standardstman(...) :
+write_incrementalstman(...)` (defaults to `:ism`'s writer). Live-verified:
+`addcolumn!(t, "B", data; kind=:ssn)` (a typo for `:ssm`) produced a
+column whose `ColumnDesc.manager` field claims `"StandardStMan"` while
+the bytes on disk are genuinely `IncrementalStMan`-encoded — a real
+metadata/data mismatch. Both this package's own reader and a real
+`Casacore.jl` cross-check still opened the resulting table and read the
+right values, because the data-manager type actually used for dispatch
+on read comes from the per-*instance* string in `table.dat`'s
+ColumnSet, not the per-*column* `manager` field — the same "informational,
+not load-bearing" role `ColumnDesc.manager` already has documented at
+`_source_dm` (`create.jl:799-805`, added specifically because a real
+reference MS mislabels its own ISM columns as `StandardStMan`) — but
+the wrong metadata is still real and user-visible
+(`columndesc(t,"B").manager` lies about the column's actual encoding).
+
+Fixed with a shared `_check_kind(kind)` (same "validate at the API
+boundary, not deep in the pipeline" pattern as Phase 198's
+`_normalize_precision` / Phase 199's `_check_storage`), called at
+every `addcolumn!` entry point: both `EditTable` methods, and — found
+by tracing the delegation chain — `RefEditTable`'s *with-data* method,
+which pushes straight onto `t.parent.addcols` rather than calling
+`addcolumn!(::EditTable, ...)` and so needed its own separate call
+(`RefEditTable`'s no-data method and both `ConcatEditTable` methods
+already delegate through the now-guarded `EditTable` path). New
+testset "edit — addcolumn! kind= is validated (Phase 201)" (10
+assertions) covering all four entry points rejecting an invalid `kind`,
+plus a positive check that `:ssm`/`:ism` still work and produce
+metadata that genuinely matches the encoding (cross-checked against
+real `Casacore.jl`). Standalone `edit_tests.jl` green in full (every
+existing testset, including the Phase 125-133 RefEditTable/
+ConcatEditTable ones), no regressions.
