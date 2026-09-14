@@ -557,15 +557,36 @@ _tql_sign(x) = sign(x)
 
 # casacore's `int()`/`integer()` (`intFUNC`, `ExprFuncNode.cc:552-553`,
 # reached via `getInt`'s `argDataType_p == NTDouble` branch) is a raw
-# C++ `Int64(double)` cast -- a NaN/out-of-range argument SATURATES
-# rather than raising, live-verified against real casacore:
-# `int(0.0/0.0) == 0`, `int(1.0/0.0) == typemax(Int64)`,
-# `int(-1.0/0.0) == typemin(Int64)`. Julia's `trunc(Int, ...)` instead
-# THROWS an `InexactError` for all three -- the exact same crash-risk
-# shape as the other fixes above, and specifically triggered by them:
+# C++ `Int64(double)` cast. For a NaN/out-of-range argument this is
+# GENUINELY UNDEFINED C++ BEHAVIOR -- and, confirmed via a CI failure
+# (`Phase 191` continuation) plus a direct compiled-C++ probe on both
+# architectures, real casacore's actual answer for it is
+# ARCHITECTURE-DEPENDENT, not a fixed "real casacore" ground truth:
+#   * ARM64 (`FCVTZS`): saturates piecewise -- `int(0.0/0.0) == 0`,
+#     `int(1.0/0.0) == typemax(Int64)`, `int(-1.0/0.0) == typemin(Int64)`
+#     -- what this file's original "live-verified against real
+#     casacore" claim captured, tested only on an ARM64 Mac.
+#   * x86-64 (`CVTTSD2SI`): every one of NaN/+Inf/-Inf/out-of-range
+#     converts to the SAME "integer indefinite" sentinel,
+#     `typemin(Int64)` (`0x8000000000000000`) -- confirmed directly:
+#     `(int64_t)(0.0/0.0) == (int64_t)(1.0/0.0) == (int64_t)(-1.0/0.0)
+#     == INT64_MIN` when compiled with g++ on x86-64 Linux (the
+#     platform GitHub Actions CI, and the overwhelming majority of real
+#     casacore deployments, actually run on).
+# Since there is no single portable "correct" value to chase here, this
+# package keeps its OWN well-defined, documented, saturating
+# convention (below) rather than trying to bit-match either CPU's raw
+# UB -- Julia's `trunc(Int, ...)` would instead THROW an
+# `InexactError` for all three, the exact same crash-risk shape as the
+# other fixes above, and specifically triggered by them:
 # `int(sqrt(-1.0))` now flows a `NaN` (Phase 184's own `_tql_sqrt` fix)
 # straight into `int()`, which used to be an unreachable combination
 # (the old `_tql_sqrt`-less `sqrt` would have already thrown first).
+# The real-TaQL cross-check test deliberately does NOT assert exact
+# equality against live casacore for the NaN/±Inf cases (see
+# `test/taql_query_tests.jl`) -- only for the well-defined, in-range
+# values (`int(1e18)`, `integer(±2.9)`), since those have no UB on any
+# platform.
 const _TQL_INT64_MAXF = Float64(typemax(Int64))
 const _TQL_INT64_MINF = Float64(typemin(Int64))
 _tql_int(x::Real) = isnan(x) ? Int64(0) :

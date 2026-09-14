@@ -3557,9 +3557,14 @@ end
 end
 
 @testset "Phase 184 — int()/integer() saturate instead of throwing" begin
-    # casacore's int()/integer() is a raw C++ Int64(double) cast --
-    # NaN/out-of-range SATURATES rather than raising; Julia's own
-    # `trunc(Int, ...)` throws an InexactError in all three cases.
+    # casacore's int()/integer() is a raw C++ Int64(double) cast -- for
+    # a NaN/out-of-range argument this is genuinely undefined behavior
+    # and architecture-dependent in REAL casacore (ARM64 saturates
+    # piecewise, x86-64 gives one fixed sentinel for all of them --
+    # see `_tql_int`'s comment and the real-TaQL cross-check testset
+    # below); this package picks its own well-defined, portable,
+    # saturating convention rather than either CPU's raw UB. Julia's
+    # own `trunc(Int, ...)` throws an InexactError in all three cases.
     # Specifically triggered by the sqrt/log/asin/acos fixes above:
     # int(sqrt(-1.0)) now flows a real NaN into int(), a combination
     # that used to be unreachable (the old sqrt would already throw).
@@ -3582,13 +3587,29 @@ end
     dir = mktempdir(); tabpath = joinpath(dir, "t.tab")
     write_table(tabpath, "T", Pair{String,Any}["A" => [-1.0]]; nrow=1)
     t = readtable(tabpath)
-    for expr in ("int(sqrt(A))", "int(1.0/0.0)", "int(-1.0/0.0)", "int(0.0/0.0)",
-                 "int(1e18)", "integer(2.9)", "integer(-2.9)")
+    # `int()`/`integer()` of a NaN/±Inf argument is a raw C++
+    # `static_cast<Int64>(double)` in real casacore -- genuinely
+    # undefined behavior. Confirmed via a real CI failure (Phase 191
+    # continuation) plus a direct compiled-C++ probe: ARM64 (`FCVTZS`)
+    # saturates piecewise (`int(0.0/0.0)==0`, `int(1.0/0.0)==typemax`,
+    # `int(-1.0/0.0)==typemin`), but x86-64 (`CVTTSD2SI`, what GitHub
+    # Actions CI actually runs) gives `typemin(Int64)` for EVERY one of
+    # them uniformly. There is no portable "real casacore" ground truth
+    # for these -- only cross-check the well-defined, in-range values
+    # live against casacore; the NaN/±Inf cases are checked against
+    # this package's own documented, architecture-independent
+    # saturating convention instead (see `_tql_int`'s comment).
+    for expr in ("int(1e18)", "integer(2.9)", "integer(-2.9)")
         rdir = joinpath(mktempdir(), "r")
         _taqlcmd("SELECT $expr AS X FROM \$1 GIVING '$rdir' AS PLAIN", tabpath)
         casa = column(readtable(rdir), "X")[1]
         ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
         @test casa == ours
+    end
+    for (expr, want) in (("int(sqrt(A))", Int64(0)), ("int(1.0/0.0)", typemax(Int64)),
+                         ("int(-1.0/0.0)", typemin(Int64)), ("int(0.0/0.0)", Int64(0)))
+        ours = query(t, "rownumber() == 1"; select = ["X" => expr]).X[1]
+        @test ours == want
     end
 end
 

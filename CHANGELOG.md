@@ -5882,3 +5882,66 @@ continuation — masked-array natives: negatemask/replacemasked/
 replaceunmasked" (29 assertions, unit + real-TaQL cross-check).
 Standalone `taql_query_tests.jl` and `taql_command_tests.jl` both green
 in full, end to end, with no other regressions.
+
+### Phase 192 — a genuine GitHub Actions CI failure, sitting undetected
+### on `main` since PR #56: `int()`/`integer()` on a NaN/±Inf argument
+### is architecture-dependent undefined behavior in real casacore
+
+A user-reported CI failure (`Phase 184 — int()/integer(), real-TaQL
+cross-check`) turned out to be real and already present on `main` — a
+genuine gap in this project's own workflow: the "merged" step never
+checks GitHub Actions' own CI status, only a local `Pkg.test()` run, so
+a real CI failure on the merge commit itself (and on the
+`phase184-sweep` branch that introduced it) had been sitting
+undetected since PR #56. Confirmed via GitHub's public REST API
+(reachable unauthenticated for a public repo, no `gh` CLI needed): the
+`main` branch's own CI run at `a2aeba9` fails this exact test on all
+three Julia versions (1.10 / 1.12 / pre), Linux x64.
+
+**Root cause, confirmed with a direct compiled-C++ probe on real
+x86-64 hardware (Docker, `--platform=linux/amd64`) before touching any
+code**: real casacore's `int()`/`integer()` (`intFUNC`) is a bare C++
+`static_cast<Int64>(double)` — for a NaN or out-of-range argument this
+is genuinely UNDEFINED BEHAVIOR, and the two architectures this
+package has actually been tested on implement it differently:
+- **ARM64** (`FCVTZS`, what every earlier "live-verified against real
+  casacore" claim in this file was tested on, on an Apple Silicon Mac):
+  saturates piecewise — `int(0.0/0.0) == 0`, `int(1.0/0.0) ==
+  typemax(Int64)`, `int(-1.0/0.0) == typemin(Int64)`.
+- **x86-64** (`CVTTSD2SI`, what GitHub Actions CI — and the
+  overwhelming majority of real casacore/CASA deployments — actually
+  run on): gives the SAME "integer indefinite" sentinel,
+  `typemin(Int64)`, for EVERY one of NaN / +Inf / -Inf / any
+  out-of-range value, uniformly. Verified two ways: a standalone C++
+  program compiled with g++ on x86-64 Linux
+  (`(int64_t)(0.0/0.0)==(int64_t)(1.0/0.0)==(int64_t)(-1.0/0.0)==
+  INT64_MIN`), and a live `Casacore.jl`/`tableCommand` run on the same
+  architecture — `int(sqrt(-1.0))`, `int(1.0/0.0)`, `int(-1.0/0.0)`,
+  `int(0.0/0.0)` all give `-9223372036854775808` in real casacore on
+  x86-64, where this package's ARM64-derived `_tql_int` gave `0`,
+  `typemax(Int64)`, `typemin(Int64)` (matched by coincidence), and `0`
+  respectively — three of the four genuinely diverge.
+
+There is no single portable "real casacore" ground truth for a
+NaN/±Inf argument to `int()`, so **chasing bit-for-bit equality with
+whatever one CPU's raw undefined behavior happens to produce is the
+wrong target.** `_tql_int` keeps its existing well-defined, documented,
+architecture-independent saturating convention unchanged (NaN→0,
++Inf→`typemax(Int64)`, -Inf→`typemin(Int64)`) — a real, useful,
+*designed* behavior, not an attempt to replicate either CPU's garbage.
+The fix is to the **test's methodology**, not the implementation: the
+real-TaQL cross-check now only asserts exact equality against live
+casacore for the well-defined, in-range values (`int(1e18)`,
+`integer(±2.9)`, which have no UB on any platform), and checks the
+NaN/±Inf cases against this package's own documented sentinel values
+directly instead of against an architecture-dependent live oracle.
+`_tql_int`'s comment records both architectures' actual behavior (with
+the compiled-C++ evidence) so a future sweep doesn't re-discover this
+by re-breaking it.
+
+Re-verified end to end on real x86-64 Linux (Docker) after the fix:
+the full `Casacore.jl` cross-check suite (141 assertions) plus the
+targeted `int()`/`integer()` testset (7 assertions) both pass — the
+fix genuinely resolves the CI failure, not just a local ARM64
+rationalization. Standalone `taql_query_tests.jl` unaffected on ARM64
+(still 0 failures, full file).
