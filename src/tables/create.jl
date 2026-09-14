@@ -220,6 +220,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            tablename::AbstractString="",
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
+    _check_storage(storage)
     mkpath(dir)
     tsmg = _tsm_groups(tsm)
 
@@ -820,6 +821,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
                   rows=Colon(), subtables=Colon(),
                   subtable_rows::AbstractDict=Dict{String,Any}(),
                   storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+    _check_storage(storage)
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
@@ -968,6 +970,7 @@ variable-shape array columns (`CHAN_FREQ`, `CORR_TYPE`, `POLARIZATION_TYPE`,
 function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
                    ncorr::Integer=2, nant::Integer=3, nrec::Integer=2,
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+    _check_storage(storage)
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)

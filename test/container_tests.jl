@@ -320,6 +320,61 @@ end
                                            storage=:nonsense)
 end
 
+# Phase 199: found live -- the ONLY place `storage=` was actually
+# checked was deep inside `with_container_sink`, called partway through
+# the per-DM-writer section of `_write_table_core` -- well AFTER
+# `_write_table_core`/`write_ms`/`create_ms` had already `mkpath`'d the
+# destination directory. Worse: `write_ms`'s subtable loop wraps each
+# subtable's `_copy_table` call in a broad `catch e; @warn "skipping
+# subtable ... (unsupported source)"` -- which caught this
+# `ArgumentError` too, mischaracterizing a caller's own typo as 18
+# separate per-subtable data problems before the true cause finally
+# surfaced (only for MAIN, which has no such catch). Fixed with a
+# shared `_check_storage(storage)` called first thing, before any
+# directory is created or any subtable is touched, in every entry
+# point that accepts `storage=`.
+@testset "storage= bad value: no stray directory, no misleading warnings (Phase 199)" begin
+    # write_table (already covered above for the error itself; add the
+    # "no directory left behind" check)
+    dir0 = joinpath(mktempdir(), "wt.tab")
+    @test_throws ArgumentError write_table(dir0, "T", ["A" => collect(1:5)]; nrow=5,
+                                           storage=:nonsense)
+    @test !ispath(dir0)
+
+    # create_ms
+    dir1 = joinpath(mktempdir(), "cm.ms")
+    @test_throws ArgumentError create_ms(dir1; storage=:nonsense)
+    @test !ispath(dir1)
+
+    # write_ms / copyms -- the important case: no misleading per-subtable
+    # "unsupported source" warnings, just the one real error, and (since
+    # `_check_storage` now runs before `mkpath`) no partial directory tree
+    src = joinpath(mktempdir(), "src.ms")
+    create_ms(src; nrow=4, nchan=2, ncorr=1, nant=2)
+    dst = joinpath(mktempdir(), "dst.ms")
+    local caught = nothing
+    records, _ = Test.collect_test_logs() do
+        try
+            write_ms(dst, MeasurementSet(src); storage=:nonsense)
+        catch e
+            caught = e
+        end
+    end
+    @test caught isa ArgumentError
+    @test !ispath(dst)
+    @test isempty(records)   # no per-subtable "skipping ... (unsupported source)" warnings
+
+    # copytable
+    dir2 = joinpath(mktempdir(), "ct.tab")
+    @test_throws ArgumentError copytable(dir2, readtable(src); storage=:nonsense)
+    @test !ispath(dir2)
+
+    # reference_copy
+    dir3 = joinpath(mktempdir(), "rc.tab")
+    @test_throws ArgumentError reference_copy(dir3, readtable(src); storage=:nonsense)
+    @test !ispath(dir3)
+end
+
 @testset "container_mmap — non-contiguous block fallback (Phase 158)" begin
     # A freshly-written container always allocates blocks sequentially
     # (`MultiFile::extendVF`), so no test anywhere else in this file (or

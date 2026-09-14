@@ -60,6 +60,31 @@ mutable struct ContainerBuilder
 end
 
 """
+    _check_storage(storage::Symbol)
+
+Validate a `storage=` argument (`:sepfile`/`:multifile`/`:multihdf5`);
+throws a clear `ArgumentError` for anything else.
+
+Phase 199: found live -- `write_table`/`copytable`/`write_ms`/
+`create_ms`/`reference_copy` all accept `storage=`, but the only place
+it was actually checked was deep inside `with_container_sink`, called
+partway through the per-DM-writer section -- AFTER `_write_table_core`/
+`write_ms`/`create_ms` had already `mkpath`'d the destination directory
+(and, for `write_ms`/`copyms`, after every subtable had already been
+attempted). Worse: `write_ms`'s subtable loop wraps each subtable's
+`_copy_table` call in a broad `catch e; @warn "skipping subtable ...
+(unsupported source)"` -- which caught this `ArgumentError` too, so an
+invalid `storage=` typo produced a misleading "unsupported source"
+warning for EVERY subtable (18 on the sample MS) before the true cause
+finally surfaced as an error on MAIN. Calling this FIRST, before any
+directory is created or any subtable is touched, fixes both: no stray
+directory tree on a rejected call, and one clear, immediate error
+instead of a wall of misdirected warnings.
+"""
+_check_storage(storage::Symbol) = storage in (:sepfile, :multifile, :multihdf5) ||
+    throw(ArgumentError("storage must be :sepfile, :multifile, or :multihdf5 (got $(repr(storage)))"))
+
+"""
     with_container_sink(f, dir, storage::Symbol, blocksize::Integer)
 
 Run `f()` with every `_dmfile_write!` call inside it buffered into a new
@@ -75,8 +100,7 @@ commit point, exactly as for the `:sepfile` path.
 function with_container_sink(f::Function, dir::AbstractString,
                              storage::Symbol, blocksize::Integer)
     storage === :sepfile && return f()
-    storage in (:multifile, :multihdf5) ||
-        throw(ArgumentError("storage must be :sepfile, :multifile, or :multihdf5 (got $(repr(storage)))"))
+    _check_storage(storage)
     sink = ContainerBuilder(storage, Int64(blocksize), Pair{String,Vector{UInt8}}[])
     task_local_storage(f, _MF_SINK_KEY, sink)
     isempty(sink.files) && return nothing     # no container-eligible DM in this table

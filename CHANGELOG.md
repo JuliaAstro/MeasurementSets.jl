@@ -6282,3 +6282,61 @@ getcell() validate precision= too (Phase 198)" (11 assertions).
 core-data-dependent-file sweep (`metadata`/`ssm`/`tsm`/`ism`/`api`/
 `tables`/`schema`/`precision_tests.jl` together, 184/184) confirming no
 regressions.
+
+### Phase 199 — a real bug found applying the Phase 198 methodology note
+### broadly: `storage=` (the `:multifile`/`:multihdf5` container option)
+### was validated in only ONE place, deep inside the write pipeline —
+### `write_ms`/`copyms` turned a caller's own typo into 18 misleading
+### "unsupported source" warnings before the true cause ever surfaced
+
+Continuing the sweep, applying Phase 198's own freshly-added standing
+note (a validation check written in one function is not automatically
+inherited by a sibling entry point accepting the "same" parameter) —
+grepped for every other validated-parameter shape in the codebase and
+found `storage=` (`write_table`/`copytable`/`write_ms`/`copyms`/
+`create_ms`/`reference_copy` all accept it) had the exact same
+disease, in a more consequential form. The only place `storage` was
+actually checked was deep inside `with_container_sink`, called
+partway through the per-DM-writer section of `_write_table_core` — well
+AFTER `_write_table_core`/`write_ms`/`create_ms` had already `mkpath`'d
+the destination directory.
+
+Live-verified the immediate symptom first: `create_ms(dir;
+storage=:bogus)` correctly threw an `ArgumentError`, but left an empty
+directory behind at `dir` that didn't exist before the call — the same
+"claims to have failed, but silently created state anyway" shape this
+codebase's whole atomic-write design (Phase 13/21's `table.dat`-is-the-
+commit-point philosophy) exists specifically to avoid.
+
+Then found something much worse live-verifying `write_ms`: its subtable
+loop wraps each subtable's `_copy_table` call in a broad `catch e;
+@warn "skipping subtable $kw (unsupported source)" typeof(sub) err=e`
+— which catches ANY error, including a caller's own invalid `storage=`
+value. On the sample MS this produced **18 separate misleading
+warnings** ("skipping subtable ANTENNA (unsupported source)",
+"skipping subtable FIELD (unsupported source)", …), each blaming the
+wrong thing (subtable data compatibility) for what was actually one
+single, unrelated, global configuration typo — before the real
+`ArgumentError` finally surfaced only when MAIN (which has no such
+catch) was reached. A user staring at 18 "unsupported source" warnings
+would have no reason to suspect their own `storage=` argument.
+
+Fixed with a shared `_check_storage(storage)` (mirroring Phase 198's
+`_normalize_precision` pattern exactly), called FIRST — before any
+directory is created or any subtable is touched — in every one of the
+five top-level entry points that accept `storage=`
+(`_write_table_core`, `write_ms`, `create_ms`; `write_table`/
+`copytable`/`reference_copy` needed no separate fix since they delegate
+straight into `_write_table_core` with no `mkpath` of their own).
+`with_container_sink` now calls the same shared check instead of its
+own inline duplicate. Live-verified across all 5 entry points: an
+invalid `storage=` now fails immediately with no directory created and
+(for `write_ms`) zero misleading warnings; all 3 valid values
+(`:sepfile`/`:multifile`/`:multihdf5`) still behave exactly as before,
+confirmed via a full `create_ms(...; storage=:multifile)` →
+`readtable` → subtable round-trip. New testset "storage= bad value: no
+stray directory, no misleading warnings (Phase 199)" (11 assertions,
+using `Test.collect_test_logs` to positively confirm zero warnings
+fire, not just that the eventual error is correct). Standalone
+`container_tests.jl` green (75/75), plus a broader `writer_tests.jl` +
+`edit_tests.jl` + `container_tests.jl` sweep together, no regressions.
