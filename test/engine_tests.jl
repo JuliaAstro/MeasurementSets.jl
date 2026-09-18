@@ -66,6 +66,60 @@ end
     end
 end
 
+# Phase 213 (src/datamanagers sweep, continued): the existing cross-check
+# above never has a negative *real* part paired with a non-negative
+# *imag* part (CompressComplex) or a genuinely mixed-sign complex value
+# (CompressComplexSD) -- so `_decode(::CompressComplex,...)`'s
+# `im < -ENG_C_WRAP` correction, and BOTH of `_decode(::CompressComplexSD,
+# ...)`'s wrap-correction branches, were never exercised. Also pins a
+# real, confirmed-matching-upstream quirk found while constructing this:
+# `CompressComplexSD::scaleOnPut` (`CompressComplex.cc:787-788`) encodes a
+# non-finite value the SAME way as plain `CompressComplex` (`stored =
+# -32768*65536`) -- but that value is EVEN, and SD's own decode
+# (`scaleOnGet`, `.cc:750`) dispatches on `inval%2==0` *before* ever
+# checking the `r==-32768` NaN sentinel (which only lives in the ODD
+# branch) -- so a NaN written through `CompressComplexSD` does NOT come
+# back as NaN in real casacore either; it's silently misdecoded as a
+# huge bogus real-only value. This package's port reproduces that
+# upstream limitation exactly (live-verified against real Casacore.jl
+# below) rather than "fixing" a divergence that doesn't actually exist.
+@testset "engine — CompressComplex(SD) wrap-correction + the SD NaN quirk (Phase 213)" begin
+    dir = mktempdir()
+
+    # CompressComplex: real<0, imag>=0 -- forces decode's `r -= 1` branch.
+    p1 = joinpath(dir, "cc.tab")
+    scale1 = 0.01f0
+    V1 = [ComplexF32(-k, k * 0.3f0) for k in 1:6]
+    write_table(p1, "T", ["C" => [reshape([v], 1, 1) for v in V1]]; nrow=6,
+        engines = Dict("C" => (; kind=MSv2E.CompressComplex(), scale=scale1, offset=0.0f0)))
+    r1 = readtable(p1)
+    bound1 = scale1 * 1.01
+    @test all(maximum(abs.(column(r1, "C")[i] .- reshape([V1[i]], 1, 1))) <= bound1 for i in 1:6)
+    if _HAVE_CASACORE
+        ct1 = CCT.Table(p1)
+        @test all(ct1[:C][i] == column(r1, "C")[i] for i in 1:6)
+    end
+
+    # CompressComplexSD: a NaN row + genuinely mixed-sign finite rows
+    # (both wrap-correction directions).
+    p2 = joinpath(dir, "sd.tab")
+    scale2 = 0.005f0
+    V2 = ComplexF32[ComplexF32(NaN, NaN), ComplexF32(-3, -7), ComplexF32(2, -5), ComplexF32(-2, 6)]
+    write_table(p2, "T", ["S" => [reshape([v], 1, 1) for v in V2]]; nrow=4,
+        engines = Dict("S" => (; kind=MSv2E.CompressComplexSD(), scale=scale2, offset=0.0f0)))
+    r2 = readtable(p2)
+    out2 = [column(r2, "S")[i][1, 1] for i in 1:4]
+    bound2 = scale2 * 3          # SD's imag has its own (coarser) scale
+    @test all(maximum(abs.([real(out2[i]) - real(V2[i]), imag(out2[i]) - imag(V2[i])])) <= bound2
+              for i in 2:4)
+    # the confirmed-matching-upstream NaN quirk: NOT NaN, a finite value
+    @test isfinite(real(out2[1])) && isfinite(imag(out2[1])) && imag(out2[1]) == 0.0f0
+    if _HAVE_CASACORE
+        ct2 = CCT.Table(p2)
+        @test all(ct2[:S][i][1, 1] == out2[i] for i in 1:4)   # incl. row 1 -- same bogus value
+    end
+end
+
 @testset "engine — MappedArrayEngine (Complex <-> DComplex)" begin
     dir = joinpath(mktempdir(), "m.tab")
     X = [ComplexF32.(reshape(1:6, 2, 3)) .+ ComplexF32(0.5, -0.5) for _ in 1:3]
@@ -415,4 +469,57 @@ end
     @test !isfile(joinpath(dst, "table.f$(_engine_manager(rc, "OK").sequ)"))
 
     @test_throws ErrorException edit(dir) do t end               # computed column -> refuse edit
+end
+
+# Phase 213 (src/datamanagers sweep, continued): three genuinely-reachable
+# VirtualTaQLColumn combinations that `_vtq_prepare!`/`getcell`/`getcolumn`
+# already handle correctly but had zero test coverage.
+import Unitful, UnitfulAngles, UnitfulAstro
+const _HAVE_UNITFUL_VTQ = Base.get_extension(MSv2E, :UnitfulExt) !== nothing
+
+if _HAVE_UNITFUL_VTQ
+    @testset "engine — VirtualTaQLColumn with a quantity literal (Phase 213)" begin
+        dir = joinpath(mktempdir(), "vtqqty.tab")
+        A = [1.0e9, 1.5e9, 2.0e9]
+        write_table(dir, "T", Pair{String,Any}["A" => A, "HI" => falses(3)]; nrow=3,
+            units = Dict("A" => "Hz"), virtualtaql = Dict("HI" => "A > 1.4GHz"))
+        r = readtable(dir)
+        @test _engine_manager(r, "HI").name == "VirtualTaQLColumn"
+        @test column(r, "HI")[:] == [false, true, true]
+    end
+end
+
+@testset "engine — VirtualTaQLColumn with an array-typed result (Phase 213)" begin
+    dir = joinpath(mktempdir(), "vtqarr2.tab")
+    V = [reshape(Float64.(1:6), 2, 3) .+ 10i for i in 0:2]
+    write_table(dir, "T", Pair{String,Any}["V" => V, "V2" => V]; nrow=3,
+        tsm = [["V"]], virtualtaql = Dict("V2" => "V * 2.0"))
+    r = readtable(dir)
+    @test [column(r, "V2")[i] for i in 1:3] == [v .* 2 for v in V]
+    @test column(r, "V2")[:] == [v .* 2 for v in V]
+end
+
+# `_vtq_err`'s wrapping is only reachable from a RUNTIME (per-row)
+# evaluation error -- distinct from the parse-time error the existing
+# "unsupported expr" testset above already exercises (that one throws
+# inside `_vtq_prepare!`, before `getcell`'s own try/catch is even
+# entered). An out-of-range, row-dependent array index is a real runtime
+# error for one specific row only.
+@testset "engine — VirtualTaQLColumn runtime evaluation error (Phase 213)" begin
+    dir = joinpath(mktempdir(), "vtqerr.tab")
+    V = [reshape(Float64.(1:6), 2, 3) for _ in 1:3]
+    K = Int32[1, 1, 9]                              # row 3: out of range for V's first axis
+    write_table(dir, "T", Pair{String,Any}["V" => V, "K" => K, "OUT" => zeros(3)]; nrow=3,
+        tsm=[["V"]], virtualtaql = Dict("OUT" => "V[K,1]"))
+    r = readtable(dir)
+    @test column(r, "OUT")[1] == V[1][1, 1]
+    @test column(r, "OUT")[2] == V[2][1, 1]
+    err = try column(r, "OUT")[3]; nothing catch e; e end
+    @test err isa ArgumentError
+    @test occursin("OUT", err.msg) && occursin("V[K,1]", err.msg)
+
+    r2 = readtable(dir)                             # same error via the bulk getcolumn path
+    err2 = try column(r2, "OUT")[:]; nothing catch e; e end
+    @test err2 isa ArgumentError
+    @test occursin("OUT", err2.msg) && occursin("V[K,1]", err2.msg)
 end

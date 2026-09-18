@@ -137,6 +137,27 @@ end
     @test pack(Int64[0, -3]) == Int64[0, 1, 2, 3]
 end
 
+# Phase 213 (src/datamanagers sweep, continued): `_mf_pack_index` --
+# `_mf_unpack_index`'s write-side mirror -- was only ever exercised with
+# an already-contiguous block list (the only shape our own writer ever
+# produces, since a virtual file's blocks are always allocated
+# sequentially). Its "close the current run, start a new one" branch (a
+# genuinely different code path for a FRAGMENTED block list) had zero
+# coverage anywhere. Confirmed correct, not buggy: it's the exact inverse
+# of `_mf_unpack_index` for every fragmented case below.
+@testset "MultiFile — pack-index, fragmented blocks (unit, Phase 213)" begin
+    unpack = MeasurementSets._mf_unpack_index
+    pack = MeasurementSets._mf_pack_index
+    for blocknrs in (Int64[5, 6, 7, 10, 11], Int64[1, 3, 4, 5, 9],
+                     Int64[0, 1, 2, 3], Int64[2, 4, 6, 8], Int64[7])
+        packed = pack(blocknrs)
+        @test unpack(packed) == blocknrs
+    end
+    @test pack(Int64[5, 6, 7, 10, 11]) == Int64[5, -2, 10, -1]
+    @test pack(Int64[1, 3, 4, 5, 9]) == Int64[1, 3, -2, 9]
+    @test pack(Int64[]) == Int64[]
+end
+
 @testset "MultiFile — CRC32 (unit)" begin
     # casacore's CRC32 is nonstandard (not zlib) -- a self-consistency
     # check (any nonzero input changes the checksum) is the honest amount
@@ -145,6 +166,41 @@ end
     @test crc(UInt8[]) != crc(UInt8[0x00])
     @test crc(UInt8[1, 2, 3]) != crc(UInt8[1, 2, 4])
     @test crc(UInt8[1, 2, 3]) == crc(UInt8[1, 2, 3])
+end
+
+# Phase 213 (src/datamanagers sweep, continued): `open_multifile`'s
+# `useCRC` header-verification branch (`container.jl:313-318`) had zero
+# coverage -- there is no TaQL/`StorageOption` knob to make real casacore
+# ever WRITE a `useCRC=true` container (confirmed in the Phase 21 plan),
+# so no available fixture -- our own writer, correctly, also never sets
+# it. Hand-patch a real container this package wrote (`blocksize=512` so
+# the header fits in block 0 with no continuation chain, keeping the
+# patch simple) to flip on `useCRC` with a correctly-computed CRC, and
+# separately with a deliberately wrong one -- confirms both the
+# accept-when-correct and reject-when-corrupted paths, live.
+@testset "MultiFile — useCRC header verification (Phase 213)" begin
+    dir = joinpath(mktempdir(), "mfcrc.tab")
+    A = collect(Int32, 1:20)
+    write_table(dir, "T", ["A" => A]; nrow=20, storage=:multifile, blocksize=512)
+    path = joinpath(dir, "table.mf")
+    buf = read(path)
+    headerSize = Int(ntoh(reinterpret(Int64, buf[33:40])[1]))
+    blocksize  = Int(ntoh(reinterpret(Int64, buf[41:48])[1]))
+    @test headerSize <= blocksize   # header fits in block 0 -- no continuation chain
+
+    hdr = copy(buf[1:headerSize])
+    hdr[57] = 0x01                                    # useCRC = true
+    chk = copy(hdr); chk[29:32] .= 0x00                # zero headerCRC field during calc
+    hdr[29:32] = reinterpret(UInt8, [hton(UInt32(MeasurementSets._mf_crc32(chk)))])
+    goodbuf = copy(buf); goodbuf[1:headerSize] = hdr
+    write(path, goodbuf)
+    r = readtable(dir)
+    @test column(r, "A")[:] == A
+
+    badbuf = copy(goodbuf)
+    badbuf[60] ⊻= 0xFF                                 # flip a spare header byte, not the CRC
+    write(path, badbuf)
+    @test_throws ErrorException readtable(dir)
 end
 
 @testset "MultiHDF5 — self-authored fixture (documented format), our reader" begin
