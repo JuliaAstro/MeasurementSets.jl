@@ -486,3 +486,57 @@ end
         @test size(ct, 1) == nr + 3 - 2
     end
 end
+
+# Phase 210 (src/tables sweep): `open_dyscostman` (`src/datamanagers/
+# dysco.jl`) unconditionally reads `column(t, "ANTENNA1")`/`"ANTENNA2"`
+# at *open* time for any `DyscoStMan`-bound column, regardless of
+# normalization -- so removing either column from a table that still
+# has a Dysco-compressed column used to succeed silently at flush time
+# and only break on the *next* read, with a bare, unhelpful `KeyError:
+# key "ANTENNA1" not found` naming neither the Dysco column nor the
+# real cause. Live-verified before the fix; `removecolumn!` now rejects
+# it immediately, before any mutation, naming the dependent column(s).
+@testset "dysco -- removecolumn!(ANTENNA1/2) is rejected while a DyscoStMan column depends on it (Phase 210)" begin
+    dir = joinpath(mktempdir(), "ac.tab")
+    nr, vdata, vweight = _dysco_synth_ms(dir)
+
+    @test_throws ErrorException edit(dir) do t
+        removecolumn!(t, "ANTENNA1")
+    end
+    @test_throws ErrorException edit(dir) do t
+        removecolumn!(t, "ANTENNA2")
+    end
+
+    # rejected before any mutation -- the table is completely untouched
+    r = readtable(dir)
+    @test issetequal(columnnames(r), ["TIME", "ANTENNA1", "ANTENNA2", "FIELD_ID",
+                                      "DATA_DESC_ID", "DATA", "WEIGHT_SPECTRUM"])
+    @test column(r, "DATA")[1] ≈ vdata[1] atol=0.5
+
+    # an unrelated column can still be removed freely
+    edit(dir) do t
+        removecolumn!(t, "FIELD_ID")
+    end
+    @test !("FIELD_ID" in columnnames(readtable(dir)))
+
+    # remove the Dysco column itself first -- ANTENNA1 is then free
+    dir2 = joinpath(mktempdir(), "ac2.tab")
+    _dysco_synth_ms(dir2)
+    edit(dir2) do t
+        removecolumn!(t, "DATA")
+        removecolumn!(t, "WEIGHT_SPECTRUM")
+    end
+    edit(dir2) do t
+        removecolumn!(t, "ANTENNA1")
+    end
+    @test !("ANTENNA1" in columnnames(readtable(dir2)))
+
+    # a table with no Dysco column at all never trips the guard
+    dir3 = joinpath(mktempdir(), "ac3.tab")
+    write_table(dir3, "T", ["ANTENNA1" => Int32[0, 1], "ANTENNA2" => Int32[1, 2],
+                            "X" => Float64[1.0, 2.0]]; nrow=2)
+    edit(dir3) do t
+        removecolumn!(t, "ANTENNA1")
+    end
+    @test !("ANTENNA1" in columnnames(readtable(dir3)))
+end

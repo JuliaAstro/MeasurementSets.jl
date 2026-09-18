@@ -184,12 +184,17 @@ _stored_casatype(::Type{ComplexF64}) = TpDComplex
                       tablename, type, subtype, readme)
 
 Write a CTDS table from explicit column descriptions + per-column data
-vectors.  Columns not named in `tsm` / `tcm` / `tcell` / `ism` /
-`engines` / `dysco` go to one StandardStMan.  `tsm` / `tcm` / `tcell` /
-`dysco` each take either a flat list of names (one hypercube/instance per
-column) or a list of name groups (one shared hypercube/instance per
-group).  `engines` maps a virtual column name to `(; kind, stored=:tsm,
-scale=nothing, offset=nothing, autoscale=false, stored_type=TpInt,
+vectors.  `data[i]`'s element type must already match `descs[i].type` --
+this function trusts its caller's `descs`, it does not re-derive types
+from `data` itself, so a caller building `data` as a bare `[...]` literal
+of differently-typed numeric vectors is exposed to the same silent
+Julia-level type-promotion hazard documented on `write_table`'s own
+`columns` argument (see its docstring).  Columns not named in `tsm` /
+`tcm` / `tcell` / `ism` / `engines` / `dysco` go to one StandardStMan.
+`tsm` / `tcm` / `tcell` / `dysco` each take either a flat list of names
+(one hypercube/instance per column) or a list of name groups (one shared
+hypercube/instance per group).  `engines` maps a virtual column name to
+`(; kind, stored=:tsm, scale=nothing, offset=nothing, autoscale=false, stored_type=TpInt,
 storedname=nothing)`.  `dysco_spec` maps a Dysco group's first column
 name to `(; normalization=AFNorm(), distribution=TruncatedGaussian(),
 dataBitCount=10, weightBitCount=12, distributionTruncation=2.5,
@@ -438,6 +443,28 @@ end
 Write a CTDS table at `dir`.  `columns` is an iterable of `name => vector`
 pairs (or a `Tables` columns source).  Column metadata (units, comments,
 exact class names) is taken from `SCHEMAVER2[name]` when available.
+
+!!! warning "a bare `[...]` literal silently coerces mixed numeric columns"
+    If `columns` is written as a bare `[...]` array literal and its pairs'
+    value vectors have *different concrete numeric eltypes* (e.g. an
+    `Int32` antenna-id column next to a `Float64` time column), **Julia
+    itself** — before `write_table` ever runs — promotes every such
+    vector to one common numeric type via its own array-literal
+    construction (`Base.vect`), silently turning `Int32[0,1,2]` into
+    `Float64[0.0,1.0,2.0]`. `write_table` then has no way to tell this
+    happened (the original `Int32` vector no longer exists by the time
+    it receives `columns`), so the column is written with the *wrong*,
+    silently-widened `CasaType` — found live: `write_table(dir, "T",
+    ["TIME" => Float64[...], "ANTENNA1" => Int32[...]]; nrow=...)` writes
+    `ANTENNA1` as `TpDouble`, not `TpInt`. This is ordinary Julia
+    semantics (`[Int32[1], Float64[2.0]]` promotes the same way with no
+    `write_table` involved at all — confirmed independently), not
+    something this function can detect or repair after the fact. It does
+    **not** happen for a `Dict(...)`, an explicitly-typed `Pair[...]` /
+    `Any[...]` literal, or a `columns` built by `push!`ing into an
+    initially-empty `[]` — use one of those whenever your columns' element
+    types differ.
+
 `dysco`/`dysco_spec` compress one or more columns with `DyscoStMan` --
 see `_write_table_core` for the exact shape.  `virtualtaql` maps a column
 name to a TaQL-lite CALC expression (a `VirtualTaQLColumn` -- the passed
