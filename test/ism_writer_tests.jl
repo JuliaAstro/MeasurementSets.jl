@@ -50,6 +50,54 @@
     end
 end
 
+# Phase 211 (src/datamanagers sweep): a coverage-instrumented run showed
+# `af_read`/`af_put!`'s `TpString` branches (`src/datamanagers/
+# arrayfile.jl`) had zero coverage. Unlike StandardStMan -- whose
+# `_ssmkind` always routes a variable-shape String column to the
+# string-bucket mechanism (`:indstr`), never to `arrayfile.jl` --
+# IncrementalStMan's `_ismkind` has no such split (every non-`Dims`
+# column, String or not, is plain `:ind`), so a ragged String-array
+# column bound to ISM genuinely does reach `af_read`/`af_put!` with
+# `t == TpString` -- this was reachable, just never exercised (the
+# existing "ragged -> indirect" ISM test above, `f`, is `Float64`, not
+# `String`). Live-verified correct before adding this as a permanent
+# regression test (same "close the gap, don't just note it" precedent
+# as the TiledCellStMan testset above).
+@testset "ISM writer — indirect (ragged) String array column (Phase 211)" begin
+    n = 6
+    s = [fill("r$(r)", r) for r in 1:n]                # ragged: 1..6 elements/row
+    dir = joinpath(mktempdir(), "ism_indstr")
+    write_table(dir, "T", ["s" => s]; nrow=n, ism=["s"])
+
+    r = readtable(dir)
+    @test r.managers[1].name == "IncrementalStMan"
+    @test getcolumn(r, "s") == s
+    @test getcell(r, "s", 4) == fill("r4", 4)
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:s][1] == s[1]
+        @test ct[:s][6] == s[6]
+    end
+
+    # repeated (run-length) values -- exercises ISM's store-on-change with
+    # an array value, and af_put!'s offset reuse for an unchanged cell
+    dir2 = joinpath(mktempdir(), "ism_indstr_runs")
+    s2 = [["a", "b"], ["a", "b"], ["a", "b"], ["x", "y", "z"], ["x", "y", "z"], ["q"]]
+    write_table(dir2, "T", ["s" => s2]; nrow=n, ism=["s"])
+    r2 = readtable(dir2)
+    @test getcolumn(r2, "s") == s2
+
+    # in-place edit of one row
+    edit(dir2) do t
+        t[:s][2] = ["changed"]
+    end
+    r3 = readtable(dir2)
+    @test getcell(r3, "s", 2) == ["changed"]
+    @test getcell(r3, "s", 1) == s2[1]   # siblings untouched
+    @test getcell(r3, "s", 3) == s2[3]
+end
+
 @testset "ISM writer multi-bucket" begin
     n = 15000
     g = Float64.(1:n)                                          # a change every row

@@ -85,6 +85,34 @@ _check_storage(storage::Symbol) = storage in (:sepfile, :multifile, :multihdf5) 
     throw(ArgumentError("storage must be :sepfile, :multifile, or :multihdf5 (got $(repr(storage)))"))
 
 """
+    _check_blocksize(blocksize::Integer)
+
+Validate `storage=:multifile`/`:multihdf5`'s `blocksize=` -- throws a clear
+`ArgumentError` for anything below the format's own hard floor.
+
+Found live (Phase 211): `blocksize` was never validated anywhere, and the
+MultiFile writer has TWO distinct ways to break on a too-small value.
+`_finalize_multifile`'s continuation-block convergence loop divides by
+`blocksize - 8` (`cld(need, bs - 8)`); `blocksize <= 8` makes that
+divisor zero or negative, throwing a bare, unhelpful `DivideError` (`==8`)
+or `ArgumentError: invalid GenericMemory size` from a downstream
+`zeros(Int64, <negative>)` (`<8`) -- neither error names the real cause.
+More fundamentally, `blocksize < 64` is wrong even where the arithmetic
+happens not to crash: the reader (`open_multifile`) always reads the
+fixed 64-byte lead directly from file offset 0 in ONE unconditional
+`readbytes!(io, lead, 64)` call, entirely outside the block-chunking
+mechanism -- so a `blocksize` smaller than that lead would make block 0
+unable to even hold it, corrupting the format at a level no amount of
+continuation-block bookkeeping can recover from. `blocksize >= 64` is
+therefore the format's real hard floor, not just an arithmetic one (the
+existing test suite's own smallest exercised value, 64, already sits
+exactly on it).
+"""
+_check_blocksize(blocksize::Integer) = blocksize >= 64 ||
+    throw(ArgumentError("blocksize must be >= 64 (the fixed MultiFile header " *
+        "lead's own size), got $blocksize"))
+
+"""
     with_container_sink(f, dir, storage::Symbol, blocksize::Integer)
 
 Run `f()` with every `_dmfile_write!` call inside it buffered into a new

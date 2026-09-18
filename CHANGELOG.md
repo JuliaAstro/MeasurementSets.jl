@@ -7095,3 +7095,136 @@ standalone run of `test/dysco_tests.jl` — 542/542 — and
 `test/edit_tests.jl` — 105/105 — after the fix; expect the full-suite
 count to land around 4977 + ~12 new assertions once merged). README +
 memory updated, merge on the user's word.
+
+### Phase 211 — `src/datamanagers/` sweep: a reachable crash from an unvalidated `blocksize=`, and two genuinely-reachable-but-completely-uncovered code paths confirmed correct and pinned by new tests
+
+Continued the coverage-instrumented sweep, this time over
+`src/datamanagers/*.jl` (10 files, ~4,500 lines — the storage-manager /
+virtual-engine layer; never swept as its own unit before, though
+individual files here had plenty of targeted attention across earlier
+phases). Ran `Pkg.test(; coverage=true)` (baseline 4995/4995, unchanged)
+plus extensive manual re-reading of `standard.jl`/`incremental.jl`/
+`arrayfile.jl`/`tiled.jl`/`forwardcol.jl`/`virtualtaql.jl` — no new bug
+found there (several candidate concerns investigated and ruled out:
+`DATAMANAGER_PATTERNS`'s regex dict has no overlapping prefixes so
+iteration-order nondeterminism can't bite; `_le_index`'s ISM
+"row precedes every bucket entry" fallback was already confirmed sound
+in Phase 161; `tsm_extend_rows!`'s file-sequence-number bookkeeping
+looks deliberate, not broken). Then followed methodology note #14 and
+diffed the coverage output against every file.
+
+**Bug — an unvalidated `blocksize=` could crash `write_table`/
+`write_ms`/`create_ms` with a confusing, unhelpful error.** None of the
+three container-write entry points ever validated `blocksize=`
+(`storage=:multifile`/`:multihdf5`'s companion kwarg) the way Phase 199
+made them validate `storage=` itself. `_finalize_multifile`'s
+continuation-block convergence loop divides by `blocksize - 8`
+(`cld(need, bs - 8)`); live-verified `blocksize=8` throws a bare
+`DivideError: integer division error` and `blocksize=4` throws
+`ArgumentError: invalid GenericMemory size` (from a downstream
+`zeros(Int64, <negative>)` once the divisor goes negative) — neither
+error names the real cause. Worse, `blocksize < 64` is wrong even where
+the arithmetic happens not to crash: the reader (`open_multifile`)
+always reads the fixed 64-byte header lead directly from file offset 0
+in one unconditional `readbytes!(io, lead, 64)` call, entirely outside
+the block-chunking mechanism, so any `blocksize` smaller than that lead
+would silently corrupt the format at a level no amount of continuation-
+block bookkeeping could recover from — `blocksize >= 64` is the format's
+real hard floor (matching the existing test suite's own smallest
+exercised value, 64, exactly). New `_check_blocksize(blocksize)`
+(`src/datamanagers/container.jl`), called at all three of `_check_storage`'s
+existing call sites (`_write_table_core`, `write_ms`, `create_ms`,
+`src/tables/create.jl`) — same "validate before any directory is
+created" placement Phase 199 established for `storage=` itself. (An
+initial worry that a batched `for bs in (8,16,32,64)` test had actually
+found a genuine *infinite loop*, not just a crash, turned out to be a
+red herring: that run was sharing the CPU with the still-running
+coverage-instrumented full suite in the background, and an isolated,
+unshared re-run of the exact same `blocksize=8` case threw the expected
+`DivideError` immediately — a reminder to isolate a suspicious timing
+result before trusting it, not just re-run it under load.)
+
+**Two genuinely-reachable, completely-uncovered code paths — confirmed
+correct via live reproduction, now pinned by permanent regression
+tests** (the coverage-diff turned these up; live-verifying each was
+cheap and each turned out to already work, so the fix is closing the
+test gap, not the code):
+- `tsm_setcell!`'s `:cell`-kind branch (`tiled.jl`) — an in-place cell
+  edit of a `TiledCellStMan`-bound column — had never been exercised by
+  any test at all (not even indirectly), for either a `Float32` or a
+  `Bool` (bit-packed) column. Live-verified both edit correctly with
+  siblings left untouched; new testset in `test/tsm_multicol_tests.jl`.
+  Writing the `_HAVE_CASACORE` cross-check for this test surfaced a
+  SEPARATE, genuinely interesting finding, in `Casacore.jl` itself, not
+  this package: a `TiledCellStMan` column whose every row happens to
+  share the *same* cell shape (a uniform-shape cell, easy to reach for
+  in a quick test even though it's not TiledCellStMan's real use case)
+  makes `Casacore.jl`'s `Tables.Column.size()` throw
+  `MethodError: Cannot convert (Int64,Int64,UInt64) to Tuple{Int64}` —
+  real casacore hands back a differently-shaped raw tuple for that case
+  and the Julia wrapper's `N=1` type parameter can't absorb it. Confirmed
+  this package's OWN reader already reads such a table back correctly
+  (the corruption, if any, would be entirely on the `Casacore.jl` read
+  side) — the full initial testset (uniform per-row cell shape) failed
+  the full-suite run this way; switched to the same *varying*-per-row-
+  shape pattern the adjacent, pre-existing "TiledCellStMan writer +
+  reader" testset already uses successfully, which sidesteps it (and is
+  the more representative case anyway — TiledCellStMan exists
+  specifically for per-row-varying shapes). Not something to fix in this
+  package; noted in the new testset's own comment for the next person
+  who hits it.
+- `af_read`/`af_put!`'s `TpString` branches (`arrayfile.jl`) — the
+  `StManArrayFile` (`table.f<seq>i`) indirect-array codec's string
+  handling. `StandardStMan`'s own `_ssmkind` always routes a
+  variable-shape `String` column to the separate string-bucket
+  mechanism (`:indstr`), never to `arrayfile.jl` — but
+  `IncrementalStMan`'s `_ismkind` has no such split (every non-`Dims`
+  column, `String` or not, is plain `:ind`), so a ragged `String`-array
+  column bound to ISM genuinely does reach these branches; nothing in
+  the existing suite ever built one (the existing "ragged → indirect"
+  ISM test covers a `Float64` array column, not `String`). Live-verified
+  a round-trip, a repeated-value ("store on change") case, and an
+  in-place `edit()` of one row — all correct; new testset in
+  `test/ism_writer_tests.jl`.
+
+Full suite green: the first full-suite run (before the `Casacore.jl`
+finding above) came back **5008 passed, 3 errored** — a genuine, if
+narrow, failure this phase's own new test caused, caught by running the
+REAL full suite rather than trusting a standalone run that happened to
+have Casacore.jl unavailable and so silently skipped the exact block
+that broke. Fixed (varying per-row shapes, see above); re-verified
+every touched test file individually in an isolated `Pkg.develop`+
+`Casacore`+`HDF5` scratch environment — `tsm_multicol_tests.jl` 209/209,
+`ism_writer_tests.jl` 193/193, `container_tests.jl` 240/240, all with
+the real `_HAVE_CASACORE`/`_HAVE_TAQL` cross-checks actually running
+(not skipped). Final full-suite run: 5011/5011. README + memory
+updated, merge on the user's word.
+
+### Phase 212 — a broken `@ref` link from Phase 210, the same shape Phase 160 already fixed once
+
+User-reported Documenter build error: `Cannot resolve @ref for
+md"[`_dysco_dependents`](@ref)" in docs/src/api-2.md` /
+`No docstring found in doc for binding
+MeasurementSets._dysco_dependents`. Root cause: Phase 210's
+`removecolumn!` docstring (`src/tables/edit.jl`) linked to
+`_dysco_dependents` via `[`_dysco_dependents`](@ref)` — but
+`_dysco_dependents` is internal (underscore-prefixed, never exported)
+and has no `@docs` entry anywhere in `docs/src/*.md`, so Documenter's
+`checkdocs`/cross-reference resolution has nothing to resolve the link
+against, even though the function genuinely does have its own
+docstring. The EXACT same category of bug Phase 160 already found and
+fixed once, in three Dysco docstrings — this one was simply written
+*after* that fix, in the same PR, and missed. Fixed by dropping the
+`@ref` link (plain inline code, `` `_dysco_dependents` ``, matching
+Phase 160's own fix). Swept the whole tree (`grep -rn
+'\[`_[A-Za-z_!]*`\](@ref)' src/ ext/`) for any other `@ref` link
+pointing at an underscore-prefixed name — none found, this was the only
+instance. Could not run the actual `docs/make.jl` locally to verify
+end-to-end (a pre-existing, unrelated `Git_jll`/`Expat_jll` precompile
+failure in this dev checkout's docs environment, already noted in an
+earlier session as an environment artifact independent of any source
+change — still present, not investigated further here); confirmed
+instead that the package itself still loads cleanly with the edited
+docstring and that no other instance of the same pattern exists.
+Bundled into the same `phase211-sweep` branch/PR since it was reported
+mid-phase. No test-count change (docstring-only).

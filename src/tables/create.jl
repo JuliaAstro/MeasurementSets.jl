@@ -226,6 +226,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            type::AbstractString="", subtype::AbstractString="",
                            readme::AbstractString="")
     _check_storage(storage)
+    _check_blocksize(blocksize)
     mkpath(dir)
     tsmg = _tsm_groups(tsm)
 
@@ -872,6 +873,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
                   subtable_rows::AbstractDict=Dict{String,Any}(),
                   storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     _check_storage(storage)
+    _check_blocksize(blocksize)
     main0 = getfield(ms, :data)
     realkws = Set(kw for (kw, _) in MeasurementSets.subtables(main0))
     # `subtables=`/`subtable_rows=` name subtables by keyword, matched only
@@ -1040,6 +1042,7 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
                    ncorr::Integer=2, nant::Integer=3, nrec::Integer=2,
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     _check_storage(storage)
+    _check_blocksize(blocksize)
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
