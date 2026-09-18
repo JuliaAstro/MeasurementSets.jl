@@ -98,6 +98,38 @@ end
     @test getcell(r3, "s", 3) == s2[3]
 end
 
+# Phase 213 (src/datamanagers sweep, continued): `af_read`/`af_put!`'s
+# empty-STRING-ELEMENT branches (`arrayfile.jl:94,181` -- an empty `""`
+# element WITHIN an otherwise-written ragged string array, distinct from
+# an entire array cell never being filled at all) had zero coverage --
+# every existing indirect-String-array test uses only non-empty strings.
+@testset "ISM writer — indirect String array with empty-string elements (Phase 213)" begin
+    dir = joinpath(mktempdir(), "afempty")
+    s = [["a", "", "c"], ["", "", ""], ["x"]]
+    write_table(dir, "T", ["s" => s]; nrow=3, ism=["s"])
+    r = readtable(dir)
+    @test [getcell(r, "s", i) for i in 1:3] == s
+    @test getcolumn(r, "s") == s
+end
+
+# Phase 213 (src/datamanagers sweep, continued): `getcolumn`'s
+# array-valued-ISM-column `astype` post-convert branch (`incremental.jl:
+# 233`, `[astype.(x) for x in out]`) had zero coverage -- every existing
+# array-valued ISM test uses `Float64` data (narrowing only ever applies
+# to `Float32`/`ComplexF32`), so no test combined a ragged ISM array
+# column with precision narrowing.
+@testset "ISM writer — narrowed getcolumn on a ragged array column (Phase 213)" begin
+    dir = joinpath(mktempdir(), "ismnarrow")
+    V = [Float32.(fill(10i, i <= 3 ? 2 : 4)) for i in 1:6]   # ragged Float32
+    write_table(dir, "T", ["V" => V]; nrow=6, ism=["V"])
+
+    r = readtable(dir)
+    @test r.managers[1].name == "IncrementalStMan"
+    out = column(r, "V"; precision=Float16)[:]
+    @test eltype(out[1]) == Float16
+    @test out == [Float16.(v) for v in V]
+end
+
 @testset "ISM writer multi-bucket" begin
     n = 15000
     g = Float64.(1:n)                                          # a change every row

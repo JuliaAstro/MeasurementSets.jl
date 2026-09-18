@@ -7228,3 +7228,204 @@ instead that the package itself still loads cleanly with the edited
 docstring and that no other instance of the same pattern exists.
 Bundled into the same `phase211-sweep` branch/PR since it was reported
 mid-phase. No test-count change (docstring-only).
+
+### Phase 213 — src/datamanagers sweep, continued: a real `getcolumn` crash on an undefined `TiledCellStMan` row, plus several confirmed-correct-but-untested paths closed with permanent tests
+
+Continuing the coverage-instrumented + manual-reading sweep from Phase
+211 (which covered `standard.jl`/`incremental.jl`/`arrayfile.jl`/
+`tiled.jl`), this phase covers the remaining `src/datamanagers/` files
+(`dysco.jl`, `virtual.jl`, `container.jl`, `virtualtaql.jl`,
+`forwardcol.jl`, `datamanager.jl`) plus a deeper pass over `tiled.jl`.
+
+**The real bug**, found via coverage diff then live-reproduced:
+`getcolumn`'s `:cell` (`TiledCellStMan`) branch (`tiled.jl`) iterated
+`tsm.cubes[r]` directly, skipping the `isnull` check `getcell` already
+has. A per-row cube can genuinely be undefined — real casacore's own
+`TiledCellStMan::addRow64` (`TiledCellStMan.cc:178-200`) creates a null
+`TSMCube` (empty cubeshape, no file) for any row added before its cell
+shape is ever `setShape`'d — so a real casacore-authored table with more
+declared rows than actually-written cells for that column is a genuine,
+reachable state. Live-reproduced by hand-inserting a null cube into a
+real, on-disk-round-tripped `TiledStMan` instance: `getcell` already gave
+a clear "row N of this column has no stored data" error; `getcolumn`
+crashed instead with a raw, unhelpful `MethodError: no method matching
+_tsmbytes(..., ::Nothing)`. Fixed to check `isnull` per row and raise the
+same clear error; new regression test in `test/tsm_multicol_tests.jl`.
+
+**Confirmed-correct-but-untested paths, closed with permanent tests**
+(each live-verified first, several against real `Casacore.jl`/TaQL):
+
+- `_cube_for_row`'s `rownr > tsm.row[end]` branch (`TiledShapeStMan`
+  reading a row beyond its own row map's last defined interval — a
+  column whose tile coverage never got extended to the table's full row
+  count) — hand-truncated a real instance's row map to simulate it;
+  `getcell`/`getcolumn` (both the astype-narrowed and plain fallback
+  paths) all give the same clear error, and the still-defined rows are
+  unaffected.
+- `getcolumn`'s astype-narrowed per-cell fallback (used only when the
+  whole-column bulk-read fast path doesn't apply, e.g. more than one
+  real hypercube for the column) — every existing precision-narrowing
+  test happened to hit the fast path instead.
+- `read_plane`'s "leading axes tiled" branch (a tile shape that also
+  chunks the cell's own non-row axes, not just the row axis) — our own
+  writer never produces this layout (`write_tiledshapestman` always
+  tiles only the row axis), so a real, TaQL-authored
+  `DEFAULTTILESHAPE=[1,2,2]` fixture is both the only way to construct
+  one and a genuine interop cross-check (`_HAVE_TAQL`-gated).
+- An unrecognized / not-yet-supported tiled wrapper name inside
+  `table.f<seq>` (hand-patched a real file's private header to a bogus
+  name and to `"TiledDataStMan"`) — both give a clear, name-carrying
+  error. Along the way, found `"TiledDataStMan"` was **not** registered
+  in `DATAMANAGERS` at all, even though
+  `TiledDataStMan::dataManagerType()` (`TiledDataStMan.cc:79-80`)
+  literally returns that string — meaning a genuine
+  `TiledDataStMan`-bound column would never even reach this file's own
+  dedicated `"TiledDataStMan not yet supported"` error (`_dm_instance`,
+  `tables/column.jl`, raises its generic "not yet supported (column
+  data)" message first, since `_dmtype` returned `nothing`) — the
+  dedicated branch was unreachable dead code for the exact real-world
+  case it names. Fixed by registering it, routing to the same
+  informative error.
+- `_dmtype`'s own final fallback (`datamanager.jl`, `return nothing` for
+  a totally unrecognized name) had no test at all.
+- `MultiFile`'s `_mf_pack_index` (the write-side mirror of
+  `_mf_unpack_index`) — only ever exercised with an already-contiguous
+  block list (the only shape this package's own writer produces); its
+  "close the current run, start a new one" branch (a genuinely different
+  code path for a *fragmented* block list) had zero coverage anywhere.
+  Confirmed correct via round-trip through `_mf_unpack_index` for
+  several fragmented cases.
+- `open_multifile`'s `useCRC` header-verification branch — no
+  TaQL/`StorageOption` knob exists to make real casacore ever *write* a
+  `useCRC=true` container (confirmed in the Phase 21 plan), so no
+  fixture was available; hand-patched a real container this package
+  wrote (with a correctly-computed CRC, and separately with a
+  deliberately wrong one) to exercise both the accept- and
+  reject-when-corrupted paths.
+- `af_read`/`af_put!`'s empty-*string-element* branches (an empty `""`
+  element *within* an otherwise-written ragged `String` array, distinct
+  from Phase 211's "entire cell never filled" case) — every existing
+  indirect-`String`-array test used only non-empty strings.
+- `getcolumn`'s array-valued-ISM-column `astype` post-convert branch —
+  every existing array-valued ISM test used `Float64` data (narrowing
+  only ever applies to `Float32`/`ComplexF32`), so no test combined a
+  ragged ISM array column with precision narrowing.
+- Three `VirtualTaQLColumn` combinations: a quantity literal inside a
+  CALC expression (`"A > 1.4GHz"`, Unitful-gated), an array-typed CALC
+  result, and `_vtq_err`'s runtime-evaluation-error wrapping (distinct
+  from the existing parse-time-error test — a per-row out-of-range array
+  index is a genuine runtime-only failure, reachable via both `getcell`
+  and the bulk `getcolumn` path).
+- `_decode(::CompressComplex,...)`'s `im < -ENG_C_WRAP` wrap-correction
+  branch (needs a negative real part paired with a non-negative
+  imaginary part — the existing cross-check fixtures never had that
+  sign combination) and **both** of `CompressComplexSD`'s wrap-correction
+  branches (needs a genuinely mixed-sign complex value) — all confirmed
+  correct via live round-trip and a real `Casacore.jl` cross-check.
+  Constructing this also surfaced a real, **confirmed-matching-upstream**
+  quirk, not a divergence to fix: `CompressComplexSD::scaleOnPut`
+  (`CompressComplex.cc:787-788`) encodes a non-finite value the *same*
+  way plain `CompressComplex` does (`stored = -32768*65536`) — but that
+  value is even, and SD's own decode (`scaleOnGet`, `.cc:750`) branches
+  on `inval%2==0` *before* ever reaching the `r==-32768` NaN sentinel
+  check (which only lives in the odd branch) — so a NaN written through
+  `CompressComplexSD` does **not** come back as NaN in real casacore
+  either; it silently misdecodes as a large bogus real-only value. This
+  package's port reproduces that upstream limitation exactly (live-
+  verified byte-for-byte against real `Casacore.jl`) rather than "fixing"
+  a divergence that doesn't actually exist. Documented in place, pinned
+  by a permanent test.
+
+**Investigated, deprioritized** (real, defensive, or too costly to
+construct a fixture for relative to the payoff — not chased further):
+`SSMIndex`/`ISMIndex`'s internal "row out of range" guards (only
+reachable from a bug in this package's own calling code, never from real
+data); `DyscoStMan`'s `rowsPerBlock == 0` guard (only reachable for a
+genuinely 0-row table, which this package's own writer already rejects
+before it can be produced); `_af_calculate_antenna_rms`'s dead-antenna
+snap-to-zero branch and `_af_fit_to_maximum!`'s two early-termination
+branches (deep inside the already CASA-cross-checked AF-normalization
+hill-climb — correct by construction and at the macro (round-trip) level,
+just not independently traced at this micro-branch level);
+`SSMStringHandler`'s `filled==0` "shape declared, never actually written"
+case (`standard.jl`) — a real casacore state (mirrors the
+`TiledCellStMan` null-cube case), but constructing a fixture needs a
+`setShape`-without-`put` sequence this package's own writer never
+produces and TaQL has no clean way to trigger either.
+
+Full suite green (baseline 5011, +54 new = 5065/5065). README/memory updated,
+merge on the user's word.
+
+### Phase 214 — src/datamanagers sweep, continued: a mathematically-unreachable branch confirmed (not a bug), a real casacore clamp asymmetry documented, and the last few coverage gaps closed
+
+Continuing Phase 213's sweep with fresh eyes: a manual line-by-line
+re-verification of `ScaledArrayEngine`/`ScaledComplexData`/
+`MappedArrayEngine` against `ScaledArrayEngine.tcc`/
+`ScaledComplexData.tcc`/`MappedArrayEngine.tcc` (never independently
+re-checked since their original implementation) found no divergence —
+both confirmed to match casacore's `scaleOnGet`/`scaleOnPut` formulas
+exactly, element layout included.
+
+**A genuine, previously-undocumented casacore asymmetry, found while
+re-reading `CompressFloat.cc`**: `CompressComplex::scaleOnPut`
+explicitly clamps each part to ±32767 before casting to `short`
+(`CompressComplex.cc:274-320`); `CompressFloat::scaleOnPut`
+(`CompressFloat.cc:274-296`) has **no clamp at all** — a raw `short(...)`
+cast, undefined behaviour in C++ for an out-of-range float (no single
+"correct" value across platforms/compilers to replicate). This
+package's own `_encode(::CompressFloat,...)` clamps anyway, reusing
+`CompressComplex`'s own clamp constant — a deliberate, safe, bounded
+divergence (never crashes, never silently produces an arbitrary
+platform-specific value) rather than a bug to "fix" by removing the
+clamp. Documented in place with a citation; new permanent regression
+test confirms an out-of-range value clamps to exactly ±32767 and never
+crashes (deliberately *not* cross-checked against real `Casacore.jl` —
+feeding an out-of-range value through the real C++ library would itself
+be exercising UB, not something to rely on as ground truth).
+
+**A mathematically-provable dead branch, not merely untested**:
+`_decode(::CompressComplexSD,...)`'s `r == -ENG_C_WRAP → NaN` check
+(inside the *odd* branch) can never actually fire — the only integer `v`
+for which `div(v, 65536) == -32768` is `v == ENG_NAN_C` itself, which is
+even and is therefore always caught by the `iseven(v)` dispatch *before*
+ever reaching this branch (confirmed computationally: any `v` one step
+less negative than `ENG_NAN_C` already truncates to `-32767`, not
+`-32768`). Real casacore's own `CompressComplexSD::scaleOnGet`
+(`CompressComplex.cc:750-756`) has the *identical* structure — this
+package's branch faithfully mirrors an equally-dead branch in upstream
+casacore itself, not a bug, and no test can exercise it (there is no
+reachable input). Documented in place; nothing to test.
+
+**Coverage gaps closed with permanent tests** (each live-verified
+first):
+- `TiledCellStMan`'s shared-group per-row shape-mismatch validation
+  (`write_tiledcellstman`) — a real, easily-reachable user-input
+  validation error with zero prior test coverage.
+- `VirtualTaQLColumn`'s non-default-TaQL-style warning
+  (`_vtq_prepare!`, real casacore can write e.g. `"python"` for 0-based
+  array indexing, which TaQL-lite has no concept of) — hand-set on a
+  real, opened instance (this package's own writer always writes `""`).
+- Dysco's AF-normalization dead-antenna snap-to-zero rule
+  (`_af_calculate_antenna_rms`, `rmsPerAntenna[i] < maxVal*1e-5 -> 0`) —
+  every existing AF test fixture gives every antenna real signal; a
+  genuinely dead antenna (zero amplitude on every baseline it
+  participates in — a realistic broken/flagged-antenna scenario) is the
+  reachable, well-defined case, exercised via a direct unit call.
+
+**Investigated, still deprioritized** (same reasoning as Phase 213,
+revisited but not chased further): `_af_fit_to_maximum!`'s two
+early-termination branches (deep inside the already CASA-cross-checked
+AF hill-climb; engineering a precise numeric scenario for these specific
+branches has a poor effort/payoff ratio relative to everything else
+found this sweep); `SSMIndex`/`ISMIndex`'s internal bounds guards;
+`SSMStringHandler`'s `filled==0` case; `tiled.jl`'s `>2 GiB` file-record
+branch (would need a multi-gigabyte fixture); Dysco's `rowsPerBlock==0`
+guard (this package's own writer already rejects a 0-row write before
+it can be produced).
+
+`src/datamanagers/{forwardcol,datamanager,arrayfile}.jl` are now fully
+covered (closed in Phase 213); `virtual.jl` is down to exactly the one
+provably-unreachable line above.
+
+Full suite green (baseline 5065, +9 new = 5074/5074). README/memory updated, merge
+on the user's word.

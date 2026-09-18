@@ -43,7 +43,19 @@ const ENG_AUTOSCALE_DIV  = 65534            # autoScale: scale = (max - min) / 6
 
 const ENG_NAN_C          = Int32(-ENG_C_WRAP) * Int32(ENG_C_HIWORD)  # CompressComplex/SD sentinel
 const ENG_NAN_F          = Int16(-ENG_C_WRAP)                        # CompressFloat sentinel
-const ENG_C_PART_MAX     = ENG_C_WRAP - 1                            # 32767: CompressComplex per-part clamp
+# 32767: CompressComplex's own `scaleOnPut` (CompressComplex.cc:274-320)
+# explicitly clamps each part to this before casting to `short` (`if (f <
+# -32767) s = -32767; ... if (f > 32767) s = 32767;`). Phase 214 finding:
+# `CompressFloat::scaleOnPut` (CompressFloat.cc:274-296) has NO such
+# clamp at all -- it casts straight to `short`, which is undefined
+# behaviour in C++ for an out-of-range float (no single "correct" value
+# to replicate; different platforms/compilers may wrap, saturate, or
+# something else entirely). This package deliberately clamps
+# `CompressFloat` too (reusing this same constant) rather than
+# replicating that undefined behaviour -- a safe, bounded divergence
+# (never crashes, never silently produces an arbitrary platform-specific
+# value), not a bug to "fix" by removing it.
+const ENG_C_PART_MAX     = ENG_C_WRAP - 1                            # 32767: CompressComplex/Float clamp
 const ENG_SD_REAL_MAX    = ENG_C_WRAP - 1                            # CompressComplexSD real clamp (odd)
 const ENG_SD_IMAG_MULT   = 2                                         # SD odd: imag scaled by `scale*2`
 const ENG_SD_IMAG_HI     = ENG_C_WRAP ÷ ENG_SD_IMAG_MULT - 1         # 16383: SD imag clamp (odd)
@@ -317,6 +329,17 @@ function _decode(::CompressComplexSD, st::AbstractArray{<:Integer}, scale, offse
             out[i] = J(R(muladd(v >> 1, fullScale, of)), zero(R))
         else
             r = div(v, ENG_C_HIWORD)
+            # Phase 214 finding: `r == -ENG_C_WRAP` is PROVABLY unreachable
+            # here, not merely untested -- the only `v` for which
+            # `div(v, ENG_C_HIWORD) == -ENG_C_WRAP` is `v == ENG_NAN_C`
+            # itself (an even number: for any `v` one step less negative,
+            # truncating division already rounds to `-ENG_C_WRAP + 1`, not
+            # `-ENG_C_WRAP`), and that exact value is always caught by the
+            # `iseven(v)` branch above, before ever reaching this `else`.
+            # Real casacore's own `CompressComplexSD::scaleOnGet`
+            # (CompressComplex.cc:750-756) has the identical structure --
+            # this branch mirrors ITS equally-unreachable one faithfully,
+            # not a bug or a gap to close with a test (none is possible).
             if r == -ENG_C_WRAP
                 out[i] = J(NaN, NaN)
             else

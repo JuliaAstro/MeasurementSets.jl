@@ -141,6 +141,70 @@ end
     end
 end
 
+# Phase 214: a shared `TiledCellStMan` group (multiple columns in one
+# per-row hypercube) requires every column to have the SAME cell shape
+# for a given row -- `write_tiledcellstman`'s own validation loop for
+# this had zero test coverage.
+@testset "TiledCellStMan — shared group with a per-row shape mismatch errors (Phase 214)" begin
+    dir = joinpath(mktempdir(), "tcellmismatch.tab")
+    A = [Float32.(reshape(1:(2 * (r + 1)), 2, r + 1)) for r in 1:3]
+    B = [Float32.(reshape(1:(2 * (r + 2)), 2, r + 2)) for r in 1:3]   # different shape per row
+    err = try
+        write_table(dir, "T", ["A" => A, "B" => B]; nrow=3, tcell=[["A", "B"]])
+        nothing
+    catch e
+        e
+    end
+    @test err isa ErrorException && occursin("row 1 shape mismatch", err.msg)
+
+    # same shapes across the group -> no error, real round trip
+    B2 = [Float32.(reshape(1:(2 * (r + 1)), 2, r + 1)) .+ 100 for r in 1:3]
+    write_table(dir, "T", ["A" => A, "B" => B2]; nrow=3, tcell=[["A", "B"]])
+    r = readtable(dir)
+    @test [column(r, "A")[i] for i in 1:3] == A
+    @test [column(r, "B")[i] for i in 1:3] == B2
+end
+
+# Phase 213 (src/datamanagers sweep, continued): a `TiledCellStMan` row can
+# genuinely have an UNDEFINED cell -- real casacore's own
+# `TiledCellStMan::addRow64` (TiledCellStMan.cc:178-200) creates a null
+# `TSMCube` (empty cubeshape, no file) for any row added before its cell
+# shape is ever `setShape`'d.  `getcell` already raised a clear error for
+# that row; `getcolumn`'s bulk `:cell` path skipped the same check and
+# crashed instead with a raw, unhelpful `MethodError: no method matching
+# _tsmbytes(..., ::Nothing)` -- live-reproduced by hand-inserting a null
+# cube into a real, on-disk-round-tripped instance (exactly the state a
+# genuine casacore-authored table can be in), confirming the crash before
+# the fix and the matching clear error after.
+@testset "TiledCellStMan — an undefined (never setShape'd) row (Phase 213)" begin
+    dir = joinpath(mktempdir(), "tcellundef.tab")
+    C = [Float32.(reshape((r * 10) .+ (1:(2 * (r + 1))), 2, r + 1)) for r in 1:3]
+    write_table(dir, "T", ["C" => C]; nrow=3, tcell=[["C"]])
+
+    r = readtable(dir)
+    seq = only(m.sequ for m in r.managers if m.name == "TiledCellStMan")
+    inst = MSv2._dm_instance(r, seq)
+    @test !MSv2.isnull(inst.cubes[2])
+    inst.cubes[2] = MSv2.TSMCube((), (), nothing, 0)   # simulate addRow64-before-setShape
+
+    cdesc = columndesc(r, "C")
+    @test_throws ErrorException MSv2.getcell(inst, 1, cdesc, 2, 1)
+    @test_throws ErrorException MSv2.getcolumn(inst, 1, cdesc, 3, 1)
+    # the other (defined) rows are unaffected by the one undefined row
+    @test MSv2.getcell(inst, 1, cdesc, 1, 1) == C[1]
+    @test MSv2.getcell(inst, 1, cdesc, 3, 1) == C[3]
+    # and the same error message either way, matching `getcell`'s
+    try
+        MSv2.getcolumn(inst, 1, cdesc, 3, 1)
+    catch e
+        try
+            MSv2.getcell(inst, 1, cdesc, 2, 1)
+        catch e2
+            @test sprint(showerror, e) == sprint(showerror, e2)
+        end
+    end
+end
+
 # Phase 211 (src/datamanagers sweep): `tsm_setcell!`'s `:cell`-kind branch
 # (a `TiledCellStMan` in-place cell edit) had ZERO test coverage anywhere
 # in the suite -- a coverage-instrumented run confirmed not one line of it
@@ -300,4 +364,123 @@ end
     @test da == "TiledColumnStMan"
     @test [column(r, "A")[i] for i in 1:3] == A
     @test [column(r, "U")[i] for i in 1:3] == U
+end
+
+# Phase 213 (src/datamanagers sweep, continued): a `TiledShapeStMan`
+# column can genuinely have rows *beyond* its own row map's last defined
+# interval -- e.g. a column whose tile coverage never got extended to the
+# table's full row count. `_cube_for_row`'s `rownr > tsm.row[end]` branch
+# (returning the dummy "undefined cells" cube 0) already handles this
+# correctly, but no test ever actually put a real, opened `TiledStMan`
+# instance into that state -- live-reproduced by hand-truncating a real
+# instance's own row map (the same technique used for the null-cube
+# `TiledCellStMan` case above), confirming `getcell` *and* `getcolumn`
+# (the astype-narrowed AND plain per-cell fallback paths) all give the
+# same clear error, and that the still-defined rows are unaffected.
+@testset "TiledShapeStMan — rows beyond the row map's last interval (Phase 213)" begin
+    dir = joinpath(mktempdir(), "tsmpartial.tab")
+    D = [Float32.(reshape(1:6, 2, 3)) .+ 10i for i in 1:5]
+    write_table(dir, "T", ["D" => D]; nrow=5, tsm=[["D"]])
+
+    r = readtable(dir)
+    seq = columndesc(r, "D").sequ
+    inst = MSv2._dm_instance(r, seq)
+    @test inst.kind === :shape
+    @test inst.row == [5]                              # one interval, covers every row
+
+    # simulate: this column's tile coverage only extends through row 3 --
+    # rows 4-5 are genuinely undefined (row/pos must stay in sync: the
+    # position at the new last row is 3, not the original 5).
+    inst.row = [3]; inst.pos = [3]
+    cdesc = columndesc(r, "D")
+    @test MSv2.getcell(inst, 1, cdesc, 1, 1) == D[1]
+    @test MSv2.getcell(inst, 1, cdesc, 3, 1) == D[3]
+    @test_throws ErrorException MSv2.getcell(inst, 1, cdesc, 4, 1)
+    @test_throws ErrorException MSv2.getcolumn(inst, 1, cdesc, 5, 1)
+    @test_throws ErrorException MSv2.getcolumn(inst, 1, cdesc, 5, 1; astype=Float16)
+end
+
+# Phase 213: `getcolumn`'s astype-narrowed per-cell fallback (used when the
+# whole-column bulk-read fast path doesn't apply -- e.g. more than one real
+# hypercube for the column, as here) had zero coverage: every existing
+# precision-narrowing test happened to hit the single-real-cube fast path
+# instead. Two distinct cell shapes force two real cubes.
+@testset "TiledShapeStMan — narrowed getcolumn via the per-cell fallback (Phase 213)" begin
+    dir = joinpath(mktempdir(), "tsmnarrow.tab")
+    A = [ComplexF32.(reshape(1:6, 2, 3)) .+ 10i for i in 1:3]
+    B = [ComplexF32.(reshape(1:8, 2, 4)) .+ 10i for i in 1:2]
+    D = vcat(A, B)
+    write_table(dir, "T", ["D" => D]; nrow=5, tsm=[["D"]])
+
+    r = readtable(dir)
+    seq = columndesc(r, "D").sequ
+    inst = MSv2._dm_instance(r, seq)
+    @test count(!MSv2.isnull, inst.cubes) == 2          # confirms the fast path is skipped
+
+    out = column(r, "D"; precision=Float16)[:]
+    @test eltype(out[1]) == ComplexF16
+    @test out == [Complex{Float16}.(d) for d in D]
+end
+
+# Phase 213: an unrecognized / not-yet-supported tiled wrapper name inside
+# `table.f<seq>` gives a clear error naming it (rather than a raw parse
+# failure) -- hand-patch a real file's private header to a bogus / the
+# genuinely-unimplemented "TiledDataStMan" wrapper (`table.dat`'s own DM
+# entry is untouched, so `_dm_instance` still routes the open call here).
+@testset "TiledStMan — unrecognized / TiledDataStMan wrapper name (Phase 213)" begin
+    @test MSv2._dmtype("TiledDataStMan") === MSv2.TiledStMan   # routed, not silently "nothing"
+
+    dir = joinpath(mktempdir(), "tsmwrap.tab")
+    D = [Float32.(reshape(1:6, 2, 3)) .+ 10i for i in 1:3]
+    write_table(dir, "T", ["D" => D]; nrow=3, tsm=[["D"]])
+    r = readtable(dir)
+    seq = columndesc(r, "D").sequ
+    path = joinpath(dir, "table.f$seq")
+
+    w = MSv2.AipsWriter(; endian=:big)
+    MSv2.putstart(w, "TiledDataStMan", 1)
+    MSv2.putend(w)
+    write(path, MSv2.bytes(w))
+    err = try column(readtable(dir), "D")[1]; nothing catch e; e end
+    @test err isa ErrorException && occursin("TiledDataStMan", err.msg)
+
+    w2 = MSv2.AipsWriter(; endian=:big)
+    MSv2.putstart(w2, "SomeBogusWrapper", 1)
+    MSv2.putend(w2)
+    write(path, MSv2.bytes(w2))
+    err2 = try column(readtable(dir), "D")[1]; nothing catch e; e end
+    @test err2 isa ErrorException && occursin("SomeBogusWrapper", err2.msg)
+
+    # a totally unregistered data-manager NAME (never reaching this file's
+    # own wrapper dispatch at all -- caught earlier, in `_dm_instance`
+    # itself, `tables/column.jl`) -- `_dmtype`'s own final fallback
+    # (`datamanager.jl:28`, `return nothing`) had no test at all.
+    @test MSv2._dmtype("TotallyUnknownDataManager") === nothing
+end
+
+if _HAVE_TAQL
+    # Phase 213: casacore allows a tile shape that also chunks the CELL's
+    # own (non-row) axes, not just the row axis -- `read_plane`'s "leading
+    # axes tiled (rare)" branch handles this, but nothing our own writer
+    # produces ever exercises it (`write_tiledshapestman` always tiles
+    # only the row axis). A real, casacore-authored fixture with an
+    # explicit small `DEFAULTTILESHAPE` is both the only way to construct
+    # one and a genuine interop cross-check.
+    @testset "TiledShapeStMan — leading axes tiled too (Phase 213)" begin
+        dir = joinpath(mktempdir(), "leadtile.tab")
+        t = _taql_create("CREATE TABLE $dir [A C4 [NDIM=2]] LIMIT 4 " *
+            "DMINFO [TYPE=\"TiledShapeStMan\", NAME=\"TSMd\", " *
+            "SPEC=[DEFAULTTILESHAPE=[1,2,2]], COLUMNS=[\"A\"]]")
+        CC = [ComplexF32.(reshape(1:6, 2, 3)) .+ 10i for i in 1:4]
+        for r in 1:4; t[:A][r] = CC[r]; end
+        CCT.flush(t); t = nothing; GC.gc()
+
+        r = readtable(dir)
+        seq = columndesc(r, "A").sequ
+        inst = MSv2._dm_instance(r, seq)
+        cube = inst.cubes[findfirst(!MSv2.isnull, inst.cubes)]
+        @test cube.tileshape[1] < cube.cubeshape[1]     # a leading axis really is tiled
+        @test [column(r, "A")[i] for i in 1:4] == CC    # per-cell (read_plane)
+        @test column(r, "A")[:] == CC                   # bulk (falls through to read_plane too)
+    end
 end

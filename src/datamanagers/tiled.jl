@@ -67,6 +67,17 @@ DATAMANAGERS["TiledShapeStMan"]  = TiledStMan
 DATAMANAGERS["TiledColumnStMan"] = TiledStMan
 DATAMANAGERS["TiledCellStMan"]   = TiledStMan
 DATAMANAGERS["TiledStMan"]       = TiledStMan
+# `TiledDataStMan::dataManagerType()` (TiledDataStMan.cc:79-80) literally
+# returns `"TiledDataStMan"` -- the exact string a real casacore-written
+# `table.dat` ColumnSet would carry for a column bound to it. Route it
+# through here too (Phase 213 sweep): without this registration,
+# `_dm_instance` (`tables/column.jl`) never even reaches this file's own
+# `elseif wrapper == "TiledDataStMan"` branch below (`_dmtype` returns
+# `nothing` first) -- a real TiledDataStMan-bound column would silently
+# get the generic "not yet supported (column data)" message instead of
+# the specific one, and the dedicated branch below was, in practice,
+# unreachable dead code for the exact real-world case it names.
+DATAMANAGERS["TiledDataStMan"]   = TiledStMan
 
 # --- tile column layout -------------------------------------------
 
@@ -413,7 +424,18 @@ come back with that element type instead of the column's native one.
 function getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Integer, ::Integer;
                    astype::Union{Nothing,Type}=nothing)
     if tsm.kind === :cell
-        return [read_cube_whole(tsm, colidx, tsm.cubes[r]; astype) for r in 1:nrow]
+        # A per-row cube can genuinely be undefined -- real casacore's own
+        # `TiledCellStMan::addRow64` creates a null `TSMCube` (empty
+        # cubeshape, no file) for any row added before its cell shape is
+        # ever `setShape`'d (TiledCellStMan.cc:178-200). `getcell` already
+        # raises a clear error for that row; this bulk path used to skip
+        # the same check and crash with a raw, unhelpful
+        # `MethodError: no method matching _tsmbytes(..., ::Nothing)`
+        # instead -- live-reproduced by hand-inserting a null cube (Phase
+        # 213).
+        return [isnull(tsm.cubes[r]) ?
+                error("row $r of this column has no stored data (the tiled cell is undefined)") :
+                read_cube_whole(tsm, colidx, tsm.cubes[r]; astype) for r in 1:nrow]
     end
     alldefined_none(tsm) &&
         error("column has no stored data (all tiled cells are undefined)")
