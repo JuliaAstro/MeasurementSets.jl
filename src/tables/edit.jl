@@ -492,7 +492,7 @@ end
 Drop a column.  If it takes a whole storage-manager instance with it,
 that instance's files are deleted on flush.  Removing `"ANTENNA1"` /
 `"ANTENNA2"` while a `DyscoStMan`-compressed column remains is rejected —
-see [`_dysco_dependents`](@ref).
+see `_dysco_dependents`.
 """
 function removecolumn!(t::EditTable, name::AbstractString)
     if _added(t, name) !== nothing

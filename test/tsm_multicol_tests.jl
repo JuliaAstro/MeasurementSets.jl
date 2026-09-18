@@ -141,6 +141,65 @@ end
     end
 end
 
+# Phase 211 (src/datamanagers sweep): `tsm_setcell!`'s `:cell`-kind branch
+# (a `TiledCellStMan` in-place cell edit) had ZERO test coverage anywhere
+# in the suite -- a coverage-instrumented run confirmed not one line of it
+# had ever executed. Live-verified correct (no code change needed) before
+# adding this as a permanent regression test, matching this project's own
+# "close a genuine coverage gap with a real test" precedent (Phases
+# 158/173/209) rather than leaving a confirmed-working-but-silently-
+# unguarded corner to bit-rot.
+#
+# NOTE: the row shapes below deliberately VARY per row (2x2, 2x3, 2x4),
+# matching the pre-existing "TiledCellStMan writer + reader" testset
+# above, rather than all sharing one uniform shape. Found live: a
+# TiledCellStMan column whose every row happens to share the SAME cell
+# shape trips a pre-existing bug in the `Casacore.jl` cross-check
+# library itself (not this package -- our own reader already reads such
+# a table back correctly) -- its `Tables.Column.size()` gets a raw
+# `(Int64, Int64, UInt64)` tuple from real casacore for that case and
+# fails to `convert` it to the `Tuple{Int64}` its own `N=1` type
+# parameter expects; the varying-shape case (real TiledCellStMan usage)
+# does not hit it.
+@testset "TiledCellStMan — in-place cell edit (Phase 211)" begin
+    dir = joinpath(mktempdir(), "tcelledit.tab")
+    C = [Float32.(reshape((r * 10) .+ (1:(2 * (r + 1))), 2, r + 1)) for r in 1:3]
+    write_table(dir, "T", ["C" => C]; nrow=3, tcell=[["C"]])
+
+    newcell = Float32.(fill(99, 2, 3))   # matches row 2's own shape, (2,3)
+    edit(dir) do t
+        t[:C][2] = newcell
+    end
+    r = readtable(dir)
+    d = [column(r, "C")[i] for i in 1:3]
+    @test d[2] == newcell
+    @test d[1] == C[1] && d[3] == C[3]   # siblings untouched
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:C][2] == newcell
+        @test ct[:C][1] == C[1] && ct[:C][3] == C[3]
+    end
+
+    # the Bool bit-packed path through the same `:cell` branch, also
+    # completely uncovered before this phase
+    dirb = joinpath(mktempdir(), "tcelleditbool.tab")
+    F = [rand(Bool, 2, r + 1) for r in 1:3]
+    write_table(dirb, "T", ["F" => F]; nrow=3, tcell=[["F"]])
+    newbool = falses(2, 3)               # matches row 2's own shape, (2,3)
+    edit(dirb) do t
+        t[:F][2] = newbool
+    end
+    rb = readtable(dirb)
+    db = [column(rb, "F")[i] for i in 1:3]
+    @test db[2] == newbool
+    @test db[1] == F[1] && db[3] == F[3]
+    if _HAVE_CASACORE
+        ctb = CCT.Table(dirb)
+        @test ctb[:F][2] == newbool
+    end
+end
+
 @testset "create_ms — DATA/FLAG/WEIGHT_SPECTRUM share one hypercube" begin
     dst = joinpath(mktempdir(), "m.ms")
     create_ms(dst; nrow=6, nchan=4, ncorr=2, nant=3)
