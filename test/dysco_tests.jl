@@ -109,6 +109,29 @@ end
     end
 end
 
+# Phase 214: `_af_calculate_antenna_rms`'s dead-antenna snap-to-zero rule
+# (`aftimeblockencoder.cc`'s own `rmsPerAntenna[i] < maxVal*1e-5 -> 0`)
+# had zero coverage -- every existing AF-normalization test fixture gives
+# every antenna real, comparable-magnitude signal. A genuinely "dead"
+# antenna (zero amplitude on every baseline it participates in, a
+# realistic real-MS scenario for a flagged/broken antenna) is the
+# reachable, well-defined case.
+@testset "dysco -- AF antenna-RMS: a dead antenna snaps to exactly 0 (Phase 214)" begin
+    nant = 4
+    baselines = [(a1, a2) for a1 in 0:nant-1 for a2 in a1+1:nant-1]
+    a1v = [b[1] for b in baselines]; a2v = [b[2] for b in baselines]
+    npol, nchan, nrows = 1, 2, length(baselines)
+    vis = zeros(ComplexF64, npol, nchan, nrows)
+    for (r, (x, y)) in enumerate(baselines)
+        (x != 0 && y != 0) || continue          # any baseline touching antenna 0 stays zero
+        vis[1, 1, r] = ComplexF64(1.0 + r, 0.5)
+        vis[1, 2, r] = ComplexF64(0.7, 1.2 + r)
+    end
+    rms = MSv2._af_calculate_antenna_rms(vis, 0, a1v, a2v, nant)
+    @test rms[1] == 0.0                          # antenna 0 (dead) snapped to exactly 0
+    @test all(rms[2:4] .> 0)                      # the live antennas got real RMS values
+end
+
 @testset "dysco -- unsupported format / unrecognized distribution/normalization" begin
     dir = mktempdir()
     cdesc = ColumnDesc("DATA", "", "DyscoStMan", "dysco", MSv2.TpComplex,

@@ -66,6 +66,29 @@ end
     end
 end
 
+# Phase 214: real casacore's `CompressFloat::scaleOnPut` (CompressFloat.cc:
+# 274-296) has NO clamp at all before its raw `short(...)` cast -- unlike
+# `CompressComplex::scaleOnPut`, which explicitly clamps each part to
+# ±32767 first. An out-of-dynamic-range value is undefined behaviour in
+# real casacore's own C++; this package deliberately clamps `CompressFloat`
+# too (reusing `CompressComplex`'s own clamp constant) rather than trying
+# to replicate unreproducible UB -- no real-Casacore.jl cross-check here
+# on purpose (feeding an out-of-range value through the real C++ library
+# would itself be UB, not something to rely on). Not previously tested at
+# all -- no existing fixture ever exceeded the dynamic range.
+@testset "engine — CompressFloat clamps an out-of-range value (Phase 214)" begin
+    dir = joinpath(mktempdir(), "cfclamp.tab")
+    scale = 0.001f0
+    V = [reshape([1.0f6], 1, 1), reshape([-1.0f6], 1, 1)]   # far outside Int16 range once scaled
+    write_table(dir, "T", ["F" => V]; nrow=2,
+        engines = Dict("F" => (; kind=MSv2E.CompressFloat(), scale, offset=0.0f0)))
+    r = readtable(dir)
+    st = column(r, "F_COMPRESSED")[:]
+    @test st[1][1] == Int16(32767) && st[2][1] == Int16(-32767)   # clamped, not overflowed/crashed
+    out = column(r, "F")[:]
+    @test out[1][1] ≈ 32767 * scale && out[2][1] ≈ -32767 * scale
+end
+
 # Phase 213 (src/datamanagers sweep, continued): the existing cross-check
 # above never has a negative *real* part paired with a non-negative
 # *imag* part (CompressComplex) or a genuinely mixed-sign complex value
@@ -469,6 +492,28 @@ end
     @test !isfile(joinpath(dst, "table.f$(_engine_manager(rc, "OK").sequ)"))
 
     @test_throws ErrorException edit(dir) do t end               # computed column -> refuse edit
+end
+
+# Phase 214: `_vtq_prepare!` warns (doesn't error) on a non-default TaQL
+# style keyword (`_VirtualTaQLEngine_Style` -- real casacore can write
+# e.g. `"python"` for 0-based array indexing; TaQL-lite has no array-
+# indexing style concept at all). This package's own writer always
+# writes `""`, so hand-set the style on a real, opened instance (the
+# same technique used elsewhere in this file for an otherwise
+# unreachable-via-our-own-writer real casacore state).
+@testset "engine — VirtualTaQLColumn warns on a non-default TaQL style (Phase 214)" begin
+    dir = joinpath(mktempdir(), "vtqstyle.tab")
+    A = collect(1.0:5.0)
+    write_table(dir, "T", ["A" => A, "CV" => zeros(5)]; nrow=5,
+        virtualtaql = Dict("CV" => "A + 1.0"))
+    r = readtable(dir)
+    inst = MSv2E._dm_instance(r, _engine_manager(r, "CV").sequ)
+    inst.style = "python"
+    logs, _ = Test.collect_test_logs() do
+        MSv2E._vtq_prepare!(inst)
+    end
+    @test length(logs) == 1 && logs[1].level == Base.CoreLogging.Warn
+    @test occursin("CV", logs[1].message) && occursin("python", logs[1].message)
 end
 
 # Phase 213 (src/datamanagers sweep, continued): three genuinely-reachable

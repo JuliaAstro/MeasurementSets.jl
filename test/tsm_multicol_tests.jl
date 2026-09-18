@@ -141,6 +141,30 @@ end
     end
 end
 
+# Phase 214: a shared `TiledCellStMan` group (multiple columns in one
+# per-row hypercube) requires every column to have the SAME cell shape
+# for a given row -- `write_tiledcellstman`'s own validation loop for
+# this had zero test coverage.
+@testset "TiledCellStMan — shared group with a per-row shape mismatch errors (Phase 214)" begin
+    dir = joinpath(mktempdir(), "tcellmismatch.tab")
+    A = [Float32.(reshape(1:(2 * (r + 1)), 2, r + 1)) for r in 1:3]
+    B = [Float32.(reshape(1:(2 * (r + 2)), 2, r + 2)) for r in 1:3]   # different shape per row
+    err = try
+        write_table(dir, "T", ["A" => A, "B" => B]; nrow=3, tcell=[["A", "B"]])
+        nothing
+    catch e
+        e
+    end
+    @test err isa ErrorException && occursin("row 1 shape mismatch", err.msg)
+
+    # same shapes across the group -> no error, real round trip
+    B2 = [Float32.(reshape(1:(2 * (r + 1)), 2, r + 1)) .+ 100 for r in 1:3]
+    write_table(dir, "T", ["A" => A, "B" => B2]; nrow=3, tcell=[["A", "B"]])
+    r = readtable(dir)
+    @test [column(r, "A")[i] for i in 1:3] == A
+    @test [column(r, "B")[i] for i in 1:3] == B2
+end
+
 # Phase 213 (src/datamanagers sweep, continued): a `TiledCellStMan` row can
 # genuinely have an UNDEFINED cell -- real casacore's own
 # `TiledCellStMan::addRow64` (TiledCellStMan.cc:178-200) creates a null

@@ -7355,3 +7355,77 @@ produces and TaQL has no clean way to trigger either.
 
 Full suite green (baseline 5011, +54 new = 5065/5065). README/memory updated,
 merge on the user's word.
+
+### Phase 214 — src/datamanagers sweep, continued: a mathematically-unreachable branch confirmed (not a bug), a real casacore clamp asymmetry documented, and the last few coverage gaps closed
+
+Continuing Phase 213's sweep with fresh eyes: a manual line-by-line
+re-verification of `ScaledArrayEngine`/`ScaledComplexData`/
+`MappedArrayEngine` against `ScaledArrayEngine.tcc`/
+`ScaledComplexData.tcc`/`MappedArrayEngine.tcc` (never independently
+re-checked since their original implementation) found no divergence —
+both confirmed to match casacore's `scaleOnGet`/`scaleOnPut` formulas
+exactly, element layout included.
+
+**A genuine, previously-undocumented casacore asymmetry, found while
+re-reading `CompressFloat.cc`**: `CompressComplex::scaleOnPut`
+explicitly clamps each part to ±32767 before casting to `short`
+(`CompressComplex.cc:274-320`); `CompressFloat::scaleOnPut`
+(`CompressFloat.cc:274-296`) has **no clamp at all** — a raw `short(...)`
+cast, undefined behaviour in C++ for an out-of-range float (no single
+"correct" value across platforms/compilers to replicate). This
+package's own `_encode(::CompressFloat,...)` clamps anyway, reusing
+`CompressComplex`'s own clamp constant — a deliberate, safe, bounded
+divergence (never crashes, never silently produces an arbitrary
+platform-specific value) rather than a bug to "fix" by removing the
+clamp. Documented in place with a citation; new permanent regression
+test confirms an out-of-range value clamps to exactly ±32767 and never
+crashes (deliberately *not* cross-checked against real `Casacore.jl` —
+feeding an out-of-range value through the real C++ library would itself
+be exercising UB, not something to rely on as ground truth).
+
+**A mathematically-provable dead branch, not merely untested**:
+`_decode(::CompressComplexSD,...)`'s `r == -ENG_C_WRAP → NaN` check
+(inside the *odd* branch) can never actually fire — the only integer `v`
+for which `div(v, 65536) == -32768` is `v == ENG_NAN_C` itself, which is
+even and is therefore always caught by the `iseven(v)` dispatch *before*
+ever reaching this branch (confirmed computationally: any `v` one step
+less negative than `ENG_NAN_C` already truncates to `-32767`, not
+`-32768`). Real casacore's own `CompressComplexSD::scaleOnGet`
+(`CompressComplex.cc:750-756`) has the *identical* structure — this
+package's branch faithfully mirrors an equally-dead branch in upstream
+casacore itself, not a bug, and no test can exercise it (there is no
+reachable input). Documented in place; nothing to test.
+
+**Coverage gaps closed with permanent tests** (each live-verified
+first):
+- `TiledCellStMan`'s shared-group per-row shape-mismatch validation
+  (`write_tiledcellstman`) — a real, easily-reachable user-input
+  validation error with zero prior test coverage.
+- `VirtualTaQLColumn`'s non-default-TaQL-style warning
+  (`_vtq_prepare!`, real casacore can write e.g. `"python"` for 0-based
+  array indexing, which TaQL-lite has no concept of) — hand-set on a
+  real, opened instance (this package's own writer always writes `""`).
+- Dysco's AF-normalization dead-antenna snap-to-zero rule
+  (`_af_calculate_antenna_rms`, `rmsPerAntenna[i] < maxVal*1e-5 -> 0`) —
+  every existing AF test fixture gives every antenna real signal; a
+  genuinely dead antenna (zero amplitude on every baseline it
+  participates in — a realistic broken/flagged-antenna scenario) is the
+  reachable, well-defined case, exercised via a direct unit call.
+
+**Investigated, still deprioritized** (same reasoning as Phase 213,
+revisited but not chased further): `_af_fit_to_maximum!`'s two
+early-termination branches (deep inside the already CASA-cross-checked
+AF hill-climb; engineering a precise numeric scenario for these specific
+branches has a poor effort/payoff ratio relative to everything else
+found this sweep); `SSMIndex`/`ISMIndex`'s internal bounds guards;
+`SSMStringHandler`'s `filled==0` case; `tiled.jl`'s `>2 GiB` file-record
+branch (would need a multi-gigabyte fixture); Dysco's `rowsPerBlock==0`
+guard (this package's own writer already rejects a 0-row write before
+it can be produced).
+
+`src/datamanagers/{forwardcol,datamanager,arrayfile}.jl` are now fully
+covered (closed in Phase 213); `virtual.jl` is down to exactly the one
+provably-unreachable line above.
+
+Full suite green (baseline 5065, +9 new = 5074/5074). README/memory updated, merge
+on the user's word.
