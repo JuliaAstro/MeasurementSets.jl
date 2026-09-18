@@ -6980,3 +6980,118 @@ clean diff is very likely an environment artifact" methodology note —
 this is a new instance of that shape (a drifted local package
 resolution, not the previously-seen CASA.app DMG mount state).
 README/memory updated, merge on the user's word.
+
+### Phase 210 — `src/tables/` sweep: a real `removecolumn!` gap against DyscoStMan, and a much bigger, previously-undocumented Julia array-literal type-promotion hazard in `write_table`
+
+Continued the coverage-instrumented-plus-manual-reading discipline
+established in Phase 209, this time over `src/tables/*.jl` (the last
+full sweep of this directory was Phase 206). Ran the full suite with
+`Pkg.test(; coverage=true)` (baseline 4977/4977, unchanged — the
+coverage run itself found no regressions) and diffed the never-executed
+lines against every `src/tables/` file *not* touched mid-run, then
+followed up on the two that looked like genuine reachable-but-untested
+code paths rather than defensive/legacy branches.
+
+**Bug 1 — `removecolumn!` could silently break a `DyscoStMan`-compressed
+column forever.** `open_dyscostman` (`src/datamanagers/dysco.jl`)
+unconditionally reads `column(t, "ANTENNA1")`/`column(t, "ANTENNA2")`
+at *open* time for *every* `DyscoStMan`-bound column, regardless of
+normalization (AF's per-baseline scale factors genuinely need them;
+RF/Row do not, but the same unconditional read still runs either way).
+`EditTable`'s `removecolumn!` had no idea about this dependency —
+`removecolumn!(t, "ANTENNA1")` on a table with any Dysco-compressed
+column used to succeed silently at flush time, and only broke on the
+*next* read of that column, with a bare `KeyError: key "ANTENNA1" not
+found` that names neither the Dysco column nor the real cause.
+Live-reproduced first (a synthetic AF-normalized Dysco `DATA` column,
+`removecolumn!(t, "ANTENNA1")`, then `column(readtable(dir), "DATA")[1]`
+throwing exactly that `KeyError`), then fixed with a new
+`_dysco_dependents(t, antcol)` helper (`src/tables/edit.jl`) — every
+remaining column of the session still bound to a `DyscoStMan` instance —
+consulted by `removecolumn!` before any mutation happens, for
+`"ANTENNA1"`/`"ANTENNA2"` only. A typo'd/rejected removal now raises a
+clear `ErrorException` naming the dependent column(s) and leaves the
+table completely untouched (checked before `push!(t.dropcols, name)`,
+so no half-applied state); removing the Dysco column *first* (or a
+table with no Dysco column at all) is unaffected. `RefEditTable`'s own
+`removecolumn!` (Phase 127) was re-checked and confirmed exempt — it
+only ever hides a column at the *view* level, never touching the
+parent's real storage, so it can never trigger this; `ConcatEditTable`'s
+is an unconditional error already (Phase 130), also exempt. New
+regression testset in `test/dysco_tests.jl` (both rejections, the
+untouched-table check, the "remove the Dysco column first" unblock, and
+the no-Dysco-column no-op case).
+
+**Finding 2 — a much bigger, previously-unknown hazard: a bare `[...]`
+array literal silently corrupts a numeric column's type before
+`write_table` ever sees it.** Investigating an adjacent, genuinely
+*working* but completely untested code path (`_stamp_measinfo`'s
+`spec isa MeasInfo` branch — passing a `MeasInfo` object straight from
+`measinfo(src, col)` into a *new* table's `measures=` dict, e.g. to give
+a freshly-added column the same reference frame as an existing one;
+confirmed this round-trips correctly and is simply undocumented, not
+broken) led to trying the same pattern with a `VarRefCol` (per-row
+frame) `MeasInfo`, which crashed with `MethodError: no method matching
+_ref_from_code(::MeasInfo, ::Float64)` — the companion reference-code
+column, written as `Int32[1,5,1,5]`, came back as `Float64` on read.
+Isolating it further (`write_table(dir, "T", ["F" => Float64[...],
+"F_REF" => Int32[...]]; nrow=...)`, **with no `measures=` involved at
+all**) reproduced the exact same corruption on its own: `F_REF` is
+declared `TpDouble`, not `TpInt`. The root cause is *pure Julia
+semantics*, not a `write_table` bug: a bare `[...]` array literal whose
+elements are structurally similar but not identically-typed (here,
+`Pair{String,Vector{Float64}}` and `Pair{String,Vector{Int32}}`) gets
+promoted by Julia's own `Base.vect` to one common concrete type *before*
+the literal is ever passed as an argument — confirmed completely
+independently of this package (`[Float64[1,2], Int32[3,4]]` alone
+promotes to `Vector{Vector{Float64}}`, converting the `Int32` values to
+`Float64` in the process). By the time `write_table` receives `columns`,
+the original `Int32` vector no longer exists anywhere for it to recover
+— there is no way to detect or repair this after the fact from inside
+the function. Confirmed the exact boundary of the hazard live: it fires
+for *any* two numeric eltypes Julia can `convert` between (so the very
+common real-MS shape of an `Int32` antenna-id column next to a
+`Float64` time column in the same bracket literal, and it applies
+across *every* column in the literal, not just adjacent pairs — a
+3-column literal with two `Int32` columns and one `Float64` column
+promotes *both* integer columns); it does **not** fire for a `Dict(...)`,
+an explicitly-typed `Pair[...]`/`Any[...]` literal, or a `columns` built
+by `push!`ing into an initially-empty `[]` (all confirmed to preserve
+each column's own concrete eltype exactly); and it does not fire when
+one of the columns is a `String` vector (no numeric promotion path
+exists, so Julia leaves both untouched). Confirmed the package's own
+internal code is never exposed to this (every internal writer —
+`_copy_table_cols`, `create_ms`, the whole `copyms`/`copytable` path —
+builds its `data::Vector{Any}` via `push!` in a loop, never a bracket
+literal), so this is purely a call-site footgun for a package user, not
+a latent data-corruption bug in any committed fixture or test. Since
+nothing inside `write_table`/`_write_table_core` can detect or prevent
+it, the fix is documentation: both docstrings now carry a prominent
+`!!! warning` (mirroring the live-verified repro exactly, including the
+`Dict`/`Pair[...]`/`Any[...]`/`push!` safe alternatives) at the exact
+point `columns`/`data` is described. New regression testset in
+`test/writer_tests.jl` pinning both the hazard itself (so a future
+reader can trust it is real and not a stale claim if Julia's own
+semantics ever change) and all three documented-safe alternatives,
+including a `_HAVE_CASACORE` check that the corrupted table still opens
+fine in real casacore (just with the wrong declared type) — the
+`MeasInfo`-varrefcol case that surfaced this is not separately re-added
+as a test here since it was never actually broken; documenting the real
+underlying hazard is the substantive fix.
+
+Two lower-priority leads investigated and left alone (no live fixture
+to verify against, same "legacy path, no ancient MS available"
+category as several earlier phases' findings): `read_keyset`
+(`src/tables/record.jl`) — the pre-`TableRecord` `TableKeywordSet`/
+`ScalarKeywordSet`/`ArrayKeywordSet` decoder, genuinely never exercised
+by anything in this suite since this package's own writer always emits
+`TableRecord` and no available real-casacore/TaQL fixture uses the old
+keyword-set format either; and `read_columnset`'s `setversion == 1`
+legacy-ColumnSet fallback (`src/tables/table.jl`) — same shape. Neither
+was touched.
+
+Full suite green (baseline 4977; the coverage run itself, plus a
+standalone run of `test/dysco_tests.jl` — 542/542 — and
+`test/edit_tests.jl` — 105/105 — after the fix; expect the full-suite
+count to land around 4977 + ~12 new assertions once merged). README +
+memory updated, merge on the user's word.

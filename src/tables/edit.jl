@@ -454,10 +454,45 @@ function addcolumn!(t::EditTable, name::AbstractString, data::AbstractVector;
 end
 
 """
+    _dysco_dependents(t, antcol) -> Vector{String}
+
+Every remaining column of `t` (as of this session, before `antcol` itself
+is dropped) that is bound to a `DyscoStMan` instance -- i.e. every column
+that would become permanently unreadable if `antcol` (`"ANTENNA1"` /
+`"ANTENNA2"`) were removed.
+
+`open_dyscostman` (`src/datamanagers/dysco.jl`) unconditionally reads
+`column(t, "ANTENNA1")`/`column(t, "ANTENNA2")` at *open* time for *every*
+`DyscoStMan` instance, regardless of normalization (AF's per-baseline
+scale factors need them; RF/Row do not, but the same unconditional read
+still runs) -- so a table with any `DyscoStMan`-bound column can never be
+reopened once either antenna column is gone. Found live:
+`removecolumn!(t, "ANTENNA1")` on such a table used to succeed silently
+at flush time, and only broke on the *next* read, with a bare
+`KeyError: key "ANTENNA1" not found` that names neither the Dysco column
+nor the real cause.
+"""
+function _dysco_dependents(t::EditTable, antcol::AbstractString)
+    deps = String[]
+    for m in t.reader.managers
+        m.name == "DyscoStMan" || continue
+        for c in t.reader.desc.columns
+            c.sequ == m.sequ || continue
+            c.name == antcol && continue
+            c.name in t.dropcols && continue
+            push!(deps, c.name)
+        end
+    end
+    return deps
+end
+
+"""
     removecolumn!(t, name)
 
 Drop a column.  If it takes a whole storage-manager instance with it,
-that instance's files are deleted on flush.
+that instance's files are deleted on flush.  Removing `"ANTENNA1"` /
+`"ANTENNA2"` while a `DyscoStMan`-compressed column remains is rejected —
+see [`_dysco_dependents`](@ref).
 """
 function removecolumn!(t::EditTable, name::AbstractString)
     if _added(t, name) !== nothing
@@ -465,6 +500,12 @@ function removecolumn!(t::EditTable, name::AbstractString)
         return t
     end
     c = columndesc(t.reader, name)                    # KeyError if absent
+    if name == "ANTENNA1" || name == "ANTENNA2"
+        deps = _dysco_dependents(t, name)
+        isempty(deps) || error("removecolumn!: \"$name\" cannot be removed -- " *
+            "DyscoStMan-compressed column(s) $(join(sort(deps), ", ")) need it to " *
+            "decode (see open_dyscostman); remove $(join(sort(deps), ", ")) first")
+    end
     push!(t.dropcols, name)
     delete!(t.override, name)
     delete!(t.tsmedit, name)

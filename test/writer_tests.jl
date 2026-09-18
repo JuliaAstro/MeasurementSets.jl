@@ -185,3 +185,55 @@ end
         @test all(iszero, ct[:DATA][1])
     end
 end
+
+# Phase 210 (src/tables sweep): a bare `[...]` array literal mixing
+# columns of different concrete numeric eltypes gets silently promoted
+# to one common eltype by Julia's OWN array-literal construction
+# (`Base.vect`) *before* `write_table` ever sees `columns` -- there is
+# no way for `write_table` to detect or undo this after the fact (the
+# original, narrower-typed vector no longer exists by the time it
+# arrives). Found live via `write_table(dir, "T", ["TIME" =>
+# Float64[...], "ANTENNA1" => Int32[...]]; nrow=...)` writing ANTENNA1
+# as `TpDouble` instead of `TpInt` -- the exact, extremely common
+# real-MS shape of an integer id column next to a float column. Not a
+# `write_table` bug to fix (documented on its docstring instead); this
+# testset pins both the hazard (so a future reader can trust it is real
+# and still present) and the three documented-safe alternatives.
+@testset "write_table — bare [...] literal numeric-eltype promotion hazard (Phase 210)" begin
+    tp = Int32[0, 1, 2, 0]
+    fp = Float64[1.0, 2.0, 3.0, 4.0]
+
+    # the hazard itself: a bare bracket literal silently promotes Int32 -> Float64
+    bad = ["TIME" => fp, "ANTENNA1" => tp]
+    @test eltype(bad[2].second) === Float64          # Julia itself already did this
+    dst1 = joinpath(mktempdir(), "bad.ms")
+    write_table(dst1, "T", bad; nrow=4)
+    @test columndesc(readtable(dst1), "ANTENNA1").type == MSv2.TpDouble   # the corrupted result
+
+    # Dict(...) does not promote its values
+    dgood = Dict("TIME" => fp, "ANTENNA1" => tp)
+    @test eltype(dgood["ANTENNA1"]) === Int32
+    dst2 = joinpath(mktempdir(), "dict.ms")
+    write_table(dst2, "T", dgood; nrow=4)
+    @test columndesc(readtable(dst2), "ANTENNA1").type == MSv2.TpInt
+    @test column(readtable(dst2), "ANTENNA1")[:] == Int32[0, 1, 2, 0]
+
+    # an explicitly-typed Pair[...] literal does not promote either
+    pgood = Pair["TIME" => fp, "ANTENNA1" => tp]
+    @test eltype(pgood[2].second) === Int32
+    dst3 = joinpath(mktempdir(), "pair.ms")
+    write_table(dst3, "T", pgood; nrow=4)
+    @test columndesc(readtable(dst3), "ANTENNA1").type == MSv2.TpInt
+
+    # nor does Any[...]
+    agood = Any["TIME" => fp, "ANTENNA1" => tp]
+    @test eltype(agood[2].second) === Int32
+    dst4 = joinpath(mktempdir(), "any.ms")
+    write_table(dst4, "T", agood; nrow=4)
+    @test columndesc(readtable(dst4), "ANTENNA1").type == MSv2.TpInt
+
+    if _HAVE_CASACORE
+        @test size(CCT.Table(dst1), 1) == 4   # the corrupted table still opens (just wrong type)
+        @test CCT.Table(dst2)[:ANTENNA1][:] == [0, 1, 2, 0]
+    end
+end
