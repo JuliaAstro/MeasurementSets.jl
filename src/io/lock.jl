@@ -184,7 +184,25 @@ function _remove_reqid!(lk::TableLock)
     reqid = _reqid_read(lk)
     nr = Int(reqid[1])
     mypid = _mypid()
-    i = findfirst(k -> reqid[2k+2] == mypid && reqid[2k+3] == 0, 0:nr-1)
+    # `findfirst(pred, 0:nr-1)` returns the 1-based POSITION of the match
+    # WITHIN the range (i.e. `k_true + 1`, since the range starts at 0),
+    # not the matching 0-based pair index `k` the closure itself uses --
+    # confirmed live (`findfirst(k -> k==1, 0:2) == 2`, not `1`). Using
+    # that return value directly as `k` (the previous code) was off by
+    # one whenever there was more than one entry, silently zeroing the
+    # LAST slot and leaving the true match untouched -- found via a
+    # coverage-instrumented test run showing this shift loop had NEVER
+    # actually executed (every existing test only ever had exactly one
+    # entry, where the off-by-one is harmless by coincidence: zeroing
+    # "the last slot" and zeroing "the only slot" are the same thing).
+    # A plain loop sidesteps the range-vs-value ambiguity entirely.
+    i = nothing
+    for k in 0:nr-1
+        if reqid[2k+2] == mypid && reqid[2k+3] == 0
+            i = k
+            break
+        end
+    end
     i === nothing && return
     for k in i:nr-2
         reqid[2k+2] = reqid[2k+4]

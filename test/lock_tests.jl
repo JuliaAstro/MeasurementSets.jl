@@ -97,6 +97,84 @@ if MSv2L.LOCK_SUPPORTED
         @test _child(grab) == 0                             # now free
     end
 
+    @testset "lock — SYNC_MAXWAIT_S timeout degrades to noop cleanly (Phase 209)" begin
+        # `_acquire!`'s "gave up waiting, proceed unlocked" branch (the
+        # `@warn`/`lk.noop = true` fallback for a genuinely-contended
+        # cross-process lock that never clears within `SYNC_MAXWAIT_S[]`)
+        # had ZERO test coverage — found via a coverage-instrumented full
+        # suite run, not by re-reading the source again. A real *process*
+        # is needed (not just a second in-process `TableLock`): the parent
+        # holds the real fcntl write lock, and a child with a short
+        # `SYNC_MAXWAIT_S[]` must poll, genuinely time out, and return
+        # WITHOUT hanging or throwing.
+        d = mktempdir()
+        MSv2L.create_ms(joinpath(d, "x.ms"); nrow=2, nchan=2, ncorr=2, nant=2)
+        ms = joinpath(d, "x.ms")
+
+        lk = MSv2L.open_lock(ms; create=false)
+        MSv2L.lock_write!(lk)                    # parent holds the write lock throughout
+
+        waiter = """
+        import MeasurementSets as M
+        M.SYNC_MAXWAIT_S[] = 0.4
+        lk = M.open_lock(raw"$ms"; create=false)
+        t0 = time()
+        M.lock_write!(lk)                        # contended -> polls, times out, degrades
+        elapsed = time() - t0
+        print(elapsed, " ", lk.noop, " ", lk.state)
+        """
+        outbuf = IOBuffer(); errbuf = IOBuffer()
+        p = run(pipeline(`$_JULIA --project=$_PROJ --startup-file=no -e $waiter`;
+                         stdout=outbuf, stderr=errbuf))
+        outstr = String(take!(outbuf))
+        errstr = String(take!(errbuf))
+
+        @test p.exitcode == 0                    # never throws, never hangs past the timeout
+        @test occursin("gave up waiting for a lock after", errstr)   # the @warn fired
+        parts = split(strip(outstr))
+        @test length(parts) == 3
+        elapsed = parse(Float64, parts[1])
+        @test 0.4 <= elapsed < 5.0                # genuinely waited ~the budget, not instant/hung
+        @test parts[2] == "true"                  # lk.noop
+        @test parts[3] == "write"                 # lock_write! still marks :write on the noop path
+
+        MSv2L._release!(lk)
+    end
+
+    @testset "lock — _remove_reqid! shifts entries out of the MIDDLE of the list (Phase 209)" begin
+        # `_remove_reqid!`'s shift loop (`for k in i:nr-2 ... end`) had
+        # ZERO test coverage -- the existing round-trip test only ever
+        # has ONE entry (added then immediately removed), so `nr` never
+        # exceeds 1 and the loop body never runs. Directly poke a 3-entry
+        # region (two other pids bracketing our own) so removing OUR
+        # entry must shift a real trailing entry down, not just decrement
+        # a trivial 1-element count.
+        d = mktempdir()
+        MSv2L.create_ms(joinpath(d, "x.ms"); nrow=2, nchan=2, ncorr=2, nant=2)
+        ms = joinpath(d, "x.ms")
+        lk = MSv2L.open_lock(ms; create=false)
+
+        mypid = getpid()
+        reqid = zeros(Int32, 65)
+        reqid[1] = 3                                  # N = 3 entries
+        reqid[2] = Int32(999); reqid[3] = 0            # slot 0: pid 999
+        reqid[4] = Int32(mypid); reqid[5] = 0          # slot 1: our own pid  <- to be removed
+        reqid[6] = Int32(888); reqid[7] = 0            # slot 2: pid 888
+        MSv2L._reqid_write!(lk, reqid)
+
+        MSv2L._remove_reqid!(lk)
+
+        raw = read(joinpath(ms, "table.lock"))
+        got = Int32[ntoh(reinterpret(Int32, raw[4i+1:4i+4])[1]) for i in 0:64]
+        @test got[1] == 2                             # N shrank to 2
+        @test got[2] == 999 && got[3] == 0            # slot 0 unchanged
+        @test got[4] == 888 && got[5] == 0            # slot 2's entry SHIFTED down into slot 1
+        @test got[6] == 0 && got[7] == 0              # the vacated trailing slot is zeroed
+        @test all(iszero, got[8:end])
+
+        MSv2L._release!(lk)
+    end
+
     @testset "lock — is_multiused" begin
         d = mktempdir()
         MSv2L.create_ms(joinpath(d, "x.ms"); nrow=2, nchan=2, ncorr=2, nant=2)

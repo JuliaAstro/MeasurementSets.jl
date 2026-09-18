@@ -6869,3 +6869,114 @@ confusing dead condition sitting in a hot read path.
 
 Full suite green (baseline 4959, +5 from the new testset = 4964/4964,
 no regressions). README/memory updated, merge on the user's word.
+
+### Phase 209 — one more `src/io/` sweep: a genuine, previously-hidden off-by-one in `_remove_reqid!`, found via coverage instrumentation rather than another manual re-read
+
+Three prior rounds of manually re-reading `aips.jl`/`lock.jl` (Phases
+207-208) had converged on diminishing returns, so this round switched
+method: ran the full suite with `Pkg.test(; coverage=true)` and
+diffed which lines in `src/io/*.jl` were never executed by ANY test
+(merging `.cov` output across the main process and every child process
+`test/lock_tests.jl` spawns for its cross-process tests). This
+surfaced two genuinely untested branches directly, rather than relying
+on re-reading to spot them.
+
+**The real bug**: `_remove_reqid!`'s match-finding line —
+`i = findfirst(k -> reqid[2k+2] == mypid && reqid[2k+3] == 0, 0:nr-1)`
+— was using `findfirst`'s return value as if it were the matching
+0-based pair index `k` the closure computed with. It isn't: for a
+`UnitRange` that doesn't start at 1 (`0:nr-1` here), `findfirst(pred,
+range)` returns the **1-based position of the match within the
+range**, not the matching *value* — confirmed live,
+`findfirst(k -> k==1, 0:2) == 2`, not `1`. So `i` was always ONE
+HIGHER than the true pair index whenever there was more than one
+request-id entry, and the subsequent shift loop
+(`for k in i:nr-2 ... end`) either shifted the wrong span or (the
+common case, when the true match wasn't in the first two positions)
+ran zero iterations — silently zeroing the *last* slot and
+decrementing the count correctly, while leaving the actual match
+UNTOUCHED in the file. Live-reproduced directly: hand-populate a
+3-entry request-id region (`[999, mypid, 888]`), call
+`_remove_reqid!()` — before the fix, the result was `[999, mypid, 0]`
+(the WRONG entry, 888, removed; `mypid`, the one that was supposed to
+check itself out, left behind); after the fix, `[999, 888, 0]` (the
+correct entry removed, the trailing one correctly shifted down).
+
+This bug has been latent since Phase 17 (when the cooperative-lock
+request-id list was first added) and was masked by every existing
+test only ever exercising the degenerate `nr == 1` case (add one
+entry, remove it immediately) — where the off-by-one is harmless by
+coincidence, since "zero the last slot" and "zero the only slot" are
+the same operation. The real-world consequence is narrow but genuine:
+whenever TWO OR MORE processes are simultaneously blocked waiting on
+the same `table.lock` (a real, if uncommon, scenario this cooperative-
+hand-off mechanism exists specifically to handle), a process that
+finishes waiting removes the WRONG pid's announcement from the file,
+leaving a stale/departed pid's entry behind and silently dropping a
+still-genuinely-waiting process's own entry — defeating the
+cooperative "let a real casacore `AutoLocking` peer see who's waiting
+and release early" mechanism for that waiter specifically (the
+request *count* stays numerically correct throughout, so a peer that
+only checks "is anyone waiting" is unaffected; only pid-level
+introspection, or a subsequent removal that expects to find its own
+now-shifted entry, would be affected). Fixed by replacing the
+`findfirst`-over-a-non-1-based-range idiom with a plain loop that
+searches by value directly, sidestepping the range-vs-value ambiguity
+entirely rather than trying to correct the index arithmetic.
+
+Also closed the two OTHER real gaps the same coverage run surfaced,
+both much lower severity (pure interop completeness / defensive-path
+verification, not live bugs): (1) `_acquire!`'s `SYNC_MAXWAIT_S[]`
+"gave up waiting for a lock, proceed unlocked" fallback — a genuine,
+user-visible degrade-to-noop behaviour — had never been exercised by
+any test; added a real cross-process test (parent holds the lock
+indefinitely, a child with a short `SYNC_MAXWAIT_S[]` genuinely times
+out, confirmed to neither hang nor throw, and to emit the expected
+`@warn`). (2) `read_array`'s `version < 3` branch (discarding an
+obsolete per-axis "origin" field from an older AipsIO `Array` object)
+had zero coverage, since this package's own writer only ever emits
+version 3 — added a direct hand-built-bytes unit test in
+`test/aipsio_tests.jl` (alongside a version-3 case) so the reader's
+own claimed backward-compatibility is actually exercised, matching
+this file's existing "hand-built bytes mirroring real casacore"
+discipline.
+
+Applied methodology note #8 ("once one function has a given bug
+shape, grep the WHOLE tree for the same shape") to the `findfirst`
+fix specifically: grepped every `findfirst` call in `src/` for the
+`findfirst(pred, <explicit numeric range>)` pattern that caused this
+bug — found nowhere else; every other `findfirst` call in the
+codebase operates on an ordinary 1-based `Vector`/`Array`, where the
+returned position IS the correct index to use, so this was a
+genuinely isolated occurrence, not a repeated shape.
+
+Side investigation (not src/io/, but adjacent to the standing "merged
+step never checks GitHub CI" workflow gap): checked the ACTUAL GitHub
+Actions job-level results for the Phase 207/208 merge (the workflow's
+overall run status shows "cancelled", which looked alarming) — found
+this is driven entirely by the "Julia pre" (nightly) matrix job
+hitting the workflow's own explicit 60-minute timeout (a pre-existing,
+recurring flake unrelated to any of this session's changes — it also
+happened on the Phase 206 merge, before any lock.jl work) while the
+two STABLE Linux jobs (Julia 1.10 and 1.12) both genuinely passed —
+confirming, for the first time with real evidence rather than an
+assumption, that the Phase 207/208 concurrency/locking changes
+(including the platform-specific `Flock` struct, never directly
+exercised on this ARM64 Mac) do work correctly on real Linux. Not
+investigated further or fixed (out of scope for this round; the
+standing workflow gap remains open).
+
+Full suite green: 4977/4977 (baseline 4964 + 13 new assertions). One
+scare along the way, resolved cleanly: the first two full-suite runs
+both errored on Aqua's `test_persistent_tasks` check ("Unable to
+locate `ChainRulesCore`, a dependency of `SpecialFunctions`") — traced
+to a **stale local `Manifest.toml`** in this dev checkout, not this
+diff: a genuinely clean `Pkg.instantiate()` of unmodified `main` in an
+isolated checkout passed cleanly (4964/4964, no Aqua issue at all),
+and regenerating this checkout's own `Manifest.toml` from scratch
+(`rm Manifest.toml; Pkg.instantiate()`) then re-running also came back
+fully clean. Matches the standing "an unexplained test anomaly with a
+clean diff is very likely an environment artifact" methodology note —
+this is a new instance of that shape (a drifted local package
+resolution, not the previously-seen CASA.app DMG mount state).
+README/memory updated, merge on the user's word.

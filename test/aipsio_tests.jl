@@ -2,7 +2,7 @@
 # mirror what casacore's CanonicalIO writes.
 
 using MeasurementSets: AipsIO, getstart, getend, getnexttype, read_string,
-             read_iposition, read_block, read_scalar
+             read_iposition, read_block, read_scalar, read_array
 
 be(x) = collect(reinterpret(UInt8, [hton(x)]))
 aipsstr(s) = vcat(be(UInt32(length(s))), Vector{UInt8}(s))
@@ -37,4 +37,27 @@ aipsstr(s) = vcat(be(UInt32(length(s))), Vector{UInt8}(s))
     bllen = UInt32(4 + length(blbody))
     blbytes = vcat(be(UInt32(0xbebebebe)), be(bllen), blbody)
     @test read_block(AipsIO(blbytes), Int32) == Int32[10, 20, 30]
+
+    # Array<Int32>, version 3 (this package's own writer's only output —
+    # no obsolete per-axis origin)
+    arr3body = vcat(aipsstr("Array"), be(UInt32(3)), be(Int32(1)),
+                    be(UInt32(3)), be(UInt32(3)),
+                    be(Int32(10)), be(Int32(20)), be(Int32(30)))
+    arr3len = UInt32(4 + length(arr3body))
+    arr3bytes = vcat(be(UInt32(0xbebebebe)), be(arr3len), arr3body)
+    @test read_array(AipsIO(arr3bytes), Int32) == ((3,), Int32[10, 20, 30])
+
+    # Array<Int32>, version 2 -- a real, older on-disk form this package's
+    # own writer never produces (it always writes version 3) but its
+    # reader claims to support for interop with an older casacore-written
+    # file: carries an obsolete per-axis origin field that must be read
+    # and discarded, not mistaken for part of the shape. Found via a
+    # coverage-instrumented test run to have zero coverage before this.
+    arr2body = vcat(aipsstr("Array"), be(UInt32(2)), be(Int32(1)),
+                    be(Int32(99)),                # obsolete origin -- must be skipped
+                    be(UInt32(3)), be(UInt32(3)),
+                    be(Int32(10)), be(Int32(20)), be(Int32(30)))
+    arr2len = UInt32(4 + length(arr2body))
+    arr2bytes = vcat(be(UInt32(0xbebebebe)), be(arr2len), arr2body)
+    @test read_array(AipsIO(arr2bytes), Int32) == ((3,), Int32[10, 20, 30])
 end
