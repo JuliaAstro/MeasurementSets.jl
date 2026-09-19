@@ -227,212 +227,243 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            readme::AbstractString="")
     _check_storage(storage)
     _check_blocksize(blocksize)
+    # Phase 226 fix: `storage=`/`blocksize=` are checked above, BEFORE
+    # `mkpath` -- Phase 199's own fix for exactly this shape of problem
+    # (a caller's typo turning into a silently-created stray directory,
+    # not just a clear error). But every OTHER validated kwarg in this
+    # function (`measures=`/`units=`/`engines=`/`forward=`/
+    # `virtualtaql=`/`ism=`/the `tsm=`/`tcm=`/`tcell=`/`dysco=` group
+    # name checks) still throws its own clear "no column ..." error --
+    # correctly -- but AFTER `mkpath(dir)` below, so the same "claims to
+    # have failed but silently created state anyway" gap Phase 199 fixed
+    # for `storage=`/`blocksize=` was never actually closed for the rest.
+    # Live-reproduced: `write_table(dir, "T", [...]; nrow=2, measures =
+    # Dict("NOTACOL" => (; kind=:epoch, ref="UTC")))` throws the correct
+    # `measures: no column "NOTACOL"` message, yet leaves an empty `dir`
+    # behind. A per-kwarg fix mirroring Phase 199's own (hoisting each
+    # check above `mkpath`) isn't safe here without a much larger
+    # restructuring: several of these loops (`engines=` most of all) do
+    # real, non-trivial encoding work interleaved with their own name
+    # check, not a separable pure-validation pass. Fixed once, robustly,
+    # for every current AND future validation site in this function:
+    # remember whether `dir` already existed, and on ANY exception from
+    # here on, remove it again (only if this call is the one that
+    # created it) before rethrowing -- also correctly cleans up a
+    # *partial* write (some SM files already on disk) for an error that
+    # only surfaces deep inside `with_container_sink`, not just the
+    # early "nothing written yet" case Phase 199 originally covered.
+    _dir_preexisted = ispath(dir)
     mkpath(dir)
-    tsmg = _tsm_groups(tsm)
+    try
+        tsmg = _tsm_groups(tsm)
 
-    # --- measures: stamp a MEASINFO (+ QuantumUnits) keyword on the column
-    for (mcol, spec) in measures
-        mi = findfirst(c -> c.name == mcol, descs)
-        mi === nothing && error("measures: no column \"$mcol\"")
-        descs[mi] = _stamp_measinfo(descs[mi], spec)
-    end
-
-    # --- units: stamp a QuantumUnits keyword (no MEASINFO)
-    for (ucol, u) in units
-        ui = findfirst(c -> c.name == ucol, descs)
-        ui === nothing && error("units: no column \"$ucol\"")
-        descs[ui] = _stamp_quantum_units(descs[ui],
-            u isa AbstractString ? String[u] : collect(String, u))
-    end
-
-    # --- virtual column engines: synthesise the stored / scale / offset
-    #     columns, stamp the `_<Engine>_*` keywords on the virtual column
-    engine_seq = Tuple{Int,String}[]        # (virtual desc index, engine type string)
-    engine_virtual = Set{String}()
-    for (vname, spec) in engines
-        vi = findfirst(c -> c.name == vname, descs)
-        vi === nothing && error("engines: no column \"$vname\"")
-        vdesc = descs[vi]; vdata = data[vi]
-        push!(engine_virtual, vname)
-        kind = spec.kind
-        autoscale = get(spec, :autoscale, false)
-        stored_type = get(spec, :stored_type, TpInt)
-        storedname  = something(get(spec, :storedname, nothing), vname * "_COMPRESSED")
-        scalename   = something(get(spec, :scalename, nothing), vname * "_SCALE")
-        offsetname  = something(get(spec, :offsetname, nothing), vname * "_OFFSET")
-
-        storeddata, kw, sc, of, stored_kw = encode_engine(kind, vdata, vdesc.type;
-            scale = get(spec, :scale, nothing), offset = get(spec, :offset, nothing),
-            autoscale, stored_type, storedname, scalename, offsetname,
-            readmask = get(spec, :readmask, typemax(UInt32)),
-            writemask = get(spec, :writemask, UInt32(1)),
-            readmaskkeys = get(spec, :readmaskkeys, String[]),
-            writemaskkeys = get(spec, :writemaskkeys, String[]),
-            flagsets = get(spec, :flagsets, nothing))
-
-        typestr = _engine_typestr(kind, vdesc.type, stored_type)
-        descs[vi] = ColumnDesc(vname, vdesc.comment, typestr, vname, vdesc.type,
-            _classname(vdesc.type, true), VariableShape(), Int32(0), UInt32(0),
-            _merge_kw(vdesc.keywords, kw), nothing, nothing)
-        push!(engine_seq, (vi, typestr))
-
-        st_ct = _stored_casatype(eltype(storeddata[1]))
-        push!(descs, _mkdesc(storedname, st_ct, VariableShape(); keywords=stored_kw))
-        push!(data, storeddata)
-        if get(spec, :stored, :tsm) === :tsm
-            push!(tsmg, String[storedname])
+        # --- measures: stamp a MEASINFO (+ QuantumUnits) keyword on the column
+        for (mcol, spec) in measures
+            mi = findfirst(c -> c.name == mcol, descs)
+            mi === nothing && error("measures: no column \"$mcol\"")
+            descs[mi] = _stamp_measinfo(descs[mi], spec)
         end
-        if sc !== nothing
-            push!(descs, _mkdesc(scalename,  TpFloat, ())); push!(data, collect(sc))
-            push!(descs, _mkdesc(offsetname, TpFloat, ())); push!(data, collect(of))
+
+        # --- units: stamp a QuantumUnits keyword (no MEASINFO)
+        for (ucol, u) in units
+            ui = findfirst(c -> c.name == ucol, descs)
+            ui === nothing && error("units: no column \"$ucol\"")
+            descs[ui] = _stamp_quantum_units(descs[ui],
+                u isa AbstractString ? String[u] : collect(String, u))
         end
-    end
 
-    # --- ForwardColumnEngine: no stored column, no file -- just the
-    #     `_ForwardColumn_TableName` (relative) keyword + an empty DM block.
-    for (vname, refabs) in forward
-        vi = findfirst(c -> c.name == vname, descs)
-        vi === nothing && error("forward: no column \"$vname\"")
-        push!(engine_virtual, vname)
-        vd = descs[vi]
-        fkw = Record()
-        _kwpush!(fkw, "_ForwardColumn_TableName", TpString, _strip_directory(String(refabs), dir))
-        descs[vi] = ColumnDesc(vname, vd.comment, "ForwardColumnEngine", vname, vd.type,
-            vd.classname, vd.shape, vd.option, vd.maxlength,
-            _merge_kw(vd.keywords, fkw), vd.default, nothing)
-        push!(engine_seq, (vi, "ForwardColumnEngine"))
-    end
+        # --- virtual column engines: synthesise the stored / scale / offset
+        #     columns, stamp the `_<Engine>_*` keywords on the virtual column
+        engine_seq = Tuple{Int,String}[]        # (virtual desc index, engine type string)
+        engine_virtual = Set{String}()
+        for (vname, spec) in engines
+            vi = findfirst(c -> c.name == vname, descs)
+            vi === nothing && error("engines: no column \"$vname\"")
+            vdesc = descs[vi]; vdata = data[vi]
+            push!(engine_virtual, vname)
+            kind = spec.kind
+            autoscale = get(spec, :autoscale, false)
+            stored_type = get(spec, :stored_type, TpInt)
+            storedname  = something(get(spec, :storedname, nothing), vname * "_COMPRESSED")
+            scalename   = something(get(spec, :scalename, nothing), vname * "_SCALE")
+            offsetname  = something(get(spec, :offsetname, nothing), vname * "_OFFSET")
 
-    # --- VirtualTaQLColumn: no data file -- store the CALC expression as
-    #     two String keywords + an empty DM block.  The expression is
-    #     evaluated (TaQL-lite) on read, never on write.
-    for (vname, expr) in virtualtaql
-        vi = findfirst(c -> c.name == vname, descs)
-        vi === nothing && error("virtualtaql: no column \"$vname\"")
-        push!(engine_virtual, vname)
-        vd = descs[vi]
-        tkw = Record()
-        _kwpush!(tkw, "_VirtualTaQLEngine_CalcExpr", TpString, String(expr))
-        _kwpush!(tkw, "_VirtualTaQLEngine_Style", TpString, "")
-        descs[vi] = ColumnDesc(vname, vd.comment, "VirtualTaQLColumn", vname, vd.type,
-            vd.classname, vd.shape, vd.option, vd.maxlength,
-            _merge_kw(vd.keywords, tkw), vd.default, nothing)
-        push!(engine_seq, (vi, "VirtualTaQLColumn"))
-    end
+            storeddata, kw, sc, of, stored_kw = encode_engine(kind, vdata, vdesc.type;
+                scale = get(spec, :scale, nothing), offset = get(spec, :offset, nothing),
+                autoscale, stored_type, storedname, scalename, offsetname,
+                readmask = get(spec, :readmask, typemax(UInt32)),
+                writemask = get(spec, :writemask, UInt32(1)),
+                readmaskkeys = get(spec, :readmaskkeys, String[]),
+                writemaskkeys = get(spec, :writemaskkeys, String[]),
+                flagsets = get(spec, :flagsets, nothing))
 
-    tiledgroups = [(:tsm, "TiledShapeStMan", write_tiledshapestman, tsmg),
-                   (:tcm, "TiledColumnStMan", write_tiledcolumnstman, _tsm_groups(tcm)),
-                   (:tcell, "TiledCellStMan", write_tiledcellstman, _tsm_groups(tcell))]
-    tiledn = Set{String}()
-    for (_, _, _, gs) in tiledgroups, g in gs, n in g
-        push!(tiledn, n)
-    end
-    dyscog = _tsm_groups(dysco)
-    dyscon = Set{String}()
-    for g in dyscog, n in g
-        push!(dyscon, n)
-    end
-    # `tsm=`/`tcm=`/`tcell=`/`dysco=` all validate every referenced name
-    # (Phase 201's fix pattern, applied here too — a typo used to be
-    # silently dropped by `findall`'s own "no match = no index" behaviour
-    # instead of erroring like its siblings do, live-verified: `ism =
-    # Set(["A", "TYPO"])` on a table with no "TYPO" column succeeded with
-    # no error and no warning, TYPO simply never became an ISM column).
-    for nm in ism
-        any(c -> c.name == nm, descs) || error("ism: unknown column \"$nm\"")
-    end
-    ism_i = findall(c -> c.name in ism, descs)
-    ssm_i = setdiff(1:length(descs),
-                    vcat(findall(c -> c.name in tiledn || c.name in engine_virtual ||
-                                      c.name in dyscon, descs),
-                         ism_i))
+            typestr = _engine_typestr(kind, vdesc.type, stored_type)
+            descs[vi] = ColumnDesc(vname, vdesc.comment, typestr, vname, vdesc.type,
+                _classname(vdesc.type, true), VariableShape(), Int32(0), UInt32(0),
+                _merge_kw(vdesc.keywords, kw), nothing, nothing)
+            push!(engine_seq, (vi, typestr))
 
-    out = Vector{ColumnDesc}(undef, length(descs))
-    dms = DMWrite[]
-    seq = 0
-    varndim = Dict{String,Int}()
-
-    # true per-row cell dimensionality for every variable-shape column
-    for i in 1:length(descs)
-        d = descs[i]
-        (d.shape isa VariableShape && !isempty(data[i])) || continue
-        varndim[d.name] = ndims(data[i][1])
-    end
-
-    # The per-DM-writer section: wrapped so a container-eligible writer's
-    # `_dmfile_write!` calls buffer into a fresh container instead of
-    # touching disk when `storage != :sepfile`.  Runs (and, if anything
-    # was buffered, finalizes the real table.mf/table.mfh5) BEFORE
-    # `write_table_files` below writes table.dat -- table.dat stays the
-    # last thing written / the commit point, exactly as for `:sepfile`.
-    with_container_sink(dir, storage, blocksize) do
-        if !isempty(ssm_i)
-            cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ssm), seq) for i in ssm_i]
-            blk = write_standardstman(dir, seq, cols, data[ssm_i], Int(nrow), endian)
-            push!(dms, DMWrite("StandardStMan", seq, blk))
-            for (k, i) in enumerate(ssm_i); out[i] = cols[k]; end
-            seq += 1
-        end
-        if !isempty(ism_i)
-            cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ism), seq) for i in ism_i]
-            blk = write_incrementalstman(dir, seq, cols, data[ism_i], Int(nrow), endian)
-            push!(dms, DMWrite("IncrementalStMan", seq, blk))
-            for (k, i) in enumerate(ism_i); out[i] = cols[k]; end
-            seq += 1
-        end
-        for (kind, dmname, writer, groups) in tiledgroups, g in groups
-            idxs = Int[]
-            for nm in g
-                i = findfirst(c -> c.name == nm, descs)
-                i === nothing && error("$dmname group $g: unknown column \"$nm\"")
-                push!(idxs, i)
+            st_ct = _stored_casatype(eltype(storeddata[1]))
+            push!(descs, _mkdesc(storedname, st_ct, VariableShape(); keywords=stored_kw))
+            push!(data, storeddata)
+            if get(spec, :stored, :tsm) === :tsm
+                push!(tsmg, String[storedname])
             end
-            sort!(idxs)                       # bind in TableDesc column order (= header dtype order)
-            cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], kind), seq) for i in idxs]
-            blk = writer(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian)
-            push!(dms, DMWrite(dmname, seq, blk))
-            for (k, i) in enumerate(idxs); out[i] = cols[k]; end
-            seq += 1
-        end
-        for g in dyscog
-            idxs = Int[]
-            for nm in g
-                i = findfirst(c -> c.name == nm, descs)
-                i === nothing && error("DyscoStMan group $g: unknown column \"$nm\"")
-                push!(idxs, i)
+            if sc !== nothing
+                push!(descs, _mkdesc(scalename,  TpFloat, ())); push!(data, collect(sc))
+                push!(descs, _mkdesc(offsetname, TpFloat, ())); push!(data, collect(of))
             end
-            sort!(idxs)
-            cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :dysco), seq) for i in idxs]
-            spec = get(dysco_spec, g[1], NamedTuple())
-            haskey(spec, :antenna1) && haskey(spec, :antenna2) ||
-                error("dysco group $g: dysco_spec[\"$(g[1])\"] must supply antenna1/antenna2 " *
-                      "(0-based, length nrow)")
-            blk = write_dyscostman(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian;
-                normalization = get(spec, :normalization, AFNorm()),
-                distribution = get(spec, :distribution, TruncatedGaussian()),
-                dataBitCount = get(spec, :dataBitCount, 10),
-                weightBitCount = get(spec, :weightBitCount, 12),
-                distributionTruncation = get(spec, :distributionTruncation, 2.5),
-                studentTNu = get(spec, :studentTNu, 5.0),
-                antenna1 = spec.antenna1, antenna2 = spec.antenna2,
-                rowsPerBlock = get(spec, :rowsPerBlock, Int(nrow)),
-                dither = get(spec, :dither, true),
-                rng = get(spec, :rng, Random.default_rng()))
-            push!(dms, DMWrite("DyscoStMan", seq, blk))
-            for (k, i) in enumerate(idxs); out[i] = cols[k]; end
-            seq += 1
         end
-        for (vi, typestr) in engine_seq         # virtual engines write no file, empty block
-            out[vi] = _withsequ(descs[vi], seq)
-            push!(dms, DMWrite(typestr, seq, UInt8[]))
-            seq += 1
-        end
-    end
 
-    td = TableDesc(isempty(tablename) ? "" : String(tablename), "2.0", "",
-                   public, private, out)
-    write_table_files(dir, td, Int(nrow), dms; type, subtype, readme, varndim, storage, blocksize)
-    return dir
+        # --- ForwardColumnEngine: no stored column, no file -- just the
+        #     `_ForwardColumn_TableName` (relative) keyword + an empty DM block.
+        for (vname, refabs) in forward
+            vi = findfirst(c -> c.name == vname, descs)
+            vi === nothing && error("forward: no column \"$vname\"")
+            push!(engine_virtual, vname)
+            vd = descs[vi]
+            fkw = Record()
+            _kwpush!(fkw, "_ForwardColumn_TableName", TpString, _strip_directory(String(refabs), dir))
+            descs[vi] = ColumnDesc(vname, vd.comment, "ForwardColumnEngine", vname, vd.type,
+                vd.classname, vd.shape, vd.option, vd.maxlength,
+                _merge_kw(vd.keywords, fkw), vd.default, nothing)
+            push!(engine_seq, (vi, "ForwardColumnEngine"))
+        end
+
+        # --- VirtualTaQLColumn: no data file -- store the CALC expression as
+        #     two String keywords + an empty DM block.  The expression is
+        #     evaluated (TaQL-lite) on read, never on write.
+        for (vname, expr) in virtualtaql
+            vi = findfirst(c -> c.name == vname, descs)
+            vi === nothing && error("virtualtaql: no column \"$vname\"")
+            push!(engine_virtual, vname)
+            vd = descs[vi]
+            tkw = Record()
+            _kwpush!(tkw, "_VirtualTaQLEngine_CalcExpr", TpString, String(expr))
+            _kwpush!(tkw, "_VirtualTaQLEngine_Style", TpString, "")
+            descs[vi] = ColumnDesc(vname, vd.comment, "VirtualTaQLColumn", vname, vd.type,
+                vd.classname, vd.shape, vd.option, vd.maxlength,
+                _merge_kw(vd.keywords, tkw), vd.default, nothing)
+            push!(engine_seq, (vi, "VirtualTaQLColumn"))
+        end
+
+        tiledgroups = [(:tsm, "TiledShapeStMan", write_tiledshapestman, tsmg),
+                       (:tcm, "TiledColumnStMan", write_tiledcolumnstman, _tsm_groups(tcm)),
+                       (:tcell, "TiledCellStMan", write_tiledcellstman, _tsm_groups(tcell))]
+        tiledn = Set{String}()
+        for (_, _, _, gs) in tiledgroups, g in gs, n in g
+            push!(tiledn, n)
+        end
+        dyscog = _tsm_groups(dysco)
+        dyscon = Set{String}()
+        for g in dyscog, n in g
+            push!(dyscon, n)
+        end
+        # `tsm=`/`tcm=`/`tcell=`/`dysco=` all validate every referenced name
+        # (Phase 201's fix pattern, applied here too — a typo used to be
+        # silently dropped by `findall`'s own "no match = no index" behaviour
+        # instead of erroring like its siblings do, live-verified: `ism =
+        # Set(["A", "TYPO"])` on a table with no "TYPO" column succeeded with
+        # no error and no warning, TYPO simply never became an ISM column).
+        for nm in ism
+            any(c -> c.name == nm, descs) || error("ism: unknown column \"$nm\"")
+        end
+        ism_i = findall(c -> c.name in ism, descs)
+        ssm_i = setdiff(1:length(descs),
+                        vcat(findall(c -> c.name in tiledn || c.name in engine_virtual ||
+                                          c.name in dyscon, descs),
+                             ism_i))
+
+        out = Vector{ColumnDesc}(undef, length(descs))
+        dms = DMWrite[]
+        seq = 0
+        varndim = Dict{String,Int}()
+
+        # true per-row cell dimensionality for every variable-shape column
+        for i in 1:length(descs)
+            d = descs[i]
+            (d.shape isa VariableShape && !isempty(data[i])) || continue
+            varndim[d.name] = ndims(data[i][1])
+        end
+
+        # The per-DM-writer section: wrapped so a container-eligible writer's
+        # `_dmfile_write!` calls buffer into a fresh container instead of
+        # touching disk when `storage != :sepfile`.  Runs (and, if anything
+        # was buffered, finalizes the real table.mf/table.mfh5) BEFORE
+        # `write_table_files` below writes table.dat -- table.dat stays the
+        # last thing written / the commit point, exactly as for `:sepfile`.
+        with_container_sink(dir, storage, blocksize) do
+            if !isempty(ssm_i)
+                cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ssm), seq) for i in ssm_i]
+                blk = write_standardstman(dir, seq, cols, data[ssm_i], Int(nrow), endian)
+                push!(dms, DMWrite("StandardStMan", seq, blk))
+                for (k, i) in enumerate(ssm_i); out[i] = cols[k]; end
+                seq += 1
+            end
+            if !isempty(ism_i)
+                cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :ism), seq) for i in ism_i]
+                blk = write_incrementalstman(dir, seq, cols, data[ism_i], Int(nrow), endian)
+                push!(dms, DMWrite("IncrementalStMan", seq, blk))
+                for (k, i) in enumerate(ism_i); out[i] = cols[k]; end
+                seq += 1
+            end
+            for (kind, dmname, writer, groups) in tiledgroups, g in groups
+                idxs = Int[]
+                for nm in g
+                    i = findfirst(c -> c.name == nm, descs)
+                    i === nothing && error("$dmname group $g: unknown column \"$nm\"")
+                    push!(idxs, i)
+                end
+                sort!(idxs)                       # bind in TableDesc column order (= header dtype order)
+                cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], kind), seq) for i in idxs]
+                blk = writer(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian)
+                push!(dms, DMWrite(dmname, seq, blk))
+                for (k, i) in enumerate(idxs); out[i] = cols[k]; end
+                seq += 1
+            end
+            for g in dyscog
+                idxs = Int[]
+                for nm in g
+                    i = findfirst(c -> c.name == nm, descs)
+                    i === nothing && error("DyscoStMan group $g: unknown column \"$nm\"")
+                    push!(idxs, i)
+                end
+                sort!(idxs)
+                cols = ColumnDesc[_withsequ(_normalize_desc(descs[i], :dysco), seq) for i in idxs]
+                spec = get(dysco_spec, g[1], NamedTuple())
+                haskey(spec, :antenna1) && haskey(spec, :antenna2) ||
+                    error("dysco group $g: dysco_spec[\"$(g[1])\"] must supply antenna1/antenna2 " *
+                          "(0-based, length nrow)")
+                blk = write_dyscostman(dir, seq, cols, Any[data[i] for i in idxs], Int(nrow), endian;
+                    normalization = get(spec, :normalization, AFNorm()),
+                    distribution = get(spec, :distribution, TruncatedGaussian()),
+                    dataBitCount = get(spec, :dataBitCount, 10),
+                    weightBitCount = get(spec, :weightBitCount, 12),
+                    distributionTruncation = get(spec, :distributionTruncation, 2.5),
+                    studentTNu = get(spec, :studentTNu, 5.0),
+                    antenna1 = spec.antenna1, antenna2 = spec.antenna2,
+                    rowsPerBlock = get(spec, :rowsPerBlock, Int(nrow)),
+                    dither = get(spec, :dither, true),
+                    rng = get(spec, :rng, Random.default_rng()))
+                push!(dms, DMWrite("DyscoStMan", seq, blk))
+                for (k, i) in enumerate(idxs); out[i] = cols[k]; end
+                seq += 1
+            end
+            for (vi, typestr) in engine_seq         # virtual engines write no file, empty block
+                out[vi] = _withsequ(descs[vi], seq)
+                push!(dms, DMWrite(typestr, seq, UInt8[]))
+                seq += 1
+            end
+        end
+
+        td = TableDesc(isempty(tablename) ? "" : String(tablename), "2.0", "",
+                       public, private, out)
+        write_table_files(dir, td, Int(nrow), dms; type, subtype, readme, varndim, storage, blocksize)
+        return dir
+    catch
+        _dir_preexisted || rm(dir; recursive=true, force=true)
+        rethrow()
+    end
 end
 
 """

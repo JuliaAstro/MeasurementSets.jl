@@ -8018,3 +8018,59 @@ assertions.
 
 Full suite green: 5195 baseline + 3 new = 5198/5198. README/memory
 updated, merge on the user's word.
+
+### Phase 226 — one last `src/measures/` sweep: found a real, broader gap
+in `_write_table_core`'s own write path — Phase 199's stray-directory fix
+was never extended past `storage=`/`blocksize=`
+
+A final, careful re-read of everything in `src/measures/` and its
+`ext/` extensions (fresh review of `doppler.jl` including a skeptical
+re-check of Phase 224's own fix, `test/measures_fixture.py` for
+staleness relative to the Phase 222-225 changes — none needed, its
+`DOP_RADIO = 0.01` fixture value is already safely in-domain) found no
+further bug *in `src/measures/` itself*. Following the write-path
+integration seam out of `src/measures/write.jl` into `src/tables/
+create.jl` (where a `Measure`-typed column's auto-detected `MEASINFO`
+actually gets stamped) turned up a real, broader bug one level removed
+from the measures subsystem — a natural place to look, since that seam
+is exactly what Phase 221 (and, further back, Phase 199/201/202/204/
+205) has repeatedly found real gaps in before.
+
+**A real bug, fixed**: `_write_table_core` (`src/tables/create.jl`) —
+the single function every `write_table`/`copytable`/`create_ms`/
+`write_ms` call eventually funnels through — validates `storage=`/
+`blocksize=` first thing, before `mkpath(dir)` (Phase 199's own fix for
+exactly this shape of problem: a caller's typo turning into a silently-
+created stray directory, not just a clear error). But every *other*
+validated kwarg in the same function (`measures=`/`units=`/`engines=`/
+`forward=`/`virtualtaql=`/`ism=`/the `tsm=`/`tcm=`/`tcell=`/`dysco=`
+group name checks) still throws its own correct "no column …" error,
+but *after* `mkpath(dir)` — so the exact same gap Phase 199 fixed was
+never actually closed for the rest. Live-reproduced: `write_table(dir,
+"T", [...]; nrow=2, measures = Dict("NOTACOL" => (; kind=:epoch,
+ref="UTC")))` throws the correct `measures: no column "NOTACOL"`
+message, yet leaves an empty `dir` behind. A per-kwarg fix mirroring
+Phase 199's own approach (hoisting each check above `mkpath`) isn't
+safe here without a much larger restructuring — several of these loops
+(`engines=` most of all) do real, non-trivial encoding work interleaved
+with their own name check, not a cleanly separable pure-validation
+pass. Fixed once, robustly, for every current *and future* validation
+site in the function: remember whether `dir` already existed before
+this call, wrap the whole body in `try`/`catch`, and on any exception
+remove `dir` again (only if this call is the one that created it)
+before rethrowing. This is a strict improvement over a per-kwarg hoist
+too — it also correctly cleans up a genuinely *partial* write (some
+storage-manager files already on disk) for an error that only surfaces
+deep inside `with_container_sink`'s per-DM-writer section, not just the
+"nothing written yet" early case Phase 199 originally covered, and a
+pre-existing directory (with unrelated content) is left completely
+untouched. Live-verified across all four shapes (early error, late/
+partial-write error, pre-existing-directory preservation, and a normal
+successful write) before writing the permanent test; the whole
+`dysco_tests.jl` and `ism_writer_tests.jl` suites — including their
+real-CASA-interop cross-checks — were also re-run standalone against
+the fix as an extra confidence check, given how much of the function's
+body now runs inside the new `try` block. 9 new assertions.
+
+Full suite green: 5198 baseline + 9 new = 5207/5207. README/memory
+updated, merge on the user's word.
