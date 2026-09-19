@@ -7670,3 +7670,160 @@ distinct sites/reference points, not typos).
 
 Full suite green: 5121 baseline + 8 new = 5129/5129. README/memory
 updated, merge on the user's word.
+
+### Phase 219 — `src/measures/` sweep, continued: a real bug in the
+ephemeris pointing-offset formula, and a coverage-gap closure across
+`measinfo.jl`/`read.jl`
+
+Continuing the Phase 218 sweep with fresh eyes over the rest of
+`src/measures/` (`types.jl`, `measinfo.jl`, `write.jl`, `doppler.jl`,
+`observatories.jl`, `earthfield.jl`, `emmachine.jl`) and the measures-
+relevant parts of `ext/SOFAExt.jl`.
+
+**A real bug, fixed**: `ephemeris.jl`'s `_ephem_shift` — the function
+that applies a moving-target FIELD's static `PHASE_DIR` pointing offset
+to the ephemeris-derived body direction — carried a comment claiming it
+*was* casacore's `MVDirection::shift(offset, True)`, but the code was
+actually only a small-angle tangent-plane approximation of it
+(`lon + dlon/cos(lat+dlat), lat+dlat`). Traced the real call site
+(`ms/MeasurementSets/MSFieldColumns.cc:480`,
+`mvxdir.shift(offsetDir.getAngle(), True)`) down through
+`MVDirection::shift(const MVDirection&, Bool)` →
+`shift(Double lng, Double lat, Bool trueAngle)`
+(`casa/Quanta/MVDirection.cc:308-343`): the real "true angle" shift is a
+3-rotation composition — with `R = Rz(-dlon)·Ry(lat+dlat)·Rz(-lon)`, the
+result is the first row of `R` applied to the unit pole `(1,0,0)` (per
+`MVPosition::operator*=(RotMatrix)`, `casa/Quanta/MVPosition.cc:278-285`,
+inherited by `MVDirection`). Independently re-derived this from the
+quoted C++ `operator*`/`operator*=` definitions in a from-scratch
+throwaway script and confirmed numerically: the two formulas agree to
+`< 1 mas` for a realistic pointing-offset magnitude (arcsec-to-arcmin —
+the ephemeris table's own UTC~TDB coarseness already swamps that), but
+diverge by `~0.1-1″` within about a degree of the celestial pole. Fixed
+`_ephem_shift` to the exact rotation formula (three small pure-arithmetic
+helpers, no new dependency — this file stays SOFA-free); a coverage
+check afterward confirmed the *existing* test suite had only ever
+exercised this function with an all-zero offset (every fixture used
+`PHASE_DIR => [[0.0, 0.0]]`), so the actual shift logic had zero prior
+test coverage at all. Added a dedicated testset pinning the fix against
+the independent from-scratch reference (both a realistic small offset
+and the near-pole divergent case) plus an end-to-end `measure()`
+round-trip through a genuinely nonzero-offset moving-target FIELD.
+
+**A coverage-gap closure**: a coverage-instrumented run of the full
+suite turned up several `measinfo.jl`/`read.jl` branches with *zero*
+prior test coverage — every existing fixture in this suite happened to
+always take the opposite path:
+- `measinfo.jl`'s `_ref_from_code` fixed-casacore-enum-order fallback
+  (a `VarRefCol` column with no `TabRefCodes`/`TabRefTypes` map at all —
+  every other `VarRefCol` fixture in this suite supplies one explicitly).
+- `measinfo.jl`'s `_measinfo_record` "give `ref` or `varrefcol`" error.
+- `read.jl`'s whole-column `measure(t, col)` `VarRefCol` path (every
+  other whole-column `measure()` call in this suite is on a fixed-`Ref`
+  column).
+- `read.jl`'s entire `:radialvelocity` branch of `_wrap_measure` — both
+  the scalar *and* array-cell forms — meaning `measure()` had *never*
+  been called on a genuine on-disk `:radialvelocity`-kind MEASINFO
+  column anywhere in this suite; every existing radial-velocity test
+  constructs `MRadialVelocity` directly.
+- `read.jl`'s `_wrap_measure` fallback for an unrecognised MEASINFO
+  `type` (confirmed no write-side validation rejects an arbitrary
+  `kind` — it only ever surfaces on read).
+- `read.jl`'s `_scalar`'s *legitimate* length-1-array return — distinct
+  from Phase 218's length-3 *error* case, which was the only one this
+  suite exercised until now.
+- `read.jl`'s `_lonlat`'s 3-element unit-direction-vector cell form
+  (distinct from the `[lon,lat]`-pair and `(2,npoly)`-matrix forms every
+  other direction test uses) and its fallback error for an unsupported
+  cell length.
+
+None of these turned out to hide a further bug — each was live-verified
+correct before being pinned with a permanent test (the `_ref_from_code`
+enum-order fallback and the `_lonlat` 3-vector unit-vector decode were
+both checked against hand-derived expected values). 20 new assertions.
+
+Full suite green: 5129 baseline + 30 new (10 + 20) = 5159/5159.
+README/memory updated, merge on the user's word.
+
+### Phase 220 — `src/measures/` sweep, continued: `_eop_lookup`'s
+documented "falls back to zeros" fallback had never actually fired
+
+Continued the sweep into `ext/EarthOrientationExt.jl` (the IERS
+Earth-orientation feed for `ext/SOFAExt.jl`'s ΔUT1 / polar-motion
+lookups), the one measures-adjacent file the Phase 218/219 sweeps
+hadn't yet examined line by line.
+
+**A real bug, fixed**: `_eop_lookup`'s own docstring promises it
+"falls back to zeros (with one warning) if the table has no coverage
+for the date." The three `EarthOrientation.jl` calls it makes
+(`getΔUT1`/`getxp`/`getyp`) all passed `outside_range=:nothing`, which
+— live-verified by reading `EarthOrientation.jl`'s `interpolate`
+function directly, then confirming with a live probe — does **not**
+mean "return nothing." It means "skip the warn/error and keep going,"
+i.e. silently return an Akima-spline **extrapolation** past the
+table's actual covered range, with zero indication anything was off.
+Live-reproduced: a UTC MJD corresponding to a date past the IERS
+`finals2000A` table's current forward bound (`~2027-09-25` at
+investigation time — and creeping forward every day, so this will
+soon start silently affecting ordinary near-future/simulated-
+observation epochs, not just deliberately-contrived test dates)
+returned a real, never-warned, silently-extrapolated `xp`/`yp`/`dut1`
+triple instead of ever reaching the documented zero-fallback — the
+`catch` block below had, until now, only ever been reached by the
+Phase 192-195 non-finite-input case, never by a genuinely
+out-of-coverage (but otherwise well-formed) date. Fixed by switching
+to `outside_range=:error`, which — confirmed directly against
+`interpolate`'s own `:error` branch, and live-verified with a probe —
+genuinely raises `EarthOrientation.OutOfRangeError` for an
+out-of-coverage date, caught by the existing `try`/`catch` exactly as
+the docstring always claimed. Confirmed numerically that an in-range
+date (a 2024 epoch, well within real IERS coverage) is completely
+unaffected — same values before and after.
+
+New testset covering all three cases: an in-range date returns real,
+physically-plausible-magnitude values (not the zero fallback); a
+far-future MJD (~year 4500, robust against the table's forward bound
+creeping forward over time) falls back to exactly `(0.0, 0.0, 0.0)`;
+a far-past MJD (before the IERS series even starts, ~1962) does too.
+6 new assertions.
+
+Full suite green: 5159 baseline + 6 new = 5165/5165. README/memory
+updated, merge on the user's word.
+
+### Phase 221 — `src/measures/` sweep, continued: `addcolumn!` and
+`write_table` disagreed on whether to stamp an empty `QuantumUnits`
+keyword
+
+Continued the sweep, this time tracing the `src/measures/write.jl`
+(`_measure_column_spec`) integration seam into both of its two call
+sites — `src/tables/create.jl`'s `write_table` and `src/tables/
+edit.jl`'s `addcolumn!` — rather than re-reading `src/measures/`
+itself again (the bundled `igrf14_data.jl` table's structural shape
+was also spot-checked: 26 five-year epochs × 195 Schmidt coefficients
+each, matching the documented degree-13 spherical-harmonic count, both
+`_IGRF_COEF` and `_IGRF_DCOEF`).
+
+**A real bug, fixed**: `edit.jl`'s `_addcol_desc` (the shared helper
+behind both `addcolumn!(::EditTable, ...)` and
+`addcolumn!(::RefEditTable, ...)`, Phase 126) unconditionally stamped
+a `QuantumUnits` keyword whenever the added column was Measure-typed
+— even when the measure kind is dimensionless (`MDoppler`, whose
+`_measure_column_spec` reports `units = String[]`). `create.jl`'s
+`write_table` path (`_stamp_measinfo`) already has the correct guard
+(`if !isempty(units)`) for exactly this case, so the two entry points
+diverged for identical input: live-reproduced,
+`write_table(dir,"T",["D"=>[MDoppler{RADIO}(...)]];nrow=...)` correctly
+wrote **no** `QuantumUnits` keyword at all, while
+`edit(dir) do t; addcolumn!(t,"D",[MDoppler{RADIO}(...)]); end`
+unconditionally wrote an **empty** `QuantumUnits = String[]`. Fixed by
+replicating `_stamp_measinfo`'s `!isempty` guard in `_addcol_desc`
+(the `_quantity_column_spec`/`Unitful` branch didn't need the same
+fix — its `units` vector is never empty, always at least
+`[""]`/`["<unit>"]`). New regression testset confirms: the Doppler
+case now correctly omits the keyword through `addcolumn!`; a
+non-dimensionless kind (`MEpoch`) is unaffected; and `write_table`'s
+own (already-correct) behaviour for the identical data is unchanged,
+so the two entry points now genuinely agree. 5 new assertions.
+
+Full suite green: 5165 baseline + 5 new = 5170/5170. README/memory
+updated, merge on the user's word.
