@@ -13,8 +13,32 @@
 _dop_ratio(::Type{RADIO},   D) = 1 - D
 _dop_ratio(::Type{OPTICAL}, D) = 1 / (D + 1)
 _dop_ratio(::Type{RATIO},   D) = D
-_dop_ratio(::Type{BETA},    D) = sqrt((1 - D) / (1 + D))
-_dop_ratio(::Type{GAMMA},   D) = D * (1 - sqrt(1 - 1 / (D * D)))
+# Phase 222 fix: `sqrt((1-D)/(1+D))` / `sqrt(1 - 1/(D*D))` go negative
+# under the radical for an unphysical BETA (`|D| > 1` -- faster than
+# light) or GAMMA (`|D| < 1` -- a Lorentz factor below its minimum,
+# 1, at rest) value -- live-reproduced: `measconvert(MDoppler{BETA}
+# (1.5), GAMMA)` and even a merely NOISY near-rest `MDoppler{GAMMA}
+# (0.9999)` (plausible after a chain of floating-point conversions,
+# not just a deliberately-malformed input) both crashed with a raw,
+# unhelpful `DomainError` from deep inside `sqrt` instead of a clear
+# message naming the actual problem. Real casacore's C++ `std::sqrt`
+# of a negative double quietly returns NaN instead of throwing, but
+# this package's whole `measures/` subsystem already has an
+# established, stronger convention for exactly this shape of problem
+# (`measconvert`'s own `_all_finite` guard, `src/measures/types.jl`):
+# a physically-meaningless result is worse than a clear early error,
+# so a raw crash (worse still -- no explanation at all) gets the same
+# treatment here, not silently downgraded to a NaN. The physical
+# boundary itself (`|D| == 1` for BETA -- an infinite/zero Doppler
+# shift at exactly the speed of light; `|D| == 1` for GAMMA -- exactly
+# at rest) is NOT an error, only strictly beyond it is.
+_dop_ratio(::Type{BETA}, D) = (-1 <= D <= 1 || throw(ArgumentError(
+        "MeasurementSets: a BETA (v/c) Doppler value must satisfy |D| ≤ 1, got $D")
+    ); sqrt((1 - D) / (1 + D)))
+_dop_ratio(::Type{GAMMA}, D) = (abs(D) >= 1 || throw(ArgumentError(
+        "MeasurementSets: a GAMMA (Lorentz factor) Doppler value must satisfy " *
+        "|D| ≥ 1, got $D")
+    ); D * (1 - sqrt(1 - 1 / (D * D))))
 _dop_ratio(::Type{C}, D) where {C} =
     error("MeasurementSets: `$(nameof(C))` is not a Doppler convention")
 
@@ -37,8 +61,27 @@ measconvert(m::MDoppler{C}, ::Type{D}) where {C<:DopplerType,D<:DopplerType} =
 _hz(x::Real) = float(x)
 _hz(f::MFrequency) = f.hz
 
+# Phase 223 fix: `β = v/c` in the BETA convention, ALWAYS routed through
+# `_dop_ratio` -- deliberately does NOT use `measconvert(d, BETA).d`.
+# `measconvert(m::MDoppler{C}, ::Type{D})`'s own `C === D ? m : ...`
+# short-circuit (just above) is a legitimate no-op passthrough for a
+# genuine "already there" conversion, but it means `d`'s OWN value never
+# passes through `_dop_ratio`'s Phase 222 domain check when `d` already
+# happens to be stored in BETA convention -- so `_beta_factor` computing
+# `sqrt((1-β)/(1+β))` straight from `measconvert(d, BETA).d` could still
+# crash with the exact same raw `DomainError` Phase 222 was meant to
+# close. Live-reproduced: `shiftfreq(MDoppler{BETA}(1.5), 1.4e9)` still
+# crashed after that fix, because `1.5` never reached `_dop_ratio` in
+# that call. `_beta_value` always calls `_dop_ratio(C, d.d)` regardless
+# of `C`, so the validation fires unconditionally; `_ratio_dop(BETA, F)`
+# is then mathematically bounded to `(-1, 1]` for ANY real `F` (its
+# denominator `1+F²` is never zero), so the subsequent
+# `sqrt((1-β)/(1+β))` in `_beta_factor` is always safe once
+# `_beta_value` itself hasn't thrown.
+_beta_value(d::MDoppler{C}) where {C} = _ratio_dop(BETA, _dop_ratio(C, d.d))
+
 # the Doppler frequency-shift factor √((1−β)/(1+β)); β from the BETA form
-_beta_factor(d::MDoppler) = (β = measconvert(d, BETA).d; sqrt((1 - β) / (1 + β)))
+_beta_factor(d::MDoppler) = (β = _beta_value(d); sqrt((1 - β) / (1 + β)))
 
 """
     doppler(f::MFrequency, restfreq) -> MDoppler{BETA}
@@ -65,7 +108,7 @@ The true radial velocity of a Doppler shift (`c·β`, casacore
 broadcasts — `radialvelocity.(measure(spw, "CHAN_FREQ"), ν₀)` is a
 velocity axis.  The result frame defaults to `LSRK`.
 """
-radialvelocity(d::MDoppler) = MRadialVelocity{LSRK}(C_LIGHT * measconvert(d, BETA).d)
+radialvelocity(d::MDoppler) = MRadialVelocity{LSRK}(C_LIGHT * _beta_value(d))
 radialvelocity(f::MFrequency, restfreq) = radialvelocity(doppler(f, restfreq))
 
 """

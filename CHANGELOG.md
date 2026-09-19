@@ -7827,3 +7827,85 @@ so the two entry points now genuinely agree. 5 new assertions.
 
 Full suite green: 5165 baseline + 5 new = 5170/5170. README/memory
 updated, merge on the user's word.
+
+### Phase 222 — `src/measures/` sweep, continued: an out-of-range
+Doppler value crashed with a raw `DomainError` instead of a clear
+message
+
+Continued the sweep by re-deriving the `measconvert`-adjacent numeric
+paths that hadn't yet been probed with genuinely out-of-physical-range
+inputs (`_all_finite`'s NaN/Inf guard in `measconvert` was already
+heavily tested; the untested gap was a *finite-but-unphysical* value).
+
+**A real bug, fixed**: `doppler.jl`'s `_dop_ratio(BETA, D) =
+sqrt((1-D)/(1+D))` and `_dop_ratio(GAMMA, D) = D*(1-sqrt(1-1/(D*D)))`
+both go negative under the radical for an out-of-physical-range input
+— `|D| > 1` for `BETA` (faster than light) or `|D| < 1` for `GAMMA` (a
+Lorentz factor below its physical minimum of 1, at rest). Live-
+reproduced: `measconvert(MDoppler{BETA}(1.5), GAMMA)` crashed with a
+raw, unhelpful `DomainError` from deep inside `sqrt`; even a merely
+*noisy* near-rest value, `MDoppler{GAMMA}(0.9999)` — entirely plausible
+after a chain of floating-point conversions, not a deliberately
+malformed input — crashed identically. Real casacore's C++
+`std::sqrt` of a negative double quietly returns NaN rather than
+throwing, but this package's own `measures/` subsystem already has an
+established, *stronger* convention for exactly this shape of problem
+(`measconvert`'s own `_all_finite` guard, Phase 195: a physically-
+meaningless result is worse than a clear early error) — so a raw,
+unexplained crash gets the same treatment, not silently downgraded to
+a NaN either. Fixed both functions to validate their domain and throw
+a clear `ArgumentError` naming the actual out-of-range value; the
+physical boundary itself (`|D| == 1` for either convention — an
+infinite/zero Doppler shift at exactly the speed of light for `BETA`,
+exactly at rest for `GAMMA`) is *not* an error, only strictly beyond
+it is — confirmed both boundary values and every in-domain value are
+completely unaffected by the new guard. 10 new assertions.
+
+Full suite green: 5170 baseline + 10 new = 5180/5180. README/memory
+updated, merge on the user's word.
+
+### Phase 223 — `src/measures/` sweep, continued: Phase 222's own fix
+had a gap — the Doppler crash was still reachable through the
+frequency/velocity bridge functions
+
+Continued the sweep by systematically re-checking every `sqrt`/`acos`/
+`asin`/`log` call across `src/measures/*.jl`, `ext/SOFAExt.jl` and
+`ext/EarthOrientationExt.jl` for a domain-violation risk like Phase
+222's — most were already `clamp`-guarded (`asin(clamp(·,-1,1))`
+appears throughout the direction/position code) or mathematically safe
+given their inputs (`ext/SOFAExt.jl`'s frequency/radial-velocity
+relativistic-aberration `sqrt`s only ever see a `β` built from bounded
+physical velocity *constants* divided by `c`, never raw user input).
+That systematic check turned up one genuine remaining gap, directly
+adjacent to what Phase 222 had just fixed.
+
+**A real bug, fixed**: Phase 222 added a domain guard to `_dop_ratio`
+for the `BETA`/`GAMMA` Doppler conventions — but `_beta_factor` (the
+shared helper behind `shiftfreq`/`frequency`/`restfrequency`) and
+`radialvelocity(d::MDoppler)` extracted `d`'s value via
+`measconvert(d, BETA).d`, and `measconvert(m::MDoppler{C}, ::Type{D})`
+has its own `C === D ? m : ...` short-circuit — a legitimate no-op
+passthrough everywhere else in the codebase, but one that means `d`'s
+own value *never reaches `_dop_ratio`'s Phase 222 check at all* when
+`d` already happens to be stored in `BETA` convention. Live-
+reproduced: `shiftfreq(MDoppler{BETA}(1.5), 1.4e9)` — a public,
+exported, documented function — still crashed with the exact same raw
+`DomainError` Phase 222 was meant to close. Fixed by adding
+`_beta_value(d::MDoppler{C}) where {C} = _ratio_dop(BETA,
+_dop_ratio(C, d.d))`, which routes through `_dop_ratio` *unconditionally*
+regardless of `C`, and using it in both `_beta_factor` and
+`radialvelocity`. Proven mathematically safe beyond just the tested
+cases: `_ratio_dop(BETA, F) = (1-F²)/(1+F²)` is bounded in `(-1, 1]`
+for *any* real `F` (its denominator `1+F²` is never zero), so once
+`_beta_value` hasn't thrown, the subsequent `sqrt((1-β)/(1+β))` in
+`_beta_factor` is unconditionally safe — not just for the specific
+values this phase's tests happen to exercise. Confirmed all four
+bridge functions (`shiftfreq`/`frequency`/`restfrequency`/
+`radialvelocity`) now throw the same clear error for an out-of-domain
+`MDoppler{BETA}`, and that in-domain values (including one reached via
+a *different* source convention, `GAMMA`, to prove the fix doesn't
+special-case the failing scenario) give identical, correct results
+through all of them. 6 new assertions.
+
+Full suite green: 5180 baseline + 6 new = 5186/5186. README/memory
+updated, merge on the user's word.
