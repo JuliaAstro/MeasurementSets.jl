@@ -13,8 +13,32 @@
 _dop_ratio(::Type{RADIO},   D) = 1 - D
 _dop_ratio(::Type{OPTICAL}, D) = 1 / (D + 1)
 _dop_ratio(::Type{RATIO},   D) = D
-_dop_ratio(::Type{BETA},    D) = sqrt((1 - D) / (1 + D))
-_dop_ratio(::Type{GAMMA},   D) = D * (1 - sqrt(1 - 1 / (D * D)))
+# Phase 222 fix: `sqrt((1-D)/(1+D))` / `sqrt(1 - 1/(D*D))` go negative
+# under the radical for an unphysical BETA (`|D| > 1` -- faster than
+# light) or GAMMA (`|D| < 1` -- a Lorentz factor below its minimum,
+# 1, at rest) value -- live-reproduced: `measconvert(MDoppler{BETA}
+# (1.5), GAMMA)` and even a merely NOISY near-rest `MDoppler{GAMMA}
+# (0.9999)` (plausible after a chain of floating-point conversions,
+# not just a deliberately-malformed input) both crashed with a raw,
+# unhelpful `DomainError` from deep inside `sqrt` instead of a clear
+# message naming the actual problem. Real casacore's C++ `std::sqrt`
+# of a negative double quietly returns NaN instead of throwing, but
+# this package's whole `measures/` subsystem already has an
+# established, stronger convention for exactly this shape of problem
+# (`measconvert`'s own `_all_finite` guard, `src/measures/types.jl`):
+# a physically-meaningless result is worse than a clear early error,
+# so a raw crash (worse still -- no explanation at all) gets the same
+# treatment here, not silently downgraded to a NaN. The physical
+# boundary itself (`|D| == 1` for BETA -- an infinite/zero Doppler
+# shift at exactly the speed of light; `|D| == 1` for GAMMA -- exactly
+# at rest) is NOT an error, only strictly beyond it is.
+_dop_ratio(::Type{BETA}, D) = (-1 <= D <= 1 || throw(ArgumentError(
+        "MeasurementSets: a BETA (v/c) Doppler value must satisfy |D| ≤ 1, got $D")
+    ); sqrt((1 - D) / (1 + D)))
+_dop_ratio(::Type{GAMMA}, D) = (abs(D) >= 1 || throw(ArgumentError(
+        "MeasurementSets: a GAMMA (Lorentz factor) Doppler value must satisfy " *
+        "|D| ≥ 1, got $D")
+    ); D * (1 - sqrt(1 - 1 / (D * D))))
 _dop_ratio(::Type{C}, D) where {C} =
     error("MeasurementSets: `$(nameof(C))` is not a Doppler convention")
 

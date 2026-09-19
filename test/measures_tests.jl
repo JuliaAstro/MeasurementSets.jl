@@ -212,6 +212,27 @@ end
     @test Z === OPTICAL && RELATIVISTIC === BETA
     @test_throws ErrorException measconvert(MDoppler{RADIO}(0.1), MeasurementSets.OtherDoppler{:X})
 
+    # Phase 222 fix: an unphysical BETA (|D| > 1, faster than light) or
+    # GAMMA (|D| < 1, below the Lorentz-factor minimum of 1 at rest)
+    # value used to crash with a raw, uninformative `DomainError` from
+    # deep inside `sqrt` (`sqrt` of a negative real) instead of a clear
+    # message -- reachable not just via a deliberately-malformed value
+    # but via ordinary floating-point noise near a physical boundary
+    # (e.g. `GAMMA(0.9999)`, plausible after a chain of conversions).
+    @test_throws ArgumentError measconvert(MDoppler{BETA}(1.5), GAMMA)
+    @test_throws ArgumentError measconvert(MDoppler{BETA}(-1.5), RADIO)
+    @test_throws ArgumentError measconvert(MDoppler{GAMMA}(0.5), BETA)
+    @test_throws ArgumentError measconvert(MDoppler{GAMMA}(0.9999), BETA)   # near-boundary noise
+    # the physical boundary itself (|D| == 1 for both conventions) is
+    # NOT an error -- only strictly beyond it is.
+    @test measconvert(MDoppler{BETA}(1.0), RATIO).d ≈ 0.0
+    @test measconvert(MDoppler{BETA}(-1.0), RATIO).d == Inf
+    @test measconvert(MDoppler{GAMMA}(1.0), BETA).d ≈ 0.0
+    @test measconvert(MDoppler{GAMMA}(-1.0), BETA).d ≈ 0.0
+    # in-domain values are completely unaffected by the guard
+    @test measconvert(MDoppler{GAMMA}(2.0), BETA).d ≈ sqrt(0.75)
+    @test measconvert(MDoppler{BETA}(0.5), GAMMA).d ≈ 1 / sqrt(0.75)
+
     # MFrequency <-> rest frequency
     ν0 = 1.42040575e9
     f = MFrequency{LSRK}(1.4e9)

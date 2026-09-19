@@ -7827,3 +7827,39 @@ so the two entry points now genuinely agree. 5 new assertions.
 
 Full suite green: 5165 baseline + 5 new = 5170/5170. README/memory
 updated, merge on the user's word.
+
+### Phase 222 — `src/measures/` sweep, continued: an out-of-range
+Doppler value crashed with a raw `DomainError` instead of a clear
+message
+
+Continued the sweep by re-deriving the `measconvert`-adjacent numeric
+paths that hadn't yet been probed with genuinely out-of-physical-range
+inputs (`_all_finite`'s NaN/Inf guard in `measconvert` was already
+heavily tested; the untested gap was a *finite-but-unphysical* value).
+
+**A real bug, fixed**: `doppler.jl`'s `_dop_ratio(BETA, D) =
+sqrt((1-D)/(1+D))` and `_dop_ratio(GAMMA, D) = D*(1-sqrt(1-1/(D*D)))`
+both go negative under the radical for an out-of-physical-range input
+— `|D| > 1` for `BETA` (faster than light) or `|D| < 1` for `GAMMA` (a
+Lorentz factor below its physical minimum of 1, at rest). Live-
+reproduced: `measconvert(MDoppler{BETA}(1.5), GAMMA)` crashed with a
+raw, unhelpful `DomainError` from deep inside `sqrt`; even a merely
+*noisy* near-rest value, `MDoppler{GAMMA}(0.9999)` — entirely plausible
+after a chain of floating-point conversions, not a deliberately
+malformed input — crashed identically. Real casacore's C++
+`std::sqrt` of a negative double quietly returns NaN rather than
+throwing, but this package's own `measures/` subsystem already has an
+established, *stronger* convention for exactly this shape of problem
+(`measconvert`'s own `_all_finite` guard, Phase 195: a physically-
+meaningless result is worse than a clear early error) — so a raw,
+unexplained crash gets the same treatment, not silently downgraded to
+a NaN either. Fixed both functions to validate their domain and throw
+a clear `ArgumentError` naming the actual out-of-range value; the
+physical boundary itself (`|D| == 1` for either convention — an
+infinite/zero Doppler shift at exactly the speed of light for `BETA`,
+exactly at rest for `GAMMA`) is *not* an error, only strictly beyond
+it is — confirmed both boundary values and every in-domain value are
+completely unaffected by the new guard. 10 new assertions.
+
+Full suite green: 5170 baseline + 10 new = 5180/5180. README/memory
+updated, merge on the user's word.
