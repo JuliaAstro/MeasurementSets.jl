@@ -247,7 +247,15 @@ reffreq(b::PolynomialBeam) = b.reffreq
 function power_response(b::PolynomialBeam, θ::Real, freq::Real = b.reffreq)
     _pb_check_offset(θ)
     _pb_check_freq(freq)
-    θ > b.maxrad && return 0.0
+    # `θ` is a radial offset, evaluated as `x²` below (so the fit is a
+    # symmetric even function of θ, same as Gaussian/Airy) -- the cutoff
+    # must be too: `abs(θ) > maxrad`, not `θ > maxrad`. Phase 216 found
+    # the one-sided form live-reproduced a real bug: a negative θ beyond
+    # `-maxrad` skipped the cutoff entirely and let the raw polynomial
+    # run unclamped, returning a "power" wildly outside the documented
+    # [0,1] range (the trailing `max(p,0.0)` only floors it at 0, it
+    # doesn't cap it at 1).
+    abs(θ) > b.maxrad && return 0.0
     x = (freq / 1e9) * rad2deg(θ) * 60
     x2 = x^2
     p = 1.0; xp = x2
