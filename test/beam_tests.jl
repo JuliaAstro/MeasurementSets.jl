@@ -56,6 +56,18 @@ end
     # AbstractVector coefficients (not just Vector{Float64})
     p2 = PolynomialBeam(Float32[-1.343e-3, 6.579e-7], deg2rad(1.0), 1.4e9)
     @test power_response(p2, deg2rad(0.5)) ≈ power_response(p, deg2rad(0.5))
+
+    # Phase 216: a real bug -- the `θ > maxrad` cutoff was one-sided.
+    # `θ` is evaluated as `x²` below (an even function, same convention
+    # as Gaussian/Airy), so the cutoff must be symmetric too; live-
+    # verified the one-sided form let a negative θ beyond `-maxrad` skip
+    # the cutoff and return a raw, unclamped "power" (~20236 for
+    # θ=-5°) far outside the documented [0,1] range, while its positive
+    # counterpart correctly gave 0.0.
+    @test power_response(p, deg2rad(0.5)) == power_response(p, -deg2rad(0.5))
+    @test power_response(p, -(deg2rad(1.0) + 1e-9)) == 0.0
+    @test power_response(p, -deg2rad(5.0)) == 0.0
+    @test 0.0 <= power_response(p, -deg2rad(5.0)) <= 1.0
 end
 
 @testset "beam — attenuate / correct_flux / angular_separation" begin
@@ -86,6 +98,34 @@ end
         @test power_response(b, 0.0) isa Float64
     end
     @test AiryBeam(25.0) isa MSv2.PrimaryBeam
+end
+
+# Phase 216: the generic `power_response(b::PrimaryBeam, offset::NTuple{2,
+# Real}, freq)` fallback (`hypot(offset...)` then the scalar method) is
+# what lets `mscal.pbresponse('gaussian:...')`/`'airy:...'` (Phase 101)
+# pass a real `(dlon, dlat)` tangent-plane offset to a *circular* beam --
+# exercised indirectly through the mscal.* integration tests, but never
+# asserted directly against the beam types themselves. Live-verified
+# correct before pinning as a permanent regression test.
+@testset "beam — generic 2-D offset fallback (Phase 216)" begin
+    g = GaussianBeam(1.4e9; diameter = 25.0)
+    off = (0.1 * g.hpbw, 0.2 * g.hpbw)
+    @test power_response(g, off) == power_response(g, hypot(off...))
+    @test voltage_response(g, off) == sqrt(power_response(g, off))
+    @test attenuate(g, 10.0, off) ≈ 10.0 * power_response(g, off)
+    @test correct_flux(g, attenuate(g, 10.0, off), off) ≈ 10.0 rtol = 1e-10
+    # a purely-dlat / purely-dlon offset reduces to the scalar case
+    @test power_response(g, (0.0, g.hpbw / 2)) ≈ 0.5 rtol = 1e-12
+    @test power_response(g, (g.hpbw / 2, 0.0)) ≈ 0.5 rtol = 1e-12
+
+    a = AiryBeam(25.0)
+    freq = 1.4e9
+    aoff = (0.001, 0.002)
+    @test power_response(a, aoff, freq) == power_response(a, hypot(aoff...), freq)
+
+    p = PolynomialBeam([-1.343e-3, 6.579e-7], deg2rad(1.0), 1.4e9)
+    poff = (deg2rad(0.3), deg2rad(0.2))
+    @test power_response(p, poff) == power_response(p, hypot(poff...))
 end
 
 # Phase 100: elliptical / squinted beams + pointing_offset + TaQL funcs.

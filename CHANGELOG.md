@@ -7514,3 +7514,82 @@ lookup + error path are unchanged (and were already correctly tested).
 
 Full suite green (baseline 5074, +35 new = 5109/5109). README/memory
 updated, merge on the user's word.
+
+### Phase 216 — `src/beam/` sweep: a real, reachable `PolynomialBeam`
+symmetry bug found live-verifying a documented-but-untested code path
+
+Coverage-instrumented full-suite run + a fresh, skeptical re-derivation
+of every formula in `src/beam/beam.jl` (analytic primary-beam models —
+Phases 99/100/117) against textbook optics: `GaussianBeam`'s HPBW/
+frequency scaling, `AiryBeam`'s annular-aperture closed form
+(`_airy_voltage`, re-checked against the quoted `[2J₁(x)/x −
+ε²·2J₁(εx)/(εx)]/(1−ε²)` formula term by term), `_elliptical_gaussian_
+power`'s position-angle projection (re-derived the major/minor-axis
+unit-vector dot products from scratch, including the `pa=0`/`pa=π/2`
+boundary cases the existing tests already pin), and `SquintBeam`'s
+centre-shift sign convention — all confirmed correct, no divergence
+found in any of them.
+
+**A real, confirmed bug**: `PolynomialBeam`'s `power_response` evaluates
+`θ` as `x²` (`x = (freq/1e9)·rad2deg(θ)·60`, only even powers of `x`
+ever appear in the fit) — an even function of `θ`, symmetric like every
+other beam model in the file — but its `maxrad` domain cutoff was
+one-sided: `θ > b.maxrad && return 0.0`. A negative `θ` beyond
+`-maxrad` skipped the cutoff entirely and let the raw polynomial run
+unclamped outside its fitted domain. Live-reproduced: for a beam with
+`maxrad = 1°`, `power_response(p, -5°)` returned **20235.9** — a "power"
+value wildly outside the type's own documented `[0,1]` range (the
+trailing `max(p, 0.0)` only floors negative results at 0, it never caps
+a positive runaway at 1), while the symmetric positive value
+(`power_response(p, +5°)`) correctly gave `0.0`. Fixed by checking
+`abs(θ) > b.maxrad` instead — confirmed the fix restores the expected
+`power_response(p,θ) == power_response(p,-θ)` symmetry and a
+`[0,1]`-bounded result at every offset tried. Not reachable through
+`mscal.pbresponse`'s own beam mini-language (Phase 101/103) — it has no
+`"polynomial:..."` spec form at all — so this was purely a direct-API
+usage-path bug, still a real one for any caller passing a signed
+angular offset (a foreseeable usage, since nothing in the API requires
+`θ` to be non-negative — `GaussianBeam`/`AiryBeam` handle a negative
+`θ` correctly by construction, so `PolynomialBeam` silently diverging
+from that pattern was a genuine, surprising asymmetry).
+
+**Confirmed-correct-but-untested path closed**: the generic
+`power_response(b::PrimaryBeam, offset::NTuple{2,Real}, freq)` fallback
+(`beam.jl`'s own mechanism letting *any* circular beam accept a 2-D
+`(dlon, dlat)` tangent-plane offset interchangeably with a scalar `θ`,
+via `hypot(offset...)`) is exercised end-to-end through the
+`mscal.pbresponse`/`pbcorr`/`pbatten` integration tests (Phases
+101-103), but had no *direct* `beam_tests.jl` assertion pinning its
+exact behaviour against `GaussianBeam`/`AiryBeam`/`PolynomialBeam`
+themselves. New regression tests confirm it agrees with the scalar form
+bit-for-bit and composes correctly with `voltage_response`/`attenuate`/
+`correct_flux`.
+
+Full suite green (baseline 5109, +12 new = 5121/5121). README/memory
+updated, merge on the user's word.
+
+### Phase 217 — `src/beam/` sweep, continued: confirmed fully covered,
+no further issue found
+
+A second coverage-instrumented full-suite run over `src/beam/beam.jl`
+(after Phase 216's fix + new tests), plus another independent, fresh-
+eyes re-derivation of the file's remaining math (the annular-aperture
+Airy formula re-checked term by term once more against the quoted
+closed form; every `SquintBeam`/`EllipticalGaussianBeam` composition
+path — squint-of-a-squint, squinting an ellipse, frequency scaling
+threaded through a squint wrapper — traced by hand; a systematic grep
+for every other `θ`-vs-bound comparison in the file, to check for any
+sibling of Phase 216's one-sided `PolynomialBeam` cutoff bug — found
+none: `abs(θ) > b.maxrad` is now the file's only such comparison).
+
+**Result: `src/beam/beam.jl` is now down to zero never-executed lines**
+(354/354, up from the handful of untested branches the Phase 216 fix +
+tests closed) — genuinely fully covered, not merely "down to a
+provably-unreachable line" the way `src/datamanagers/` settled. No new
+bug found; this phase is a confirming pass, not a fix, matching this
+project's own precedent for investigation-only sweeps (e.g. Phases 116,
+118, 124, 134) where "thoroughly checked, nothing further to find" is
+itself the useful, documented outcome.
+
+Full suite green: 5121/5121 (unchanged — no code or test changes this
+phase). README/memory updated, merge on the user's word.
