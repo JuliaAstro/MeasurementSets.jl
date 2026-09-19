@@ -1108,3 +1108,40 @@ end
     eoext = Base.get_extension(MSv2, :EarthOrientationExt)
     @test eoext._eop_lookup(NaN) == (dut1 = 0.0, xp = 0.0, yp = 0.0)
 end
+
+@testset "measures — EOP out-of-range fallback (Phase 220)" begin
+    # `_eop_lookup`'s own docstring promises "falls back to zeros (with
+    # one warning) if the table has no coverage for the date" -- but
+    # `EarthOrientation.jl`'s `outside_range=:nothing` (what this
+    # function used to pass) does NOT mean "return nothing": reading
+    # `interpolate` directly (`EarthOrientation.jl/src/EarthOrientation.jl`)
+    # shows it means "skip the warn/error, keep going" -- i.e. silently
+    # return an Akima-spline *extrapolation* past the table's covered
+    # range. Live-reproduced before the fix: a date past the IERS
+    # table's current forward bound (~2027-09-25 at investigation time)
+    # returned a real, never-warned, silently-extrapolated value instead
+    # of ever reaching the zero-fallback below. Fixed by switching to
+    # `outside_range=:error`, which genuinely raises
+    # `EarthOrientation.OutOfRangeError` for an out-of-coverage date
+    # (confirmed against `interpolate`'s own `:error` branch) -- caught
+    # by the existing `try`/`catch`, so the documented fallback now
+    # actually fires.
+    eoext = Base.get_extension(MSv2, :EarthOrientationExt)
+
+    # in range (a 2024 date, well within real IERS `finals2000A`
+    # coverage): real, plausible-magnitude values, NOT the zero
+    # fallback -- confirms the fix has no effect on ordinary usage.
+    r_ok = eoext._eop_lookup(60454.0)
+    @test !(r_ok.dut1 == 0.0 && r_ok.xp == 0.0 && r_ok.yp == 0.0)
+    @test abs(r_ok.dut1) < 1.0                      # ΔUT1 is IERS-bounded to ±0.9 s
+    @test abs(r_ok.xp) < 2000 * MSv2.ARCSEC          # real polar motion is O(0.1-0.3″)
+    @test abs(r_ok.yp) < 2000 * MSv2.ARCSEC
+
+    # far future (~year 4500) -- always past the IERS table's forward
+    # bound no matter when this test runs -- falls back to zeros.
+    @test eoext._eop_lookup(1_000_000.0) == (dut1 = 0.0, xp = 0.0, yp = 0.0)
+
+    # far past (well before the IERS series even starts, ~1962) --
+    # same fallback.
+    @test eoext._eop_lookup(100.0) == (dut1 = 0.0, xp = 0.0, yp = 0.0)
+end

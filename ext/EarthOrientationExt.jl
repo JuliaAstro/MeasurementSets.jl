@@ -36,14 +36,34 @@ cell): `_datetime` used to be called OUTSIDE the `try` below, so a raw
 `round(Int, NaN*...)`-derived crash (Phase 192/193/194's same finding,
 a fourth corner) escaped the existing "no coverage" fallback entirely
 instead of hitting it. Moved inside the `try` so it does.
+
+Phase 220 fix: `EarthOrientation.jl`'s own `outside_range=:nothing`
+keyword does NOT mean "return nothing" (which this docstring's "falls
+back to zeros" claim implicitly assumed) -- reading
+`EarthOrientation.jl`'s `interpolate` directly shows `:nothing` means
+"skip the warn/error, just continue" -- i.e. silently return an
+Akima-spline *extrapolation* past the table's covered range, with no
+indication at all. Live-reproduced: a date past the table's current
+forward bound (`~2027-09-25` for the finals2000A table bundled/fetched
+at investigation time, and creeping forward every day) returned a real,
+never-warned, silently-extrapolated `xp`/`yp`/`dut1` instead of ever
+reaching the `catch` block below -- so the documented zero+warning
+fallback had never actually fired for a genuinely out-of-coverage date,
+only for the non-finite-input case above. `outside_range=:error` is the
+value that actually makes `EarthOrientation.jl` raise
+`EarthOrientation.OutOfRangeError` when a date has no coverage (verified
+directly against its source, `interpolate`'s `if outside_range ==
+:error` branch) -- switching to it makes this function's own documented
+behaviour true, with zero effect on any in-range date (confirmed
+unaffected numerically).
 """
 function _eop_lookup(mjd_utc::Float64)
     _ensure!()
     try
         dt = _datetime(mjd_utc)
-        dut1 = EO.getΔUT1(dt; outside_range=:nothing)
-        xp = EO.getxp(dt; outside_range=:nothing)
-        yp = EO.getyp(dt; outside_range=:nothing)
+        dut1 = EO.getΔUT1(dt; outside_range=:error)
+        xp = EO.getxp(dt; outside_range=:error)
+        yp = EO.getyp(dt; outside_range=:error)
         return (dut1=Float64(dut1), xp=Float64(xp) * MS.ARCSEC, yp=Float64(yp) * MS.ARCSEC)
     catch err
         if !_WARNED[]

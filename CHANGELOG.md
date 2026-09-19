@@ -7744,3 +7744,48 @@ both checked against hand-derived expected values). 20 new assertions.
 
 Full suite green: 5129 baseline + 30 new (10 + 20) = 5159/5159.
 README/memory updated, merge on the user's word.
+
+### Phase 220 — `src/measures/` sweep, continued: `_eop_lookup`'s
+documented "falls back to zeros" fallback had never actually fired
+
+Continued the sweep into `ext/EarthOrientationExt.jl` (the IERS
+Earth-orientation feed for `ext/SOFAExt.jl`'s ΔUT1 / polar-motion
+lookups), the one measures-adjacent file the Phase 218/219 sweeps
+hadn't yet examined line by line.
+
+**A real bug, fixed**: `_eop_lookup`'s own docstring promises it
+"falls back to zeros (with one warning) if the table has no coverage
+for the date." The three `EarthOrientation.jl` calls it makes
+(`getΔUT1`/`getxp`/`getyp`) all passed `outside_range=:nothing`, which
+— live-verified by reading `EarthOrientation.jl`'s `interpolate`
+function directly, then confirming with a live probe — does **not**
+mean "return nothing." It means "skip the warn/error and keep going,"
+i.e. silently return an Akima-spline **extrapolation** past the
+table's actual covered range, with zero indication anything was off.
+Live-reproduced: a UTC MJD corresponding to a date past the IERS
+`finals2000A` table's current forward bound (`~2027-09-25` at
+investigation time — and creeping forward every day, so this will
+soon start silently affecting ordinary near-future/simulated-
+observation epochs, not just deliberately-contrived test dates)
+returned a real, never-warned, silently-extrapolated `xp`/`yp`/`dut1`
+triple instead of ever reaching the documented zero-fallback — the
+`catch` block below had, until now, only ever been reached by the
+Phase 192-195 non-finite-input case, never by a genuinely
+out-of-coverage (but otherwise well-formed) date. Fixed by switching
+to `outside_range=:error`, which — confirmed directly against
+`interpolate`'s own `:error` branch, and live-verified with a probe —
+genuinely raises `EarthOrientation.OutOfRangeError` for an
+out-of-coverage date, caught by the existing `try`/`catch` exactly as
+the docstring always claimed. Confirmed numerically that an in-range
+date (a 2024 epoch, well within real IERS coverage) is completely
+unaffected — same values before and after.
+
+New testset covering all three cases: an in-range date returns real,
+physically-plausible-magnitude values (not the zero fallback); a
+far-future MJD (~year 4500, robust against the table's forward bound
+creeping forward over time) falls back to exactly `(0.0, 0.0, 0.0)`;
+a far-past MJD (before the IERS series even starts, ~1962) does too.
+6 new assertions.
+
+Full suite green: 5159 baseline + 6 new = 5165/5165. README/memory
+updated, merge on the user's word.
