@@ -79,6 +79,43 @@ end
     @test f[1].hz ≈ getcell(subtable(ms, "SPECTRAL_WINDOW"), "CHAN_FREQ", 1)[1]
 end
 
+# Phase 218: `_scalar` (the epoch/frequency/radialvelocity/doppler
+# scalar-cell reader in read.jl) was `length(v) == 1 ? first(v) :
+# first(v)` -- a dead ternary with identical branches that silently
+# discarded every element past the first instead of validating the
+# cell was genuinely scalar. Live-reproduced: reading an `:epoch`
+# MEASINFO column whose cell is a length-3 array used to silently
+# return an `MEpoch` built from only the *first* element, with no
+# warning at all. Now a clear `ArgumentError`.
+@testset "measures — measure() errors on a non-scalar epoch cell (Phase 218)" begin
+    dir = joinpath(mktempdir(), "badepoch.tab")
+    T = [[100.0, 200.0, 300.0] .* 86400.0, [400.0, 500.0, 600.0] .* 86400.0]
+    write_table(dir, "T", ["T" => T]; nrow = 2,
+        measures = Dict("T" => (; kind = :epoch, ref = "UTC", units = ["s"])))
+    r = readtable(dir)
+    @test_throws ArgumentError measure(r, "T", 1)
+    @test_throws ArgumentError measure(r, "T")
+
+    # a genuinely scalar epoch cell (the normal case) is unaffected
+    dir2 = joinpath(mktempdir(), "okepoch.tab")
+    write_table(dir2, "T", ["T" => [100.0 * 86400.0, 200.0 * 86400.0]]; nrow = 2,
+        measures = Dict("T" => (; kind = :epoch, ref = "UTC", units = ["s"])))
+    r2 = readtable(dir2)
+    @test measure(r2, "T", 1) == MEpoch{UTC}(100.0)
+
+    # array-valued frequency/radialvelocity cells (a real, supported
+    # shape) route through the Vector{MFrequency} branch, never `_scalar`
+    # with length != 1 -- confirm that's still untouched
+    dir3 = joinpath(mktempdir(), "arrfreq.tab")
+    F = [[1.0e9, 1.1e9, 1.2e9], [2.0e9, 2.1e9, 2.2e9]]
+    write_table(dir3, "T", ["F" => F]; nrow = 2,
+        measures = Dict("F" => (; kind = :frequency, ref = "TOPO")))
+    r3 = readtable(dir3)
+    f1 = measure(r3, "F", 1)
+    @test f1 isa Vector{<:MFrequency}
+    @test [x.hz for x in f1] == F[1]
+end
+
 @testset "measures — epoch conversions (SOFA)" begin
     # round-trips
     for R in (TAI, TT, TDB, UT1)
@@ -723,6 +760,19 @@ end
     @test ephemeris_distance(e, 60002.5) ≈ 1.5 * MSv2.AU_METRES rtol = 1e-4
     @test ephemeris_radvel(e, 60002.5) ≈ 0.01 * MSv2.AU_METRES / MSv2.SEC_PER_DAY rtol = 1e-9
     @test_throws ErrorException ephemeris_direction(e, 59000.0)   # out of range
+
+    # Phase 218: the valid MJD range is HALF-OPEN -- [mjd0+dmjd,
+    # mjd0+length*dmjd) -- confirmed against `MeasComet::fillMeas`'s own
+    # identical `ut >= nrow-1` bound (measures/Measures/MeasComet.cc:406):
+    # querying exactly the table's last sampled MJD (60004.0 here) always
+    # fails, in both this port and real casacore, since interpolation
+    # needs a pair of bracketing rows and the last row has none after it.
+    # Not a bug to fix; the error MESSAGE used to self-contradictorily
+    # claim that exact value was covered ("table covers 60000.0 ..
+    # 60004.0") -- fixed to state the half-open range plainly.
+    @test_throws ErrorException ephemeris_direction(e, 60004.0)     # exact last sample
+    @test ephemeris_direction(e, 60003.999) isa MDirection          # just inside
+    @test ephemeris_direction(e, 60000.0) isa MDirection            # exact first sample: fine
 
     # via a FIELD subtable
     flddir = joinpath(tmp, "FIELD")
