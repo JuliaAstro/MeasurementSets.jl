@@ -61,8 +61,27 @@ measconvert(m::MDoppler{C}, ::Type{D}) where {C<:DopplerType,D<:DopplerType} =
 _hz(x::Real) = float(x)
 _hz(f::MFrequency) = f.hz
 
+# Phase 223 fix: `β = v/c` in the BETA convention, ALWAYS routed through
+# `_dop_ratio` -- deliberately does NOT use `measconvert(d, BETA).d`.
+# `measconvert(m::MDoppler{C}, ::Type{D})`'s own `C === D ? m : ...`
+# short-circuit (just above) is a legitimate no-op passthrough for a
+# genuine "already there" conversion, but it means `d`'s OWN value never
+# passes through `_dop_ratio`'s Phase 222 domain check when `d` already
+# happens to be stored in BETA convention -- so `_beta_factor` computing
+# `sqrt((1-β)/(1+β))` straight from `measconvert(d, BETA).d` could still
+# crash with the exact same raw `DomainError` Phase 222 was meant to
+# close. Live-reproduced: `shiftfreq(MDoppler{BETA}(1.5), 1.4e9)` still
+# crashed after that fix, because `1.5` never reached `_dop_ratio` in
+# that call. `_beta_value` always calls `_dop_ratio(C, d.d)` regardless
+# of `C`, so the validation fires unconditionally; `_ratio_dop(BETA, F)`
+# is then mathematically bounded to `(-1, 1]` for ANY real `F` (its
+# denominator `1+F²` is never zero), so the subsequent
+# `sqrt((1-β)/(1+β))` in `_beta_factor` is always safe once
+# `_beta_value` itself hasn't thrown.
+_beta_value(d::MDoppler{C}) where {C} = _ratio_dop(BETA, _dop_ratio(C, d.d))
+
 # the Doppler frequency-shift factor √((1−β)/(1+β)); β from the BETA form
-_beta_factor(d::MDoppler) = (β = measconvert(d, BETA).d; sqrt((1 - β) / (1 + β)))
+_beta_factor(d::MDoppler) = (β = _beta_value(d); sqrt((1 - β) / (1 + β)))
 
 """
     doppler(f::MFrequency, restfreq) -> MDoppler{BETA}
@@ -89,7 +108,7 @@ The true radial velocity of a Doppler shift (`c·β`, casacore
 broadcasts — `radialvelocity.(measure(spw, "CHAN_FREQ"), ν₀)` is a
 velocity axis.  The result frame defaults to `LSRK`.
 """
-radialvelocity(d::MDoppler) = MRadialVelocity{LSRK}(C_LIGHT * measconvert(d, BETA).d)
+radialvelocity(d::MDoppler) = MRadialVelocity{LSRK}(C_LIGHT * _beta_value(d))
 radialvelocity(f::MFrequency, restfreq) = radialvelocity(doppler(f, restfreq))
 
 """
