@@ -166,10 +166,36 @@ function field_ephemeris(fld::Table, field_id::Integer)
     return open_ephemeris(joinpath(fld.path, first(cands)))
 end
 
-# shift a direction by a (usually zero) offset -- casacore's
-# `MVDirection::shift(offset, True)` (longitude scaled by 1/cos(lat)).
-_ephem_shift(lon, lat, dlon, dlat) =
-    (dlon == 0 && dlat == 0) ? (lon, lat) : (lon + dlon / cos(lat + dlat), lat + dlat)
+# Phase 219 finding: this used to be `lon + dlon/cos(lat+dlat), lat+dlat`
+# -- a small-angle tangent-plane approximation -- while the in-code
+# citation claimed it WAS `MVDirection::shift(offset, True)`.  Reading
+# that call site (`ms/MeasurementSets/MSFieldColumns.cc:480`,
+# `mvxdir.shift(offsetDir.getAngle(), True)`) down through
+# `MVDirection::shift(const MVDirection&, Bool)` ->
+# `shift(Double lng, Double lat, Bool trueAngle)`
+# (`casa/Quanta/MVDirection.cc:308-343`) shows the real "true angle"
+# shift is a 3-rotation composition: with `R = Rz(-dlon)·Ry(lat+dlat)·
+# Rz(-lon)`, the result is the FIRST ROW of `R` applied to the unit pole
+# (1,0,0) -- i.e. `MVDirection(1,0,0) * R`, which (per `MVPosition::
+# operator*=(RotMatrix)`, `casa/Quanta/MVPosition.cc:278-285`, inherited
+# by `MVDirection`) picks out `R`'s own row 0.  Independently re-derived
+# from the quoted C++ and confirmed numerically (Phase 219) to match the
+# small-angle formula to << 1 mas for a realistic pointing-offset
+# magnitude (arcsec-to-arcmin -- the ephemeris table's own UTC~TDB
+# coarseness already swamps that), diverging only within about a degree
+# of the celestial pole (~0.1-1″) -- but it is now bit-exact, not an
+# approximation, at negligible extra cost.
+_rotz(t::Real) = ((cos(t), -sin(t), 0.0), (sin(t), cos(t), 0.0), (0.0, 0.0, 1.0))
+_roty(t::Real) = ((cos(t), 0.0, sin(t)), (0.0, 1.0, 0.0), (-sin(t), 0.0, cos(t)))
+_mm3(A, B) = ntuple(i -> ntuple(j -> sum(A[i][k] * B[k][j] for k in 1:3), 3), 3)
+
+function _ephem_shift(lon, lat, dlon, dlat)
+    (dlon == 0 && dlat == 0) && return (lon, lat)
+    R = _mm3(_mm3(_rotz(-dlon), _roty(lat + dlat)), _rotz(-lon))
+    x, y, z = R[1]                              # row 0 of R = MVDirection(1,0,0) * R
+    r = hypot(x, y, z)
+    (atan(y, x), asin(clamp(z / r, -1.0, 1.0)))
+end
 
 # great-circle (SLERP) interpolation between two (lon, lat) points --
 # geometrically the same *path* casacore's own `separation` +

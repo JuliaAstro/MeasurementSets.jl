@@ -314,6 +314,96 @@ end
     end
 end
 
+@testset "measures — read-path coverage gaps (Phase 219)" begin
+    # A coverage-instrumented sweep found these `src/measures/{read,
+    # measinfo}.jl` branches were never exercised by ANY test in this
+    # suite -- every existing fixture happened to always take the
+    # opposite path (a fixed `Ref`, a VarRefCol column with an explicit
+    # `TabRefCodes` map, an `[lon,lat]`-pair direction cell, a
+    # `:radialvelocity` value only ever constructed directly rather than
+    # read through `measure()`, ...).
+
+    # measinfo.jl: `_ref_from_code`'s fixed casacore-enum-order fallback
+    # -- a `VarRefCol` column with no `TabRefCodes`/`TabRefTypes` map at
+    # all (every other VarRefCol fixture in this suite supplies one
+    # explicitly).
+    mi_f = MSv2.MeasInfo(:frequency, nothing, "F_REF", String[], Int[], ["Hz"])
+    @test MSv2._ref_from_code(mi_f, 0) == "REST"
+    @test MSv2._ref_from_code(mi_f, 1) == "LSRK"
+    @test MSv2._ref_from_code(mi_f, 5) == "TOPO"
+    @test_throws ArgumentError MSv2._ref_from_code(mi_f, 99)
+
+    # measinfo.jl: `_measinfo_record` needs one of `ref`/`varrefcol`.
+    @test_throws ArgumentError MSv2._measinfo_record(:epoch)
+
+    # read.jl: the whole-column `measure(t, col)` `VarRefCol` path --
+    # every other whole-column `measure()` call in this suite is on a
+    # fixed-`Ref` column, never a per-row-coded one.
+    dir = mktempdir()
+    tabv = joinpath(dir, "VRC")
+    write_table(tabv, "VRC",
+        Pair{String,Any}["F" => Float64.(1e9 .* (1:4)), "F_REF" => Int32[1, 5, 1, 5]];
+        nrow = 4,
+        measures = Dict("F" => (; kind = :frequency, varrefcol = "F_REF",
+                                  tabtypes = ["LSRK", "TOPO"], tabcodes = [1, 5])))
+    rv = readtable(tabv)
+    whole = measure(rv, "F")
+    @test reftype.(whole) == [LSRK, TOPO, LSRK, TOPO]
+    @test [m.hz for m in whole] == [measure(rv, "F", i).hz for i in 1:4]
+
+    # read.jl: `:radialvelocity` through `measure()` -- scalar form.
+    # Every existing radial-velocity test constructs `MRadialVelocity`
+    # directly; none reads one back through a real on-disk MEASINFO
+    # column.
+    tabrv = joinpath(dir, "RV")
+    write_table(tabrv, "RV", Pair{String,Any}["V" => [1e4, -2e4, 3e4]]; nrow = 3,
+                measures = Dict("V" => (; kind = :radialvelocity, ref = "LSRK")))
+    rrv = readtable(tabrv)
+    mv2 = measure(rrv, "V", 2)
+    @test mv2 isa MRadialVelocity{LSRK} && mv2.mps ≈ -2e4
+    @test [m.mps for m in measure(rrv, "V")] ≈ [1e4, -2e4, 3e4]
+
+    # read.jl: the array-valued `:radialvelocity` cell form (e.g.
+    # `SOURCE.SYSVEL`, one value per spectral line) -- the other half of
+    # the same never-exercised ternary.
+    tabrva = joinpath(dir, "RVARR")
+    write_table(tabrva, "RVARR", Pair{String,Any}["V" => [[1e4, 2e4], [3e4, 4e4]]]; nrow = 2,
+                measures = Dict("V" => (; kind = :radialvelocity, ref = "LSRK")))
+    rrva = readtable(tabrva)
+    mv3 = measure(rrva, "V", 1)
+    @test mv3 isa Vector{<:MRadialVelocity} && length(mv3) == 2
+    @test all(m -> m isa MRadialVelocity{LSRK}, mv3)
+    @test mv3[1].mps ≈ 1e4 && mv3[2].mps ≈ 2e4
+
+    # read.jl: `_wrap_measure`'s fallback for an unrecognised MEASINFO
+    # `type` -- no write-side validation rejects an arbitrary `kind`, so
+    # this only ever surfaces on read.
+    tabbad = joinpath(dir, "BADKIND")
+    write_table(tabbad, "BADKIND", Pair{String,Any}["X" => [1.0, 2.0]]; nrow = 2,
+                measures = Dict("X" => (; kind = :nonsense, ref = "FOO")))
+    @test_throws ArgumentError measure(readtable(tabbad), "X", 1)
+
+    # read.jl: `_scalar`'s legitimate length-1-array case -- distinct
+    # from Phase 218's length-3 *error* case, which is the only one this
+    # suite exercised until now.
+    @test MSv2._scalar([12345.0]) == 12345.0
+    mi_e = MSv2.MeasInfo(:epoch, "UTC", nothing, String[], Int[], ["s"])
+    @test MSv2._wrap_measure(:epoch, UTC, [86400.0 * 5], mi_e) == MEpoch{UTC}(5.0)
+
+    # read.jl: `_lonlat`'s 3-element unit-direction-vector form --
+    # distinct from the `[lon,lat]` pair and `(2,npoly)`-matrix forms
+    # every other direction test in this suite uses -- and its fallback
+    # error for an unsupported cell length.
+    lo, la = MSv2._lonlat([0.0, 1.0, 0.0])          # unit vector along +Y
+    @test lo ≈ pi / 2 && la ≈ 0.0
+    lo2, la2 = MSv2._lonlat([1.0, 0.0, 0.0])        # +X
+    @test lo2 ≈ 0.0 && la2 ≈ 0.0
+    lo3, la3 = MSv2._lonlat([0.0, 0.0, 1.0])        # +Z (pole)
+    @test lo3 == 0.0 && la3 ≈ pi / 2
+    @test_throws ArgumentError MSv2._lonlat([1.0])
+    @test_throws ArgumentError MSv2._lonlat([1.0, 2.0, 3.0, 4.0])
+end
+
 @testset "measures — addcolumn! from a Measure-typed column" begin
     dir = mktempdir()
     tab = joinpath(dir, "AC")
@@ -792,6 +882,78 @@ end
         "NAME" => ["3C286"], "EPHEMERIS_ID" => Int32[-1], "PHASE_DIR" => [[1.0, 0.5]]];
         nrow = 1, measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
     @test field_ephemeris(readtable(joinpath(tmp, "F2")), 0) === nothing
+end
+
+@testset "measures — ephemeris direction offset shift (Phase 219)" begin
+    # `_ephem_shift` -- the static PHASE_DIR pointing offset applied to a
+    # moving-target's ephemeris direction -- used to be a small-angle
+    # tangent-plane approximation (`lon + dlon/cos(lat)`) while its own
+    # comment claimed it WAS casacore's `MVDirection::shift(offset,
+    # True)`.  Fixed to the real 3-rotation-composition formula
+    # (`ms/MeasurementSets/MSFieldColumns.cc:480` ->
+    # `casa/Quanta/MVDirection.cc:308-343`).  These expected values are
+    # independently re-derived -- a separate, from-scratch Julia script
+    # building `Rz`/`Ry` as literal matrices and multiplying with plain
+    # `*`, not the package's own tuple-based `_rotz`/`_roty`/`_mm3`
+    # helpers -- from the quoted C++ `operator*`/`operator*=`
+    # definitions, not merely a self-check of the package's own code.
+    lon, lat = MSv2._ephem_shift(deg2rad(123.456), deg2rad(20.0),
+                                 deg2rad(5 / 3600), deg2rad(-3 / 3600))
+    @test rad2deg(lon) ≈ 123.4574780168599 atol = 1e-9
+    @test rad2deg(lat) ≈ 19.999166660539938 atol = 1e-9
+
+    # a nonzero (if larger) offset at 89.9° body latitude -- the regime
+    # where the old small-angle approximation and the real rotation
+    # formula genuinely diverge (~0.1-1″, see the comment in
+    # `src/measures/ephemeris.jl`) -- still bit-matches the independent
+    # from-scratch reference.
+    lon2, lat2 = MSv2._ephem_shift(deg2rad(123.456), deg2rad(89.9),
+                                   deg2rad(5 / 3600), deg2rad(-3 / 3600))
+    @test rad2deg(lon2) ≈ 124.24514856760143 atol = 1e-9
+    @test rad2deg(lat2) ≈ 89.89915710178045 atol = 1e-9
+
+    # zero offset is an identity via the fast path; a genuinely nonzero
+    # offset that happens to cancel would still exercise the general
+    # formula, which must reduce to the same point
+    @test MSv2._ephem_shift(deg2rad(50.0), deg2rad(-10.0), 0.0, 0.0) ==
+          (deg2rad(50.0), deg2rad(-10.0))
+
+    # end to end through `measure()`: a moving-target FIELD with a
+    # genuinely nonzero PHASE_DIR pointing offset -- every pre-existing
+    # ephemeris test above uses an all-zero offset, which never touches
+    # this code path at all (the `dlon == 0 && dlat == 0` fast path
+    # always fired).
+    tmp = mktempdir()
+    ep = joinpath(tmp, "EPHEM0_X_J2000.tab")
+    write_table(ep, "EPHEM", Pair{String,Any}[
+        "MJD" => collect(60000.0:1.0:60004.0), "RA" => fill(123.456, 5),
+        "DEC" => fill(20.0, 5), "Rho" => fill(1.5, 5), "RadVel" => fill(0.0, 5)];
+        nrow = 5, keywords = Dict("MJD0" => 59999.0, "dMJD" => 1.0,
+                                  "NAME" => "X", "posrefsys" => "J2000"))
+    flddir = joinpath(tmp, "FIELD")
+    write_table(flddir, "FIELD", Pair{String,Any}[
+        "NAME" => ["X"], "EPHEMERIS_ID" => Int32[0],
+        "PHASE_DIR" => [[deg2rad(5 / 3600), deg2rad(-3 / 3600)]]];
+        nrow = 1, measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
+    mv(ep, joinpath(flddir, "EPHEM0_X_J2000.tab"))
+    fld = readtable(flddir)
+    md = measure(fld, "PHASE_DIR", 1; epoch = MEpoch{UTC}(60002.0))
+    @test md isa MDirection{J2000}
+    @test rad2deg(md.lon) ≈ 123.4574780168599 atol = 1e-9
+    @test rad2deg(md.lat) ≈ 19.999166660539938 atol = 1e-9
+
+    # the same field with the offset zeroed out reads back as exactly
+    # the body's own direction (123.456°, 20°) -- confirms the nonzero
+    # offset above really is what moved it off that value, not some
+    # unrelated discrepancy.
+    flddir2 = joinpath(tmp, "FIELD2")
+    write_table(flddir2, "FIELD", Pair{String,Any}[
+        "NAME" => ["X"], "EPHEMERIS_ID" => Int32[0], "PHASE_DIR" => [[0.0, 0.0]]];
+        nrow = 1, measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
+    cp(joinpath(flddir, "EPHEM0_X_J2000.tab"), joinpath(flddir2, "EPHEM0_X_J2000.tab"))
+    md2 = measure(readtable(flddir2), "PHASE_DIR", 1; epoch = MEpoch{UTC}(60002.0))
+    @test rad2deg(md2.lon) ≈ 123.456 atol = 1e-9
+    @test rad2deg(md2.lat) ≈ 20.0 atol = 1e-9
 end
 
 # Phase 93: polynomial PHASE_DIR + the ephemeris sub-Earth point.

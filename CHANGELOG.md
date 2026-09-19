@@ -7670,3 +7670,77 @@ distinct sites/reference points, not typos).
 
 Full suite green: 5121 baseline + 8 new = 5129/5129. README/memory
 updated, merge on the user's word.
+
+### Phase 219 — `src/measures/` sweep, continued: a real bug in the
+ephemeris pointing-offset formula, and a coverage-gap closure across
+`measinfo.jl`/`read.jl`
+
+Continuing the Phase 218 sweep with fresh eyes over the rest of
+`src/measures/` (`types.jl`, `measinfo.jl`, `write.jl`, `doppler.jl`,
+`observatories.jl`, `earthfield.jl`, `emmachine.jl`) and the measures-
+relevant parts of `ext/SOFAExt.jl`.
+
+**A real bug, fixed**: `ephemeris.jl`'s `_ephem_shift` — the function
+that applies a moving-target FIELD's static `PHASE_DIR` pointing offset
+to the ephemeris-derived body direction — carried a comment claiming it
+*was* casacore's `MVDirection::shift(offset, True)`, but the code was
+actually only a small-angle tangent-plane approximation of it
+(`lon + dlon/cos(lat+dlat), lat+dlat`). Traced the real call site
+(`ms/MeasurementSets/MSFieldColumns.cc:480`,
+`mvxdir.shift(offsetDir.getAngle(), True)`) down through
+`MVDirection::shift(const MVDirection&, Bool)` →
+`shift(Double lng, Double lat, Bool trueAngle)`
+(`casa/Quanta/MVDirection.cc:308-343`): the real "true angle" shift is a
+3-rotation composition — with `R = Rz(-dlon)·Ry(lat+dlat)·Rz(-lon)`, the
+result is the first row of `R` applied to the unit pole `(1,0,0)` (per
+`MVPosition::operator*=(RotMatrix)`, `casa/Quanta/MVPosition.cc:278-285`,
+inherited by `MVDirection`). Independently re-derived this from the
+quoted C++ `operator*`/`operator*=` definitions in a from-scratch
+throwaway script and confirmed numerically: the two formulas agree to
+`< 1 mas` for a realistic pointing-offset magnitude (arcsec-to-arcmin —
+the ephemeris table's own UTC~TDB coarseness already swamps that), but
+diverge by `~0.1-1″` within about a degree of the celestial pole. Fixed
+`_ephem_shift` to the exact rotation formula (three small pure-arithmetic
+helpers, no new dependency — this file stays SOFA-free); a coverage
+check afterward confirmed the *existing* test suite had only ever
+exercised this function with an all-zero offset (every fixture used
+`PHASE_DIR => [[0.0, 0.0]]`), so the actual shift logic had zero prior
+test coverage at all. Added a dedicated testset pinning the fix against
+the independent from-scratch reference (both a realistic small offset
+and the near-pole divergent case) plus an end-to-end `measure()`
+round-trip through a genuinely nonzero-offset moving-target FIELD.
+
+**A coverage-gap closure**: a coverage-instrumented run of the full
+suite turned up several `measinfo.jl`/`read.jl` branches with *zero*
+prior test coverage — every existing fixture in this suite happened to
+always take the opposite path:
+- `measinfo.jl`'s `_ref_from_code` fixed-casacore-enum-order fallback
+  (a `VarRefCol` column with no `TabRefCodes`/`TabRefTypes` map at all —
+  every other `VarRefCol` fixture in this suite supplies one explicitly).
+- `measinfo.jl`'s `_measinfo_record` "give `ref` or `varrefcol`" error.
+- `read.jl`'s whole-column `measure(t, col)` `VarRefCol` path (every
+  other whole-column `measure()` call in this suite is on a fixed-`Ref`
+  column).
+- `read.jl`'s entire `:radialvelocity` branch of `_wrap_measure` — both
+  the scalar *and* array-cell forms — meaning `measure()` had *never*
+  been called on a genuine on-disk `:radialvelocity`-kind MEASINFO
+  column anywhere in this suite; every existing radial-velocity test
+  constructs `MRadialVelocity` directly.
+- `read.jl`'s `_wrap_measure` fallback for an unrecognised MEASINFO
+  `type` (confirmed no write-side validation rejects an arbitrary
+  `kind` — it only ever surfaces on read).
+- `read.jl`'s `_scalar`'s *legitimate* length-1-array return — distinct
+  from Phase 218's length-3 *error* case, which was the only one this
+  suite exercised until now.
+- `read.jl`'s `_lonlat`'s 3-element unit-direction-vector cell form
+  (distinct from the `[lon,lat]`-pair and `(2,npoly)`-matrix forms every
+  other direction test uses) and its fallback error for an unsupported
+  cell length.
+
+None of these turned out to hide a further bug — each was live-verified
+correct before being pinned with a permanent test (the `_ref_from_code`
+enum-order fallback and the `_lonlat` 3-vector unit-vector decode were
+both checked against hand-derived expected values). 20 new assertions.
+
+Full suite green: 5129 baseline + 30 new (10 + 20) = 5159/5159.
+README/memory updated, merge on the user's word.
