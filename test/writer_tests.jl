@@ -121,6 +121,66 @@ if isdir(SAMPLE_MS)
     end
 end
 
+# Phase 226 finding: Phase 199 fixed `storage=`/`blocksize=` specifically
+# (checked first thing, before any directory is created) but every OTHER
+# validated kwarg in `_write_table_core` (`measures=`/`units=`/`engines=`/
+# `forward=`/`virtualtaql=`/`ism=`/the `tsm=`/`tcm=`/`tcell=`/`dysco=`
+# group name checks) still threw its own clear error -- correctly -- but
+# AFTER `mkpath(dir)`, so the exact same "claims to have failed but
+# silently created state anyway" gap was never actually closed for the
+# rest. Live-reproduced: `write_table(dir, "T", [...]; nrow=2, measures =
+# Dict("NOTACOL" => (; kind=:epoch, ref="UTC")))` threw the correct
+# "measures: no column \"NOTACOL\"" message, yet left an empty `dir`
+# behind. A per-kwarg hoist-before-mkpath fix (Phase 199's own approach)
+# isn't safe here without a much larger restructuring -- several of these
+# loops (`engines=` most of all) do real, non-trivial encoding work
+# interleaved with their own name check, not a separable pure-validation
+# pass. Fixed once, robustly, for every validation site in the function:
+# remember whether `dir` already existed, and on ANY exception, remove it
+# again (only if this call is the one that created it) before rethrowing
+# -- which also correctly cleans up a genuinely *partial* write (some
+# storage-manager files already on disk) for an error surfacing deep
+# inside `with_container_sink`, not just the "nothing written yet" early
+# case Phase 199 originally covered.
+@testset "measures=/engines=/dysco=/etc. bad column name: no stray directory (Phase 226)" begin
+    # an early error (measures=, checked near the top of the function)
+    dir1 = joinpath(mktempdir(), "wt_meas.tab")
+    @test_throws ErrorException write_table(dir1, "T", ["A" => [1.0, 2.0]]; nrow=2,
+        measures = Dict("NOTACOL" => (; kind=:epoch, ref="UTC")))
+    @test !ispath(dir1)
+
+    dir2 = joinpath(mktempdir(), "wt_ism.tab")
+    @test_throws ErrorException write_table(dir2, "T", ["A" => [1.0, 2.0]]; nrow=2,
+        ism = Set(["NOTACOL"]))
+    @test !ispath(dir2)
+
+    # a LATE error (a dysco group name typo, checked deep inside
+    # `with_container_sink`'s per-DM-writer section -- by then a
+    # DIFFERENT, valid StandardStMan column has already been written to
+    # real files on disk) -- confirms genuinely partial output is cleaned
+    # up too, not just the "nothing written yet" early case.
+    dir3 = joinpath(mktempdir(), "wt_dysco.tab")
+    @test_throws ErrorException write_table(dir3, "T",
+        ["A" => [1.0, 2.0], "B" => ComplexF32[1 + 2im, 3 + 4im]]; nrow=2,
+        dysco = [["NOTACOL"]],
+        dysco_spec = Dict("NOTACOL" => (; antenna1 = [0, 0], antenna2 = [1, 1])))
+    @test !ispath(dir3)
+
+    # a directory that already existed before the call (with unrelated
+    # content) must be left completely untouched, not deleted
+    dir4 = joinpath(mktempdir(), "wt_preexist.tab")
+    mkpath(dir4)
+    write(joinpath(dir4, "sentinel.txt"), "keep me")
+    @test_throws ErrorException write_table(dir4, "T", ["A" => [1.0, 2.0]]; nrow=2,
+        measures = Dict("NOTACOL" => (; kind=:epoch, ref="UTC")))
+    @test isfile(joinpath(dir4, "sentinel.txt"))
+
+    # a valid call is completely unaffected
+    dir5 = joinpath(mktempdir(), "wt_ok.tab")
+    write_table(dir5, "T", ["A" => [1.0, 2.0]]; nrow=2)
+    @test column(readtable(dir5), "A")[:] == [1.0, 2.0]
+end
+
 @testset "copyms stamps a missing FLAG_CATEGORY CATEGORY keyword (Phase 147)" begin
     # `MeasurementSet`'s own C++ constructor (`MeasurementSet.cc:89-99`)
     # requires FLAG_CATEGORY to carry a `CATEGORY` keyword; real MSes

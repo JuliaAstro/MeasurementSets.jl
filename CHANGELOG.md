@@ -7909,3 +7909,168 @@ through all of them. 6 new assertions.
 
 Full suite green: 5180 baseline + 6 new = 5186/5186. README/memory
 updated, merge on the user's word.
+
+### Phase 224 — `src/measures/` sweep, continued: `doppler(v::MRadialVelocity)`
+had no domain check at all, and `MDoppler`'s `measconvert` bypassed the
+package's own NaN/Inf guard entirely
+
+Continued the sweep with a fresh re-read of every file in
+`src/measures/` not yet re-checked this cycle. `_FRAME_STRING` was
+independently re-verified complete against every named `RefFrame`/
+`DopplerType` singleton in `types.jl` (42 entries, exact match — no
+gap); `ephemeris.jl`, `emmachine.jl`, `earthfield.jl`, `measinfo.jl`
+and `observatories.jl` were all re-read and found consistent with
+their own prior, extensively-verified fixes (Phases 82/91-93/134-135/
+144/218-219). One already-investigated lead
+(`emm_lineofsight`'s `sqrt(an*an+subl)` for a pathological negative
+shell `height`) was confirmed still correctly deprioritized, not
+re-chased.
+
+**Two real bugs, fixed, both in `doppler.jl`:**
+
+1. `doppler(v::MRadialVelocity)` used to construct
+   `MDoppler{BETA}(v.mps / C_LIGHT)` *directly*, with no validation at
+   all — unlike its sibling `doppler(f::MFrequency, restfreq)`, whose
+   `t = (f/restfreq)^2 ≥ 0` provably keeps `(1-t)/(1+t)` in `(-1, 1]`
+   for *any* finite input and so needs none. `v.mps` has no such
+   bound. Live-reproduced: `doppler(MRadialVelocity{LSRK}(4e8))`
+   (superluminal, `> c`) silently succeeded, returning an
+   `MDoppler{BETA}` with `|d.d| > 1` — a physically-meaningless value
+   that then only crashed (with the Phase 222 message) the *next* time
+   anyone tried to `measconvert`/`radialvelocity`/`frequency`/
+   `shiftfreq` it, not at the point the bad input was actually given.
+   Fixed by factoring `_dop_ratio(::Type{BETA}, ·)`'s own domain check
+   out into a shared `_check_beta_domain`, reused by `doppler` before
+   constructing the value — the physical boundary itself (`|v| == c`)
+   is still not an error, only strictly beyond it is.
+
+2. `MDoppler`'s own `measconvert` dispatches on `DopplerType`, not
+   `RefFrame` — a *completely separate* method from the generic
+   `Measure -> RefFrame` one in `types.jl` that validates `_all_finite`
+   on its input before converting (Phase 195). It never went through
+   that guard at all. Live-reproduced: `measconvert(MDoppler{RADIO}
+   (NaN), OPTICAL)` silently returned `MDoppler{OPTICAL}(NaN)`, while
+   the identical NaN input to e.g. `measconvert(MEpoch{UTC}(NaN), TAI)`
+   correctly throws a clear `ArgumentError` — the one measure type with
+   a domain-sensitive conversion (Phase 222/223's own `BETA`/`GAMMA`
+   `sqrt`) was also the one measure type where a non-finite input could
+   slip through silently instead of erroring. Fixed with the same
+   `isfinite` check every other measure conversion already has,
+   raising the identical message style; the `C === D` short-circuit
+   still skips it, matching the generic version's own identical
+   `reftype(m) === R && return m` early return — a genuine no-op needs
+   no validation either way.
+
+Both fixes verified live (boundary values `|v| == c` / same-convention
+NaN passthrough unaffected; ordinary round-trips unaffected) before
+being pinned with permanent tests. 9 new assertions.
+
+Full suite green: 5186 baseline + 9 new = 5195/5195. README/memory
+updated, merge on the user's word.
+
+### Phase 225 — `src/measures/` sweep, continued: a permanently uncovered
+"SOFA loaded, `EarthOrientation` not loaded" fallback path, finally
+pinned with a real cross-process test
+
+A comprehensive fresh re-read of every remaining unswept corner —
+`ext/EarthOrientationExt.jl`, the epoch/direction/`_frame_site`/body-
+resolution sections of `ext/SOFAExt.jl` not covered by Phase 224's own
+Doppler-focused pass, and `igrf14_data.jl`'s bundled coefficient table —
+found no further *bug*. Two candidate leads were investigated and ruled
+out as already-settled or non-reachable: `_riseset`'s `acos`/division
+at an exact celestial-pole declination (live-tested at `dec = ±90°` —
+real precession perturbs the converted apparent position just enough
+that the exact singularity never actually manifests; the same class of
+double-degenerate coincidence this project has already declined to
+chase elsewhere), and `_measure_column_spec`'s "mixed-convention
+`Vector{MDoppler}`" case (confirmed to be the *same*, already-documented,
+already-accepted "stores every row under the first row's frame/
+convention" limitation Phase 70 established for every other measure
+kind, not a new gap). `igrf14_data.jl` was independently re-verified
+structurally sound (26 epochs × 195 coefficients; the first 25
+`_IGRF_DCOEF` rows exactly equal `(COEF[i+1]-COEF[i])/5`, confirming
+they really are generated per-year interpolation rates and not a
+transcription error, with the 26th correctly holding the distinct
+published 2025–2030 secular-variation values).
+
+**A genuine, permanent coverage gap, closed**: a coverage-instrumented
+run showed `src/measures/` itself was now 100% line-covered, but turned
+up 12 never-executed lines in `ext/SOFAExt.jl` — 8 are `"frame … is not
+supported"` fallbacks for the enumerated dispatch chains (unreachable by
+construction — every `RefFrame` this package defines already has a
+handled branch) and were left alone, but the remaining 4 are `_eop`'s
+`ext === nothing` branch: the fallback for "`SOFA` is loaded but
+`EarthOrientation` is not" (ΔUT1 = 0, no polar motion, a one-time
+`@warn`). This had *never* been exercised by any test in this suite's
+history — `test/runtests.jl`'s harness always `import`s both `SOFA` and
+`EarthOrientation` together (asserted explicitly at the top of
+`measures_tests.jl`), and once `EarthOrientationExt` loads for a Julia
+process it stays loaded for that process's entire lifetime, so the
+gap genuinely could not be closed by adding a testset to the existing
+file. Live-verified the fallback is correctly implemented (exactly one
+warning on first use, none on a repeat call, `ΔUT1 = 0` gives
+`UT1.mjd == UTC.mjd` bit-for-bit, and the AZEL result agrees with the
+EOP-accurate value to within the documented ~1″ tolerance) via a real
+child process with only `SOFA` imported — reusing `lock_tests.jl`'s
+`_JULIA`/`_PROJ` cross-process machinery (already in scope, included
+earlier in `runtests.jl`) rather than inventing a new mechanism. 3 new
+assertions.
+
+Full suite green: 5195 baseline + 3 new = 5198/5198. README/memory
+updated, merge on the user's word.
+
+### Phase 226 — one last `src/measures/` sweep: found a real, broader gap
+in `_write_table_core`'s own write path — Phase 199's stray-directory fix
+was never extended past `storage=`/`blocksize=`
+
+A final, careful re-read of everything in `src/measures/` and its
+`ext/` extensions (fresh review of `doppler.jl` including a skeptical
+re-check of Phase 224's own fix, `test/measures_fixture.py` for
+staleness relative to the Phase 222-225 changes — none needed, its
+`DOP_RADIO = 0.01` fixture value is already safely in-domain) found no
+further bug *in `src/measures/` itself*. Following the write-path
+integration seam out of `src/measures/write.jl` into `src/tables/
+create.jl` (where a `Measure`-typed column's auto-detected `MEASINFO`
+actually gets stamped) turned up a real, broader bug one level removed
+from the measures subsystem — a natural place to look, since that seam
+is exactly what Phase 221 (and, further back, Phase 199/201/202/204/
+205) has repeatedly found real gaps in before.
+
+**A real bug, fixed**: `_write_table_core` (`src/tables/create.jl`) —
+the single function every `write_table`/`copytable`/`create_ms`/
+`write_ms` call eventually funnels through — validates `storage=`/
+`blocksize=` first thing, before `mkpath(dir)` (Phase 199's own fix for
+exactly this shape of problem: a caller's typo turning into a silently-
+created stray directory, not just a clear error). But every *other*
+validated kwarg in the same function (`measures=`/`units=`/`engines=`/
+`forward=`/`virtualtaql=`/`ism=`/the `tsm=`/`tcm=`/`tcell=`/`dysco=`
+group name checks) still throws its own correct "no column …" error,
+but *after* `mkpath(dir)` — so the exact same gap Phase 199 fixed was
+never actually closed for the rest. Live-reproduced: `write_table(dir,
+"T", [...]; nrow=2, measures = Dict("NOTACOL" => (; kind=:epoch,
+ref="UTC")))` throws the correct `measures: no column "NOTACOL"`
+message, yet leaves an empty `dir` behind. A per-kwarg fix mirroring
+Phase 199's own approach (hoisting each check above `mkpath`) isn't
+safe here without a much larger restructuring — several of these loops
+(`engines=` most of all) do real, non-trivial encoding work interleaved
+with their own name check, not a cleanly separable pure-validation
+pass. Fixed once, robustly, for every current *and future* validation
+site in the function: remember whether `dir` already existed before
+this call, wrap the whole body in `try`/`catch`, and on any exception
+remove `dir` again (only if this call is the one that created it)
+before rethrowing. This is a strict improvement over a per-kwarg hoist
+too — it also correctly cleans up a genuinely *partial* write (some
+storage-manager files already on disk) for an error that only surfaces
+deep inside `with_container_sink`'s per-DM-writer section, not just the
+"nothing written yet" early case Phase 199 originally covered, and a
+pre-existing directory (with unrelated content) is left completely
+untouched. Live-verified across all four shapes (early error, late/
+partial-write error, pre-existing-directory preservation, and a normal
+successful write) before writing the permanent test; the whole
+`dysco_tests.jl` and `ism_writer_tests.jl` suites — including their
+real-CASA-interop cross-checks — were also re-run standalone against
+the fix as an extra confidence check, given how much of the function's
+body now runs inside the new `try` block. 9 new assertions.
+
+Full suite green: 5198 baseline + 9 new = 5207/5207. README/memory
+updated, merge on the user's word.

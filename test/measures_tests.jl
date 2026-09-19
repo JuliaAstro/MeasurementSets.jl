@@ -212,6 +212,22 @@ end
     @test Z === OPTICAL && RELATIVISTIC === BETA
     @test_throws ErrorException measconvert(MDoppler{RADIO}(0.1), MeasurementSets.OtherDoppler{:X})
 
+    # Phase 224 fix: `MDoppler`'s own `measconvert` dispatches on
+    # `DopplerType`, a COMPLETELY SEPARATE method from the generic
+    # `Measure -> RefFrame` one in `types.jl` that validates
+    # `_all_finite` before converting (Phase 195) -- so it never went
+    # through that guard at all. Live-reproduced: a NaN/Inf `.d` used
+    # to silently propagate through `measconvert` instead of erroring,
+    # unlike every other measure type (`MEpoch`, `MDirection`, ...).
+    @test_throws ArgumentError measconvert(MDoppler{RADIO}(NaN), OPTICAL)
+    @test_throws ArgumentError measconvert(MDoppler{RADIO}(Inf), OPTICAL)
+    @test_throws ArgumentError measconvert(MDoppler{BETA}(-Inf), RADIO)
+    # the same-convention short-circuit is a genuine no-op (mirrors the
+    # generic version's own identical `reftype(m) === R && return m`
+    # early return) and still skips the check either way.
+    dnan = MDoppler{RADIO}(NaN)
+    @test measconvert(dnan, RADIO) === dnan
+
     # Phase 222 fix: an unphysical BETA (|D| > 1, faster than light) or
     # GAMMA (|D| < 1, below the Lorentz-factor minimum of 1 at rest)
     # value used to crash with a raw, uninformative `DomainError` from
@@ -270,6 +286,26 @@ end
     # MRadialVelocity <-> MDoppler
     @test doppler(MRadialVelocity{LSRK}(3e5)).d ≈ 3e5 / MSv2.C_LIGHT
     @test radialvelocity(doppler(MRadialVelocity{BARY}(-1.2e5))).mps ≈ -1.2e5
+
+    # Phase 224 fix: `doppler(v::MRadialVelocity)` used to construct
+    # `MDoppler{BETA}(v.mps / C_LIGHT)` directly, with NO validation at
+    # all -- unlike its sibling `doppler(f::MFrequency, restfreq)`,
+    # whose `t = (f/restfreq)^2 >= 0` provably keeps the result in
+    # `(-1, 1]` for ANY finite input and so needs none. `v.mps` has no
+    # such bound: live-reproduced, `doppler(MRadialVelocity{LSRK}(4e8))`
+    # (superluminal, > c) used to succeed silently, returning an
+    # `MDoppler{BETA}` with `|d.d| > 1` -- a physically-meaningless
+    # value that then only crashed (with the Phase 222 message) the
+    # NEXT time anyone tried to `measconvert`/`radialvelocity`/
+    # `frequency`/`shiftfreq` it, not at the point the bad input was
+    # actually given.
+    @test_throws ArgumentError doppler(MRadialVelocity{LSRK}(4e8))
+    @test_throws ArgumentError doppler(MRadialVelocity{LSRK}(-4e8))
+    # the physical boundary itself (|v| == c) is NOT an error
+    @test doppler(MRadialVelocity{LSRK}(MSv2.C_LIGHT)).d ≈ 1.0
+    @test doppler(MRadialVelocity{LSRK}(-MSv2.C_LIGHT)).d ≈ -1.0
+    # an ordinary in-domain value round-trips unaffected
+    @test radialvelocity(doppler(MRadialVelocity{LSRK}(3e5))).mps ≈ 3e5
 
     # Phase 74: shiftfreq + one-step bridges
     @test shiftfreq(d, ν0) ≈ frequency(d, ν0).hz                  # scalar == fromDoppler
@@ -1216,4 +1252,48 @@ end
     # far past (well before the IERS series even starts, ~1962) --
     # same fallback.
     @test eoext._eop_lookup(100.0) == (dut1 = 0.0, xp = 0.0, yp = 0.0)
+end
+
+# Phase 225 finding: `_eop`'s `ext === nothing` branch (`ext/SOFAExt.jl` —
+# the "SOFA loaded, EarthOrientation NOT loaded" ΔUT1=0/no-polar-motion
+# fallback + its one-time warning) had NEVER been exercised by any test
+# in this suite's history -- confirmed via a coverage-instrumented run
+# showing zero hits on `SOFAExt.jl`'s lines 49-54, because this file's
+# own test harness (`runtests.jl`) always `import`s both `SOFA` AND
+# `EarthOrientation` together (asserted at the top of this file, "measures
+# — extensions loaded"). Once `EarthOrientationExt` loads for a Julia
+# process it stays loaded for that process's whole lifetime, so this
+# genuinely cannot be tested in-process -- spawn a real child process
+# with only `SOFA` imported, reusing `lock_tests.jl`'s `_JULIA`/`_PROJ`
+# cross-process machinery (already in scope -- `lock_tests.jl` is
+# `include`d before this file in `runtests.jl`).
+@testset "measures — no-EarthOrientation fallback (SOFA-only child process, Phase 225)" begin
+    child_code = """
+        using MeasurementSets
+        import SOFA
+        @assert Base.get_extension(MeasurementSets, :SOFAExt) !== nothing
+        @assert Base.get_extension(MeasurementSets, :EarthOrientationExt) === nothing
+        fr = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
+                       position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150))
+        d = MDirection{J2000}(2.0, 0.5)
+        r1 = measconvert(d, AZEL; frame = fr)
+        r2 = measconvert(d, AZEL; frame = fr)      # second call: no repeat warning, same result
+        @assert r1 == r2
+        eu = measconvert(MEpoch{UTC}(60454.5), UT1; frame = fr)
+        @assert eu.mjd == 60454.5                  # ΔUT1 = 0 exactly -> UT1 == UTC, bit for bit
+        println(r1.lon, " ", r1.lat)
+        """
+    out = read(`$_JULIA --project=$_PROJ --startup-file=no -e $child_code`, String)
+    lon, lat = parse.(Float64, split(strip(out)))
+    @test isfinite(lon) && isfinite(lat)
+
+    # cross-check against the EOP-accurate result computed HERE (this
+    # process already has both extensions loaded) -- confirms the
+    # documented "~1 arcsecond" fallback accuracy claim, not just that
+    # the fallback ran without crashing.
+    fr2 = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
+                    position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150))
+    racc = MeasurementSets.measconvert(MDirection{J2000}(2.0, 0.5), AZEL; frame = fr2)
+    @test abs(lon - racc.lon) < deg2rad(2 / 3600)
+    @test abs(lat - racc.lat) < deg2rad(2 / 3600)
 end
