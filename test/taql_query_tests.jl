@@ -2322,6 +2322,98 @@ end
     @test column(readtable(dst), "LAB")[:] == ["a", "b", "c"]
 end
 
+# Phase 227 finding: a `missing` value anywhere in a WHERE/HAVING/JOIN
+# condition -- reachable in perfectly ordinary usage (an outer `join`
+# routinely produces a `missing`-containing column, and the verbs are
+# explicitly designed to chain) -- used to crash with a raw
+# `TypeError: non-boolean (Missing) used in boolean context` instead of
+# excluding the row, matching real SQL/TaQL's three-valued logic. Two
+# distinct crash shapes: (1) the final "does this row pass" decision
+# (every `if`/`::Bool`-context consumer across `query`/`groupby`/`join`);
+# (2) `&&`/`||` THEMSELVES inside `TQLAnd`/`TQLOr` -- Julia's `&&`/`||`
+# require specifically the LEFT operand to satisfy `x::Bool`
+# (`missing && true` throws, `true && missing` does not), so which side
+# of an `AND`/`OR` a `missing` sub-condition landed on determined
+# whether it crashed -- fixed with genuine 3-valued `_tql_and`/`_tql_or`,
+# not "coalesce to `false` early" (which would silently break `NOT`:
+# `!missing === missing`, but `!false === true`). No real-TaQL cross-
+# check here -- this is a MeasurementSets-chaining scenario (an outer
+# `join`'s `missing` fill), not something a plain casacore MS ever
+# produces.
+@testset "missing-value 3-valued logic in WHERE/HAVING/JOIN (Phase 227)" begin
+    dir = joinpath(mktempdir(), "missing3vl")
+    write_table(joinpath(dir, "L"), "L",
+        Pair{String,Any}["ID" => Int32[1, 2, 3], "ANTENNA1" => Int32[0, 1, 9]]; nrow=3)
+    write_table(joinpath(dir, "R1"), "R1", Pair{String,Any}["KEY" => [10, 20]]; nrow=2)
+    write_table(joinpath(dir, "R2"), "R2", Pair{String,Any}["X" => [100, 200]]; nrow=2)
+    l = readtable(joinpath(dir, "L"))
+    r1 = readtable(joinpath(dir, "R1"))
+    r2 = readtable(joinpath(dir, "R2"))
+
+    # an outer join makes row 3's KEY `missing` (ANTENNA1=9 is out of range)
+    g1 = join(l, r1; on="ANTENNA1", rightcols=["KEY"], unmatched=:missing)
+    @test isequal(collect(g1.KEY), [10, 20, missing])
+
+    # index-lookup `on=` with a `missing` value: no crash, treated as
+    # "no match" exactly like an out-of-range index
+    g2 = join(g1, r2; on="KEY", rightcols=["X"], unmatched=:missing)
+    @test isequal(collect(g2.X), [missing, missing, missing])   # KEY=10/20 are also out of range for r2
+
+    # predicate join `on=`: no crash for a `missing`-valued row.KEY
+    g3 = join(g1, r2; on=(lr, rr) -> lr.KEY == rr.X, rightcols=["X"], unmatched=:missing)
+    @test isequal(collect(g3.X), [missing, missing, missing])
+
+    # string L./R.-qualified condition join: same
+    g4 = join(g1, r2; on="L.KEY == R.X", rightcols=["X"], unmatched=:missing)
+    @test isequal(collect(g4.X), [missing, missing, missing])
+
+    # query WHERE (string form): a `missing` result excludes the row
+    @test collect(query(g1, "KEY > 5").KEY) == [10, 20]
+
+    # query WHERE (closure form)
+    @test collect(query(g1) do row
+        row.KEY > 5
+    end.KEY) == [10, 20]
+
+    # groupby HAVING (string form)
+    gg = groupby(g1, "ID"; select=["ID" => :ID, "K" => "KEY"], having="KEY > 5")
+    @test collect(gg.K) == [10, 20]
+
+    # groupby HAVING (closure form)
+    gg2 = groupby(g1, "ID"; select=["ID" => :ID, "K" => "KEY"], having=gs -> gs.KEY[1] > 5)
+    @test collect(gg2.K) == [10, 20]
+
+    # AND: `missing` on either side of the operator, order must not matter
+    @test collect(query(g1, "KEY > 5 AND ID > 0").KEY) == [10, 20]
+    @test collect(query(g1, "ID > 0 AND KEY > 5").KEY) == [10, 20]
+
+    # OR: genuine 3-valued logic -- `missing OR true` is `true`, so the
+    # row with `KEY == missing` but `ID == 3` (definitely true) must be
+    # INCLUDED, not excluded -- this is the case "coalesce missing to
+    # false early" would get wrong
+    r7 = query(g1, "KEY > 5 OR ID == 3")
+    @test length(r7.KEY) == 3   # all 3 rows, including the missing-KEY one
+    r7b = query(g1, "ID == 3 OR KEY > 5")   # missing on the right this time
+    @test length(r7b.KEY) == 3
+
+    # NOT on a `missing` comparison must stay excluded (`missing`, not
+    # flipped to `true`) -- the case naive early-coalescing gets wrong
+    @test isempty(query(g1, "NOT (KEY > 5)").KEY)
+
+    # iif() with a `missing` condition propagates `missing`, no crash
+    r8 = query(g1, "ID > 0"; select=["V" => "iif(KEY > 5, 1, 0)"])
+    @test isequal(collect(r8.V), [1, 1, missing])
+
+    # non-missing usage is completely unaffected by any of the above
+    write_table(joinpath(dir, "L2"), "L2",
+        Pair{String,Any}["ANTENNA1" => Int32[0, 1]]; nrow=2)
+    l2 = readtable(joinpath(dir, "L2"))
+    g5 = join(l2, r1; on="ANTENNA1", rightcols=["KEY"])
+    @test collect(g5.KEY) == [10, 20]
+    @test collect(query(g5, "KEY > 5 AND KEY < 15").KEY) == [10]
+    @test collect(query(g5, "KEY < 5 OR KEY > 15").KEY) == [20]
+end
+
 # ---- Phase 42: array indexing + slices ---------------------------------
 
 @testset "TaQL-lite parser — array indexing unit" begin

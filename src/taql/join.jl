@@ -28,7 +28,14 @@ function _join_matchrow(left::AbstractTable, right::AbstractTable, on)
         String(on) in columnnames(left) ||
             throw(ArgumentError("join: left table has no column \"$(on)\""))
         lc = column(left, String(on))
-        return Int[(v = lc[i]; 0 <= v < nr ? Int(v) + 1 : 0) for i in 1:nrow(left)]
+        # Phase 227 fix: `v` can be `missing` (the left table is itself a
+        # `missing`-containing outer-join/masked result — the verbs chain,
+        # so this is ordinary usage, not contrived input); `0 <= missing`
+        # is `missing`, not `false`, and `missing ? ... : ...` throws a
+        # raw `TypeError` instead of the intended "no match, like an
+        # out-of-range index". Treated the same as out-of-range: row 0.
+        return Int[(v = lc[i]; v === missing ? 0 : (0 <= v < nr ? Int(v) + 1 : 0))
+                   for i in 1:nrow(left)]
     end
     pairs = on isa Pair ? [on] : collect(on)
     isempty(pairs) && throw(ArgumentError("join: `on` must not be empty"))
@@ -144,7 +151,7 @@ function _join_pairs_pred(left::AbstractTable, right::AbstractTable, pred::Funct
     for (i, lr) in enumerate(lrws)
         hit = false
         for (j, rr) in enumerate(rrows_v)
-            if pred(lr, rr)::Bool
+            if _tql_truthy(pred(lr, rr))
                 push!(lrows, i); push!(rrows, j); matched_r[j] = true; hit = true
             end
         end
@@ -194,7 +201,7 @@ function _join_pairs_qexpr(left::AbstractTable, right::AbstractTable, onstr::Abs
         hit = false
         for j in 1:nrow(right)
             for r in rref; qcd[r][1] = rcols[r][j]; end
-            if _tqleval(ast, qcd, 1)::Bool
+            if _tql_truthy(_tqleval(ast, qcd, 1))
                 push!(lrows, i); push!(rrows, j); matched_r[j] = true; hit = true
             end
         end
@@ -219,13 +226,13 @@ function _result_filter(gt::GroupedTable, where)
     n = isempty(gt.cols) ? 0 : length(gt.cols[1])
     keep = if where isa Function
         rws = CTDSRows(gt.cols, gt.names, n)
-        [i for (i, r) in enumerate(rws) if where(r)]
+        [i for (i, r) in enumerate(rws) if _tql_truthy(where(r))]
     else
         cd = Dict{String,AbstractVector}(String(nm) => c for (nm, c) in zip(gt.names, gt.cols))
         ast = _taqllite_parse(String(where), Set(Base.keys(cd)))
         !_has_aggr(ast) ||
             throw(ArgumentError("join: `where` must not contain aggregate functions"))
-        [i for i in 1:n if _tqleval(ast, cd, i)]
+        [i for i in 1:n if _tql_truthy(_tqleval(ast, cd, i))]
     end
     return GroupedTable(copy(gt.names), AbstractVector[c[keep] for c in gt.cols])
 end

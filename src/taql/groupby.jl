@@ -60,8 +60,11 @@ _geval(e::TQLNeg, cols, g) = _bcast(-, _geval(e.a, cols, g))
 _geval(e::TQLBitNot, cols, g) = _bcast((~), _geval(e.a, cols, g))
 _geval(e::TQLMaskOf, cols, g) = (v = _geval(e.e, cols, g);
     v isa TQLMArray ? v.mask : _bcast(!isfinite, _unwrap_marray(v)))
-_geval(e::TQLAnd, cols, g) = _geval(e.a, cols, g) && _geval(e.b, cols, g)
-_geval(e::TQLOr, cols, g) = _geval(e.a, cols, g) || _geval(e.b, cols, g)
+# Phase 227 fix: same 3-valued-logic crash as `_tqleval`'s `TQLAnd`/
+# `TQLOr` (`ast.jl`) -- raw `&&`/`||` throw when the LEFT operand is
+# `missing`.
+_geval(e::TQLAnd, cols, g) = _tql_and(_geval(e.a, cols, g), _geval(e.b, cols, g))
+_geval(e::TQLOr, cols, g) = _tql_or(_geval(e.a, cols, g), _geval(e.b, cols, g))
 _geval(e::TQLNot, cols, g) = _bcast(!, _geval(e.a, cols, g))
 _geval(e::TQLIn, cols, g) = _geval(e.lhs, cols, g) in e.vals
 _geval(e::TQLMatch, cols, g) =
@@ -208,7 +211,7 @@ function query(gt::GroupedTable, wherestr::AbstractString;
     ast, orderby = _taqllite_parse_query(wherestr, Set(columnnames(gt)))
     cd = Dict{String,AbstractVector}(n => column(gt, n) for n in columnnames(gt))
     nr = nrow(gt)
-    keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tqleval(ast, cd, i)]
+    keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tql_truthy(_tqleval(ast, cd, i))]
     keep = _apply_orderby(keep, orderby, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
     ps = _select_materialize(cls, gt, keep)
@@ -230,7 +233,7 @@ function query(f::Function, gt::GroupedTable;
     allnames = unique(vcat(collect(names), [k.name for k in orderkeys]))
     cd = Dict{String,AbstractVector}(n => column(gt, n) for n in allnames)
     rws = CTDSRows(AbstractVector[cd[n] for n in allnames], Symbol.(allnames), nrow(gt))
-    keep = [i for (i, row) in enumerate(rws) if f(row)]
+    keep = [i for (i, row) in enumerate(rws) if _tql_truthy(f(row))]
     keep = _apply_orderby(keep, orderkeys, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
     ps = _select_materialize(cls, gt, keep)
@@ -283,12 +286,12 @@ function _where_rows(t::AbstractTable, where, cols::AbstractDict)
     if where isa Function
         nms = collect(keys(cols))
         rws = CTDSRows(AbstractVector[cols[n] for n in nms], Symbol.(nms), nrow(t))
-        return [i for (i, r) in enumerate(rws) if where(r)]
+        return [i for (i, r) in enumerate(rws) if _tql_truthy(where(r))]
     end
     ast = _taqllite_parse(String(where), Set(columnnames(t)))
     !_has_aggr(ast) ||
         throw(ArgumentError("WHERE must not contain aggregate functions"))
-    return [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
+    return [i for i in 1:nrow(t) if _tql_truthy(_tqleval(ast, cols, i))]
 end
 
 # Shared preparation for both `groupby` methods: validate keys, parse
@@ -324,9 +327,9 @@ function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
         wherearg isa Function ? begin
             nms = collect(Base.keys(loaded))
             rws = CTDSRows(AbstractVector[loaded[n] for n in nms], Symbol.(nms), nrow(t))
-            [i for (i, r) in enumerate(rws) if wherearg(r)]
+            [i for (i, r) in enumerate(rws) if _tql_truthy(wherearg(r))]
         end :
-        [i for i in 1:nrow(t) if _tqleval(whereast, loaded, i)]
+        [i for i in 1:nrow(t) if _tql_truthy(_tqleval(whereast, loaded, i))]
 
     havingfn =
         havingarg === nothing ? ((g, kn, act) -> true) :
@@ -455,7 +458,7 @@ function groupby(t::AbstractTable, groupcols;
         groups, seen = _group_rows(keys[active], loaded, rows)
         for key in seen
             g = groups[key]
-            havingfn(g, keys, active) || continue
+            _tql_truthy(havingfn(g, keys, active)) || continue
             for (j, (k, v)) in enumerate(lvl)
                 push!(acc[j],
                     k === :fn ? v(GroupSlice(loaded, g, keys, active)) :
@@ -503,7 +506,7 @@ function groupby(f::Function, t::AbstractTable, groupcols; cols=nothing,
         groups, seen = _group_rows(keys[active], loaded, rows)
         for key in seen
             g = groups[key]
-            havingfn(g, keys, active) || continue
+            _tql_truthy(havingfn(g, keys, active)) || continue
             nt = f(GroupSlice(loaded, g, keys, active))
             nt isa NamedTuple ||
                 throw(ArgumentError("groupby(f, ...): the closure must return a NamedTuple"))

@@ -439,7 +439,7 @@ function query(t::AbstractTable, wherestr::AbstractString;
     end
     cols = _tql_cols(t, needed, ast)
     matched = ast === nothing ? collect(1:nrow(t)) :
-              [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
+              [i for i in 1:nrow(t) if _tql_truthy(_tqleval(ast, cols, i))]
     matched = _apply_orderby(matched, orderby, cols)
     cls = _select_classify(select, validnames)
     if _select_all_proj(cls)
@@ -491,7 +491,7 @@ function query(f::Function, t::AbstractTable;
     allnames = vcat(collect(names), extra)
     allcols = AbstractVector[_load_col(column(t, n)) for n in allnames]
     rows = CTDSRows(allcols, Symbol.(allnames), nrow(t))
-    matched = [i for (i, row) in enumerate(rows) if f(row)]
+    matched = [i for (i, row) in enumerate(rows) if _tql_truthy(f(row))]
     cols_by_name = Dict(n => c for (n, c) in zip(allnames, allcols))
     matched = _apply_orderby(matched, orderkeys, cols_by_name)
     cls = _select_classify(select, Set(columnnames(t)))

@@ -765,6 +765,16 @@ _boxed_svar(x, w) = (a = _require_array(x);
 _boxed_sstd(x, w) = (a = _require_array(x);
                      _boxed_reduce(y -> Statistics.std(_tql_need2(y, "samplestddev")), Float64, a, w))
 
+# Phase 227 fix: `ifelse(cond, a, b)` (unlike `&&`/`||`, an ordinary
+# function, not special syntax) still requires `cond::Bool` and throws a
+# raw `MethodError` for a `missing` condition (e.g. `iif(V > 5, a, b)`
+# where `V` is `missing` -- reachable the same way every other site in
+# this file's Phase 227 fix is). SQL's `CASE WHEN NULL THEN a ELSE b
+# END` is NULL -- `iif` propagates `missing` the same way, matching the
+# 3-valued-logic convention used throughout the rest of the WHERE/HAVING/
+# JOIN evaluation (`_tql_and`/`_tql_or`/`_tql_truthy`, `ast.jl`).
+_tql_iif(cond, a, b) = cond === missing ? missing : ifelse(cond, a, b)
+
 # name => (callable-over-arg-values, allowed arg count).  `min`/`max` and
 # `angdist` are arity-overloaded and handled in `_make_func`, not here.
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
@@ -874,7 +884,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "reversestring" => (reverse, 1:1), "sreverse" => (reverse, 1:1),
     "trim" => (_tql_trim, 1:1), "ltrim" => (_tql_ltrim, 1:1), "rtrim" => (_tql_rtrim, 1:1),
     # --- misc ---
-    "iif" => (ifelse, 3:3),
+    "iif" => (_tql_iif, 3:3),
     # --- date/time (MJD-Float days) + angle strings (Phase 69) ---
     "datetime" => (_tql_datetime, 0:1),
     "mjd" => ((a...) -> isempty(a) ? _tql_now_mjd() : float(a[1]), 0:1),

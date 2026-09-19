@@ -8074,3 +8074,79 @@ body now runs inside the new `try` block. 9 new assertions.
 
 Full suite green: 5198 baseline + 9 new = 5207/5207. README/memory
 updated, merge on the user's word.
+
+### Phase 227 — `src/taql/` sweep: a `missing` value anywhere in a
+WHERE/HAVING/JOIN condition used to crash with a raw `TypeError` instead
+of excluding the row, matching real SQL/TaQL's three-valued logic
+
+Started a fresh sweep of `src/taql/` (six files, ~6,600 lines) with a
+fresh-eyes read of `join.jl` and `groupby.jl` — the two files that
+hadn't had a fix land in them since their original Phase 28/49/56/26/48
+implementations, across the entire later sweep history. `join`'s
+explicit "the verbs chain" design (Phase 58) is what surfaced the real
+finding: a `join` with `unmatched=:missing` produces a genuinely
+`missing`-containing output column (an unmatched row's right-side
+value), and re-joining/filtering on *that* column downstream — ordinary
+usage of a documented feature, not contrived input — hits a real gap.
+
+**Real bugs, fixed, four distinct crash shapes, all live-reproduced
+before fixing:**
+
+1. `_join_matchrow`'s index-lookup `on=` branch did `0 <= v < nr ?
+   Int(v)+1 : 0` — for `v === missing`, `0 <= missing` is `missing`, and
+   `missing ? ... : ...` throws `TypeError: non-boolean (Missing) used
+   in boolean context`. Fixed to treat `missing` the same as an
+   out-of-range index (row unmatched).
+2. Every `if`/`::Bool`-context consumer of a WHERE/HAVING/join-condition
+   result — `query`'s string and closure WHERE, `groupby`'s `_where_rows`
+   / `_gb_prepare` (shared by `update!`/`delete!` too) and its two
+   `havingfn(...) || continue` sites, and `join`'s predicate/string-
+   condition/post-join-`where` paths — all threw the identical raw
+   `TypeError` for a `missing` result instead of excluding the row.
+3. `TQLAnd`/`TQLOr`'s own `_tqleval`/`_geval` implementation used raw
+   `&&`/`||`, which are special syntax requiring specifically the *left*
+   operand to satisfy `x::Bool` (`missing && true` throws; `true &&
+   missing` does not — confirmed live, a real asymmetry) — so no amount
+   of fixing only the outer consumer (item 2) could catch a crash
+   happening *inside* the AND/OR evaluation itself, before it ever
+   returns a value to wrap.
+4. `iif(cond, a, b)` was wired straight to `Base.ifelse`, which (an
+   ordinary function, not special syntax, but still requires
+   `cond::Bool`) throws a `MethodError` for `cond === missing`.
+
+Fixed once, comprehensively, rather than patching only the first site
+found: a shared `_tql_truthy` (the single point every condition result
+passes through before the row-inclusion decision — `missing` excluded,
+exactly like `false`; a genuinely non-Bool result still errors clearly)
+applied at every site in item 2, and genuine 3-valued-logic `_tql_and`/
+`_tql_or` (`missing` propagates like SQL NULL — `false AND missing =
+false`, `true AND missing = missing`, etc.) replacing the raw `&&`/`||`
+in both `_tqleval(::TQLAnd/TQLOr)` (`ast.jl`) and its `_geval`
+counterpart (`groupby.jl`). Deliberately *not* "coalesce every
+`missing` sub-result to `false` immediately" — that reads as equivalent
+for AND/OR but silently breaks `NOT`: `!missing === missing` (still
+excluded, correct), but `!(coalesced false) === true` (wrongly
+*included*) — live-verified this exact case (`NOT (KEY > 5)` on a
+`missing`-valued `KEY`) stays correctly excluded under the real fix.
+The 3-valued design was also confirmed *positively* correct, not just
+non-crashing: `missing OR true` is `true` per SQL semantics, so a row
+whose `KEY > 5` is `missing` but whose `ID == 3` is definitely true is
+correctly *included*, live-verified both operand orders. `iif` fixed
+with a small `_tql_iif` that propagates `missing`, matching `CASE WHEN
+NULL THEN a ELSE b END`.
+
+Confirmed already-safe and left untouched: `TQLNot` (Base's own
+`!(::Missing) = missing`), `TQLCmp` (comparison operators already
+propagate `missing` correctly), `TQLIn` (`in`, built on `any`, is
+already `missing`-safe) — only `&&`/`||`/`if`/`ifelse` specifically
+require exactly `Bool` and crash otherwise. The equi-join `Dict`-based
+lookup path (`_join_pairs`'s `multi=true`/`Pair on=` branches) was
+checked too and confirmed already crash-safe (`Dict` uses `isequal`,
+which treats `missing` as equal to itself — a deliberate, pre-existing,
+internally-consistent design choice, not a bug, left as-is). No
+real-TaQL cross-check — this is a MeasurementSets-side chaining
+scenario (an outer `join`'s `missing` fill), not something a plain
+casacore MS or real TaQL query ever produces. 17 new assertions.
+
+Full suite green: 5207 baseline + 17 new = 5224/5224. README/memory
+updated, merge on the user's word.
