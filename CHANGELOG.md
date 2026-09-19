@@ -7567,3 +7567,29 @@ bit-for-bit and composes correctly with `voltage_response`/`attenuate`/
 
 Full suite green (baseline 5109, +12 new = 5121/5121). README/memory
 updated, merge on the user's word.
+
+### Phase 217 — `src/beam/` sweep, continued: confirmed fully covered,
+no further issue found
+
+A second coverage-instrumented full-suite run over `src/beam/beam.jl`
+(after Phase 216's fix + new tests), plus another independent, fresh-
+eyes re-derivation of the file's remaining math (the annular-aperture
+Airy formula re-checked term by term once more against the quoted
+closed form; every `SquintBeam`/`EllipticalGaussianBeam` composition
+path — squint-of-a-squint, squinting an ellipse, frequency scaling
+threaded through a squint wrapper — traced by hand; a systematic grep
+for every other `θ`-vs-bound comparison in the file, to check for any
+sibling of Phase 216's one-sided `PolynomialBeam` cutoff bug — found
+none: `abs(θ) > b.maxrad` is now the file's only such comparison).
+
+**Result: `src/beam/beam.jl` is now down to zero never-executed lines**
+(354/354, up from the handful of untested branches the Phase 216 fix +
+tests closed) — genuinely fully covered, not merely "down to a
+provably-unreachable line" the way `src/datamanagers/` settled. No new
+bug found; this phase is a confirming pass, not a fix, matching this
+project's own precedent for investigation-only sweeps (e.g. Phases 116,
+118, 124, 134) where "thoroughly checked, nothing further to find" is
+itself the useful, documented outcome.
+
+Full suite green: 5121/5121 (unchanged — no code or test changes this
+phase). README/memory updated, merge on the user's word.
