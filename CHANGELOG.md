@@ -7967,3 +7967,54 @@ being pinned with permanent tests. 9 new assertions.
 
 Full suite green: 5186 baseline + 9 new = 5195/5195. README/memory
 updated, merge on the user's word.
+
+### Phase 225 — `src/measures/` sweep, continued: a permanently uncovered
+"SOFA loaded, `EarthOrientation` not loaded" fallback path, finally
+pinned with a real cross-process test
+
+A comprehensive fresh re-read of every remaining unswept corner —
+`ext/EarthOrientationExt.jl`, the epoch/direction/`_frame_site`/body-
+resolution sections of `ext/SOFAExt.jl` not covered by Phase 224's own
+Doppler-focused pass, and `igrf14_data.jl`'s bundled coefficient table —
+found no further *bug*. Two candidate leads were investigated and ruled
+out as already-settled or non-reachable: `_riseset`'s `acos`/division
+at an exact celestial-pole declination (live-tested at `dec = ±90°` —
+real precession perturbs the converted apparent position just enough
+that the exact singularity never actually manifests; the same class of
+double-degenerate coincidence this project has already declined to
+chase elsewhere), and `_measure_column_spec`'s "mixed-convention
+`Vector{MDoppler}`" case (confirmed to be the *same*, already-documented,
+already-accepted "stores every row under the first row's frame/
+convention" limitation Phase 70 established for every other measure
+kind, not a new gap). `igrf14_data.jl` was independently re-verified
+structurally sound (26 epochs × 195 coefficients; the first 25
+`_IGRF_DCOEF` rows exactly equal `(COEF[i+1]-COEF[i])/5`, confirming
+they really are generated per-year interpolation rates and not a
+transcription error, with the 26th correctly holding the distinct
+published 2025–2030 secular-variation values).
+
+**A genuine, permanent coverage gap, closed**: a coverage-instrumented
+run showed `src/measures/` itself was now 100% line-covered, but turned
+up 12 never-executed lines in `ext/SOFAExt.jl` — 8 are `"frame … is not
+supported"` fallbacks for the enumerated dispatch chains (unreachable by
+construction — every `RefFrame` this package defines already has a
+handled branch) and were left alone, but the remaining 4 are `_eop`'s
+`ext === nothing` branch: the fallback for "`SOFA` is loaded but
+`EarthOrientation` is not" (ΔUT1 = 0, no polar motion, a one-time
+`@warn`). This had *never* been exercised by any test in this suite's
+history — `test/runtests.jl`'s harness always `import`s both `SOFA` and
+`EarthOrientation` together (asserted explicitly at the top of
+`measures_tests.jl`), and once `EarthOrientationExt` loads for a Julia
+process it stays loaded for that process's entire lifetime, so the
+gap genuinely could not be closed by adding a testset to the existing
+file. Live-verified the fallback is correctly implemented (exactly one
+warning on first use, none on a repeat call, `ΔUT1 = 0` gives
+`UT1.mjd == UTC.mjd` bit-for-bit, and the AZEL result agrees with the
+EOP-accurate value to within the documented ~1″ tolerance) via a real
+child process with only `SOFA` imported — reusing `lock_tests.jl`'s
+`_JULIA`/`_PROJ` cross-process machinery (already in scope, included
+earlier in `runtests.jl`) rather than inventing a new mechanism. 3 new
+assertions.
+
+Full suite green: 5195 baseline + 3 new = 5198/5198. README/memory
+updated, merge on the user's word.

@@ -1253,3 +1253,47 @@ end
     # same fallback.
     @test eoext._eop_lookup(100.0) == (dut1 = 0.0, xp = 0.0, yp = 0.0)
 end
+
+# Phase 225 finding: `_eop`'s `ext === nothing` branch (`ext/SOFAExt.jl` —
+# the "SOFA loaded, EarthOrientation NOT loaded" ΔUT1=0/no-polar-motion
+# fallback + its one-time warning) had NEVER been exercised by any test
+# in this suite's history -- confirmed via a coverage-instrumented run
+# showing zero hits on `SOFAExt.jl`'s lines 49-54, because this file's
+# own test harness (`runtests.jl`) always `import`s both `SOFA` AND
+# `EarthOrientation` together (asserted at the top of this file, "measures
+# — extensions loaded"). Once `EarthOrientationExt` loads for a Julia
+# process it stays loaded for that process's whole lifetime, so this
+# genuinely cannot be tested in-process -- spawn a real child process
+# with only `SOFA` imported, reusing `lock_tests.jl`'s `_JULIA`/`_PROJ`
+# cross-process machinery (already in scope -- `lock_tests.jl` is
+# `include`d before this file in `runtests.jl`).
+@testset "measures — no-EarthOrientation fallback (SOFA-only child process, Phase 225)" begin
+    child_code = """
+        using MeasurementSets
+        import SOFA
+        @assert Base.get_extension(MeasurementSets, :SOFAExt) !== nothing
+        @assert Base.get_extension(MeasurementSets, :EarthOrientationExt) === nothing
+        fr = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
+                       position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150))
+        d = MDirection{J2000}(2.0, 0.5)
+        r1 = measconvert(d, AZEL; frame = fr)
+        r2 = measconvert(d, AZEL; frame = fr)      # second call: no repeat warning, same result
+        @assert r1 == r2
+        eu = measconvert(MEpoch{UTC}(60454.5), UT1; frame = fr)
+        @assert eu.mjd == 60454.5                  # ΔUT1 = 0 exactly -> UT1 == UTC, bit for bit
+        println(r1.lon, " ", r1.lat)
+        """
+    out = read(`$_JULIA --project=$_PROJ --startup-file=no -e $child_code`, String)
+    lon, lat = parse.(Float64, split(strip(out)))
+    @test isfinite(lon) && isfinite(lat)
+
+    # cross-check against the EOP-accurate result computed HERE (this
+    # process already has both extensions loaded) -- confirms the
+    # documented "~1 arcsecond" fallback accuracy claim, not just that
+    # the fallback ran without crashing.
+    fr2 = MeasFrame(epoch = MEpoch{UTC}(60454.42255),
+                    position = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150))
+    racc = MeasurementSets.measconvert(MDirection{J2000}(2.0, 0.5), AZEL; frame = fr2)
+    @test abs(lon - racc.lon) < deg2rad(2 / 3600)
+    @test abs(lat - racc.lat) < deg2rad(2 / 3600)
+end
