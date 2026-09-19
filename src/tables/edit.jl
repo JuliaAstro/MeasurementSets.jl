@@ -424,9 +424,21 @@ function _addcol_desc(name::AbstractString, data;
         msp = _measure_column_spec(vals)
         if msp !== nothing
             vals = msp.data
-            mkw = _set_kw(_set_kw(Record(), "MEASINFO", TpRecord,
-                                  _measinfo_record(msp.kind; ref = msp.ref)),
-                          "QuantumUnits", TpArrayString, msp.units)
+            mkw = _set_kw(Record(), "MEASINFO", TpRecord,
+                          _measinfo_record(msp.kind; ref = msp.ref))
+            # Phase 221 fix: only stamp `QuantumUnits` when non-empty --
+            # a dimensionless kind (`:doppler`, `msp.units == String[]`)
+            # must omit the keyword entirely, matching real casacore
+            # convention and (crucially) `write_table`'s own
+            # `_stamp_measinfo` (`create.jl`), which already has this
+            # exact guard. Live-reproduced before the fix: `write_table`
+            # of an `MDoppler`-typed column correctly wrote NO
+            # `QuantumUnits` keyword at all, while `addcolumn!` of the
+            # identical data unconditionally wrote an empty
+            # `QuantumUnits = String[]` -- the package's own two
+            # Measure-typed-column auto-detection entry points
+            # disagreeing with each other for the same input.
+            isempty(msp.units) || (mkw = _set_kw(mkw, "QuantumUnits", TpArrayString, msp.units))
         else
             qsp = _quantity_column_spec(vals)
             if qsp !== nothing

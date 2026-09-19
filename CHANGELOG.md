@@ -7789,3 +7789,41 @@ a far-past MJD (before the IERS series even starts, ~1962) does too.
 
 Full suite green: 5159 baseline + 6 new = 5165/5165. README/memory
 updated, merge on the user's word.
+
+### Phase 221 — `src/measures/` sweep, continued: `addcolumn!` and
+`write_table` disagreed on whether to stamp an empty `QuantumUnits`
+keyword
+
+Continued the sweep, this time tracing the `src/measures/write.jl`
+(`_measure_column_spec`) integration seam into both of its two call
+sites — `src/tables/create.jl`'s `write_table` and `src/tables/
+edit.jl`'s `addcolumn!` — rather than re-reading `src/measures/`
+itself again (the bundled `igrf14_data.jl` table's structural shape
+was also spot-checked: 26 five-year epochs × 195 Schmidt coefficients
+each, matching the documented degree-13 spherical-harmonic count, both
+`_IGRF_COEF` and `_IGRF_DCOEF`).
+
+**A real bug, fixed**: `edit.jl`'s `_addcol_desc` (the shared helper
+behind both `addcolumn!(::EditTable, ...)` and
+`addcolumn!(::RefEditTable, ...)`, Phase 126) unconditionally stamped
+a `QuantumUnits` keyword whenever the added column was Measure-typed
+— even when the measure kind is dimensionless (`MDoppler`, whose
+`_measure_column_spec` reports `units = String[]`). `create.jl`'s
+`write_table` path (`_stamp_measinfo`) already has the correct guard
+(`if !isempty(units)`) for exactly this case, so the two entry points
+diverged for identical input: live-reproduced,
+`write_table(dir,"T",["D"=>[MDoppler{RADIO}(...)]];nrow=...)` correctly
+wrote **no** `QuantumUnits` keyword at all, while
+`edit(dir) do t; addcolumn!(t,"D",[MDoppler{RADIO}(...)]); end`
+unconditionally wrote an **empty** `QuantumUnits = String[]`. Fixed by
+replicating `_stamp_measinfo`'s `!isempty` guard in `_addcol_desc`
+(the `_quantity_column_spec`/`Unitful` branch didn't need the same
+fix — its `units` vector is never empty, always at least
+`[""]`/`["<unit>"]`). New regression testset confirms: the Doppler
+case now correctly omits the keyword through `addcolumn!`; a
+non-dimensionless kind (`MEpoch`) is unaffected; and `write_table`'s
+own (already-correct) behaviour for the identical data is unchanged,
+so the two entry points now genuinely agree. 5 new assertions.
+
+Full suite green: 5165 baseline + 5 new = 5170/5170. README/memory
+updated, merge on the user's word.

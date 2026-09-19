@@ -415,6 +415,33 @@ end
     @test measinfo(r, "PDIR").kind === :direction
     pd = measure(r, "PDIR")[2]
     @test pd isa MDirection{J2000} && pd.lon ≈ 0.1 && pd.lat ≈ 0.5
+    # a non-dimensionless kind still gets QuantumUnits stamped
+    @test columndesc(r, "PDIR").keywords["QuantumUnits"] == ["rad", "rad"]
+
+    # Phase 221 fix: a DIMENSIONLESS kind (`MDoppler`, `units == String[]`)
+    # must OMIT the `QuantumUnits` keyword entirely through `addcolumn!`
+    # -- `_addcol_desc` used to stamp an empty `QuantumUnits = String[]`
+    # unconditionally, diverging from `write_table`'s own
+    # `_stamp_measinfo` (which already guards `!isempty(units)`) for the
+    # identical data. Live-verified this divergence was real before
+    # fixing it -- the package's own two Measure-typed-column
+    # auto-detection paths disagreeing with each other.
+    tab2 = joinpath(dir, "AC2")
+    write_table(tab2, "AC2", Pair{String,Any}["A" => collect(1.0:3.0)]; nrow = 3)
+    edit(tab2) do t
+        addcolumn!(t, "DOP", [MDoppler{RADIO}(0.01i) for i in 1:3])
+    end
+    r2 = readtable(tab2)
+    @test !haskey(columndesc(r2, "DOP").keywords, "QuantumUnits")
+    @test measinfo(r2, "DOP").kind === :doppler && measinfo(r2, "DOP").fixedref == "RADIO"
+    @test measure(r2, "DOP")[2] === MDoppler{RADIO}(0.02)
+
+    # the `write_table` path was already correct -- confirms the two
+    # entry points now agree.
+    tab3 = joinpath(dir, "WT")
+    write_table(tab3, "WT", Pair{String,Any}["DOP" => [MDoppler{RADIO}(0.01i) for i in 1:3]];
+                nrow = 3)
+    @test !haskey(columndesc(readtable(tab3), "DOP").keywords, "QuantumUnits")
 end
 
 # Phase 75: MBaseline / MuvW vector measures.
