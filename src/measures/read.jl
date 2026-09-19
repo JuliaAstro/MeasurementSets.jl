@@ -107,7 +107,23 @@ function _wrap_measure(kind::Symbol, R::Type, v, mi::MeasInfo)
 end
 
 _scalar(v::Real) = v
-_scalar(v::AbstractArray) = length(v) == 1 ? first(v) : first(v)
+# `:epoch` (and, defensively, `:frequency`/`:radialvelocity`/`:doppler`
+# on a length-1 array cell) routes through here. Phase 218 found this
+# was `length(v) == 1 ? first(v) : first(v)` — a dead ternary with
+# identical branches — which silently discarded every element past the
+# first for a genuinely multi-element cell instead of erroring. Live-
+# reproduced: `measure(t, "T", row)` on an `:epoch`-MEASINFO column
+# whose cell is `[100.0, 200.0, 300.0] .* 86400.0` (reachable through
+# this package's own `write_table(...; measures=Dict(...))`) silently
+# returned `MEpoch{UTC}(100.0)`, dropping 2 of the cell's 3 values with
+# no warning — the same "a wrong-but-plausible-looking answer is worse
+# than an error" concern `measconvert`'s own `_all_finite` guard states
+# explicitly, just for a different failure shape. Now throws clearly.
+function _scalar(v::AbstractArray)
+    length(v) == 1 || throw(ArgumentError(
+        "measure: expected a scalar cell, got a length-$(length(v)) array $v"))
+    first(v)
+end
 
 _vec3(v::AbstractArray) = (Float64(v[1]), Float64(v[2]), Float64(v[3]))
 

@@ -78,12 +78,26 @@ function open_ephemeris(path::AbstractString)
                      Float64.(column(t, "RadVel")[:]), dlon, dlat)
 end
 
-# bracketing row + fractional offset (casacore `MeasComet::fillMeas`)
+# bracketing row + fractional offset (casacore `MeasComet::fillMeas`,
+# `ut = ifloor((utf-mjd0)/dmjd)-1; if (ut<0 || ut>=nrow-1) return False;`
+# -- the identical formula and bound, confirmed by reading
+# `measures/Measures/MeasComet.cc:405-427` directly). A query at exactly
+# the table's LAST sampled MJD always fails here, in both this port and
+# real casacore: the algorithm always needs a *pair* of bracketing rows
+# to interpolate between, and the last row has no row after it to pair
+# with. So the true valid range is the HALF-OPEN interval
+# `[mjd0+dmjd, mjd0+length*dmjd)` -- Phase 218 found the error message
+# below used to claim the range as a closed `X .. Y` interval, which is
+# self-contradictory (querying exactly `Y`, the value the message itself
+# says is covered, is precisely what triggers this error). Message
+# fixed to say so plainly; the *behaviour* is an intentional, faithful
+# match to upstream, not something to change.
 function _ephem_bracket(e::Ephemeris, mjd::Real)
     ut = floor(Int, (mjd - e.mjd0) / e.dmjd) - 1          # 0-based row
     (ut < 0 || ut >= length(e.mjd) - 1) && error(
         "ephemeris \"$(e.name)\": no entry for MJD $mjd (table covers " *
-        "$(e.mjd0 + e.dmjd) .. $(e.mjd0 + length(e.mjd) * e.dmjd))")
+        "$(e.mjd0 + e.dmjd) up to, but not including, " *
+        "$(e.mjd0 + length(e.mjd) * e.dmjd))")
     i0 = ut + 1                                           # Julia index of row `ut`
     return i0, (mjd - e.mjd[i0]) / e.dmjd
 end

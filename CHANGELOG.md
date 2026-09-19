@@ -7593,3 +7593,80 @@ itself the useful, documented outcome.
 
 Full suite green: 5121/5121 (unchanged — no code or test changes this
 phase). README/memory updated, merge on the user's word.
+
+### Phase 218 — `src/measures/` sweep: a real silent-truncation bug
+found, a misleading (but upstream-matching) error message fixed, and a
+live cross-check of the bundled Observatories table
+
+The project's first dedicated sweep of `src/measures/` (types.jl,
+measinfo.jl, read.jl, write.jl, doppler.jl, ephemeris.jl,
+observatories.jl, earthfield.jl/igrf14_data.jl, emmachine.jl — Phases
+66/71/72/74-76/82/88/90-93/96) — a coverage-instrumented full-suite run
+plus a fresh-eyes read of every file, prioritising the parts that had
+had the *least* independent re-verification since their original
+implementation (the write side, the `MeasInfo`/`VarRefCol` plumbing,
+the ephemeris table reader, the bundled static data), rather than
+re-deriving `ext/SOFAExt.jl`'s core conversion math yet again (already
+independently re-checked across roughly 20 prior phases — 66 through
+217 — with no further divergence expected from another blind re-read).
+
+**A real bug, fixed**: `read.jl`'s `_scalar` (the shared scalar-cell
+reader behind `:epoch`/`:frequency`/`:radialvelocity`/`:doppler`
+measure decoding) was
+`_scalar(v::AbstractArray) = length(v) == 1 ? first(v) : first(v)` — a
+dead ternary with *identical* branches, meaning it always just returned
+`first(v)` regardless of the array's actual length, with no validation
+at all. For `:frequency`/`:radialvelocity`/`:doppler` this never
+mattered (`_wrap_measure` already branches on `length(v) != 1` before
+ever reaching `_scalar`), but `:epoch` calls it unconditionally.
+Live-reproduced: `measure(t, "T", row)` on an `:epoch`-MEASINFO column
+whose cell was a length-3 array (reachable through this package's own
+`write_table(...; measures=Dict(...))`) silently returned an `MEpoch`
+built from *only the first of three elements*, discarding the rest
+with no warning whatsoever — precisely the "a wrong-but-plausible
+answer is worse than an error" failure shape `measconvert`'s own
+`_all_finite` guard (Phase 195) already states as a design principle
+for this exact file, just via a different mechanism. Fixed to validate
+`length(v) == 1` and throw a clear `ArgumentError` otherwise; confirmed
+both the genuine scalar-epoch path and the array-valued frequency/
+radial-velocity path (which never reaches the changed branch) are
+unaffected.
+
+**A misleading-but-upstream-matching message fixed, not the
+behaviour**: `ephemeris.jl`'s `_ephem_bracket` throws when a query MJD
+falls outside the table's sampled range — but live-reproduced that
+querying *exactly* the table's last sampled MJD always throws, even
+though the error message itself claimed that exact value was within
+the covered range (`"table covers 60000.0 .. 60004.0"` when
+`60004.0` — the *very* value in the message — is what triggers the
+error). Read casacore's own `MeasComet::fillMeas`
+(`measures/Measures/MeasComet.cc:405-427`) directly: it has the
+*identical* formula and the *identical* `ut >= nrow-1` bound — this is
+a faithful match to a real, structural limitation in upstream itself
+(interpolation always needs a bracketing *pair* of rows, and the last
+row has none after it), not a divergence to "fix" by changing the
+behaviour. Only the message was wrong — it described the valid range
+as closed when it is actually half-open. Fixed the wording; added a
+permanent regression test pinning the exact boundary (last sample
+throws, one epsilon before it doesn't, the *first* sample is fine).
+
+**A live cross-check, no bug found**: independently spot-checked 14
+entries of the bundled `_OBSERVATORIES` table (`observatories.jl`,
+Phase 90) against a fresh `casatools.measures().observatory(name)`
+query on this machine's real CASA install — including the two
+suspicious-looking near-duplicate pairs (`"IRAM PDB"` vs `"IRAM_PDB"`,
+`"GB"` vs `"GBT"` vs `"NRAO_GBT"`) that looked at first glance like
+they might be transcription errors. All 14 matched to sub-millimetre
+precision once the check correctly distinguished CASA's two different
+position representations (`refer: "ITRF"` returns geocentric spherical
+`(lon, lat, radius)`; `refer: "WGS84"` returns geodetic
+`(lon, lat, height-above-ellipsoid)`, needing the real WGS84 ellipsoid
+formula, not a sphere) — an initial naive spherical-only conversion
+gave wildly wrong values for the WGS84 entries and looked like a real
+bug for a few minutes, until re-doing the check with the correct
+per-entry formula resolved it cleanly. The near-duplicate pairs are
+genuine, independently real casacore Observatories-table entries (both
+distinct sites/reference points, not typos).
+
+Full suite green: 5121 baseline + 8 new = 5129/5129. README/memory
+updated, merge on the user's word.
