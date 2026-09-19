@@ -212,6 +212,22 @@ end
     @test Z === OPTICAL && RELATIVISTIC === BETA
     @test_throws ErrorException measconvert(MDoppler{RADIO}(0.1), MeasurementSets.OtherDoppler{:X})
 
+    # Phase 224 fix: `MDoppler`'s own `measconvert` dispatches on
+    # `DopplerType`, a COMPLETELY SEPARATE method from the generic
+    # `Measure -> RefFrame` one in `types.jl` that validates
+    # `_all_finite` before converting (Phase 195) -- so it never went
+    # through that guard at all. Live-reproduced: a NaN/Inf `.d` used
+    # to silently propagate through `measconvert` instead of erroring,
+    # unlike every other measure type (`MEpoch`, `MDirection`, ...).
+    @test_throws ArgumentError measconvert(MDoppler{RADIO}(NaN), OPTICAL)
+    @test_throws ArgumentError measconvert(MDoppler{RADIO}(Inf), OPTICAL)
+    @test_throws ArgumentError measconvert(MDoppler{BETA}(-Inf), RADIO)
+    # the same-convention short-circuit is a genuine no-op (mirrors the
+    # generic version's own identical `reftype(m) === R && return m`
+    # early return) and still skips the check either way.
+    dnan = MDoppler{RADIO}(NaN)
+    @test measconvert(dnan, RADIO) === dnan
+
     # Phase 222 fix: an unphysical BETA (|D| > 1, faster than light) or
     # GAMMA (|D| < 1, below the Lorentz-factor minimum of 1 at rest)
     # value used to crash with a raw, uninformative `DomainError` from
@@ -270,6 +286,26 @@ end
     # MRadialVelocity <-> MDoppler
     @test doppler(MRadialVelocity{LSRK}(3e5)).d ≈ 3e5 / MSv2.C_LIGHT
     @test radialvelocity(doppler(MRadialVelocity{BARY}(-1.2e5))).mps ≈ -1.2e5
+
+    # Phase 224 fix: `doppler(v::MRadialVelocity)` used to construct
+    # `MDoppler{BETA}(v.mps / C_LIGHT)` directly, with NO validation at
+    # all -- unlike its sibling `doppler(f::MFrequency, restfreq)`,
+    # whose `t = (f/restfreq)^2 >= 0` provably keeps the result in
+    # `(-1, 1]` for ANY finite input and so needs none. `v.mps` has no
+    # such bound: live-reproduced, `doppler(MRadialVelocity{LSRK}(4e8))`
+    # (superluminal, > c) used to succeed silently, returning an
+    # `MDoppler{BETA}` with `|d.d| > 1` -- a physically-meaningless
+    # value that then only crashed (with the Phase 222 message) the
+    # NEXT time anyone tried to `measconvert`/`radialvelocity`/
+    # `frequency`/`shiftfreq` it, not at the point the bad input was
+    # actually given.
+    @test_throws ArgumentError doppler(MRadialVelocity{LSRK}(4e8))
+    @test_throws ArgumentError doppler(MRadialVelocity{LSRK}(-4e8))
+    # the physical boundary itself (|v| == c) is NOT an error
+    @test doppler(MRadialVelocity{LSRK}(MSv2.C_LIGHT)).d ≈ 1.0
+    @test doppler(MRadialVelocity{LSRK}(-MSv2.C_LIGHT)).d ≈ -1.0
+    # an ordinary in-domain value round-trips unaffected
+    @test radialvelocity(doppler(MRadialVelocity{LSRK}(3e5))).mps ≈ 3e5
 
     # Phase 74: shiftfreq + one-step bridges
     @test shiftfreq(d, ν0) ≈ frequency(d, ν0).hz                  # scalar == fromDoppler

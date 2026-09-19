@@ -7909,3 +7909,61 @@ through all of them. 6 new assertions.
 
 Full suite green: 5180 baseline + 6 new = 5186/5186. README/memory
 updated, merge on the user's word.
+
+### Phase 224 — `src/measures/` sweep, continued: `doppler(v::MRadialVelocity)`
+had no domain check at all, and `MDoppler`'s `measconvert` bypassed the
+package's own NaN/Inf guard entirely
+
+Continued the sweep with a fresh re-read of every file in
+`src/measures/` not yet re-checked this cycle. `_FRAME_STRING` was
+independently re-verified complete against every named `RefFrame`/
+`DopplerType` singleton in `types.jl` (42 entries, exact match — no
+gap); `ephemeris.jl`, `emmachine.jl`, `earthfield.jl`, `measinfo.jl`
+and `observatories.jl` were all re-read and found consistent with
+their own prior, extensively-verified fixes (Phases 82/91-93/134-135/
+144/218-219). One already-investigated lead
+(`emm_lineofsight`'s `sqrt(an*an+subl)` for a pathological negative
+shell `height`) was confirmed still correctly deprioritized, not
+re-chased.
+
+**Two real bugs, fixed, both in `doppler.jl`:**
+
+1. `doppler(v::MRadialVelocity)` used to construct
+   `MDoppler{BETA}(v.mps / C_LIGHT)` *directly*, with no validation at
+   all — unlike its sibling `doppler(f::MFrequency, restfreq)`, whose
+   `t = (f/restfreq)^2 ≥ 0` provably keeps `(1-t)/(1+t)` in `(-1, 1]`
+   for *any* finite input and so needs none. `v.mps` has no such
+   bound. Live-reproduced: `doppler(MRadialVelocity{LSRK}(4e8))`
+   (superluminal, `> c`) silently succeeded, returning an
+   `MDoppler{BETA}` with `|d.d| > 1` — a physically-meaningless value
+   that then only crashed (with the Phase 222 message) the *next* time
+   anyone tried to `measconvert`/`radialvelocity`/`frequency`/
+   `shiftfreq` it, not at the point the bad input was actually given.
+   Fixed by factoring `_dop_ratio(::Type{BETA}, ·)`'s own domain check
+   out into a shared `_check_beta_domain`, reused by `doppler` before
+   constructing the value — the physical boundary itself (`|v| == c`)
+   is still not an error, only strictly beyond it is.
+
+2. `MDoppler`'s own `measconvert` dispatches on `DopplerType`, not
+   `RefFrame` — a *completely separate* method from the generic
+   `Measure -> RefFrame` one in `types.jl` that validates `_all_finite`
+   on its input before converting (Phase 195). It never went through
+   that guard at all. Live-reproduced: `measconvert(MDoppler{RADIO}
+   (NaN), OPTICAL)` silently returned `MDoppler{OPTICAL}(NaN)`, while
+   the identical NaN input to e.g. `measconvert(MEpoch{UTC}(NaN), TAI)`
+   correctly throws a clear `ArgumentError` — the one measure type with
+   a domain-sensitive conversion (Phase 222/223's own `BETA`/`GAMMA`
+   `sqrt`) was also the one measure type where a non-finite input could
+   slip through silently instead of erroring. Fixed with the same
+   `isfinite` check every other measure conversion already has,
+   raising the identical message style; the `C === D` short-circuit
+   still skips it, matching the generic version's own identical
+   `reftype(m) === R && return m` early return — a genuine no-op needs
+   no validation either way.
+
+Both fixes verified live (boundary values `|v| == c` / same-convention
+NaN passthrough unaffected; ordinary round-trips unaffected) before
+being pinned with permanent tests. 9 new assertions.
+
+Full suite green: 5186 baseline + 9 new = 5195/5195. README/memory
+updated, merge on the user's word.
