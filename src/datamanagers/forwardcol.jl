@@ -29,8 +29,20 @@ function Base.open(::Type{ForwardColumnEngine}, t::Table, dm::DataManagerInfo)
     vi === nothing &&
         error("ForwardColumnEngine (seq $(dm.sequ)) has no bound column")
     vdesc = t.desc.columns[vi]
-    rel = String(get(vdesc.keywords, "_ForwardColumn_TableName",
-                     get(t.desc.private, "_ForwardColumn_TableName_$(dm.sequ)", "")))
+    # `ForwardColumn::fillTableName` (ForwardCol.cc:270-300) always defines
+    # this on the *column*'s own keyword set, under the literal name
+    # `"_ForwardColumn_TableName" + enginePtr_p->suffix()` -- and `suffix()`
+    # (ForwardCol.h:531-532,554-558) is only ever set to a non-empty value
+    # by `ForwardColumnIndexedRowEngine::setSuffix("_Row")`
+    # (ForwardColRow.cc:46,60,70), the sibling engine this package doesn't
+    # support (Phase 124). So for the plain `ForwardColumnEngine` this file
+    # implements, the keyword name is always exactly
+    # `"_ForwardColumn_TableName"`, with no suffix and never on `t.desc.private`
+    # -- a `dm.sequ`-suffixed `t.desc.private` fallback was carried here since
+    # this engine's original Phase 40 implementation with no source citation
+    # for it; confirmed (Phase 215) it corresponds to no real casacore
+    # convention (our own writer never populates it either) and removed.
+    rel = String(get(vdesc.keywords, "_ForwardColumn_TableName", ""))
     isempty(rel) && error("ForwardColumnEngine column \"$(vdesc.name)\": " *
                           "missing _ForwardColumn_TableName keyword")
     return ForwardColumnEngine(t, vdesc, _resolve_tabpath(rel, t.path), nothing)

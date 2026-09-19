@@ -184,6 +184,45 @@ end
     end
 end
 
+# Phase 215 (src/datamanagers sweep, continued): two confirmed-correct-
+# but-never-exercised `encode_engine` paths found reading `virtual.jl`
+# fresh. (a) `autoscale=true` is only meaningful for the Compress*
+# engines (per-row scale/offset makes no sense for a *fixed*-per-column
+# Scaled*Engine — casacore has no such thing); `encode_engine` already
+# guards this (`kind isa ScaledKind && autoscale`) but no test ever
+# passed the combination. (b) a *fixed* `scale=0` (as opposed to the
+# autoscale all-NaN-row case the "autoScale" testset above already
+# covers) is guarded the same way inside `_encode` — never dereferences
+# the scale, encodes straight to the NaN sentinel — but was also never
+# tried. Live-verified both before adding as permanent regression tests.
+@testset "engine — autoscale=true is rejected for a Scaled*Engine (Phase 215)" begin
+    dir = joinpath(mktempdir(), "badauto.tab")
+    V = [Float64.(1:4), Float64.(5:8)]
+    @test_throws ErrorException write_table(dir, "T", ["V" => V]; nrow=2,
+        engines = Dict("V" => (; kind=MSv2E.ScaledArray(), autoscale=true)))
+    dir2 = joinpath(mktempdir(), "badauto2.tab")
+    W = [fill(ComplexF32(1, 2), 2, 2), fill(ComplexF32(3, 4), 2, 2)]
+    @test_throws ErrorException write_table(dir2, "T", ["W" => W]; nrow=2,
+        engines = Dict("W" => (; kind=MSv2E.ScaledComplex(), autoscale=true)))
+end
+
+@testset "engine — a fixed scale=0 encodes to the NaN sentinel (Phase 215)" begin
+    dir = joinpath(mktempdir(), "scale0.tab")
+    F = [Float32.(1:4), Float32.(5:8)]
+    write_table(dir, "T", ["F" => F]; nrow=2,
+        engines = Dict("F" => (; kind=MSv2E.CompressFloat(), scale=0.0f0, offset=0.0f0)))
+    fc = column(readtable(dir), "F")
+    @test all(isnan, fc[1])
+    @test all(isnan, fc[2])
+
+    dir2 = joinpath(mktempdir(), "scale0c.tab")
+    C = [fill(ComplexF32(1, 2), 2, 2), fill(ComplexF32(3, 4), 2, 2)]
+    write_table(dir2, "T", ["C" => C]; nrow=2,
+        engines = Dict("C" => (; kind=MSv2E.CompressComplex(), scale=0.0f0, offset=0.0f0)))
+    c1 = column(readtable(dir2), "C")[1]
+    @test all(isnan, real.(c1)) && all(isnan, imag.(c1))
+end
+
 @testset "engine — NaN sentinels" begin
     dir = joinpath(mktempdir(), "nan.tab")
     F = [Float32[1.0 NaN; 2.0 3.0], Float32[NaN NaN; NaN NaN]]
