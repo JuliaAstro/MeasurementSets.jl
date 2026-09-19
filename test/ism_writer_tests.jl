@@ -204,3 +204,47 @@ if isdir(SAMPLE_MS)
         end
     end
 end
+
+# Phase 215 (src/datamanagers sweep, continued): a variable-shape ISM
+# column's indirect-array cell being genuinely undefined (never `put`, or
+# explicitly written as an empty array) decodes via `_ism_decode`'s
+# `foff == 0` branch (`incremental.jl`) -- a real casacore state (the same
+# category as the `TiledCellStMan` null-cube state fixed in Phase 213),
+# and directly reachable through this package's own writer (`_ism_encode!`
+# stores offset 0 for an empty-array cell) -- but nothing in the suite had
+# ever written one. Live-verified correct before adding as a permanent
+# regression test.
+@testset "ISM writer — an undefined (empty-array) indirect cell (Phase 215)" begin
+    dir = joinpath(mktempdir(), "ism_undef")
+    V = [Float64[1.0, 2.0, 3.0], Float64[], Float64[4.0, 5.0]]   # row 2: undefined
+    write_table(dir, "T", ["V" => V]; nrow=3, ism=["V"])
+    r = readtable(dir)
+    @test r.managers[1].name == "IncrementalStMan"
+    @test getcell(r, "V", 1) == [1.0, 2.0, 3.0]
+    @test getcell(r, "V", 2) == Float64[]
+    @test getcell(r, "V", 3) == [4.0, 5.0]
+    @test getcolumn(r, "V") == V
+
+    # the same state for an indirect *String* array column (ISM has no
+    # separate string-bucket mechanism -- every non-Dims column, String or
+    # not, goes through the array file, Phase 8)
+    dir2 = joinpath(mktempdir(), "ism_undef_str")
+    S = [["a", "b", "c"], String[], ["x", "y"]]
+    write_table(dir2, "T", ["S" => S]; nrow=3, ism=["S"])
+    r2 = readtable(dir2)
+    @test getcell(r2, "S", 1) == ["a", "b", "c"]
+    @test getcell(r2, "S", 2) == String[]
+    @test getcell(r2, "S", 3) == ["x", "y"]
+    @test getcolumn(r2, "S") == S
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:V][1] == V[1]
+        @test isempty(ct[:V][2])
+        @test ct[:V][3] == V[3]
+        ct2 = CCT.Table(dir2)
+        @test ct2[:S][1] == S[1]
+        @test isempty(ct2[:S][2])
+        @test ct2[:S][3] == S[3]
+    end
+end

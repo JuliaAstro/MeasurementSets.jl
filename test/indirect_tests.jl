@@ -80,3 +80,44 @@ if isdir(SAMPLE_MS)
         end
     end
 end
+
+# Phase 215 (src/datamanagers sweep, continued): a variable-shape SSM
+# indirect-array cell that was never `put` (or is explicitly an empty
+# array) decodes via `getcell`'s `foff == 0` branch (`standard.jl`) --
+# same real casacore state as the ISM case (`test/ism_writer_tests.jl`'s
+# "an undefined (empty-array) indirect cell" testset), and reachable
+# through this package's own SSM-indirect writer (`isempty(v) ? Int64(0)
+# : af_put!(...)`) -- but never actually exercised. Covers both the
+# numeric-array path (`arrayfile.jl`) and the indirect-*string*-array
+# path (`_read_string_array`'s `total <= 0` branch, `standard.jl`).
+@testset "SSM indirect — an undefined (empty-array) cell (Phase 215)" begin
+    dir = joinpath(mktempdir(), "ssm_undef")
+    V = [Float64[1.0, 2.0, 3.0], Float64[], Float64[4.0, 5.0]]   # row 2: undefined
+    write_table(dir, "T", ["V" => V]; nrow=3)          # default: StandardStMan
+    r = readtable(dir)
+    @test r.managers[1].name == "StandardStMan"
+    @test getcell(r, "V", 1) == [1.0, 2.0, 3.0]
+    @test getcell(r, "V", 2) == Float64[]
+    @test getcell(r, "V", 3) == [4.0, 5.0]
+    @test getcolumn(r, "V") == V
+
+    dir2 = joinpath(mktempdir(), "ssm_undef_str")
+    S = [["a", "b", "c"], String[], ["x", "y"]]
+    write_table(dir2, "T", ["S" => S]; nrow=3)
+    r2 = readtable(dir2)
+    @test getcell(r2, "S", 1) == ["a", "b", "c"]
+    @test getcell(r2, "S", 2) == String[]
+    @test getcell(r2, "S", 3) == ["x", "y"]
+    @test getcolumn(r2, "S") == S
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:V][1] == V[1]
+        @test isempty(ct[:V][2])
+        @test ct[:V][3] == V[3]
+        ct2 = CCT.Table(dir2)
+        @test ct2[:S][1] == S[1]
+        @test isempty(ct2[:S][2])
+        @test ct2[:S][3] == S[3]
+    end
+end

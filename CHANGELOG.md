@@ -7429,3 +7429,88 @@ provably-unreachable line above.
 
 Full suite green (baseline 5065, +9 new = 5074/5074). README/memory updated, merge
 on the user's word.
+
+### Phase 215 — src/datamanagers sweep, continued: a dead/fabricated
+fallback removed, plus a handful of confirmed-correct-but-untested
+paths closed
+
+Another coverage-instrumented full-suite run + manual re-reading of
+every `src/datamanagers/*.jl` file, continuing where Phase 214 left
+off. `arrayfile.jl`, `datamanager.jl`, `forwardcol.jl`,
+`virtualtaql.jl`, `container.jl` (barring the expected HDF5-fallback
+stubs, overridden whenever `import HDF5` loads the extension) all came
+back fully covered or down to already-documented, deliberately
+deprioritized lines; every remaining "0 never executed" line across
+`standard.jl` / `incremental.jl` / `tiled.jl` / `virtual.jl` / `dysco.jl`
+matched — line for line — something Phase 213 or 214 had already
+investigated and explicitly deprioritized (the `SSMIndex`/`ISMIndex`
+bounds guards, `SSMStringHandler`'s `filled==0` case, `tiled.jl`'s
+`>2 GiB` file-record branch, `_af_fit_to_maximum!`'s two early-
+termination branches, Dysco's `rowsPerBlock==0` guard, and — confirmed
+once more, still genuinely unreachable — `CompressComplexSD`'s
+mathematically-dead `r == -ENG_C_WRAP` branch). `src/datamanagers/` is,
+at this point, about as thoroughly line-covered as it is going to get
+without chasing fixtures that need multi-gigabyte files or platform-
+specific undefined behaviour to reproduce.
+
+**A real, if not crashing, finding: a fabricated fallback in
+`ForwardColumnEngine`'s reader that corresponds to no real casacore
+convention.** `open(::Type{ForwardColumnEngine}, ...)` has carried,
+unchanged since its original Phase 40 implementation, a fallback that
+looked up `_ForwardColumn_TableName_$(dm.sequ)` on the table's *private*
+keyword set whenever the primary lookup (`vdesc.keywords
+["_ForwardColumn_TableName"]`) came back empty — with no source
+citation for it anywhere in the comments. Reading
+`ForwardCol.cc::fillTableName`/`basePrepare` directly
+(`tables/DataMan/ForwardCol.cc:270-300,311-313`) shows real casacore
+*always* defines this keyword on the *column*'s own keyword set, under
+the literal name `"_ForwardColumn_TableName" + enginePtr_p->suffix()` —
+never on a table-level private slot, and never keyed by a data-manager
+sequence number. `suffix()` (`ForwardCol.h:531-532,554-558`) is only
+ever set to a non-empty value by `ForwardColumnIndexedRowEngine::
+setSuffix("_Row")` (`ForwardColRow.cc:46,60,70`) — the sibling engine
+this package deliberately doesn't support (Phase 124) — so for the
+plain `ForwardColumnEngine` this file implements, the keyword name is
+*always* exactly `"_ForwardColumn_TableName"`, unsuffixed, and never on
+`t.desc.private`. Confirmed via `git log` the fallback was speculative
+from the start (present in the very first commit, no citation, never
+touched since) and via `grep` that neither this package's own writer
+(`create.jl`, which only ever populates `vdesc.keywords`) nor any test
+ever puts anything there — a `dm.sequ`-suffixed private-keyword form was
+never a real convention to begin with. Removed the fallback and
+replaced the comment with the actual source citation; the primary
+lookup + error path are unchanged (and were already correctly tested).
+
+**Confirmed-correct-but-untested paths closed with permanent tests**
+(each live-verified first, several against real `Casacore.jl`):
+- An SSM- or ISM-indirect (variable-shape) array cell that was never
+  `put` — or is explicitly written as an empty array — decodes via the
+  `foff == 0` branch in `standard.jl`'s `getcell` and
+  `incremental.jl`'s `_ism_decode` (a real casacore state, the same
+  category as the `TiledCellStMan` null-cube state fixed in Phase 213),
+  and is directly reachable through this package's own writer
+  (`isempty(v) ? Int64(0) : af_put!(...)`). The SSM numeric-array case
+  turned out to already be exercised abundantly by the real sample-MS
+  fixture reads (the coverage counters showed the early-return firing
+  over 100,000 times) — just never with an explicit, hand-built,
+  Casacore.jl-cross-checked assertion pinning the exact behaviour. The
+  ISM case, and both indirect-*string*-array variants
+  (`_read_string_array`'s `total <= 0` branch), had *zero* prior
+  coverage at all. New regression tests in `test/indirect_tests.jl` and
+  `test/ism_writer_tests.jl` cover all four combinations.
+- `encode_engine`'s `kind isa ScaledKind && autoscale` rejection
+  (`virtual.jl`) — per-row auto-scale/offset only makes sense for the
+  Compress* engines (a `ScaledArrayEngine`/`ScaledComplexData` column
+  has one *fixed* scale/offset per column, by casacore's own design —
+  there is no such thing as an autoscaled one); the guard exists and is
+  correct, but nothing had ever actually passed the combination it
+  rejects.
+- A *fixed* `scale=0` for `CompressFloat`/`CompressComplex`
+  (`virtual.jl`'s `_encode` — distinct from the *autoscale*-all-NaN-row
+  case the existing "autoScale" testset already covers) hits the same
+  `sc == 0 → NaN sentinel` guard from a different direction and was
+  likewise never tried. Live-verified it encodes straight to the NaN
+  sentinel with no division-by-zero, for both engines.
+
+Full suite green (baseline 5074, +35 new = 5109/5109). README/memory
+updated, merge on the user's word.
