@@ -8856,3 +8856,77 @@ on the real MS's `TIME` column).
 
 Full suite green: 5342 baseline + 3 new = 5345/5345. README/memory
 updated, merge on the user's word.
+
+### Phase 239 — fix the `SPECTRAL_WINDOW.CHAN_FREQ` subtable outlier (and centralise the underlying byte-reader bug fix, found in three other files while looking for "any others")
+
+Direct follow-up ask: "Improve the subtable outlier performance, i.e.,
+the `SPECTRAL_WINDOW.CHAN_FREQ` performance, and any others that might
+be identified" — the one subtable column, out of every one benchmarked
+since Phase 45's comparison, that stayed slower than C++ (5.08x) while
+every other subtable column was already faster.
+
+**Root cause: the exact same allocating byte-read pattern Phases
+68/234/237/238 had already found and fixed three times — independently,
+in three different files, never centralised.** `CHAN_FREQ` is an
+SSM-indirect (ragged/`VariableShape`) array column, read via
+`arrayfile.jl`'s `af_read` and `standard.jl`'s `getcell`/`locate`
+machinery — both used `reinterpret(T, ::Vector{UInt8})` (via a `view`)
+for every scalar/array element read, the identical slow path this
+package's own `tiled.jl` (`_rd_run!`/`_rd_bits!`, Phase 68/234) and
+`incremental.jl` (`_ld`, Phase 237) had already replaced with a
+pinned-pointer `unsafe_load` primitive — just never carried over to
+`standard.jl` or `arrayfile.jl`.
+
+**Fix — centralised, not a fourth independent patch:** extracted
+`_hostconv`/`_ld`/`_rd_run!`/`_rd_bits!` out of `tiled.jl`/
+`incremental.jl` into a new shared `datamanagers/bytes.jl`, included
+first among the `datamanagers/*.jl` files (so every other data-manager
+file — `standard.jl`, `tiled.jl`, `incremental.jl`, `arrayfile.jl` — can
+use it, resolving the include-order problem that was presumably *why*
+each file grew its own independent copy of the same primitive in the
+first place). Rewired every site: `standard.jl`'s `_i32`/`_i64`/
+`_be_i32` (used throughout `getcell`/`locate`/bucket-header parsing) and
+`_read_elems` (the fixed-shape-array `getcell` decode); `arrayfile.jl`'s
+`_af_get`, `open_arrayfile`'s version read, and `af_read`'s three
+element-type branches — the `Bool` branch switched to the bulk
+`_rd_bits!` primitive, and the `Complex` branch was found to need no
+special case at all once using `_rd_run!` (a Julia `Complex{T}`'s
+in-memory layout — two contiguous `T` fields, real then imaginary —
+already matches casacore's own interleaved on-disk storage, and
+`_hostconv` already swaps each component; the same bulk primitive Phase
+234-238 already proved correct for tiled `DATA`, ComplexF32, columns
+handles it directly, merging what used to be three branches into two).
+
+Live-verified on the real MS: `column(spw,"CHAN_FREQ")[:]` **0.38x of
+C++ (was 5.08x — from 10x slower to ~2.6x faster)**. Every subtable
+column across `ANTENNA`/`FIELD`/`SPECTRAL_WINDOW`/`POLARIZATION`/`FEED`
+in the benchmark is now faster than C++ — **no remaining subtable
+outlier** (subtable geometric-mean ratio 0.286x → 0.215x). The MAIN
+table's own SSM-bound scalar columns share `_i32`/`_be_i32`/
+`_read_elems` too, so this incidentally tightens those further (already
+faster than C++ before this phase, geometric-mean ratio essentially
+unchanged at 0.2x — within run-to-run noise). The one remaining ">1x"
+line in the benchmark, table/subtable *open* (metadata parsing, ~400 µs
+absolute — a fundamentally different operation from a column data read)
+was not part of this ask and is left as a documented, unaddressed
+asymmetry.
+
+New `test/indirect_tests.jl` testset ("SSM indirect array —
+whole-column allocation regression"): a synthetic 2000-row **ragged**
+(non-uniform-cell-shape — `_infer_shape`'s `VariableShape()` branch,
+confirmed via `columndesc(...).shape isa VariableShape` so the test
+can't silently drift onto the already-fast fixed-shape `:direct` path
+instead) array column with `CHAN_FREQ`-sized (63-65-element) cells; an
+`@allocated` regression guard for both `getcolumn` (whole-column) and
+`getcell` (per-cell), each with a documented, empirically-calibrated
+bound (a `Vector{Any}`-of-individually-allocated-cells column has real,
+unavoidable per-cell array-header overhead on top of its raw payload —
+not 1x, but nowhere near the several-hundred-bytes-per-element the old
+`reinterpret`/`view` pattern added). `_HAVE_CASACORE`-gated
+cross-check. The pre-existing "StManArrayFile codec round-trip" testset
+(both endians, `Double`/`Int`/`Complex`/`Bool`) already fully covers
+`af_read`'s rewritten branches for correctness — no separate
+correctness test needed for the `Complex` merge.
+
+Full suite green: 5345 baseline + 9 new = 5354/5354. README/memory
+updated, merge on the user's word.

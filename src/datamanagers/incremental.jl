@@ -72,20 +72,9 @@ end
 DATAMANAGERS["IncrementalStMan"] = IncrementalStMan
 DATAMANAGERS["ISM"]              = IncrementalStMan
 
-# Single-value analog of `tiled.jl`'s `_rd_run!` -- `reinterpret(T,
-# ::Vector{UInt8})` (via a `view`) is an allocating slow path in Julia for
-# `sizeof(T) > 1`; a pinned-pointer `unsafe_load` is not.  `_hostconv`
-# (defined in `tiled.jl`, included before this file) does the endian fixup
-# for both `Real` and `Complex`.  This one primitive replaces what used to
-# be dozens of allocating `reinterpret`/`view` reads per `getcell` call
-# (Phase 237 -- random-access `TIME` was allocating ~123 KiB/lookup).
-@inline function _ld(::Type{T}, bytes::AbstractVector{UInt8}, off::Int, big::Bool) where {T}
-    GC.@preserve bytes begin
-        p = Ptr{T}(pointer(bytes) + off)
-        return _hostconv(unsafe_load(p), big)
-    end
-end
-
+# `_ld` (the single-value primitive both of these use) moved to
+# `datamanagers/bytes.jl` (Phase 239 -- shared with `standard.jl`/
+# `tiled.jl`/`arrayfile.jl`).
 _u32(ism, off) = _ld(UInt32, ism.data, off, ism.endian === :big)
 _ism_i64(ism, off) = _ld(Int64, ism.data, off, ism.endian === :big)
 

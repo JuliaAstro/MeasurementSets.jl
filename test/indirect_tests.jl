@@ -121,3 +121,68 @@ end
         @test ct2[:S][3] == S[3]
     end
 end
+
+# `getcolumn`/`getcell` on an SSM-indirect array column (`CHAN_FREQ` and
+# every other ragged-array subtable column -- `POLARIZATION.CORR_TYPE`,
+# `FIELD.PHASE_DIR`, ...) -- the one MAIN/subtable-read path Phase
+# 237-238's ISM/tiled sweep hadn't reached: `af_read` (`arrayfile.jl`)
+# and `StandardStMan`'s own `_i32`/`_i64`/`_be_i32`/`_read_elems` byte
+# readers all shared the same allocating `reinterpret(T,
+# ::Vector{UInt8})`-via-`view` pattern already fixed elsewhere (Phase
+# 68/234 for the tiled reader, Phase 237/238 for ISM) -- live-measured
+# on the real ALMA MS's `SPECTRAL_WINDOW.CHAN_FREQ` (96 rows x 64
+# `Float64` channels): 5.1x slower than real casacore C++
+# (`Casacore.jl`), ~787 bytes/row against a 512-byte payload. Phase 239
+# centralised the fix (a shared `datamanagers/bytes.jl`, reused by
+# `standard.jl`/`tiled.jl`/`incremental.jl`/`arrayfile.jl`) rather than
+# patching `arrayfile.jl` alone. Live-verified afterward: `CHAN_FREQ`
+# whole-column read is now 0.38x of C++ (faster, not merely
+# "comparable") -- pin the allocation side of that here.
+@testset "SSM indirect array — whole-column allocation regression (Phase 239)" begin
+    n = 2000
+    # a RAGGED (non-uniform-shape) column -- `_infer_shape` (`create.jl`)
+    # routes a column to the fast fixed-shape `:direct` path the moment
+    # every cell shares one shape, which would silently test the WRONG
+    # (already-fast, Phase 235/236) path instead of the SSM-indirect
+    # `:indarr` mechanism this phase actually fixed. Lengths cycle
+    # 63/64/65 -- close to `CHAN_FREQ`'s real 64-channel size, genuinely
+    # ragged.
+    V = [collect(Float64, 1:(63 + i % 3)) .+ i for i in 1:n]
+    dir = joinpath(mktempdir(), "ssm_indarr_alloc")
+    write_table(dir, "T", ["V" => V]; nrow=n)
+    r = readtable(dir)
+    @test columndesc(r, "V").manager == "StandardStMan"
+    @test columndesc(r, "V").shape isa MSv2.VariableShape   # confirms :indarr, not :direct
+
+    getcolumn(r, "V")           # warm up (compile)
+    GC.gc()
+    a = @allocated getcolumn(r, "V")
+    # theoretical minimum: every cell array's own real payload, summed,
+    # plus the `n`-length `Vector{Any}` wrapper `getcolumn` returns for a
+    # non-scalar column -- the old per-element `reinterpret`/`view` waste
+    # was several hundred bytes *on top of* each cell's own payload; a
+    # loose bound well under that still catches a real regression.
+    payload = sum(length, V) * sizeof(Float64)
+    # not 1x -- `getcolumn` returns a `Vector{Any}` of `n` INDIVIDUALLY
+    # allocated cell arrays for a non-scalar column (no shared backing
+    # buffer, unlike the fixed-shape `BlockColumn` path), so `n` real
+    # small-array headers are genuine, unavoidable overhead on top of the
+    # raw payload -- live-measured ~1.5x here. 2x still catches the old
+    # bug (which added several HUNDRED bytes of pure `reinterpret`/`view`
+    # waste per element on top of that, not a fixed ~50%).
+    @test a < 2.0 * payload
+    @test getcolumn(r, "V") == V
+
+    getcell(r, "V", 1)          # warm up
+    GC.gc()
+    a1 = @allocated getcell(r, "V", n ÷ 2)
+    @test a1 < 4 * 65 * sizeof(Float64)   # one cell's worth, generously bounded
+    @test getcell(r, "V", n ÷ 2) == V[n ÷ 2]
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test ct[:V][1] == V[1]
+        @test ct[:V][n] == V[n]
+        @test ct[:V][n ÷ 2] == V[n ÷ 2]
+    end
+end
