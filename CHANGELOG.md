@@ -8150,3 +8150,72 @@ casacore MS or real TaQL query ever produces. 17 new assertions.
 
 Full suite green: 5207 baseline + 17 new = 5224/5224. README/memory
 updated, merge on the user's word.
+
+### Phase 228 — user-reported docs build failure: `measconvert` had no
+docstring at all, a real, previously-undetected instance of the "a
+docstring is silently DROPPED if anything sits between it and its
+target" mistake (Phase 160's own class of bug, three more instances)
+
+The user reported the docs build failing with `Error: no docs found
+for 'measconvert' in @docs block in docs/src/api-measures.md:14-52`.
+Reproduced locally: `@doc(measconvert)` genuinely returned `nothing`.
+
+**Root cause, confirmed with a minimal reproduction before touching any
+source**: a Julia `"""..."""` docstring is silently *dropped* — not
+misattached to the wrong thing, not an error, just lost — if *anything
+at all*, even a bare `# comment` line with nothing else, sits between
+it and the expression it documents; only blank lines are transparent.
+This is the same class of mistake Phase 160 already found and fixed
+(there, an `@eval`-generated `struct` needing `@doc` explicitly) — a
+different concrete shape of the same underlying trap.
+
+**Three real instances found and fixed, one of them user-reported, two
+found only by then doing a comprehensive sweep rather than stopping at
+the first fix:**
+
+1. `src/measures/types.jl` — the generic `measconvert(m::Measure,
+   R::Type{<:RefFrame}; frame)` docstring was separated from its target
+   by `_all_finite`'s own explanatory comment *and* the `_all_finite`
+   definition itself (inserted between them back in Phase 195, which
+   evidently broke this without anyone noticing until Documenter's own
+   `@docs` check finally caught it). Fixed by moving `_all_finite`
+   above the docstring instead of below it.
+2. `src/measures/doppler.jl` — **found while investigating the exact
+   same mistake in my own Phase 224 commit**: `measconvert(m::MDoppler
+   {C}, ::Type{D})`'s docstring had an identical shape (docstring, a
+   long explanatory comment, then the function) — introduced by this
+   session's own Phase 224 work, never caught because the *generic*
+   `measconvert` function still resolved to types.jl's docstring at
+   the time (before item 1 broke that too), so `@doc(measconvert)`
+   wasn't actually `nothing` until both were broken simultaneously.
+3. `src/measures/measinfo.jl` — a pre-existing, lower-severity instance
+   (the docstring is internal, `_ref_string`, never listed in any
+   `@docs` block, so it didn't break the build) found by a systematic
+   scan rather than another docs-build failure: the docstring intended
+   for `_ref_string` (defined at line 157) sat, misplaced, directly
+   above `_ref_from_code` (a different, undocumented sibling function
+   defined earlier), separated from its real target by an intervening
+   comment + the whole `_ref_from_code` function body. Fixed by moving
+   the docstring down to sit directly above `_ref_string` itself.
+
+**Methodology**: rather than trusting a single fix + a check of only
+the reported symbol, wrote a small script scanning every `.jl` file in
+`src/` and `ext/` for a `"""..."""` block whose next non-blank line is
+a `#` comment (the exact structural shape that drops a docstring) —
+confirmed zero remaining instances after all three fixes. Also
+confirmed, live, that a naive "check every *exported* name has some
+docstring via `@doc`" approach is unreliable here and would have missed
+item 2: `@doc` on a generic function returns docs from *any* of its
+methods, so a broken docstring on one method can be masked by a working
+docstring on another method of the same name — exactly what happened
+between items 1 and 2 before both were simultaneously broken. The fix
+was finally verified against the *real* mechanism that reported the
+original error — a genuine local `docs/make.jl` build (`julia
+--project=docs docs/make.jl`), which now completes with zero errors
+(only a pre-existing, unrelated search-index-size informational
+warning).
+
+No test-count change (a pure comment/docstring reordering — every
+executable line is byte-identical, just moved relative to comments)
+— full suite reconfirmed green regardless, since a source change is a
+source change. README/memory updated, merge on the user's word.

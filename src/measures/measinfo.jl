@@ -129,13 +129,6 @@ function measinfo(t::AbstractTable, col::AbstractString)
     MeasInfo(kind, fixed, varcol, tt, tc, units)
 end
 
-"""
-    _ref_string(mi, t, col, row) -> String
-
-The reference-frame name for one row: the fixed `Ref`, or the
-`VarRefCol` companion column's code for that row mapped through
-`TabRefCodes` -> `TabRefTypes` (or the fixed enum order).
-"""
 # a per-row `VarRefCol` code -> its reference-frame name
 function _ref_from_code(mi::MeasInfo, code::Integer)
     c = Int(code)
@@ -154,6 +147,19 @@ function _ref_from_code(mi::MeasInfo, code::Integer)
     return enum[c + 1]
 end
 
+# Phase 228 docs fix: this docstring used to sit above `_ref_from_code`
+# (this function's own sibling, ~15 lines up), separated from THIS
+# function -- its actual target -- by an intervening comment, so it was
+# silently dropped entirely (a `"""..."""` docstring is lost, not
+# misattached, if anything at all sits between it and the expression it
+# documents). Moved to sit directly above its real target.
+"""
+    _ref_string(mi, t, col, row) -> String
+
+The reference-frame name for one row: the fixed `Ref`, or the
+`VarRefCol` companion column's code for that row mapped through
+`TabRefCodes` -> `TabRefTypes` (or the fixed enum order).
+"""
 function _ref_string(mi::MeasInfo, t::AbstractTable, col::AbstractString, row::Integer)
     mi.fixedref !== nothing && return mi.fixedref
     mi.varrefcol === nothing && throw(ArgumentError(

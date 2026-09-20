@@ -302,15 +302,6 @@ MeasFrame(; epoch=nothing, position=nothing, direction=nothing) =
 # conversion entry point  -- real methods come from the SOFA extension
 # ======================================================================
 
-"""
-    measconvert(m::Measure, R::Type{<:RefFrame}; frame=MeasFrame()) -> Measure
-
-Convert measure `m` to reference frame `R`.  Needs `SOFA.jl` loaded
-(`import SOFA`); `import EarthOrientation` as well for full ΔUT1 /
-polar-motion accuracy (otherwise ~1 arcsecond, with a one-time warning).
-`frame` supplies whatever auxiliary epoch / position / source direction
-the target frame requires -- see [`MeasFrame`](@ref).
-"""
 # A non-finite (NaN/±Inf) field anywhere in a measure or its frame used
 # to crash deep inside SOFA.jl's own numeric routines with a confusing,
 # unrelated-looking error (e.g. SOFA's `jd2cal` raising `AssertionError:
@@ -325,6 +316,25 @@ the target frame requires -- see [`MeasFrame`](@ref).
 # error is the right choice here, not a silent fallback.
 _all_finite(x) = all(isfinite(getfield(x, f)) for f in fieldnames(typeof(x)))
 
+# Docs fix: a `"""..."""` docstring is silently DROPPED (not attached to
+# anything, not even an error) if ANYTHING -- even a bare `# comment` --
+# sits between it and the expression it documents; only whitespace/blank
+# lines are transparent. This one used to sit right above, separated
+# from `function measconvert(...)` by the `_all_finite` comment + its
+# one-line definition, so `measconvert` had NO docstring at all (found
+# live: `@doc(measconvert)` returned `nothing`, and Documenter's `@docs`
+# block in `docs/src/api-measures.md` failed outright with "no docs
+# found for 'measconvert'"). Moved `_all_finite` above so this docstring
+# is now immediately followed by its target, with nothing in between.
+"""
+    measconvert(m::Measure, R::Type{<:RefFrame}; frame=MeasFrame()) -> Measure
+
+Convert measure `m` to reference frame `R`.  Needs `SOFA.jl` loaded
+(`import SOFA`); `import EarthOrientation` as well for full ΔUT1 /
+polar-motion accuracy (otherwise ~1 arcsecond, with a one-time warning).
+`frame` supplies whatever auxiliary epoch / position / source direction
+the target frame requires -- see [`MeasFrame`](@ref).
+"""
 function measconvert(m::Measure, R::Type{<:RefFrame}; frame::MeasFrame=MeasFrame())
     reftype(m) === R && return m
     _all_finite(m) || throw(ArgumentError(
