@@ -61,13 +61,23 @@ end
 # the original (pre-sort) row order (`alg=MergeSort` -- Julia's default
 # algorithm choice is type/size-dependent and not guaranteed stable, and
 # a stable tie-break is the intuitive, TaQL-consistent behaviour).
+#
+# Phase 229 finding (the `groupby.jl` sibling of this function, `_gt_sort`,
+# had the identical bug -- fixed there too): a column being sorted may
+# genuinely contain `missing` (e.g. `ORDER BY` a right-side column of an
+# outer `join` with `unmatched=:missing`) -- ordinary usage, not contrived.
+# Raw `vi == vj` gives `missing` (three-valued) whenever either side is
+# `missing`, and `missing && continue` crashed with a raw `TypeError`
+# instead of sorting normally. Fixed with `isequal` (`missing`-safe,
+# always-`Bool`); `isless` already sorts `missing` sensibly on its own
+# (last ascending / first descending -- Julia's own `sort` convention).
 function _apply_orderby(matched::Vector{Int}, orderby::Vector{TQLOrderKey},
                         cols::AbstractDict)
     isempty(orderby) && return matched
     lt = function (i, j)
         for k in orderby
             vi, vj = cols[k.name][i], cols[k.name][j]
-            vi == vj && continue
+            isequal(vi, vj) && continue
             return k.desc ? isless(vj, vi) : isless(vi, vj)
         end
         return false

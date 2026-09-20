@@ -8219,3 +8219,62 @@ No test-count change (a pure comment/docstring reordering — every
 executable line is byte-identical, just moved relative to comments)
 — full suite reconfirmed green regardless, since a source change is a
 source change. README/memory updated, merge on the user's word.
+
+### Phase 229 — continued the `src/taql/` sweep: Phase 227's own fix
+introduced a fresh regression, plus a second, unrelated `missing`-vs-`==`
+crash in `ORDER BY`/`orderby` sorting
+
+Continued sweeping `src/taql/` with a fresh-eyes read of `ast.jl` and
+`parse.jl` — the tokenizer/AST core, last touched (not re-read) when
+Phase 227 patched `_tql_and`/`_tql_or` in place.
+
+**Real bug #1, fixed:** Phase 227's `_tql_and`/`_tql_or` accepted a raw,
+*unvalidated* operand of any type, not just `Bool`/`Missing`. Before
+Phase 227, `TQLAnd`/`TQLOr` used plain `&&`/`||`, which correctly
+`throw`s a `TypeError` for a non-Bool, non-Missing operand — a genuinely
+malformed predicate. Live-reproduced: `_tql_and(5, true)` silently gave
+`missing` (not an error), and because `_tql_truthy(missing) == false`, a
+whole malformed query like `query(t, "K AND FLAG")` (`K` an `Int32`
+column, not `Bool`) silently returned *zero rows* instead of raising the
+same clear "must evaluate to Bool" error every other malformed-predicate
+shape in this file gives. Worse: `_tql_and(5, false)` gave `false` — a
+garbage *left* operand combined with a literal `false` on the right was
+never even inspected, short-circuited away by the `b === false` branch
+before validation could run. Fixed by validating each operand through a
+new `_tql_boolish` (mirrors `_tql_truthy`, but *preserves* rather than
+coalesces a genuine `missing`) before the 3-valued combination — a real
+type error still raises clearly, and only `true`/`false`/`missing` ever
+reach the SQL-NULL-style logic. `groupby.jl`'s `_geval(::TQLAnd/TQLOr)`
+reuses these same two functions, so one fix covers both `_tqleval` and
+`_geval`.
+
+**Real bug #2, fixed, a completely separate finding:** `_apply_orderby`
+(`query.jl`, `ORDER BY` / `update!`/`delete!`'s `orderby=`) and its
+`groupby.jl` sibling `_gt_sort` (`groupby`'s `orderby=`) both compared
+sort keys with raw `vi == vj && continue`. `missing == missing` is
+`missing` (three-valued), not `true`/`false`, and `missing && continue`
+crashes with the identical raw `TypeError` — genuinely reachable via
+entirely ordinary usage: `ORDER BY`/`orderby` on a column that came out
+of an outer `join` with `unmatched=:missing` (live-reproduced:
+`query(joined_result, "TRUE ORDER BY NAME")` crashed), or a
+`rollup=true`/`cube=true`/`grouping_sets=` result's aggregated-away key
+column (live-reproduced: `groupby(t, [...]; rollup=true,
+orderby=[...])` crashed the moment the sort touched a subtotal row).
+Fixed both with `isequal` (a `missing`-safe, always-`Bool` equality —
+`missing` equals `missing`, unequal to anything else); the subsequent
+`isless` ordering already handles `missing` correctly on its own with no
+change needed (sorts it last ascending / first descending, Julia's own
+`sort` convention — `isless(x, missing)` is `true` for any real `x`).
+Grepped the whole tree for any other `lt=function`/custom-sort-comparator
+site — confirmed these were the only two.
+
+16 new assertions (both the AND/OR type-validation error path and the
+legitimate-`missing`-still-works path, plus the `join`-`ORDER BY` and
+`groupby`-`rollup`-`orderby` crash reproductions). No real-TaQL
+cross-check for either — both are MeasurementSets-side chaining
+scenarios (an outer `join`'s `missing` fill; SQL `ROLLUP`/`CUBE`, which
+casacore parses but does not implement), not something a plain casacore
+MS or real TaQL query ever produces.
+
+Full suite green: 5224 baseline + 16 new = 5240/5240. README/memory
+updated, merge on the user's word.

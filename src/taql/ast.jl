@@ -213,10 +213,39 @@ _bcast(f, x::TQLMArray, y::TQLMArray) =
 # needed -- Base's `!(::Missing)`, comparison operators, and `any`
 # (which `in` uses) are already `missing`-safe; only `&&`/`||`/`if`/
 # `ifelse` require exactly `Bool` and crash otherwise.
-_tql_and(a, b) = (a === false || b === false) ? false :
-                 (a === true && b === true) ? true : missing
-_tql_or(a, b) = (a === true || b === true) ? true :
-                (a === false && b === false) ? false : missing
+#
+# Phase 229 finding: the Phase 227 fix above introduced its own new
+# regression -- `_tql_and`/`_tql_or` accepted a raw, unvalidated operand
+# of ANY type, not just `Bool`/`Missing`. Before Phase 227, `TQLAnd`/
+# `TQLOr` used plain `&&`/`||`, which correctly `throw`s a `TypeError`
+# for a non-Bool, non-Missing operand (e.g. `K AND FLAG` where `K` is an
+# `Int32` column) -- live-reproduced: `_tql_and(5, true)` silently gave
+# `missing` (not an error), and because `_tql_truthy(missing) == false`,
+# a WHOLE malformed query like `query(t, "K AND FLAG")` silently
+# returned ZERO rows instead of raising the same clear "must evaluate to
+# Bool" error every other malformed-predicate shape in this file gives.
+# Worse: `_tql_and(5, false)` gave `false` -- a garbage LEFT operand
+# combined with a literal `false` on the right was never even inspected,
+# short-circuited away by the `b === false` branch. Fixed by validating
+# each operand through `_tql_boolish` (mirrors `_tql_truthy` above, but
+# preserves rather than coalesces a genuine `missing`) before the
+# 3-valued combination -- a real type error still raises clearly, and
+# only `true`/`false`/`missing` ever reach the SQL-NULL-style logic.
+_tql_boolish(x::Bool) = x
+_tql_boolish(::Missing) = missing
+_tql_boolish(x) = throw(ArgumentError(
+    "TaQL-lite: an AND/OR operand must evaluate to Bool, got $(typeof(x))"))
+
+function _tql_and(a, b)
+    va, vb = _tql_boolish(a), _tql_boolish(b)
+    return (va === false || vb === false) ? false :
+           (va === true && vb === true) ? true : missing
+end
+function _tql_or(a, b)
+    va, vb = _tql_boolish(a), _tql_boolish(b)
+    return (va === true || vb === true) ? true :
+           (va === false && vb === false) ? false : missing
+end
 
 # The single point every WHERE/HAVING/JOIN-condition result passes
 # through before deciding row inclusion -- `missing` (SQL's "unknown")

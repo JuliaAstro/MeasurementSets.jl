@@ -2414,6 +2414,73 @@ end
     @test collect(query(g5, "KEY < 5 OR KEY > 15").KEY) == [20]
 end
 
+# Phase 229 finding: the Phase 227 fix above introduced its own new
+# regression -- `_tql_and`/`_tql_or` accepted a raw, unvalidated operand
+# of ANY type, not just `Bool`/`Missing`. Before Phase 227, `TQLAnd`/
+# `TQLOr` used plain `&&`/`||`, which correctly `throw`s for a non-Bool,
+# non-Missing operand; live-reproduced: `query(t, "K AND FLAG")` (`K` an
+# Int32 column) silently returned ZERO rows instead of the same clear
+# "must evaluate to Bool" error every other malformed-predicate shape
+# gives -- `_tql_and(5, true)` gave `missing`, and `_tql_truthy(missing)
+# == false`. Separately, `_apply_orderby` (`query.jl`) and its
+# `groupby.jl` sibling `_gt_sort` both compared sort keys with raw `vi ==
+# vj`, which crashes with a raw `TypeError` the moment either side is
+# `missing` (`missing && continue`) -- genuinely reachable via `ORDER
+# BY`/`orderby` on a `missing`-containing column from an outer `join`, or
+# a `rollup=true`/`cube=true` grouping-set's aggregated-away key.
+@testset "AND/OR type validation + ORDER BY with missing (Phase 229)" begin
+    dir = joinpath(mktempdir(), "phase229")
+    write_table(dir, "T", Pair{String,Any}["K" => Int32[1, 2, 3],
+                                            "FLAG" => Bool[true, false, true]]; nrow=3)
+    t = readtable(dir)
+
+    # a genuine type error (not `missing`) still raises clearly
+    @test_throws ArgumentError query(t, "K AND FLAG")
+    @test_throws ArgumentError query(t, "FLAG AND K")
+    @test_throws ArgumentError query(t, "K OR FLAG")
+    err = try
+        query(t, "K AND FLAG")
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError && occursin("must evaluate to Bool", err.msg)
+
+    # legitimate 3-valued logic (missing) unaffected by the validation
+    @test MSv2._tql_and(missing, true) === missing
+    @test MSv2._tql_and(missing, false) === false
+    @test MSv2._tql_and(true, missing) === missing
+    @test MSv2._tql_or(missing, true) === true
+    @test MSv2._tql_or(missing, false) === missing
+    @test MSv2._tql_and(missing, missing) === missing
+
+    # ORDER BY / orderby on a `missing`-containing column: no crash,
+    # `missing` sorts last ascending / first descending (Julia's `sort`
+    # convention via `isless`)
+    l = readtable(write_table(mktempdir(), "L", Pair{String,Any}["K" => Int32[1, 2, 3]]; nrow=3))
+    r = readtable(write_table(mktempdir(), "R",
+        Pair{String,Any}["K" => Int32[1, 2], "NAME" => ["a", "b"]]; nrow=2))
+    j = join(l, r; on="K" => "K", rightcols=["NAME"], unmatched=:missing)
+    @test isequal(collect(query(j, "TRUE ORDER BY NAME").NAME), ["a", "b", missing])
+    @test isequal(collect(query(j, "TRUE ORDER BY NAME DESC").NAME), [missing, "b", "a"])
+
+    # groupby rollup + orderby on a rolled-up key: no crash, `missing`
+    # subtotal rows sort per the same convention
+    dir2 = joinpath(mktempdir(), "rollup229")
+    write_table(dir2, "G",
+        Pair{String,Any}["K1" => Int32[1, 1, 2, 2], "K2" => Int32[10, 20, 10, 20],
+                          "V" => Float64[1, 2, 3, 4]]; nrow=4)
+    gt = readtable(dir2)
+    g = groupby(gt, ["K1", "K2"]; select=["K1" => :K1, "K2" => :K2, "N" => "gcount()"],
+               rollup=true, orderby=["K1", "K2"])
+    k1 = collect(column(g, "K1")); k2 = collect(column(g, "K2"))
+    @test length(k1) == 7   # 4 detailed + 2 K1-subtotals + 1 grand total
+    @test count(ismissing, k1) == 1
+    @test count(ismissing, k2) == 3
+    # K1-missing (grand total) row sorts last ascending
+    @test ismissing(k1[end])
+end
+
 # ---- Phase 42: array indexing + slices ---------------------------------
 
 @testset "TaQL-lite parser — array indexing unit" begin

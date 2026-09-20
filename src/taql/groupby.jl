@@ -541,10 +541,22 @@ function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
     end
     bycol = Dict(String(n) => c for (n, c) in zip(gt.names, gt.cols))
     n = isempty(gt.cols) ? 0 : length(gt.cols[1])
+    # Phase 229 finding: a `rollup=true`/`cube=true`/`grouping_sets=`
+    # result routinely has `missing` in a grouping-key output column (the
+    # aggregated-away key of a subtotal row) -- `orderby` on that column
+    # is entirely ordinary usage, not a contrived case. Raw `vi == vj`
+    # gives `missing` whenever either side is `missing` (three-valued),
+    # and `missing && continue` -- Julia's `&&` requires exactly `Bool` --
+    # crashed with a raw `TypeError` instead of sorting normally. Fixed
+    # with `isequal` (a `missing`-safe, always-`Bool` equality: `missing`
+    # equals `missing`, not-equal to anything else); the subsequent
+    # `isless` ordering already handles `missing` correctly on its own
+    # (sorts it last ascending / first descending, Julia's own `sort`
+    # convention -- `isless(x, missing)` is `true` for any real `x`).
     perm = sort(collect(1:n); alg=Base.Sort.MergeSort, lt=function (i, j)
         for k in keys
             vi, vj = bycol[k.name][i], bycol[k.name][j]
-            vi == vj && continue
+            isequal(vi, vj) && continue
             return k.desc ? isless(vj, vi) : isless(vi, vj)
         end
         return false
