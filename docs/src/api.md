@@ -43,6 +43,8 @@ column
 Column
 getcolumn(::MeasurementSets.AbstractTable, ::AbstractString)
 getcell(::MeasurementSets.AbstractTable, ::AbstractString, ::Integer)
+BlockColumn
+rawblock
 nrow
 columnnames
 ```

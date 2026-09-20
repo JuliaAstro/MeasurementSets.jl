@@ -30,7 +30,12 @@ virtual scaling / compression engines (`ScaledArrayEngine`,
 `VirtualTaQLColumn`, …).  `MultiFile` / `MultiHDF5` container tables, and
 `RefTable` / `ConcatTable` (TaQL selections, MultiMS MAIN), too.  Columns
 are lazy `AbstractVector`s; tables are `Tables.jl` sources
-(`DataFrame(subtable(ms, "ANTENNA"))`).  A MAIN table's `DATA` /
+(`DataFrame(subtable(ms, "ANTENNA"))`).  A fixed-shape array column's
+whole-column read (`DATA`, `FLAG`, `UVW`, …) is a lazy `BlockColumn` —
+one shared backing buffer, no per-row allocation until you index a row;
+[`rawblock`](@ref) hands back that buffer directly as one dense
+`(cellshape..., nrow)` `Array` for bulk numeric work.  A MAIN table's
+`DATA` /
 `MODEL_DATA` / `CORRECTED_DATA` read back as `ComplexF16` by default
 (the visibilities derive from 8-bit samples — nothing real is lost, and
 the working set halves); `readtable(ms; precision=:full)` for
