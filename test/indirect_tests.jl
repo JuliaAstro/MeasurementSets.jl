@@ -186,3 +186,55 @@ end
         @test ct[:V][n ÷ 2] == V[n ÷ 2]
     end
 end
+
+# Phase 240: `StandardStMan.getcolumn`'s `:indarr`/`:indstr` (SSM-indirect
+# array / indirect-string-array) branches had NO bulk path at all -- just
+# `[getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]`, redoing a full
+# `locate` (an O(log nbucket) binary search via `bucket_of`) from scratch
+# for every single row. Phase 239 sped up the byte-reading PRIMITIVES
+# these calls use but never touched this O(nrow)-`getcell`-calls loop
+# structure -- the documented (since Phase 16) architectural gap behind
+# `POINTING.DIRECTION`/`TARGET`/`ENCODER`/`POINTING_OFFSET` and every
+# `SYSPOWER` array column still being 4.3x-7.4x slower than real casacore
+# C++ even after Phase 239. Fixed by walking each column's buckets
+# directly (the same `_foreach_bucket` sequential-iteration trick the
+# Bool/direct-array branch already used) so each row's reference is read
+# at one O(1) offset within its bucket -- live-verified on the real MS:
+# `POINTING.DIRECTION` 4.34x slower -> 0.63x (now FASTER than C++);
+# `SYSPOWER.REQUANTIZER_GAIN` 7.43x slower -> 0.42x. This test pins
+# correctness across multiple SSM buckets (our own writer packs 1024
+# rows/bucket) for both the numeric (`:indarr`) and string (`:indstr`)
+# forms, including an undefined (never-`put`) cell in each.
+@testset "SSM indirect getcolumn — bulk bucket-walk correctness (Phase 240)" begin
+    n = 3000   # spans 3 SSM buckets (1024 rows/bucket)
+    undef_rows = Set([1, 1500, n])
+
+    V = [i in undef_rows ? Float64[] : collect(Float64, 1:(2 + i % 5)) .+ i for i in 1:n]
+    S = [i in undef_rows ? String[] : ["r$(i)_$(k)" for k in 1:(1 + i % 4)] for i in 1:n]
+
+    dir = joinpath(mktempdir(), "ssm_indarr_bulk")
+    write_table(dir, "T", ["V" => V, "S" => S]; nrow=n)
+    r = readtable(dir)
+    @test columndesc(r, "V").shape isa MSv2.VariableShape
+    @test columndesc(r, "S").shape isa MSv2.VariableShape
+
+    colV = getcolumn(r, "V")
+    colS = getcolumn(r, "S")
+    @test colV == V
+    @test colS == S
+    # spans every bucket boundary (1024, 2048) plus the undefined rows
+    for i in [1, 2, 1023, 1024, 1025, 1500, 2047, 2048, 2049, n]
+        @test getcell(r, "V", i) == V[i]
+        @test getcell(r, "S", i) == S[i]
+        @test colV[i] == V[i]
+        @test colS[i] == S[i]
+    end
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        for i in [1, 1024, 1500, 2048, n]
+            @test collect(ct[:V][i]) == V[i]
+            @test collect(ct[:S][i]) == S[i]
+        end
+    end
+end

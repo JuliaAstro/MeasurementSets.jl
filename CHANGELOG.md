@@ -8930,3 +8930,60 @@ correctness test needed for the `Complex` merge.
 
 Full suite green: 5345 baseline + 9 new = 5354/5354. README/memory
 updated, merge on the user's word.
+
+### Phase 240 — `StandardStMan.getcolumn` bulk read for SSM-indirect (`:indarr`/`:indstr`) columns
+
+Direct follow-up ask: "Implement the SSM-indirect columns bulk read" —
+the architectural gap documented since Phase 16 and left open through
+Phases 237-239's byte-reader fixes: `StandardStMan.getcolumn`'s
+`:indarr` (variable-shape numeric/`Bool` array) and `:indstr`
+(variable-shape string array) branches had **no bulk path at all**,
+just `[getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]` — every one of
+`nrow` calls redid `locate` (an O(log nbucket) binary search via
+`bucket_of`) from scratch. Phase 239 sped up the byte-reading
+*primitives* those calls use but never touched this per-row loop
+structure — the reason `POINTING.DIRECTION`/`TARGET`/`ENCODER`/
+`POINTING_OFFSET` and every `SYSPOWER` array column stayed 4.3x-7.4x
+slower than real casacore C++ even after Phase 239, at 925K-2.4M rows.
+
+**Fix:** walk each column's buckets directly — the same
+`_foreach_bucket` sequential-iteration trick the Bool/direct-array
+branch already used — instead of calling `getcell` (and its own fresh
+`locate`) per row. Within one bucket, a row's reference sits at a fixed
+byte offset from the bucket's own base (`SSM_INDARR_REF` = 8 bytes for
+`:indarr`'s `Int64` file offset, `SSM_STRING_REF` = 12 bytes for
+`:indstr`'s string-bucket triple), so each row now costs one O(1)
+offset computation instead of a fresh O(log nbucket) search — live-
+verified on the real MS: `POINTING.DIRECTION` 4.34x slower than C++ →
+0.63x (now *faster* than C++); `SYSPOWER.REQUANTIZER_GAIN` 7.43x → 0.42x;
+every column in the original "worst 10" list now reads faster than C++
+(0.37x-0.63x), correctness spot-checked against `Casacore.jl` across
+200 rows per column.
+
+**A real correctness wrinkle caught by the existing test suite, not
+guessed:** the old per-row comprehension `[getcell(...) for r in
+1:nrow]`, thanks to Julia's `collect`-for-`Generator` type-widening
+(start from the first real element's type, `typejoin` in any later
+element that doesn't fit), happened to return a *concretely*-typed
+`Vector{Matrix{ComplexF32}}` for a column like `FEED.POL_RESPONSE`
+(every cell 2-D) — not `Vector{Any}`. `Column`'s `getindex(::Colon)`
+returns the data manager's `getcolumn` result completely unwrapped, so
+that concrete eltype is exactly what `eltype(getcolumn(...))`,
+`Tables.jl` schemas, and the Phase-34 precision-narrowing path
+(`Matrix{ComplexF16}` after `precision=:half`) all depend on. A plain
+`Vector{Any}` from the new bucket-walking loop broke three pre-existing
+`precision_tests.jl` assertions immediately. Fixed by returning
+`identity.(out)` instead of the raw `Vector{Any}` — the same
+`Vector{Any}`-narrowing idiom already used throughout `taql/`
+(`groupby.jl`, `join.jl`, `query.jl`) for precisely this purpose.
+
+New `test/indirect_tests.jl` testset ("SSM indirect getcolumn — bulk
+bucket-walk correctness"): a synthetic 3000-row table (spans 3 of our
+own writer's 1024-row SSM buckets) with both a ragged numeric (`:indarr`)
+and a ragged string (`:indstr`) column, including an undefined
+(never-`put`, empty-array) cell in each; asserts `getcolumn`/`getcell`
+agree and match the source values at every bucket boundary (1024, 2048)
+and the undefined rows, plus a `_HAVE_CASACORE` cross-check.
+
+Full suite green: 5354 baseline + 54 new = 5408/5408. README/memory
+updated, merge on the user's word.

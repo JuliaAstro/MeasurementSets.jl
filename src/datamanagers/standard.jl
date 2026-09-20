@@ -386,9 +386,39 @@ is unused (see [`getcell`](@ref)).
 function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer, ::Integer;
                    astype::Union{Nothing,Type}=nothing)
     kind = _ssmkind(c)
-    if kind === :indarr || kind === :indstr
-        astype === nothing && return [getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]
-        return [astype.(getcell(ssm, ssmcol, c, r, 1)) for r in 1:nrow]
+    if kind === :indarr
+        # Phase 240: was `[getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]` --
+        # each `getcell` redid `locate` (an O(log nbucket) search) from
+        # scratch. Walk the column's buckets directly instead (the same
+        # `_foreach_bucket` sequential-iteration trick the Bool/direct-array
+        # branch below already uses) so each row's reference is read via
+        # one O(1) offset within its bucket, no repeated search.
+        out = Vector{Any}(undef, nrow)
+        _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
+            base = bucketptr(ssm, bkt) + ssm.offset[ssmcol]
+            for row in firstrow:lastrow
+                foff = Int(_i64(ssm, base + (row - firstrow) * SSM_INDARR_REF))
+                v = foff == 0 ? juliatype(c.type)[] : af_read(_arrayfile!(ssm), c.type, foff)
+                out[row] = astype === nothing ? v : astype.(v)
+            end
+        end
+        # `identity.(out)` narrows the `Vector{Any}` to its actual common
+        # concrete element type (e.g. `Vector{Matrix{ComplexF32}}` when
+        # every cell happens to share one ndim) -- the same idiom used
+        # throughout `taql/` for this exact purpose, and what the old
+        # `[getcell(...) for r in 1:nrow]` comprehension gave "for free"
+        # via `collect`'s own type-widening, which callers (e.g. `Column`'s
+        # `eltype`, `Tables.jl` schemas) rely on.
+        return identity.(out)
+    elseif kind === :indstr
+        out = Vector{Any}(undef, nrow)
+        _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
+            base = bucketptr(ssm, bkt) + ssm.offset[ssmcol]
+            for row in firstrow:lastrow
+                out[row] = _read_string_array(ssm, base + (row - firstrow) * SSM_STRING_REF)
+            end
+        end
+        return identity.(out)
     end
 
     dims = _dims(c)
