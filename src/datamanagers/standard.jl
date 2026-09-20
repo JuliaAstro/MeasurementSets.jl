@@ -105,14 +105,18 @@ function _arrayfile!(ssm::StandardStMan)
 end
 
 # Int32 in the table's endianness (data-bucket contents, string refs).
-_i32(ssm, off) = (ssm.endian === :big ? ntoh : ltoh)(reinterpret(Int32, view(ssm.data, off+1:off+4))[1])
+# `_ld` (`datamanagers/bytes.jl`) -- a pinned-pointer `unsafe_load`, not
+# the allocating `reinterpret(T, ::Vector{UInt8})`-via-`view` pattern
+# these three used to share with every other data manager's byte readers
+# before Phase 239 centralised the fix.
+_i32(ssm, off) = _ld(Int32, ssm.data, off, ssm.endian === :big)
 
 # Int64 in the table's endianness (indirect-array file offset in a bucket cell).
-_i64(ssm, off) = (ssm.endian === :big ? ntoh : ltoh)(reinterpret(Int64, view(ssm.data, off+1:off+8))[1])
+_i64(ssm, off) = _ld(Int64, ssm.data, off, ssm.endian === :big)
 
 # Int32 in big-endian: casacore always uses CanonicalConversion (never the
 # little-endian variant) for the string-bucket and index-bucket headers.
-_be_i32(ssm, off) = ntoh(reinterpret(Int32, view(ssm.data, off+1:off+4))[1])
+_be_i32(ssm, off) = _ld(Int32, ssm.data, off, true)
 
 function read_ssm_header!(hdr::AipsIO)
     version = getstart(hdr, "StandardStMan")
@@ -226,8 +230,9 @@ end
 _swap(ssm::StandardStMan, x) = ssm.endian === :big ? ntoh(x) : ltoh(x)
 
 function _read_elems(ssm::StandardStMan, ::Type{T}, off::Int, n::Int) where {T}
-    raw = reinterpret(T, ssm.data[off+1:off+n*sizeof(T)])
-    return T[_swap(ssm, x) for x in raw]
+    out = Vector{T}(undef, n)
+    _rd_run!(out, 0, T, ssm.data, off, n, ssm.endian === :big)
+    return out
 end
 
 function _read_bits(ssm::StandardStMan, off::Int, bitstart::Int, n::Int)

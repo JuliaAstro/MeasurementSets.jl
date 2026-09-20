@@ -286,6 +286,15 @@ getcolumn(t::AbstractTable, name::AbstractString; precision::Union{Nothing,Symbo
     getcell(t, name, row; precision=nothing) -> value
 
 Read one cell (`row` is 1-based).
+
+Each call re-resolves `name` to a [`Column`](@ref) (a `columndesc` lookup +
+opening/looking up the bound data-manager instance) -- cheap once, but
+repeated in a `for row in ...; getcell(t, name, row); end` loop it can
+dominate the actual per-cell read cost. For repeated access to the same
+column, cache the lazy column once and index into that instead:
+`col = column(t, name); for row in ...; col[row]; end` (Phase 237 --
+live-measured ~2.5x faster over a real MS's tiled `DATA` column, purely
+from not re-resolving `name` on every row).
 """
 getcell(t::AbstractTable, name::AbstractString, row::Integer;
         precision::Union{Nothing,Symbol,Type}=nothing) = _pcolumn(t, name, precision)[row]

@@ -47,12 +47,15 @@ struct ISMIndex
     bucket::Vector{Int}    # used entries: physical bucket number
 end
 
-# bucket index i whose row range [rows[i], rows[i+1]) contains `row` (1-based)
+# bucket index i whose row range [rows[i], rows[i+1]) contains `row` (1-based).
+# `ix.rows` is ascending, so this is `searchsortedlast` -- O(log(used))
+# instead of the original O(used) linear scan (Phase 237: a random-access
+# `getcell` loop over a ~98K-bucket ISM column was paying a full linear
+# scan per lookup).
 function _ism_bucket(ix::ISMIndex, row::Integer)
-    for i in 1:ix.used
-        ix.rows[i+1] > row && return i
-    end
-    error("ISMIndex: row $row out of range")
+    i = searchsortedlast(ix.rows, row)
+    (1 <= i <= ix.used) || error("ISMIndex: row $row out of range")
+    return i
 end
 
 mutable struct IncrementalStMan
@@ -69,8 +72,11 @@ end
 DATAMANAGERS["IncrementalStMan"] = IncrementalStMan
 DATAMANAGERS["ISM"]              = IncrementalStMan
 
-_u32(ism, off) = (ism.endian === :big ? ntoh : ltoh)(reinterpret(UInt32, view(ism.data, off+1:off+4))[1])
-_ism_i64(ism, off) = (ism.endian === :big ? ntoh : ltoh)(reinterpret(Int64, view(ism.data, off+1:off+8))[1])
+# `_ld` (the single-value primitive both of these use) moved to
+# `datamanagers/bytes.jl` (Phase 239 -- shared with `standard.jl`/
+# `tiled.jl`/`arrayfile.jl`).
+_u32(ism, off) = _ld(UInt32, ism.data, off, ism.endian === :big)
+_ism_i64(ism, off) = _ld(Int64, ism.data, off, ism.endian === :big)
 
 # `table.f<seq>i` --- opened on first indirect-array access, then memoized.
 function _arrayfile!(ism::IncrementalStMan)
@@ -119,41 +125,90 @@ end
 
 # --- bucket index parsing -----------------------------------------
 
-# Parse the per-column (rownumbers, offsets) index of one bucket, for the
-# first `ncol` columns.  Returns the vectors for column `colnr` (1-based).
-function _ism_colindex(ism::IncrementalStMan, bucketnr::Int, colnr::Int, ncol::Int)
+# Skip (without materializing) to column `colnr`'s index entries within
+# bucket `bucketnr` -- the shared skip logic behind both `_ism_colindex`
+# (whole-column reads, which need the full entry list) and
+# `_ism_value_offset` (the `getcell` hot path, which doesn't).  Every
+# other bound column's `nr` entries are skipped by pure pointer
+# arithmetic, no allocation (Phase 237 -- the original walked and
+# allocated two `Vector{Int}`s per column, for EVERY bound column, on
+# every single-cell lookup).
+@inline function _ism_locate_column(ism::IncrementalStMan, bucketnr::Int, colnr::Int, ncol::Int)
     base = ISM_LEADER + bucketnr * ism.length
     hdr = _u32(ism, base)
     use64 = (hdr & ISM_ROWNR64_MASK) != 0
     p = base + Int(hdr & ISM_IDXOFF_MASK)     # start of the index part
     rownr_t = use64 ? UInt64 : UInt32
-    local rownrs, offsets
+    big = ism.endian === :big
+    database = base + ISM_UINT                # data part starts after `woffset`
     for i in 1:ncol
         nr = Int(_u32(ism, p)); p += ISM_UINT
-        rr = Vector{Int}(undef, nr)
-        for j in 1:nr
-            rr[j] = Int((ism.endian === :big ? ntoh : ltoh)(
-                reinterpret(rownr_t, view(ism.data, p+1:p+sizeof(rownr_t)))[1]))
-            p += sizeof(rownr_t)
-        end
-        oo = Vector{Int}(undef, nr)
-        for j in 1:nr
-            oo[j] = Int(_u32(ism, p)); p += ISM_UINT
-        end
-        if i == colnr
-            rownrs, offsets = rr, oo
-        end
+        i == colnr && return p, nr, database, rownr_t, big
+        p += nr * (sizeof(rownr_t) + ISM_UINT)
     end
-    return rownrs, offsets, base + ISM_UINT   # data part starts after `woffset`
+    error("_ism_locate_column: column $colnr not found among $ncol bound columns")
 end
 
-# largest index i with v[i] <= x  (v ascending)
-function _le_index(v::Vector{Int}, x::Integer)
-    i = 1
-    @inbounds while i < length(v) && v[i+1] <= x
-        i += 1
+# `_ism_locate_column` reports whether row numbers are 32- or 64-bit as a
+# *runtime* `DataType` value (`use64` is only known once the bucket header
+# has been read) -- calling `_ld` with that non-constant `T` inside a
+# per-entry loop forces a full dynamic dispatch on EVERY iteration, not
+# just once. On a real MS with large ISM buckets (tens of thousands of
+# stored-value entries per bucket for a fast-changing column like `TIME`)
+# that dwarfed the cost of the allocation it replaced -- live-measured
+# 23x *slower* wall-clock than the original allocating code, despite
+# genuinely lower peak allocation, when first tried without this split
+# (Phase 237). The fix is the standard Julia "type-instability barrier":
+# branch on `use64` ONCE, outside the loop, into two calls of a
+# `where {RT}`-parameterized helper -- each call site passes a *literal*
+# `UInt32`/`UInt64`, so the compiler emits one fully type-stable, inlined
+# specialization per width instead of re-dispatching every entry.
+@inline function _ism_colindex(ism::IncrementalStMan, bucketnr::Int, colnr::Int, ncol::Int)
+    rowp, nr, database, rownr_t, big = _ism_locate_column(ism, bucketnr, colnr, ncol)
+    return rownr_t === UInt64 ? _ism_colindex_of(ism, rowp, nr, database, UInt64, big) :
+                                _ism_colindex_of(ism, rowp, nr, database, UInt32, big)
+end
+
+@inline function _ism_colindex_of(ism::IncrementalStMan, rowp::Int, nr::Int, database::Int,
+                                  ::Type{RT}, big::Bool) where {RT}
+    rr = Vector{Int}(undef, nr)
+    p = rowp
+    @inbounds for j in 1:nr
+        rr[j] = Int(_ld(RT, ism.data, p, big))
+        p += sizeof(RT)
     end
-    return i
+    oo = Vector{Int}(undef, nr)
+    @inbounds for j in 1:nr
+        oo[j] = Int(_u32(ism, p)); p += ISM_UINT
+    end
+    return rr, oo, database
+end
+
+# The `getcell` fast path: locate the stored-value byte offset for
+# bucket-relative row `relrow` of column `colnr`, without ever
+# materializing the bucket's row-number/offset arrays -- a single scan
+# over the (ascending) row-number entries tracking the largest index `j`
+# with `rownrs[j] <= relrow` (defaulting to entry 1, which every bucket
+# guarantees exists at relative row 0). Split into a type-stable inner
+# call the same way as `_ism_colindex` above, for the same reason.
+@inline function _ism_value_offset(ism::IncrementalStMan, bucketnr::Int, colnr::Int,
+                                   ncol::Int, relrow::Int)
+    rowp, nr, database, rownr_t, big = _ism_locate_column(ism, bucketnr, colnr, ncol)
+    return rownr_t === UInt64 ? _ism_value_offset_of(ism, rowp, nr, database, UInt64, big, relrow) :
+                                _ism_value_offset_of(ism, rowp, nr, database, UInt32, big, relrow)
+end
+
+@inline function _ism_value_offset_of(ism::IncrementalStMan, rowp::Int, nr::Int, database::Int,
+                                      ::Type{RT}, big::Bool, relrow::Int) where {RT}
+    best = 1
+    p = rowp
+    @inbounds for j in 1:nr
+        Int(_ld(RT, ism.data, p, big)) > relrow && break
+        best = j
+        p += sizeof(RT)
+    end
+    off = Int(_u32(ism, rowp + nr * sizeof(RT) + (best - 1) * ISM_UINT))
+    return database + off
 end
 
 # --- value decoding ----------------------------------------------
@@ -167,21 +222,30 @@ function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
 
     dims = _dims(c)
     nrelem = isempty(dims) ? 1 : prod(dims)
-    swap = ism.endian === :big ? ntoh : ltoh
 
     if c.type == TpBool
+        isempty(dims) && return ism.data[dataoff + 1] & 0x01 == 0x01
         bits = Bool[(ism.data[dataoff + (k >> 3) + 1] >> (k & 7)) & 0x01 == 0x01
                     for k in 0:nrelem-1]
-        return isempty(dims) ? bits[1] : reshape(bits, dims...)
+        return reshape(bits, dims...)
     elseif c.type == TpString
         isempty(dims) || error("ISM string arrays not supported yet")
         total = Int(_u32(ism, dataoff))                       # counts the length word
         return String(ism.data[dataoff + ISM_UINT + 1 : dataoff + total])
     else
         T = juliatype(c.type)
-        raw = reinterpret(T, view(ism.data, dataoff+1 : dataoff + nrelem*sizeof(T)))
-        vals = T[swap(x) for x in raw]
-        return isempty(dims) ? vals[1] : reshape(vals, dims...)
+        big = ism.endian === :big
+        # a scalar (by far the common ISM case -- TIME, FIELD_ID, ...) is
+        # loaded directly, skipping the wasteful `Vector{T}(undef, 1)` the
+        # array path below needs (Phase 238 -- this ran once per
+        # distinct-value entry, not per row, but still added up over a
+        # whole-column read's tens of thousands of entries).
+        isempty(dims) && return _ld(T, ism.data, dataoff, big)
+        vals = Vector{T}(undef, nrelem)
+        @inbounds for k in 1:nrelem
+            vals[k] = _ld(T, ism.data, dataoff + (k - 1) * sizeof(T), big)
+        end
+        return reshape(vals, dims...)
     end
 end
 
@@ -196,9 +260,8 @@ function getcell(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
     bi = _ism_bucket(ism.index, Int(row))
     bucketnr = ism.index.bucket[bi]
     bstart = ism.index.rows[bi]                  # 1-based first row of the bucket
-    rownrs, offsets, database = _ism_colindex(ism, bucketnr, colnr, ncol)
-    inx = _le_index(rownrs, Int(row) - bstart)   # bucket-relative (0-based) row
-    return _ism_decode(ism, c, database + offsets[inx])
+    dataoff = _ism_value_offset(ism, bucketnr, colnr, ncol, Int(row) - bstart)
+    return _ism_decode(ism, c, dataoff)
 end
 
 """
@@ -212,9 +275,13 @@ function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
                    nrow::Integer, ncol::Int; astype::Union{Nothing,Type}=nothing)
     kind = _ismkind(c)
     scalar = kind === :scalar && c.type != TpString
-    out = scalar ? Vector{astype === nothing ? juliatype(c.type) : astype}(undef, nrow) :
-          Vector{Any}(undef, nrow)
+    if scalar
+        D = juliatype(c.type)                # on-disk element type
+        out = Vector{astype === nothing ? D : astype}(undef, nrow)
+        return _ism_getcolumn_scalar!(out, ism, colnr, c.type === TpBool, Int(nrow), ncol, D)
+    end
 
+    out = Vector{Any}(undef, nrow)
     ix = ism.index
     for bi in 1:ix.used
         bstart = ix.rows[bi]                 # 1-based first row of the bucket
@@ -229,8 +296,45 @@ function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
             end
         end
     end
-    (scalar || astype === nothing) && return out
+    astype === nothing && return out
     return [astype.(x) for x in out]         # array-valued ISM column: post-convert
+end
+
+# The scalar-column fast path behind `getcolumn` above (`TIME`,
+# `FIELD_ID`, ... -- by far the common ISM case: every column of a real
+# MS's `_MAIN_ISM` set is a plain scalar). `_ism_decode`'s general form
+# returns `Bool | String | T | Array{T,N}` depending on `c` at *runtime*,
+# so a caller that stores its result (`v = _ism_decode(...); out[r] = v`)
+# in a per-row fill loop can never be type-stable there -- live-profiled
+# on a real MS: ~25 bytes/row of pure boxing overhead on top of the
+# unavoidable output-array bytes, dwarfing the actual per-entry decode
+# cost, for a loop that touches every one of `nrow` rows (not just the
+# `nr` distinct-value entries). Fixed with the same type-instability
+# barrier as `_ism_value_offset` (Phase 237): `D` (the on-disk element
+# type) is passed as a `where {D}` type parameter, so the compiler emits
+# one fully type-stable specialization per concrete `D` instead of
+# re-boxing on every row (`isbool` stays a plain `Bool` field, not part
+# of the barrier -- it's a compile-time-resolved `D === Bool` check
+# inlined below, not a second axis of runtime dispatch).
+function _ism_getcolumn_scalar!(out::Vector{J}, ism::IncrementalStMan, colnr::Int,
+                                isbool::Bool, nrow::Int, ncol::Int, ::Type{D}) where {J,D}
+    ix = ism.index
+    big = ism.endian === :big
+    for bi in 1:ix.used
+        bstart = ix.rows[bi]                 # 1-based first row of the bucket
+        bend = ix.rows[bi+1]                 # 1-based, exclusive
+        rownrs, offsets, database = _ism_colindex(ism, ix.bucket[bi], colnr, ncol)
+        @inbounds for k in 1:length(rownrs)
+            r0 = bstart + rownrs[k]                                  # 1-based
+            r1 = k < length(rownrs) ? bstart + rownrs[k+1] : bend    # exclusive
+            dataoff = database + offsets[k]
+            v = isbool ? (ism.data[dataoff + 1] & 0x01 == 0x01) : _ld(D, ism.data, dataoff, big)
+            for r in r0:r1-1
+                out[r] = v
+            end
+        end
+    end
+    return out
 end
 
 # =====================  writer  =====================================

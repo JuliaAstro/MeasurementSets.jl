@@ -105,9 +105,19 @@ function _tile_layout(types::Vector{CasaType}, tileshape)
     return acc, offs
 end
 # memoised per tileshape -- the `sortperm` + allocation happen once per DM
-# instance rather than on every `read_plane` / bulk read.
-_tile_layout(tsm::TiledStMan, cube::TSMCube) =
-    get!(() -> _tile_layout(tsm.types, cube.tileshape), tsm.layout, cube.tileshape)
+# instance rather than on every `read_plane` / bulk read. A plain
+# `get`-then-`setindex!` instead of `get!(f, dict, key)`: the latter's `f`
+# is a closure capturing `tsm`/`cube`, allocated on *every* call whether
+# or not the key is already cached -- real cost on a `getcell`-per-row
+# hot loop (Phase 237).
+function _tile_layout(tsm::TiledStMan, cube::TSMCube)
+    ts = cube.tileshape
+    v = get(tsm.layout, ts, nothing)
+    v === nothing || return v
+    v2 = _tile_layout(tsm.types, ts)
+    tsm.layout[ts] = v2
+    return v2
+end
 
 # --- header parsing ----------------------------------------------
 
@@ -213,11 +223,16 @@ end
 
 # --- tile data access -------------------------------------------
 
+# Plain `get`-then-`setindex!`, not `get!(f, dict, key)` -- same reasoning
+# as `_tile_layout` above: `do...end` builds a closure over `tsm` on
+# every call, cache hit or not (Phase 237).
 function _tsmbytes(tsm::TiledStMan, sequ::Int)
-    get!(tsm.data, sequ) do
-        tsm.container === nothing ? Mmap.mmap(tsm.files[sequ], Vector{UInt8}) :
-            container_mmap(tsm.container, basename(tsm.files[sequ]))
-    end
+    b = get(tsm.data, sequ, nothing)
+    b === nothing || return b
+    b2 = tsm.container === nothing ? Mmap.mmap(tsm.files[sequ], Vector{UInt8}) :
+         container_mmap(tsm.container, basename(tsm.files[sequ]))
+    tsm.data[sequ] = b2
+    return b2
 end
 
 _colmajor_offset(pos, dims) = begin
@@ -229,63 +244,9 @@ _colmajor_offset(pos, dims) = begin
     off
 end
 
-# host-endian conversion that also covers `Complex` (Base's `ntoh`/`ltoh`
-# are Real-only).
-_hostconv(x::Real, big::Bool)    = big ? ntoh(x) : ltoh(x)
-_hostconv(z::Complex, big::Bool) = Complex(_hostconv(real(z), big), _hostconv(imag(z), big))
-
-# Copy `n` contiguous on-disk `T` values from byte offset `b` (0-based) of
-# `bytes` into `dest[doff+1 : doff+n]` (converted to `eltype(dest)`),
-# endian-corrected.  Uses `unsafe_load` via a pinned pointer:
-# `reinterpret(T, ::Vector{UInt8})` + indexing is an allocating slow path
-# in Julia when `sizeof(T) > 1`.  `bytes` is a real `Vector{UInt8}` or a
-# contiguous `view` (Phase-20 container) -- both give a valid `pointer`.
-@inline function _rd_run!(dest::AbstractVector, doff::Int, ::Type{T},
-                          bytes::AbstractVector{UInt8}, b::Int, n::Int, big::Bool) where {T}
-    D = eltype(dest)
-    GC.@preserve bytes begin
-        p = Ptr{T}(pointer(bytes) + b)
-        @inbounds for k in 1:n
-            dest[doff + k] = convert(D, _hostconv(unsafe_load(p, k), big))
-        end
-    end
-    return dest
-end
-
-# Bit-packed (`Bool`) counterpart of `_rd_run!` -- unpacks `n` consecutive
-# LSB-first bits starting at 0-based bit offset `bitoff` within byte range
-# `bytes[base+1:...]`, into `dest[doff+1:doff+n]`. `unsafe_load` on a
-# pinned pointer avoids the bounds-checked `bytes[...]` indexing AND the
-# per-element `CartesianIndex`/`_colmajor_offset` tuple recomputation the
-# original doubly-nested-`CartesianIndices` loop paid on every bit --
-# ~3,100 allocations / ~90 KiB per `getcell` for a 4x64 `FLAG` plane before
-# this fix, live-measured (Phase 234), vs. 32 allocs / ~3.4 KiB for the
-# equal-size `DATA` cell via `_rd_run!` -- a 111x wall-clock gap against a
-# real casacore (Casacore.jl) cross-check on the same MS.
-@inline function _rd_bits!(dest::AbstractVector{Bool}, doff::Int,
-                           bytes::AbstractVector{UInt8}, base::Int, bitoff::Int, n::Int)
-    n == 0 && return dest
-    GC.@preserve bytes begin
-        p = pointer(bytes) + base
-        bytei = bitoff >> 3
-        biti = bitoff & 7
-        byte = unsafe_load(p, bytei + 1)
-        @inbounds for k in 1:n
-            # lazy reload, only on the iteration that actually needs the
-            # next byte -- never fetches a byte past what `n` requires
-            # (an eager prefetch on every 8th bit could read one byte
-            # past a mmap/array that ends exactly on a byte boundary).
-            if biti == 8
-                biti = 0
-                bytei += 1
-                byte = unsafe_load(p, bytei + 1)
-            end
-            dest[doff + k] = (byte >> biti) & 0x01 == 0x01
-            biti += 1
-        end
-    end
-    return dest
-end
+# `_hostconv`/`_rd_run!`/`_rd_bits!` moved to `datamanagers/bytes.jl`
+# (Phase 239 -- shared with `standard.jl`/`incremental.jl`/`arrayfile.jl`,
+# which each had, or needed, the identical primitive).
 
 """
     read_plane(tsm, cube, lastpos, colidx) -> Array

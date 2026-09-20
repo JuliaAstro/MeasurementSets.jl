@@ -34,8 +34,10 @@ struct ArrayFile
     version::Int
 end
 
-_af_get(af::ArrayFile, ::Type{T}, off::Integer) where {T} =
-    (af.endian === :big ? ntoh : ltoh)(reinterpret(T, @view af.data[off+1:off+sizeof(T)])[1])
+# `_ld` (`datamanagers/bytes.jl`) -- a pinned-pointer `unsafe_load`, not
+# the allocating `reinterpret`-via-`view` pattern this (and every sibling
+# byte reader in this package) used to duplicate before Phase 239.
+_af_get(af::ArrayFile, ::Type{T}, off::Integer) where {T} = _ld(T, af.data, off, af.endian === :big)
 
 """
     open_arrayfile(data::Vector{UInt8}, endian::Symbol) -> ArrayFile
@@ -48,7 +50,7 @@ I/O of its own.
 function open_arrayfile(data::Vector{UInt8}, endian::Symbol)
     length(data) >= AF_HEADER ||
         error("StManArrayFile: truncated header ($(length(data)) bytes)")
-    version = Int((endian === :big ? ntoh : ltoh)(reinterpret(UInt32, @view data[1:AF_INT])[1]))
+    version = Int(_ld(UInt32, data, 0, endian === :big))
     return ArrayFile(data, endian, version)
 end
 
@@ -78,12 +80,16 @@ function af_read(af::ArrayFile, t::CasaType, offset::Integer)
     dims, dp = _af_shape(af, offset)
     n = prod(dims; init=1)
     J = juliatype(t)
+    big = af.endian === :big
 
     if t == TpBool
+        # `_rd_bits!` (`datamanagers/bytes.jl`) -- the bulk, pinned-pointer
+        # bit-unpack primitive Phase 234 added for the tiled `FLAG`
+        # column's identical bit-packed-array layout; a per-bit
+        # `af.data[...]`-indexed loop had the same (smaller-scale, since
+        # indirect arrays are typically short) cost here.
         out = Vector{Bool}(undef, n)
-        for k in 0:n-1
-            out[k+1] = (af.data[dp + (k >> 3) + 1] >> (k & 7)) & 0x01 == 0x01
-        end
+        _rd_bits!(out, 0, af.data, dp, 0, n)
         return reshape(out, dims)
 
     elseif t == TpString
@@ -99,20 +105,16 @@ function af_read(af::ArrayFile, t::CasaType, offset::Integer)
         end
         return reshape(out, dims)
 
-    elseif J <: Complex
-        R = real(J)
-        raw = reinterpret(R, @view af.data[dp+1 : dp + 2n * sizeof(R)])
-        swap = af.endian === :big ? ntoh : ltoh
-        out = Vector{J}(undef, n)
-        for k in 1:n
-            out[k] = J(swap(raw[2k-1]), swap(raw[2k]))
-        end
-        return reshape(out, dims)
-
     else
-        raw = reinterpret(J, @view af.data[dp+1 : dp + n * sizeof(J)])
-        swap = af.endian === :big ? ntoh : ltoh
-        return reshape(J[swap(x) for x in raw], dims)
+        # `_rd_run!` already covers `Complex` (`_hostconv` swaps real/imag
+        # separately; a Julia `Complex{T}`'s in-memory layout -- two
+        # contiguous `T` fields, real then imaginary -- already matches
+        # casacore's own interleaved on-disk storage), so one bulk,
+        # allocation-free call handles every non-Bool/non-String element
+        # type -- no separate `Complex` branch needed.
+        out = Vector{J}(undef, n)
+        _rd_run!(out, 0, J, af.data, dp, n, big)
+        return reshape(out, dims)
     end
 end
 

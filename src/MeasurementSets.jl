@@ -46,6 +46,7 @@ include("tables/writer.jl")
 
 # --- storage managers + column engines ---
 include("datamanagers/datamanager.jl")
+include("datamanagers/bytes.jl")
 include("datamanagers/arrayfile.jl")
 include("datamanagers/standard.jl")
 include("datamanagers/tiled.jl")
