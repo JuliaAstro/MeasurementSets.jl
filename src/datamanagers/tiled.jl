@@ -105,9 +105,19 @@ function _tile_layout(types::Vector{CasaType}, tileshape)
     return acc, offs
 end
 # memoised per tileshape -- the `sortperm` + allocation happen once per DM
-# instance rather than on every `read_plane` / bulk read.
-_tile_layout(tsm::TiledStMan, cube::TSMCube) =
-    get!(() -> _tile_layout(tsm.types, cube.tileshape), tsm.layout, cube.tileshape)
+# instance rather than on every `read_plane` / bulk read. A plain
+# `get`-then-`setindex!` instead of `get!(f, dict, key)`: the latter's `f`
+# is a closure capturing `tsm`/`cube`, allocated on *every* call whether
+# or not the key is already cached -- real cost on a `getcell`-per-row
+# hot loop (Phase 237).
+function _tile_layout(tsm::TiledStMan, cube::TSMCube)
+    ts = cube.tileshape
+    v = get(tsm.layout, ts, nothing)
+    v === nothing || return v
+    v2 = _tile_layout(tsm.types, ts)
+    tsm.layout[ts] = v2
+    return v2
+end
 
 # --- header parsing ----------------------------------------------
 
@@ -213,11 +223,16 @@ end
 
 # --- tile data access -------------------------------------------
 
+# Plain `get`-then-`setindex!`, not `get!(f, dict, key)` -- same reasoning
+# as `_tile_layout` above: `do...end` builds a closure over `tsm` on
+# every call, cache hit or not (Phase 237).
 function _tsmbytes(tsm::TiledStMan, sequ::Int)
-    get!(tsm.data, sequ) do
-        tsm.container === nothing ? Mmap.mmap(tsm.files[sequ], Vector{UInt8}) :
-            container_mmap(tsm.container, basename(tsm.files[sequ]))
-    end
+    b = get(tsm.data, sequ, nothing)
+    b === nothing || return b
+    b2 = tsm.container === nothing ? Mmap.mmap(tsm.files[sequ], Vector{UInt8}) :
+         container_mmap(tsm.container, basename(tsm.files[sequ]))
+    tsm.data[sequ] = b2
+    return b2
 end
 
 _colmajor_offset(pos, dims) = begin

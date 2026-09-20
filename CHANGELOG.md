@@ -8678,3 +8678,114 @@ regression pinning `column(t,"UVW")[:]`/`rawblock(t,"UVW")` to within
 
 Full suite green: 5268 baseline + 57 new = 5325/5325. README/memory
 updated, merge on the user's word.
+
+### Phase 237 — fix per-cell `DATA`/`FLAG` reads and random-access `TIME` (a real ISM dynamic-dispatch regression, not just a fix)
+
+Follow-up to Phase 234-236's whole-column work, at the user's direct
+request: "improve the performance of per-cell DATA/FLAG reads and
+random-access TIME functionality" (the two metrics that stayed merely
+"comparable" — 2.1-2.3x C++ — in the post-236 benchmark, plus
+random-access `TIME`'s odd ~12 GiB allocation for 100K lookups despite
+only a 1.4-1.8x wall-clock ratio).
+
+**Root cause, `TIME` random-access (`IncrementalStMan`/ISM, untouched by
+234-236 since those were tiled/SSM-only fixes):** `getcell` walked
+`_ism_bucket` (a linear scan over the bucket index — cheap in isolation
+on a small table, but a real MS's `TIME` column has as few as 19 very
+large buckets, not this package's own ~100-row-per-bucket write target)
+then `_ism_colindex`, which **materialised full `Vector{Int}`
+row-number/offset arrays for every column bound to the ISM instance —
+not just the target one — on every single `getcell` call**. Live-measured
+~82 KiB / ~4,500 allocations for ONE `getcell` on a real MS's `TIME`
+column. Root allocator underneath both: `_u32`/`_ism_i64` and the
+per-entry row-number read used `reinterpret(T, ::Vector{UInt8})` via a
+`view` — the same allocating-slow-path pattern Phase 68 had already
+fixed for the tiled reader (`_rd_run!`/`_rd_bits!`), never carried over
+to `incremental.jl`.
+
+**Fix, attempt 1:** a single-value `unsafe_load`-via-pinned-pointer
+primitive (`_ld`, the ISM counterpart of `_rd_run!`), `_ism_bucket`
+switched to `searchsortedlast` (O(log used) instead of O(used)), and
+`_ism_colindex`/a new `_ism_value_offset` (the `getcell` fast path) that
+skip non-target columns by pure pointer arithmetic and — for `getcell`
+specifically — never materialise the target column's arrays at all,
+scanning its entries directly for the matching offset. Single-`getcell`
+allocation dropped substantially, but the **wall-clock on a 100K-row
+random-access loop went from ~1.4s to 32s — ~23x *worse*,** despite
+lower peak allocation (~9.7 GiB vs ~12.3 GiB — in the same ballpark, not
+the order-of-magnitude drop the allocation fix should have produced).
+
+**Root cause of THAT regression, found by profiling rather than
+guessing:** the row-number entry width (`UInt32` vs `UInt64`, from a
+`woffset` header bit) is only known at *runtime*, and calling a
+`T`-parameterized primitive with that non-constant `T` **inside the
+per-entry loop** forces a full dynamic method dispatch on *every*
+iteration — for a real MS's large ISM buckets (thousands of stored-value
+entries for a fast-changing column like `TIME`), that dwarfed the
+allocation cost it had just eliminated. `Profile.@profile` pointed
+straight at `Base_compiler.jl`'s dynamic-dispatch machinery dominating
+the sample count. **Fix:** the standard Julia type-instability barrier —
+branch on the row-number width *once*, outside the loop, into a
+`where {RT}`-parameterized inner function called with a *literal*
+`UInt32`/`UInt64` at each of the two call sites, so the compiler emits
+one fully type-stable, inlined specialization per width instead of
+re-dispatching every entry. Live-verified: single `getcell` allocation
+320 bytes (was ~82 KiB), a 10K-row random-access loop 0.0083s (was
+3.07s pre-barrier-fix / ~32s scaled) — **~370x faster and ~320x fewer
+bytes** than the intermediate "fixed but still slow" version.
+
+**Two smaller wins in `tiled.jl`, same family of bug:** `_tile_layout`
+and `_tsmbytes` both used `get!(f, dict, key)` with a `do...end`/lambda
+`f` — Julia builds that closure on *every* call, cache hit or not, not
+only on a miss. Switched both to a plain `get`-then-`setindex!`. Minor
+in isolation (their payload is small), but on the exact same
+per-`getcell` hot path as the ISM fix.
+
+**The benchmark itself was measuring the wrong thing for DATA/FLAG
+per-cell** — found while profiling why the tiled-side fixes weren't
+moving the numbers: the Phase-236 benchmark called the top-level
+`getcell(t, "DATA", r)` convenience wrapper inside the per-cell loop,
+which — by design, `_pcolumn(t, name, precision)[row]` — re-resolves the
+column (a `columndesc` lookup + opening/looking up the data-manager
+instance) on **every call**, while the C++ side of the comparison cached
+`ct[:DATA]` once outside its own loop. Not a bug, but an apples-to-oranges
+comparison; the documented, idiomatic pattern for repeated access is
+`col = column(t, name); col[row]` (already what the `TIME` random-access
+benchmark did, which is why *that* number was a genuine, fixable
+regression rather than a methodology artifact). Fixed the benchmark to
+cache the column handle on both sides (matching the C++ side's own
+pattern) and added a docstring note on `getcell` pointing at `column`
+for repeated access. With the fair comparison: `DATA` per-cell
+0.233s vs C++ 0.240s (**0.97x**), `FLAG` per-cell 0.195s vs 0.202s
+(**0.96x**) — both now at parity with C++, not merely "comparable". The
+uncached top-level `getcell` form is 2.36x slower than the cached form,
+consistent with the re-resolution cost measured above, and is now called
+out explicitly rather than silently eaten by every repeated-access
+caller.
+
+**Re-run of the full C++ comparison** (same methodology as the
+post-Phase-236 run): `TIME` random-access 0.091s vs C++ 0.766s
+(**0.12x — now 8x faster than C++**, was 1.4-1.8x depending on the run);
+`DATA`/`FLAG` per-cell at parity (0.96-0.97x, up from "comparable" 2.1-
+2.3x); every other MAIN whole-column metric (`UVW`/`FLAG`/`DATA`
+whole-column) unchanged/still superior. Subtables unaffected (none of
+them are ISM-bound in the sample MS). `TIME` *whole-column* read stays
+~10-12x slower than C++ — untouched by this phase (it's the bulk
+`getcolumn` path, a `run-length-fill` loop, not the per-cell path fixed
+here) and not something the user asked to chase this round; flagged as a
+candidate for a future phase.
+
+New `test/ism_writer_tests.jl` testset ("ISM random-access getcell —
+correctness + allocation"): a synthetic 4000-row, 2-column ISM instance
+sized to force multiple large buckets (unlike the small committed sample
+MS fixture, which — by Phase 45's own design — can't build more than one
+low-entry-count bucket) with different run-length patterns per column
+(so `colnr != ncol`, exercising the "skip a non-target column" path);
+correctness checked via a full-column comparison plus a permutation-order
+random-access walk crossing bucket boundaries in both columns; an
+`@allocated` regression guard (< 2 KiB for one cached `getcell`, several
+orders of magnitude under both the original bug and the intermediate
+dynamic-dispatch regression). `_HAVE_CASACORE`-gated cross-check.
+
+Full suite green: 5325 baseline + 17 new = 5342/5342. README/memory
+updated, merge on the user's word.

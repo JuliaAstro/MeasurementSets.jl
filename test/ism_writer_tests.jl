@@ -248,3 +248,84 @@ end
         @test ct2[:S][3] == S[3]
     end
 end
+
+# `getcell` on a large, multi-bucket, multi-column ISM instance --
+# correctness across bucket boundaries and non-target-column skipping,
+# plus an allocation regression guard for the two real bugs found and
+# fixed while chasing a user-reported random-access `TIME` slowdown on a
+# real 9.8M-row MS (Phase 237):
+#
+# 1. `_ism_bucket` was an O(used) linear scan over the bucket index; a
+#    real MS with a handful of very large ISM buckets for a fast-changing
+#    column (rather than this package's own ~100-row-per-bucket writer
+#    target) made that scan itself cheap in isolation, but combined with
+#    (2) below it compounded into a severe regression -- switched to
+#    `searchsortedlast` (O(log used)).
+# 2. `_ism_colindex`'s original per-cell path materialized full
+#    `Vector{Int}` row-number/offset arrays for **every** column bound to
+#    the ISM instance (not just the target one) on **every single**
+#    `getcell` call -- live-measured ~123 KiB/call for a real MS's `TIME`
+#    column. The first fix (skip non-target columns by pure pointer
+#    arithmetic, scan the target column's entries directly without
+#    materializing arrays) made allocation better but wall-clock ~23x
+#    *worse* on a real MS with large buckets (thousands of stored-value
+#    entries) -- the per-entry read was calling a `T`-parameterized
+#    primitive with a *runtime*, not compile-time-constant, `T`
+#    (`use64 ? UInt64 : UInt32`), forcing a full dynamic dispatch on every
+#    loop iteration. Fixed with the standard Julia type-instability
+#    barrier: branch on `use64` once, then call a `where {RT}`-specialized
+#    inner function with a literal `UInt32`/`UInt64` at each call site.
+#
+# This table deliberately has TWO columns sharing one ISM instance (so
+# `colnr != ncol`, exercising the "skip a non-target column" path) and
+# enough rows, with a column that changes on (almost) every row, to force
+# several large buckets with many stored-value entries each -- unlike the
+# small committed sample MS fixture, which (by design, Phase 45) has too
+# few rows to build more than one small, low-entry-count ISM bucket.
+@testset "ISM random-access getcell — correctness + allocation (Phase 237)" begin
+    n = 4000
+    # `A` changes almost every row (worst case for the per-entry scan,
+    # like a real MS's TIME column); `B` changes rarely (a distinct
+    # run-length pattern, so the two columns' entry counts differ).
+    A = Float64[4.6e9 + (i ÷ 3) for i in 1:n]
+    B = Int32[cld(i, 137) for i in 1:n]
+    dir = joinpath(mktempdir(), "ism_bigrandom")
+    write_table(dir, "T", ["A" => A, "B" => B]; nrow=n, ism=["A", "B"])
+
+    r = readtable(dir)
+    @test r.managers[1].name == "IncrementalStMan"
+    inst = MSv2._dm_instance(r, 0)
+    @test inst.index.used > 1        # genuinely multiple buckets
+
+    colA = column(r, "A")
+    colB = column(r, "B")
+
+    # sequential + a fixed pseudo-random (not `Random`-seeded, to avoid a
+    # stdlib-version-dependent sequence) access pattern crossing bucket
+    # boundaries, both columns, both directions
+    order = [((i * 2654435761) % n) + 1 for i in 1:n]    # a full permutation-ish walk
+    @test all(colA[i] == A[i] for i in order)
+    @test all(colB[i] == B[i] for i in order)
+    @test getcolumn(r, "A") == A
+    @test getcolumn(r, "B") == B
+
+    # allocation regression guard: a single cached-column `getcell`
+    # should be a small, fixed cost -- not scale with the bucket's entry
+    # count (the ~123 KiB/call figure measured on the real MS before this
+    # fix, or the correctness-preserving-but-23x-slower intermediate fix
+    # that still allocated a comparable amount per call).
+    colA[1]; colA[n]                          # warm up (compile)
+    GC.gc()
+    a1 = @allocated colA[n ÷ 2]
+    @test a1 < 2048
+
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        @test collect(ct[:A][:]) == A
+        @test collect(ct[:B][:]) == B
+        for i in (1, n ÷ 3, 2n ÷ 3, n)
+            @test ct[:A][i] == A[i]
+            @test ct[:B][i] == B[i]
+        end
+    end
+end
