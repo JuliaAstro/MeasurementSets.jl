@@ -2988,12 +2988,23 @@ end
 
 @testset "Phase 110 — meas.<frame>() column-MEASINFO-driven direction argument" begin
     # parser (no SOFA needed) -- disambiguation: a recognized frame name
-    # is still the existing numeric form; anything else is a colname
+    # is still the existing numeric form; anything else is a colname.
+    #
+    # Phase 230 finding: `mjd` is only required (in the colname form, as
+    # in the numeric one) when the TARGET frame actually needs an epoch
+    # (`_meas_dir_needs_epoch` -- APP/AZEL/HADEC/ITRF); GALACTIC does not
+    # (a fixed rotation, like B1950<->J2000), so `meas.galactic('DIR')`
+    # (0 rest args) is the VALID colname-form call and `meas.galactic
+    # ('DIR', T)` (an unwanted extra arg) is the wrong-arity one -- the
+    # reverse of what this testset originally asserted, before the fix.
     p(s) = MSv2._taqllite_parse(s, Set(["DIR", "T"]))
-    @test p("meas.galactic('DIR', T)") isa MSv2.TQLMeasColDir         # colname form
-    @test p("meas.galactic('DIR', T)").colname == "DIR"
+    @test p("meas.galactic('DIR')") isa MSv2.TQLMeasColDir            # colname form
+    @test p("meas.galactic('DIR')").colname == "DIR"
+    @test p("meas.galactic('DIR')").mjd === nothing                   # target needs no epoch
+    @test p("meas.azel('DIR', T, T, T, T)") isa MSv2.TQLMeasColDir    # colname form, needs mjd+xyz
+    @test p("meas.azel('DIR', T, T, T, T)").mjd !== nothing
     @test p("meas.galactic('J2000', T, T)") isa MSv2.TQLFunc          # still the numeric form
-    @test_throws ArgumentError p("meas.galactic('DIR')")              # wrong arity (needs mjd)
+    @test_throws ArgumentError p("meas.galactic('DIR', T)")           # wrong arity (needs no args)
     @test_throws ArgumentError p("meas.azel('DIR', T)")               # azel needs mjd, x, y, z
 
     ext = Base.get_extension(MSv2, :SOFAExt)
@@ -3006,8 +3017,8 @@ end
     t = readtable(joinpath(d, "T"))
 
     ref = measconvert(MDirection{J2000}(2.0, 0.5), GALACTIC)
-    gt = query(t, "TIME > 0"; select = ["l" => "meas.galactic('DIR', TIME/86400.0)[1]",
-                                        "b" => "meas.galactic('DIR', TIME/86400.0)[2]"])
+    gt = query(t, "TIME > 0"; select = ["l" => "meas.galactic('DIR')[1]",
+                                        "b" => "meas.galactic('DIR')[2]"])
     @test collect(gt.l)[1] ≈ ref.lon
     @test collect(gt.b)[1] ≈ ref.lat
     # agrees with the plain numeric form given the same lon/lat directly
@@ -3023,7 +3034,7 @@ end
     d2 = mktempdir()
     write_table(joinpath(d2, "T2"), "T2", Pair{String,Any}["X" => [1.0, 2.0]]; nrow = 2)
     t2 = readtable(joinpath(d2, "T2"))
-    @test_throws ErrorException query(t2, "X > 0"; select = ["z" => "meas.j2000('X', 1.0)"])
+    @test_throws ErrorException query(t2, "X > 0"; select = ["z" => "meas.j2000('X')"])
 
     d3 = mktempdir()
     write_table(joinpath(d3, "T3"), "T3", Pair{String,Any}[
@@ -3031,7 +3042,7 @@ end
         measures = Dict("DIR" => (; kind = :direction, varrefcol = "REFC",
                                    tabtypes = ["J2000"], tabcodes = [0])))
     t3 = readtable(joinpath(d3, "T3"))
-    @test_throws ErrorException query(t3, "REFC >= 0"; select = ["z" => "meas.galactic('DIR', 1.0)"])
+    @test_throws ErrorException query(t3, "REFC >= 0"; select = ["z" => "meas.galactic('DIR')"])
 end
 
 @testset "Phase 104 — meas.freq() / meas.rv() / meas.doppler() / meas.riseset()" begin

@@ -8278,3 +8278,60 @@ MS or real TaQL query ever produces.
 
 Full suite green: 5224 baseline + 16 new = 5240/5240. README/memory
 updated, merge on the user's word.
+
+### Phase 230 — continued the `src/taql/` sweep: `meas.<frame>('COLNAME')`
+unconditionally demanded an `mjd` argument the target frame never used
+
+Continued sweeping `src/taql/` with a fresh-eyes read of `functions.jl`
+(1,419 lines — the curated function library, including the `meas.*`
+measure-conversion UDFs, not re-read since its original phase-by-phase
+construction).
+
+**Real bug, fixed:** `meas.<frame>('COLNAME'[, mjd[, x, y, z]])` (Phase
+110's column-MEASINFO-driven direction form) unconditionally required
+exactly `1 + (need_p ? 3 : 0)` trailing arguments — always demanding an
+`mjd`, regardless of whether the *target* frame actually needs an epoch
+at all. The equivalent general numeric form,
+`meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])`, has always
+correctly made `mjd` conditional on `_meas_dir_needs_epoch(target)`
+(only `APP`/`AZEL`/`HADEC`/`ITRF` need one — `J2000`/`B1950`/`GALACTIC`/
+`ECLIPTIC`/`ICRS` conversions are fixed rotations that need no epoch at
+all, exactly like the already-working `meas.b1950('J2000', RA, DEC)`
+form with no `mjd`). Live-reproduced the inconsistency directly:
+`meas.j2000('B1950', 1.0, 0.5)` (general form, target `J2000`) worked
+with no `mjd`, but the equivalent `meas.j2000('COLNAME')` (colname form,
+same target frame) threw `"meas.j2000('COLNAME', mjd) in ..."`, forcing
+the caller to supply and thread through an epoch value the conversion
+never uses.
+
+Fixed by making `TQLMeasColDir`'s `mjd` field nullable (mirroring how
+its `xyz` field already was) and computing the colname form's required
+argument count the same way the numeric form already does:
+`(need_ep ? 1 : 0) + (need_p ? 3 : 0)` instead of the old unconditional
+`1 + (need_p ? 3 : 0)`. `_meas_dir_needs_pos(R)` already implies
+`_meas_dir_needs_epoch(R)` for every frame in `_MEAS_DIR_FRAMES` (only
+`AZEL`/`HADEC`/`ITRF` need position, and all three already need epoch
+too), so the fix needed no extra case analysis. Live-verified the fixed
+colname form (`meas.j2000('B1950')`, no `mjd`) gives byte-identical
+results to the general numeric form given the same `lon`/`lat`, and
+that an epoch-dependent target (`meas.azel('COLNAME')`) still correctly
+demands its `mjd`/`x`/`y`/`z` arguments.
+
+Fixing this uncovered that the Phase 110 testset itself had baked in
+the old, wrong requirement — it used `GALACTIC` (which needs *no* epoch)
+as its "colname form successfully takes an `mjd`" example, and as its
+"colname form errors without an `mjd`" example, both backwards from the
+corrected behaviour; two further assertions supplied a now-superfluous
+`mjd` to a `J2000`/`GALACTIC`-target colname call purely to satisfy the
+old arity check en route to testing an unrelated error path (no
+`MEASINFO`; a `VarRefCol` frame). All four call sites updated to match
+the corrected, and now internally consistent, behaviour; two new
+assertions added pinning `.mjd === nothing` / `.mjd !== nothing` for the
+no-epoch-needed and epoch-needed cases respectively.
+
+3 net new assertions. No real-TaQL cross-check — `meas.*` is this
+package's own function-library subset, not a real casacore/`libmeas` UDF
+surface with a byte-for-byte equivalent to compare against.
+
+Full suite green: 5240 baseline + 3 new = 5243/5243. README/memory
+updated, merge on the user's word.
