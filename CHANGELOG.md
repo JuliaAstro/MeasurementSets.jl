@@ -8789,3 +8789,70 @@ dynamic-dispatch regression). `_HAVE_CASACORE`-gated cross-check.
 
 Full suite green: 5325 baseline + 17 new = 5342/5342. README/memory
 updated, merge on the user's word.
+
+### Phase 238 — fix `TIME` whole-column reads (a third real ISM bug in the same family as Phase 237, found by profiling not guessing)
+
+Direct follow-up ask: "Improve the performance of the `TIME`
+whole-column access" (the one MAIN metric Phase 237 explicitly left
+untouched and flagged as a candidate — 9-12x slower than C++
+depending on the run, versus every other MAIN metric being at parity
+or faster).
+
+**Root cause, found via `Profile.@profile` on the real MS:**
+`IncrementalStMan.getcolumn`'s run-length fill loop
+(`v = _ism_decode(ism, c, ...); out[r] = v` for every row in a stored
+run) was live-measured at **~245 MiB / ~10 M allocations** for a
+9.8M-row `Float64` column whose output array alone needs ~78.5 MiB —
+**~25 bytes of pure overhead per ROW**, not per stored *value* (only
+~30K of the 9.8M rows are actual distinct-value decodes; the rest are
+plain fill-loop writes of an already-decoded value). Root cause:
+`_ism_decode`'s general form returns `Bool | String | T | Array{T,N}`
+depending on the runtime `ColumnDesc` it's given — its return type is
+fundamentally not inferrable from the call site, so `getcolumn`'s own
+`v = _ism_decode(...)` is `Any`-typed, and *every* `out[r] = v` write
+in the fill loop — not just the decode itself — re-boxes/dispatches
+dynamically. (`_ism_decode`'s scalar branches also each built a
+wasteful `Vector{T}(undef, 1)` just to return `vals[1]` — a smaller,
+separate waste in the same function, fixed alongside: both the `Bool`
+and general-numeric scalar cases now load the value directly via the
+Phase 237 `_ld` primitive with no intermediate array.)
+
+**Fix — the same type-instability barrier as Phase 237's `getcell`
+fix, applied one level up:** a new `_ism_getcolumn_scalar!(out, ism,
+colnr, isbool, nrow, ncol, ::Type{D})` where `D` (the on-disk element
+type) is a `where {D}` type parameter, not a runtime `ColumnDesc`
+field — `getcolumn` computes `D = juliatype(c.type)` once and calls
+this specialized function, which the compiler compiles fully
+type-stably per concrete `D` (`Float64` for `TIME`, `Int32` for
+`FIELD_ID`, …), eliminating the boxing entirely from the per-row fill
+loop. Covers every scalar ISM column (`kind === :scalar && c.type !=
+TpString` — i.e. every column in `_MAIN_ISM`, the real common case);
+the non-scalar (array-valued / string) path is untouched, still going
+through the general `_ism_decode`.
+
+Live-verified on the real MS: `column(t,"TIME")[:]` **0.155s / 245
+MiB → 0.0085s / 75 MiB (18x faster, allocation now essentially just
+the output array)**. Re-running the full C++ comparison: `TIME`
+whole-column **0.05x of C++ (20x FASTER)**, was 9-12x slower — now the
+single best MAIN metric, alongside `DATA`/`FLAG` whole-column. Every
+MAIN-table metric is now at parity or faster than C++ (worst case
+0.93x for cached-column `DATA` per-cell); the MAIN-table geometric-mean
+ratio improved from 0.369x to **0.197x** (≈5x faster than C++ on
+average across every measured MAIN operation). Subtables unaffected
+(unchanged from Phase 237's numbers).
+
+New `test/ism_writer_tests.jl` testset ("ISM getcolumn — whole-column
+allocation regression"): a synthetic 40,000-row ISM column with a
+realistic run length (changes every ~250 rows, matching the real MS's
+`TIME` column's ~325-row average — a short run length was tried first
+and found to make the bound meaningless, since `_ism_colindex`'s own
+row-number/offset array construction is legitimate, unavoidable
+overhead that scales with the *number of distinct-value entries*, not
+with `nrow`, and a too-short run length inflates that non-bug cost
+disproportionately relative to the output array); an `@allocated`
+regression guard (< 1.5x the theoretical-minimum output-array size,
+comfortably under the ~4x-of-minimum the old per-row-boxing bug gave
+on the real MS's `TIME` column).
+
+Full suite green: 5342 baseline + 3 new = 5345/5345. README/memory
+updated, merge on the user's word.

@@ -329,3 +329,51 @@ end
         end
     end
 end
+
+# `getcolumn` (whole-column read) — the same synthetic table as above,
+# but the allocation regression this pins is a *different* bug from the
+# `getcell` one Phase 237 fixed: `_ism_decode`'s general form returns
+# `Bool | String | T | Array{T,N}` depending on `c` at *runtime* (its
+# return type can't be inferred from a `ColumnDesc` argument), so
+# `getcolumn`'s old `v = _ism_decode(...); out[r] = v` fill loop was
+# never type-stable — live-profiled on a real MS: ~25 bytes/row of pure
+# boxing overhead (not from the ~30K *decodes*, from the ~9.8M *row
+# writes* re-boxing the same already-decoded value on every iteration of
+# the run-length fill), on top of the unavoidable output-array bytes.
+# Fixed the same way as Phase 237's `getcell` regression: a `where {D}`
+# type-parameterized inner function (`_ism_getcolumn_scalar!`), so the
+# on-disk element type is a compile-time constant inside the fill loop
+# instead of a boxed runtime value (Phase 238).
+@testset "ISM getcolumn — whole-column allocation regression (Phase 238)" begin
+    n = 40_000
+    # a long-ish run length (changes every ~250 rows, like a real MS's
+    # `TIME` column averaging ~325 rows/value on the real 9.8M-row ALMA
+    # MS) -- NOT the "changes almost every row" pattern the Phase 237
+    # `getcell` test above uses. `_ism_colindex`'s own row-number/offset
+    # arrays (one small `Vector{Int}` pair per bucket, genuinely
+    # unavoidable work, not part of either bug) scale with the number of
+    # distinct-value ENTRIES, not with `n` -- a short run length inflates
+    # that legitimate overhead disproportionately and would make this
+    # bound meaningless (verified: `i ÷ 3` here needs a >4x-of-minimum
+    # bound purely from that, swamping the actual regression this test
+    # is meant to catch).
+    A = Float64[4.6e9 + (i ÷ 250) for i in 1:n]
+    dir = joinpath(mktempdir(), "ism_getcolumn_alloc")
+    write_table(dir, "T", ["A" => A]; nrow=n, ism=["A"])
+
+    r = readtable(dir)
+    inst = MSv2._dm_instance(r, 0)
+    @test inst.index.used > 1        # genuinely multiple buckets
+
+    getcolumn(r, "A")                # warm up (compile)
+    GC.gc()
+    a = @allocated getcolumn(r, "A")
+    # the theoretical minimum is just the output `Vector{Float64}` itself
+    # (`n * sizeof(Float64)`); the old per-ROW-boxing bug allocated ~25
+    # bytes/row *on top of* that (~4x the minimum on the real MS's
+    # `TIME` column) -- a bound comfortably under that, but well above
+    # the genuine `_ism_colindex` overhead at this run length, still
+    # catches a real regression.
+    @test a < 1.5 * n * sizeof(Float64)
+    @test getcolumn(r, "A") == A
+end

@@ -235,9 +235,10 @@ function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
     nrelem = isempty(dims) ? 1 : prod(dims)
 
     if c.type == TpBool
+        isempty(dims) && return ism.data[dataoff + 1] & 0x01 == 0x01
         bits = Bool[(ism.data[dataoff + (k >> 3) + 1] >> (k & 7)) & 0x01 == 0x01
                     for k in 0:nrelem-1]
-        return isempty(dims) ? bits[1] : reshape(bits, dims...)
+        return reshape(bits, dims...)
     elseif c.type == TpString
         isempty(dims) || error("ISM string arrays not supported yet")
         total = Int(_u32(ism, dataoff))                       # counts the length word
@@ -245,11 +246,17 @@ function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
     else
         T = juliatype(c.type)
         big = ism.endian === :big
+        # a scalar (by far the common ISM case -- TIME, FIELD_ID, ...) is
+        # loaded directly, skipping the wasteful `Vector{T}(undef, 1)` the
+        # array path below needs (Phase 238 -- this ran once per
+        # distinct-value entry, not per row, but still added up over a
+        # whole-column read's tens of thousands of entries).
+        isempty(dims) && return _ld(T, ism.data, dataoff, big)
         vals = Vector{T}(undef, nrelem)
         @inbounds for k in 1:nrelem
             vals[k] = _ld(T, ism.data, dataoff + (k - 1) * sizeof(T), big)
         end
-        return isempty(dims) ? vals[1] : reshape(vals, dims...)
+        return reshape(vals, dims...)
     end
 end
 
@@ -279,9 +286,13 @@ function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
                    nrow::Integer, ncol::Int; astype::Union{Nothing,Type}=nothing)
     kind = _ismkind(c)
     scalar = kind === :scalar && c.type != TpString
-    out = scalar ? Vector{astype === nothing ? juliatype(c.type) : astype}(undef, nrow) :
-          Vector{Any}(undef, nrow)
+    if scalar
+        D = juliatype(c.type)                # on-disk element type
+        out = Vector{astype === nothing ? D : astype}(undef, nrow)
+        return _ism_getcolumn_scalar!(out, ism, colnr, c.type === TpBool, Int(nrow), ncol, D)
+    end
 
+    out = Vector{Any}(undef, nrow)
     ix = ism.index
     for bi in 1:ix.used
         bstart = ix.rows[bi]                 # 1-based first row of the bucket
@@ -296,8 +307,45 @@ function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
             end
         end
     end
-    (scalar || astype === nothing) && return out
+    astype === nothing && return out
     return [astype.(x) for x in out]         # array-valued ISM column: post-convert
+end
+
+# The scalar-column fast path behind `getcolumn` above (`TIME`,
+# `FIELD_ID`, ... -- by far the common ISM case: every column of a real
+# MS's `_MAIN_ISM` set is a plain scalar). `_ism_decode`'s general form
+# returns `Bool | String | T | Array{T,N}` depending on `c` at *runtime*,
+# so a caller that stores its result (`v = _ism_decode(...); out[r] = v`)
+# in a per-row fill loop can never be type-stable there -- live-profiled
+# on a real MS: ~25 bytes/row of pure boxing overhead on top of the
+# unavoidable output-array bytes, dwarfing the actual per-entry decode
+# cost, for a loop that touches every one of `nrow` rows (not just the
+# `nr` distinct-value entries). Fixed with the same type-instability
+# barrier as `_ism_value_offset` (Phase 237): `D` (the on-disk element
+# type) is passed as a `where {D}` type parameter, so the compiler emits
+# one fully type-stable specialization per concrete `D` instead of
+# re-boxing on every row (`isbool` stays a plain `Bool` field, not part
+# of the barrier -- it's a compile-time-resolved `D === Bool` check
+# inlined below, not a second axis of runtime dispatch).
+function _ism_getcolumn_scalar!(out::Vector{J}, ism::IncrementalStMan, colnr::Int,
+                                isbool::Bool, nrow::Int, ncol::Int, ::Type{D}) where {J,D}
+    ix = ism.index
+    big = ism.endian === :big
+    for bi in 1:ix.used
+        bstart = ix.rows[bi]                 # 1-based first row of the bucket
+        bend = ix.rows[bi+1]                 # 1-based, exclusive
+        rownrs, offsets, database = _ism_colindex(ism, ix.bucket[bi], colnr, ncol)
+        @inbounds for k in 1:length(rownrs)
+            r0 = bstart + rownrs[k]                                  # 1-based
+            r1 = k < length(rownrs) ? bstart + rownrs[k+1] : bend    # exclusive
+            dataoff = database + offsets[k]
+            v = isbool ? (ism.data[dataoff + 1] & 0x01 == 0x01) : _ld(D, ism.data, dataoff, big)
+            for r in r0:r1-1
+                out[r] = v
+            end
+        end
+    end
+    return out
 end
 
 # =====================  writer  =====================================
