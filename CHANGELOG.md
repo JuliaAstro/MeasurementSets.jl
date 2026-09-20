@@ -8335,3 +8335,66 @@ surface with a byte-for-byte equivalent to compare against.
 
 Full suite green: 5240 baseline + 3 new = 5243/5243. README/memory
 updated, merge on the user's word.
+
+### Phase 232 — continued the `src/taql/` sweep, targeting `mscal.jl`:
+one stale comment fixed, plus a coverage-instrumented pass pinning
+several genuinely-correct-but-never-tested code paths
+
+`mscal.jl` (2,009 lines) is by far the most extensively pre-vetted file
+in `src/taql/` — dozens of prior phases (77 through ~171, plus later
+touch-ups) already found and fixed real bugs there via live cross-checks
+against real casacore/CASA, and its comments densely document every
+prior finding. A careful, complete fresh-eyes read of the whole file
+found exactly one issue — genuinely stale documentation, not a runtime
+bug: the comment above `_cache`'s memo said `antid < 0` encodes an
+`OBSERVATION_ID` as `-antid-1` — a leftover from *before* Phase 144
+replaced that per-row per-observation array-centre lookup with a single
+engine-wide `centrepos`; confirmed via grep that nothing in the current
+file ever decodes a negative `antid` any other way than the one fixed
+sentinel `-1`. Fixed the comment to describe the actual, current
+behaviour.
+
+**Coverage-instrumented pass** (methodology note #14 — once manual
+re-reading plateaus, diff never-executed lines against a clean run):
+turned up several DOCUMENTED, real code paths — not defensive/
+unreachable branches — that had simply never been directly exercised by
+any test, each live-verified correct (cross-checked against an
+independent direct `measure`/`measconvert` computation, not just
+"doesn't crash") before being pinned with a permanent regression test:
+
+1. The array-centre fallback when an MS's `OBSERVATION.TELESCOPE_NAME`
+   has no entry in the bundled Observatories table — real casacore (and
+   this package, Phase 144) falls back to the MIDDLE antenna
+   (`itsAntPos[0][nant÷2]`, 0-based), with a `@warn`. Live-verified
+   `mscal.ha()` against a synthetic MS with a bogus telescope name
+   matches a direct `measconvert` computation using that exact antenna.
+2. `mscal.*`'s interpolation of a polynomial (`NUM_POLY`) `PHASE_DIR`
+   at a genuinely nonzero `dt` from `FIELD.TIME` (Phase 93's own
+   interpolation machinery) — previously only exercised via direct
+   `measure()` calls in `measures_tests.jl`, never through an actual
+   `mscal.*` function end to end. Live-verified `mscal.hadec1()` matches
+   an independent computation, and confirmed the polynomial ramp term
+   genuinely fired (differs from the `dt=0` static value).
+3. `mscal.spw`/`mscal.chan`'s single-channel-index (`'0:5'`) and `>`/`<`
+   channel-index-bound (`'0:>60'`, `'0:<3'`) selector forms (Phase 83) —
+   every prior test used only the `a~b` range and frequency-unit forms.
+4. The "bad selector" (`mscal.chan`) and "malformed spec" (`mscal.
+   uvdist`) generic parse-error paths for a string matching neither a
+   unit suffix nor any recognised numeric form.
+
+A first coverage-run attempt was itself contaminated by the stale-
+comment edit landing mid-run (the established "mid-run-edit race"
+pattern) — the edit shifted line numbers past its insertion point,
+misaligning the `.cov` file's line-count-to-source mapping for
+everything after it; caught by noticing two "0 executions" results
+(`mscal.pa()`'s `else` branch, `mscal.uvdist`'s `<` bound) that
+contradicted existing, passing tests exercising those exact lines.
+Redone with a clean run once the edit had settled.
+
+11 new assertions. No real-TaQL cross-check needed (each finding was
+cross-checked against this package's own independent `measure`/
+`measconvert` machinery, already itself real-CASA-cross-checked
+elsewhere).
+
+Full suite green: 5243 baseline + 11 new = 5254/5254. README/memory
+updated, merge on the user's word.

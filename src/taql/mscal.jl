@@ -445,8 +445,14 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     end
 
     # memo: (position key, direction key, TIME seconds) -> frame-converted values.
-    # antid >= 0 is an antenna; antid < 0 means the array centre for
-    # OBSERVATION_ID `-antid-1`.
+    # antid >= 0 is an antenna; antid < 0 (always -1, from `_antid`'s
+    # suffix-less case) means the ONE array centre, `centrepos` above.
+    # Phase 232: this comment previously (pre-Phase-144) described a
+    # per-OBSERVATION_ID array centre (`-antid-1` decoding an
+    # OBSERVATION_ID) -- stale since Phase 144 replaced that per-row
+    # lookup with a single engine-wide `centrepos`; `_antid` never
+    # produces anything other than `-1` for the array-centre case, and
+    # nothing in this file decodes a negative `antid` any other way.
     memo = Dict{Tuple{Int,Any,Float64},NamedTuple}()
     function _cache(antid::Int, dir::AbstractString, i::Int)
         dj, dkey = _djfor(dir, i)
