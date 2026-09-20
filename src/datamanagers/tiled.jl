@@ -422,12 +422,16 @@ alldefined_none(tsm::TiledStMan) =
 
 # Fast whole-column read for the common layout: a single hypercube whose
 # leading axes are not tiled (tilesPerDim == 1 there), so each on-disk tile
-# is a contiguous run of whole cells along the last (row) axis.
+# is a contiguous run of whole cells along the last (row) axis. One shared
+# `backing` buffer for the WHOLE column (`Bool` via `_rd_bits!`, everything
+# else via `_rd_run!`) -- the final `Vector` holds a lightweight `reshape
+# (view(...))` per row, not a fresh per-row `Array` (Phase 234/235: `Bool`
+# used to bail to a per-row-allocating fallback here; fixed to share this
+# same single-backing-buffer structure instead of being a special case).
 function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
                          nrow::Int, colidx::Int; astype::Union{Nothing,Type}=nothing)
     T = juliatype(tsm.types[colidx])
-    T === Bool && return nothing            # bit unpacking: use the slow path
-    Tout = astype === nothing ? T : astype
+    Tout = astype === nothing ? T : astype   # astype never narrows Bool (Phase 34/35)
     nd = length(cube.cubeshape)
     cs, ts = cube.cubeshape, cube.tileshape
     all(cld(cs[d], ts[d]) == 1 for d in 1:nd-1) || return nothing
@@ -441,12 +445,22 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
     big = tsm.endian === :big
 
     backing = Vector{Tout}(undef, nrow * planelen)
-    for r in 1:nrow
-        p = rowpos(r) - 1                    # 0-based last-axis position
-        tile = p ÷ rowspertile
-        within = (p % rowspertile) * planelen
-        b = cube.offset + tile * bbytes + coloff + within * sizeof(T)
-        _rd_run!(backing, (r - 1) * planelen, T, bytes, b, planelen, big)
+    if T === Bool
+        for r in 1:nrow
+            p = rowpos(r) - 1                    # 0-based last-axis position
+            tile = p ÷ rowspertile
+            within = (p % rowspertile) * planelen   # 0-based BIT offset within the tile's block
+            base = cube.offset + tile * bbytes + coloff
+            _rd_bits!(backing, (r - 1) * planelen, bytes, base, within, planelen)
+        end
+    else
+        for r in 1:nrow
+            p = rowpos(r) - 1                    # 0-based last-axis position
+            tile = p ÷ rowspertile
+            within = (p % rowspertile) * planelen
+            b = cube.offset + tile * bbytes + coloff + within * sizeof(T)
+            _rd_run!(backing, (r - 1) * planelen, T, bytes, b, planelen, big)
+        end
     end
     return [reshape(view(backing, (r-1)*planelen+1 : r*planelen), planeshape...)
             for r in 1:nrow]

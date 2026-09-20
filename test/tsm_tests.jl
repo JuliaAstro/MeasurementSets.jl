@@ -89,3 +89,43 @@ end
     # merely "somewhat more")
     @test a_flag < 3 * a_data
 end
+
+@testset "TSM Bool WHOLE-COLUMN read — bulk path, not per-row (Phase 235)" begin
+    # `_read_cube_bulk` (the bulk `getcolumn` fast path -- one shared
+    # backing buffer for the whole column, added in Phase 35/68 for every
+    # OTHER type) used to bail out for `Bool` entirely
+    # (`T === Bool && return nothing`), forcing `getcolumn(t, "FLAG")` to
+    # fall back to `[getcell(...) for r in 1:nrow]` -- ONE fresh
+    # `Array{Bool}` allocation PER ROW for a whole-column read, even
+    # though Phase 234 had already made each individual `getcell` fast.
+    # `Bool` now shares the SAME single-backing-buffer bulk path as every
+    # other type (via `_rd_bits!`); every row's cell is a zero-copy view
+    # into it, not its own allocation.
+    dir = mktempdir()
+    n = 20_000
+    F = [rand(Bool, 4, 8) for _ in 1:n]
+    write_table(joinpath(dir, "t.ms"), "T", ["F" => F]; nrow=n, tsm=[["F"]])
+    t = readtable(joinpath(dir, "t.ms"))
+    @test columndesc(t, "F").manager == "TiledShapeStMan"
+
+    c = getcolumn(t, "F")
+    @test length(c) == n
+    @test all(c[r] == F[r] for r in 1:n)                  # correctness unchanged
+    # THE regression guard: every row's cell is a view sharing ONE
+    # backing buffer (a fresh per-row `Array{Bool}(undef, ...)`, the old
+    # fallback, would give each row an unrelated, non-shared buffer).
+    @test parent(vec(c[1])) isa Vector{Bool}
+    @test parent(vec(c[1])) === parent(vec(c[end]))
+
+    # a real allocation comparison against the actual old-code-equivalent
+    # (a per-row `getcell` loop is exactly what `getcolumn`'s fallback
+    # used to reduce to for `Bool`) -- not a guessed byte count, which
+    # turned out to undercount `Base.ReshapedArray`'s own wrapper cost on
+    # top of the `SubArray` it wraps.
+    getcolumn(t, "F"); [getcell(t, "F", r) for r in 1:n]  # warm up (compile)
+    GC.gc()
+    a_bulk = @allocated getcolumn(t, "F")
+    GC.gc()
+    a_perrow = @allocated [getcell(t, "F", r) for r in 1:n]
+    @test a_bulk < a_perrow / 3   # live-measured ~10.6x; a loose 3x margin
+end

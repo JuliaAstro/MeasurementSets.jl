@@ -65,3 +65,35 @@ if _HAVE_CASACORE
             ["SPECTRAL_WINDOW_ID", "POLARIZATION_ID", "FLAG_ROW"])
     end
 end
+
+@testset "SSM fixed-array getcolumn — view, not copy (Phase 235)" begin
+    # `getcolumn` for a fixed-shape direct-array column (e.g. a real MS's
+    # SSM-bound `ANTENNA.POSITION`) used to build one shared flat backing
+    # buffer and then take a COPYING slice of it per row
+    # (`flat[(r-1)*nrelem+1:r*nrelem]`) before `reshape`-ing -- one extra
+    # small allocation per row on top of the already-built backing array,
+    # the same shape of bug Phase 234 fixed for tiled `Bool` columns.
+    # `@view` makes each returned cell a zero-copy window into the ONE
+    # backing buffer instead (matching `tiled.jl`'s `_read_cube_bulk`
+    # precedent, already in production since Phase 35/68).
+    dir = mktempdir()
+    n = 20_000
+    pos = [rand(3) for _ in 1:n]
+    write_table(joinpath(dir, "t.ms"), "T", ["POS" => pos]; nrow=n)
+    t = readtable(joinpath(dir, "t.ms"))
+    @test columndesc(t, "POS").manager == "StandardStMan"
+
+    c = getcolumn(t, "POS")
+    @test length(c) == n
+    @test all(c[r] == pos[r] for r in 1:n)               # correctness unchanged
+    @test parent(c[1]) isa Vector{Float64}                # a real view, not a copy
+    # THE regression guard: every row shares ONE backing buffer. A
+    # `flat[range]` copy (the old bug) would give each row its own,
+    # unrelated `Vector` -- `parent(c[1]) === parent(c[2])` would be
+    # `false`. (A raw byte-count threshold isn't a reliable guard here:
+    # the per-row VIEW wrapper itself still costs ~40 bytes/row on top of
+    # the 24-byte payload, so the view-vs-copy saving for a *small* cell
+    # like this 3-element position is real but modest — the dramatic win
+    # is for large tiled cells (`FLAG`), covered in `tsm_tests.jl`.)
+    @test parent(c[1]) === parent(c[end])
+end

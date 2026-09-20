@@ -8474,3 +8474,100 @@ allocation/performance fix, not new TaQL surface — the existing
 
 Full suite green: 5254 baseline + 3 new = 5257/5257. README/memory
 updated, merge on the user's word.
+
+### Phase 235 — a follow-up allocation pass at the user's request:
+eliminate two more per-row copies/allocations in whole-column reads
+
+Re-benchmarked with a focus on allocations after Phase 234, and
+investigated the user's direct question — "would it not provide better
+performance to allocate Matrices instead of Vectors, i.e. blocks of
+rows instead of individual rows?" Found two concrete answers.
+
+**1. A real bug, fixed:** `StandardStMan.getcolumn`'s fixed-shape
+direct-array branch (the SSM path a real MS's `ANTENNA.POSITION`
+uses, and — depending on the MS — `UVW`) already built ONE shared flat
+backing buffer for the whole column, but then took a COPYING slice of
+it per row (`flat[(r-1)*nrelem+1:r*nrelem]`, a plain `Vector`
+`getindex` — always a copy in Julia) before `reshape`-ing, instead of
+`@view`. One extra small allocation per row on top of the backing
+buffer already built — the identical bug shape Phase 234 fixed for
+tiled `Bool` columns, just via a copying array-slice instead of a
+doubly-nested loop. Fixed both occurrences (the `Bool` and the general
+numeric direct-array branches) to `@view` — matching `tiled.jl`'s
+`_read_cube_bulk`, which has used the "one backing buffer, per-row
+views" pattern since Phase 35/68. Verified: every row of a fixed
+`ANTENNA.POSITION`-like column now shares ONE backing buffer
+(`parent(c[1]) === parent(c[end])`), matching casacore exactly.
+
+**2. Extended the whole-column bulk fast path to `Bool`:** `_read_cube_bulk`
+(the shared-backing-buffer bulk read added in Phase 35/68) bailed out
+for `Bool` unconditionally (`T === Bool && return nothing`), forcing
+`getcolumn(t, "FLAG")` to fall back to `[getcell(...) for r in
+1:nrow]` — one fresh `Array{Bool}` allocation PER ROW for a
+whole-column read, even after Phase 234 made each individual `getcell`
+call itself fast. `Bool` now shares the exact same single-backing-buffer
+structure as every other type, via `_rd_bits!` (Phase 234's new
+primitive) instead of `_rd_run!`. Live-measured against the true
+old-code-equivalent (a per-row `getcell` loop, exactly what the old
+fallback reduced to): the new bulk path allocates **~10.6x less** for a
+20,000-row synthetic `Bool` tiled column.
+
+**3. The architecture question, answered quantitatively.** Both fixes
+above still return a `Vector` of per-row *view* objects
+(`reshape(view(backing, ...), cellshape...)`), not a genuine
+`(cellshape..., nrow)` block `Array` — the representation this
+package's `Column <: AbstractVector` / `Tables.jl` / TaQL-engine /
+`edit.jl` surface is built on throughout, and changing it everywhere
+would be a much larger, likely-breaking restructuring. Quantified
+exactly what that representation still costs on top of a genuine block:
+a bare `[reshape(view(backing, ...), shape...) for r in 1:n]` — with NO
+copy, NO decode, just the wrapper construction — costs **~120
+bytes/row** for a 1-D `(3,)` cell (`UVW`-shaped) and **~150 bytes/row**
+for a 2-D `(4,64)`-shaped cell needing an extra `Base.ReshapedArray`
+layer, live-measured for 9.8M rows. For a large payload (`DATA`: 2048
+bytes/row) that wrapper is ~7% overhead — negligible. For a small
+payload (`UVW`: 24 bytes/row) the wrapper is **~5x the actual data** —
+confirming the user's intuition is exactly right for small-cell
+columns specifically: a real `(3, nrow)` `Matrix` (one allocation,
+`Base.format_bytes` ≈ 48 bytes total via `reshape`) would eliminate
+essentially all of that overhead. This is why `UVW`'s whole-column read
+stayed ~75x slower than real casacore C++ even after fixing the two
+bugs above (both already-optimal-for-the-current-representation for
+`UVW` specifically — it's `TiledColumnStMan`-bound in this MS, so
+neither the SSM copy-fix nor the new `Bool` bulk path touch it at all;
+its existing view-based bulk path was already in place since Phase
+35/68 and simply has this structural per-row-wrapper cost baked in).
+Documented as a genuine, scoped candidate for a future phase (a real
+block/`Matrix`-returning accessor, additive — not a change to
+`getcolumn`'s existing `Vector`-of-cells contract) rather than
+implemented here, given the architectural weight of touching the
+return-type contract every consumer of a fixed-shape array column
+relies on.
+
+New regression tests: `ssm_tests.jl` ("SSM fixed-array getcolumn —
+view, not copy") — a synthetic 20,000-row SSM-bound `(3,)` column,
+correctness + the `parent(...) === parent(...)` structural guard (a
+byte-count threshold isn't reliable here: the per-row view wrapper
+itself still costs more than the tiny 3-element payload, so the
+before/after *saving* is real but modest for a column this small —
+the guard is "no longer independently copied", not a specific
+allocation number). `tsm_tests.jl` ("TSM Bool WHOLE-COLUMN read — bulk
+path, not per-row") — a synthetic 20,000-row tiled `Bool` `(4,8)`
+column, correctness + the same structural guard + a live allocation
+comparison against the true old-code-equivalent (10.6x measured, 3x
+margin asserted).
+
+Live-verified end to end on the real 9.8M-row MS (re-running the
+Phase 234 benchmark): whole-column `FLAG` now reads in 1.78s / 3.4 GiB
+— **faster than real casacore C++** (10.16s) for this operation,
+`0.17x`. `UVW` whole-column stayed at ~1.7s / 1.6 GiB / ~75x slower
+than C++'s 0.022s (unaffected, per the architecture note above — real
+casacore returns one dense block with zero per-row overhead at all).
+Correctness re-verified against real casacore on the sample fixture
+for `UVW`, `FLAG`, and `DATA` (unaffected, sanity-checked).
+
+11 new assertions. No real-TaQL cross-check needed (an internal
+representation/allocation fix, not new TaQL surface).
+
+Full suite green: 5257 baseline + 11 new = 5268/5268. README/memory
+updated, merge on the user's word.
