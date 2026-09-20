@@ -61,13 +61,23 @@ end
 # the original (pre-sort) row order (`alg=MergeSort` -- Julia's default
 # algorithm choice is type/size-dependent and not guaranteed stable, and
 # a stable tie-break is the intuitive, TaQL-consistent behaviour).
+#
+# Phase 229 finding (the `groupby.jl` sibling of this function, `_gt_sort`,
+# had the identical bug -- fixed there too): a column being sorted may
+# genuinely contain `missing` (e.g. `ORDER BY` a right-side column of an
+# outer `join` with `unmatched=:missing`) -- ordinary usage, not contrived.
+# Raw `vi == vj` gives `missing` (three-valued) whenever either side is
+# `missing`, and `missing && continue` crashed with a raw `TypeError`
+# instead of sorting normally. Fixed with `isequal` (`missing`-safe,
+# always-`Bool`); `isless` already sorts `missing` sensibly on its own
+# (last ascending / first descending -- Julia's own `sort` convention).
 function _apply_orderby(matched::Vector{Int}, orderby::Vector{TQLOrderKey},
                         cols::AbstractDict)
     isempty(orderby) && return matched
     lt = function (i, j)
         for k in orderby
             vi, vj = cols[k.name][i], cols[k.name][j]
-            vi == vj && continue
+            isequal(vi, vj) && continue
             return k.desc ? isless(vj, vi) : isless(vi, vj)
         end
         return false
@@ -439,7 +449,7 @@ function query(t::AbstractTable, wherestr::AbstractString;
     end
     cols = _tql_cols(t, needed, ast)
     matched = ast === nothing ? collect(1:nrow(t)) :
-              [i for i in 1:nrow(t) if _tqleval(ast, cols, i)]
+              [i for i in 1:nrow(t) if _tql_truthy(_tqleval(ast, cols, i))]
     matched = _apply_orderby(matched, orderby, cols)
     cls = _select_classify(select, validnames)
     if _select_all_proj(cls)
@@ -491,7 +501,7 @@ function query(f::Function, t::AbstractTable;
     allnames = vcat(collect(names), extra)
     allcols = AbstractVector[_load_col(column(t, n)) for n in allnames]
     rows = CTDSRows(allcols, Symbol.(allnames), nrow(t))
-    matched = [i for (i, row) in enumerate(rows) if f(row)]
+    matched = [i for (i, row) in enumerate(rows) if _tql_truthy(f(row))]
     cols_by_name = Dict(n => c for (n, c) in zip(allnames, allcols))
     matched = _apply_orderby(matched, orderkeys, cols_by_name)
     cls = _select_classify(select, Set(columnnames(t)))

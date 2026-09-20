@@ -765,6 +765,16 @@ _boxed_svar(x, w) = (a = _require_array(x);
 _boxed_sstd(x, w) = (a = _require_array(x);
                      _boxed_reduce(y -> Statistics.std(_tql_need2(y, "samplestddev")), Float64, a, w))
 
+# Phase 227 fix: `ifelse(cond, a, b)` (unlike `&&`/`||`, an ordinary
+# function, not special syntax) still requires `cond::Bool` and throws a
+# raw `MethodError` for a `missing` condition (e.g. `iif(V > 5, a, b)`
+# where `V` is `missing` -- reachable the same way every other site in
+# this file's Phase 227 fix is). SQL's `CASE WHEN NULL THEN a ELSE b
+# END` is NULL -- `iif` propagates `missing` the same way, matching the
+# 3-valued-logic convention used throughout the rest of the WHERE/HAVING/
+# JOIN evaluation (`_tql_and`/`_tql_or`/`_tql_truthy`, `ast.jl`).
+_tql_iif(cond, a, b) = cond === missing ? missing : ifelse(cond, a, b)
+
 # name => (callable-over-arg-values, allowed arg count).  `min`/`max` and
 # `angdist` are arity-overloaded and handled in `_make_func`, not here.
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
@@ -874,7 +884,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "reversestring" => (reverse, 1:1), "sreverse" => (reverse, 1:1),
     "trim" => (_tql_trim, 1:1), "ltrim" => (_tql_ltrim, 1:1), "rtrim" => (_tql_rtrim, 1:1),
     # --- misc ---
-    "iif" => (ifelse, 3:3),
+    "iif" => (_tql_iif, 3:3),
     # --- date/time (MJD-Float days) + angle strings (Phase 69) ---
     "datetime" => (_tql_datetime, 0:1),
     "mjd" => ((a...) -> isempty(a) ? _tql_now_mjd() : float(a[1]), 0:1),
@@ -1067,10 +1077,25 @@ end
 # data) and a `"::measframe::COLNAME"` sentinel; `_measframe_split` /
 # `_measframe_cols` (called from `_tql_cols` / `_vtq_prepare!`) resolve
 # the sentinel to the column's fixed source-frame name, once per table.
+# Phase 230 finding: `mjd` used to be a mandatory `TQLExpr` field here,
+# but the general numeric `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y,
+# z]])` form only requires an `mjd` argument when the TARGET frame's own
+# `_meas_dir_needs_epoch` is true (`want = 2 + (need_ep ? 1 : 0) + ...`)
+# -- so `meas.j2000('B1950', lon, lat)` (target J2000, no epoch needed)
+# correctly takes no `mjd` at all. The COLNAME form (this struct)
+# unconditionally required exactly `1 + (need_p ? 3 : 0)` rest args,
+# forcing an unused `mjd` even for a J2000-target conversion -- live-
+# reproduced: `meas.j2000('B1950', 1.0, 0.5)` (2 args) worked, but the
+# equivalent-in-spirit `meas.j2000('SOME_COL')` (0 rest args, same
+# target frame) threw `"meas.j2000('COLNAME', mjd) in ..."`, demanding
+# an argument the conversion never uses. Fixed by making `mjd` nullable
+# (mirroring how `xyz` already was) and requiring it only when
+# `_meas_dir_needs_epoch(target)` is true, matching the numeric form
+# exactly.
 struct TQLMeasColDir <: TQLExpr
     target::DataType
     colname::String
-    mjd::TQLExpr
+    mjd::Union{Nothing,TQLExpr}
     xyz::Union{Nothing,NTuple{3,TQLExpr}}
 end
 
@@ -1079,7 +1104,7 @@ _measframe_key(colname::AbstractString) = "::measframe::" * colname
 function _tqleval(e::TQLMeasColDir, cols, i)
     lonlat = cols[e.colname][i]
     sref = cols[_measframe_key(e.colname)][1]
-    mjd = _tqleval(e.mjd, cols, i)
+    mjd = e.mjd === nothing ? nothing : _tqleval(e.mjd, cols, i)
     xyz = e.xyz === nothing ? nothing :
           (_tqleval(e.xyz[1], cols, i), _tqleval(e.xyz[2], cols, i), _tqleval(e.xyz[3], cols, i))
     _meas_dir_convert(e.target, sref, lonlat[1], lonlat[2], mjd, xyz)
@@ -1087,7 +1112,7 @@ end
 function _geval(e::TQLMeasColDir, cols, g)
     lonlat = cols[e.colname][g[1]]
     sref = cols[_measframe_key(e.colname)][1]
-    mjd = _geval(e.mjd, cols, g)
+    mjd = e.mjd === nothing ? nothing : _geval(e.mjd, cols, g)
     xyz = e.xyz === nothing ? nothing :
           (_geval(e.xyz[1], cols, g), _geval(e.xyz[2], cols, g), _geval(e.xyz[3], cols, g))
     _meas_dir_convert(e.target, sref, lonlat[1], lonlat[2], mjd, xyz)
@@ -1095,11 +1120,13 @@ end
 function _tqlrefs!(seen, e::TQLMeasColDir)
     push!(seen, e.colname)
     push!(seen, _measframe_key(e.colname))
-    _tqlrefs!(seen, e.mjd)
+    e.mjd === nothing || _tqlrefs!(seen, e.mjd)
     e.xyz === nothing || foreach(x -> _tqlrefs!(seen, x), e.xyz)
 end
-_has_aggr(e::TQLMeasColDir) = _has_aggr(e.mjd) || (e.xyz !== nothing && any(_has_aggr, e.xyz))
-_has_qty(e::TQLMeasColDir) = _has_qty(e.mjd) || (e.xyz !== nothing && any(_has_qty, e.xyz))
+_has_aggr(e::TQLMeasColDir) = (e.mjd !== nothing && _has_aggr(e.mjd)) ||
+    (e.xyz !== nothing && any(_has_aggr, e.xyz))
+_has_qty(e::TQLMeasColDir) = (e.mjd !== nothing && _has_qty(e.mjd)) ||
+    (e.xyz !== nothing && any(_has_qty, e.xyz))
 
 function _measframe_split(names)
     rest = String[]
@@ -1137,16 +1164,22 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
         is_frame1 = has_str1 &&
             haskey(_MEAS_DIR_FRAMES, lowercase(strip(String(args[1].value))))
         if has_str1 && !is_frame1
-            # Phase 110: meas.<frame>('COLNAME', mjd[, x, y, z]) -- the source
-            # frame comes from COLNAME's own MEASINFO, not a literal
+            # Phase 110: meas.<frame>('COLNAME'[, mjd[, x, y, z]]) -- the
+            # source frame comes from COLNAME's own MEASINFO, not a literal.
+            # `mjd`/`x,y,z` are required exactly when the TARGET frame needs
+            # them (`need_ep`/`need_p`, `_meas_dir_needs_epoch`/`_pos`) --
+            # matching the general numeric form's own `want` below exactly
+            # (Phase 230: this used to unconditionally require `mjd` even
+            # for a target frame, like J2000, that never uses one).
             colname = String(args[1].value)
             rest = args[2:end]
-            wantc = 1 + (need_p ? 3 : 0)
+            wantc = (need_ep ? 1 : 0) + (need_p ? 3 : 0)
             length(rest) == wantc || throw(ArgumentError(
-                "TaQL-lite: meas.$fn('COLNAME', mjd" * (need_p ? ", x, y, z" : "") *
-                ") in \"$src\""))
+                "TaQL-lite: meas.$fn('COLNAME'" * (need_ep ? ", mjd" : "") *
+                (need_p ? ", x, y, z" : "") * ") in \"$src\""))
+            mjdexpr = need_ep ? rest[1] : nothing
             xyz = need_p ? (rest[2], rest[3], rest[4]) : nothing
-            return TQLMeasColDir(R, colname, rest[1], xyz)
+            return TQLMeasColDir(R, colname, mjdexpr, xyz)
         end
         sref = is_frame1 ? String(args[1].value) : "J2000"
         rest = is_frame1 ? args[2:end] : args

@@ -8074,3 +8074,264 @@ body now runs inside the new `try` block. 9 new assertions.
 
 Full suite green: 5198 baseline + 9 new = 5207/5207. README/memory
 updated, merge on the user's word.
+
+### Phase 227 — `src/taql/` sweep: a `missing` value anywhere in a
+WHERE/HAVING/JOIN condition used to crash with a raw `TypeError` instead
+of excluding the row, matching real SQL/TaQL's three-valued logic
+
+Started a fresh sweep of `src/taql/` (six files, ~6,600 lines) with a
+fresh-eyes read of `join.jl` and `groupby.jl` — the two files that
+hadn't had a fix land in them since their original Phase 28/49/56/26/48
+implementations, across the entire later sweep history. `join`'s
+explicit "the verbs chain" design (Phase 58) is what surfaced the real
+finding: a `join` with `unmatched=:missing` produces a genuinely
+`missing`-containing output column (an unmatched row's right-side
+value), and re-joining/filtering on *that* column downstream — ordinary
+usage of a documented feature, not contrived input — hits a real gap.
+
+**Real bugs, fixed, four distinct crash shapes, all live-reproduced
+before fixing:**
+
+1. `_join_matchrow`'s index-lookup `on=` branch did `0 <= v < nr ?
+   Int(v)+1 : 0` — for `v === missing`, `0 <= missing` is `missing`, and
+   `missing ? ... : ...` throws `TypeError: non-boolean (Missing) used
+   in boolean context`. Fixed to treat `missing` the same as an
+   out-of-range index (row unmatched).
+2. Every `if`/`::Bool`-context consumer of a WHERE/HAVING/join-condition
+   result — `query`'s string and closure WHERE, `groupby`'s `_where_rows`
+   / `_gb_prepare` (shared by `update!`/`delete!` too) and its two
+   `havingfn(...) || continue` sites, and `join`'s predicate/string-
+   condition/post-join-`where` paths — all threw the identical raw
+   `TypeError` for a `missing` result instead of excluding the row.
+3. `TQLAnd`/`TQLOr`'s own `_tqleval`/`_geval` implementation used raw
+   `&&`/`||`, which are special syntax requiring specifically the *left*
+   operand to satisfy `x::Bool` (`missing && true` throws; `true &&
+   missing` does not — confirmed live, a real asymmetry) — so no amount
+   of fixing only the outer consumer (item 2) could catch a crash
+   happening *inside* the AND/OR evaluation itself, before it ever
+   returns a value to wrap.
+4. `iif(cond, a, b)` was wired straight to `Base.ifelse`, which (an
+   ordinary function, not special syntax, but still requires
+   `cond::Bool`) throws a `MethodError` for `cond === missing`.
+
+Fixed once, comprehensively, rather than patching only the first site
+found: a shared `_tql_truthy` (the single point every condition result
+passes through before the row-inclusion decision — `missing` excluded,
+exactly like `false`; a genuinely non-Bool result still errors clearly)
+applied at every site in item 2, and genuine 3-valued-logic `_tql_and`/
+`_tql_or` (`missing` propagates like SQL NULL — `false AND missing =
+false`, `true AND missing = missing`, etc.) replacing the raw `&&`/`||`
+in both `_tqleval(::TQLAnd/TQLOr)` (`ast.jl`) and its `_geval`
+counterpart (`groupby.jl`). Deliberately *not* "coalesce every
+`missing` sub-result to `false` immediately" — that reads as equivalent
+for AND/OR but silently breaks `NOT`: `!missing === missing` (still
+excluded, correct), but `!(coalesced false) === true` (wrongly
+*included*) — live-verified this exact case (`NOT (KEY > 5)` on a
+`missing`-valued `KEY`) stays correctly excluded under the real fix.
+The 3-valued design was also confirmed *positively* correct, not just
+non-crashing: `missing OR true` is `true` per SQL semantics, so a row
+whose `KEY > 5` is `missing` but whose `ID == 3` is definitely true is
+correctly *included*, live-verified both operand orders. `iif` fixed
+with a small `_tql_iif` that propagates `missing`, matching `CASE WHEN
+NULL THEN a ELSE b END`.
+
+Confirmed already-safe and left untouched: `TQLNot` (Base's own
+`!(::Missing) = missing`), `TQLCmp` (comparison operators already
+propagate `missing` correctly), `TQLIn` (`in`, built on `any`, is
+already `missing`-safe) — only `&&`/`||`/`if`/`ifelse` specifically
+require exactly `Bool` and crash otherwise. The equi-join `Dict`-based
+lookup path (`_join_pairs`'s `multi=true`/`Pair on=` branches) was
+checked too and confirmed already crash-safe (`Dict` uses `isequal`,
+which treats `missing` as equal to itself — a deliberate, pre-existing,
+internally-consistent design choice, not a bug, left as-is). No
+real-TaQL cross-check — this is a MeasurementSets-side chaining
+scenario (an outer `join`'s `missing` fill), not something a plain
+casacore MS or real TaQL query ever produces. 17 new assertions.
+
+Full suite green: 5207 baseline + 17 new = 5224/5224. README/memory
+updated, merge on the user's word.
+
+### Phase 228 — user-reported docs build failure: `measconvert` had no
+docstring at all, a real, previously-undetected instance of the "a
+docstring is silently DROPPED if anything sits between it and its
+target" mistake (Phase 160's own class of bug, three more instances)
+
+The user reported the docs build failing with `Error: no docs found
+for 'measconvert' in @docs block in docs/src/api-measures.md:14-52`.
+Reproduced locally: `@doc(measconvert)` genuinely returned `nothing`.
+
+**Root cause, confirmed with a minimal reproduction before touching any
+source**: a Julia `"""..."""` docstring is silently *dropped* — not
+misattached to the wrong thing, not an error, just lost — if *anything
+at all*, even a bare `# comment` line with nothing else, sits between
+it and the expression it documents; only blank lines are transparent.
+This is the same class of mistake Phase 160 already found and fixed
+(there, an `@eval`-generated `struct` needing `@doc` explicitly) — a
+different concrete shape of the same underlying trap.
+
+**Three real instances found and fixed, one of them user-reported, two
+found only by then doing a comprehensive sweep rather than stopping at
+the first fix:**
+
+1. `src/measures/types.jl` — the generic `measconvert(m::Measure,
+   R::Type{<:RefFrame}; frame)` docstring was separated from its target
+   by `_all_finite`'s own explanatory comment *and* the `_all_finite`
+   definition itself (inserted between them back in Phase 195, which
+   evidently broke this without anyone noticing until Documenter's own
+   `@docs` check finally caught it). Fixed by moving `_all_finite`
+   above the docstring instead of below it.
+2. `src/measures/doppler.jl` — **found while investigating the exact
+   same mistake in my own Phase 224 commit**: `measconvert(m::MDoppler
+   {C}, ::Type{D})`'s docstring had an identical shape (docstring, a
+   long explanatory comment, then the function) — introduced by this
+   session's own Phase 224 work, never caught because the *generic*
+   `measconvert` function still resolved to types.jl's docstring at
+   the time (before item 1 broke that too), so `@doc(measconvert)`
+   wasn't actually `nothing` until both were broken simultaneously.
+3. `src/measures/measinfo.jl` — a pre-existing, lower-severity instance
+   (the docstring is internal, `_ref_string`, never listed in any
+   `@docs` block, so it didn't break the build) found by a systematic
+   scan rather than another docs-build failure: the docstring intended
+   for `_ref_string` (defined at line 157) sat, misplaced, directly
+   above `_ref_from_code` (a different, undocumented sibling function
+   defined earlier), separated from its real target by an intervening
+   comment + the whole `_ref_from_code` function body. Fixed by moving
+   the docstring down to sit directly above `_ref_string` itself.
+
+**Methodology**: rather than trusting a single fix + a check of only
+the reported symbol, wrote a small script scanning every `.jl` file in
+`src/` and `ext/` for a `"""..."""` block whose next non-blank line is
+a `#` comment (the exact structural shape that drops a docstring) —
+confirmed zero remaining instances after all three fixes. Also
+confirmed, live, that a naive "check every *exported* name has some
+docstring via `@doc`" approach is unreliable here and would have missed
+item 2: `@doc` on a generic function returns docs from *any* of its
+methods, so a broken docstring on one method can be masked by a working
+docstring on another method of the same name — exactly what happened
+between items 1 and 2 before both were simultaneously broken. The fix
+was finally verified against the *real* mechanism that reported the
+original error — a genuine local `docs/make.jl` build (`julia
+--project=docs docs/make.jl`), which now completes with zero errors
+(only a pre-existing, unrelated search-index-size informational
+warning).
+
+No test-count change (a pure comment/docstring reordering — every
+executable line is byte-identical, just moved relative to comments)
+— full suite reconfirmed green regardless, since a source change is a
+source change. README/memory updated, merge on the user's word.
+
+### Phase 229 — continued the `src/taql/` sweep: Phase 227's own fix
+introduced a fresh regression, plus a second, unrelated `missing`-vs-`==`
+crash in `ORDER BY`/`orderby` sorting
+
+Continued sweeping `src/taql/` with a fresh-eyes read of `ast.jl` and
+`parse.jl` — the tokenizer/AST core, last touched (not re-read) when
+Phase 227 patched `_tql_and`/`_tql_or` in place.
+
+**Real bug #1, fixed:** Phase 227's `_tql_and`/`_tql_or` accepted a raw,
+*unvalidated* operand of any type, not just `Bool`/`Missing`. Before
+Phase 227, `TQLAnd`/`TQLOr` used plain `&&`/`||`, which correctly
+`throw`s a `TypeError` for a non-Bool, non-Missing operand — a genuinely
+malformed predicate. Live-reproduced: `_tql_and(5, true)` silently gave
+`missing` (not an error), and because `_tql_truthy(missing) == false`, a
+whole malformed query like `query(t, "K AND FLAG")` (`K` an `Int32`
+column, not `Bool`) silently returned *zero rows* instead of raising the
+same clear "must evaluate to Bool" error every other malformed-predicate
+shape in this file gives. Worse: `_tql_and(5, false)` gave `false` — a
+garbage *left* operand combined with a literal `false` on the right was
+never even inspected, short-circuited away by the `b === false` branch
+before validation could run. Fixed by validating each operand through a
+new `_tql_boolish` (mirrors `_tql_truthy`, but *preserves* rather than
+coalesces a genuine `missing`) before the 3-valued combination — a real
+type error still raises clearly, and only `true`/`false`/`missing` ever
+reach the SQL-NULL-style logic. `groupby.jl`'s `_geval(::TQLAnd/TQLOr)`
+reuses these same two functions, so one fix covers both `_tqleval` and
+`_geval`.
+
+**Real bug #2, fixed, a completely separate finding:** `_apply_orderby`
+(`query.jl`, `ORDER BY` / `update!`/`delete!`'s `orderby=`) and its
+`groupby.jl` sibling `_gt_sort` (`groupby`'s `orderby=`) both compared
+sort keys with raw `vi == vj && continue`. `missing == missing` is
+`missing` (three-valued), not `true`/`false`, and `missing && continue`
+crashes with the identical raw `TypeError` — genuinely reachable via
+entirely ordinary usage: `ORDER BY`/`orderby` on a column that came out
+of an outer `join` with `unmatched=:missing` (live-reproduced:
+`query(joined_result, "TRUE ORDER BY NAME")` crashed), or a
+`rollup=true`/`cube=true`/`grouping_sets=` result's aggregated-away key
+column (live-reproduced: `groupby(t, [...]; rollup=true,
+orderby=[...])` crashed the moment the sort touched a subtotal row).
+Fixed both with `isequal` (a `missing`-safe, always-`Bool` equality —
+`missing` equals `missing`, unequal to anything else); the subsequent
+`isless` ordering already handles `missing` correctly on its own with no
+change needed (sorts it last ascending / first descending, Julia's own
+`sort` convention — `isless(x, missing)` is `true` for any real `x`).
+Grepped the whole tree for any other `lt=function`/custom-sort-comparator
+site — confirmed these were the only two.
+
+16 new assertions (both the AND/OR type-validation error path and the
+legitimate-`missing`-still-works path, plus the `join`-`ORDER BY` and
+`groupby`-`rollup`-`orderby` crash reproductions). No real-TaQL
+cross-check for either — both are MeasurementSets-side chaining
+scenarios (an outer `join`'s `missing` fill; SQL `ROLLUP`/`CUBE`, which
+casacore parses but does not implement), not something a plain casacore
+MS or real TaQL query ever produces.
+
+Full suite green: 5224 baseline + 16 new = 5240/5240. README/memory
+updated, merge on the user's word.
+
+### Phase 230 — continued the `src/taql/` sweep: `meas.<frame>('COLNAME')`
+unconditionally demanded an `mjd` argument the target frame never used
+
+Continued sweeping `src/taql/` with a fresh-eyes read of `functions.jl`
+(1,419 lines — the curated function library, including the `meas.*`
+measure-conversion UDFs, not re-read since its original phase-by-phase
+construction).
+
+**Real bug, fixed:** `meas.<frame>('COLNAME'[, mjd[, x, y, z]])` (Phase
+110's column-MEASINFO-driven direction form) unconditionally required
+exactly `1 + (need_p ? 3 : 0)` trailing arguments — always demanding an
+`mjd`, regardless of whether the *target* frame actually needs an epoch
+at all. The equivalent general numeric form,
+`meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])`, has always
+correctly made `mjd` conditional on `_meas_dir_needs_epoch(target)`
+(only `APP`/`AZEL`/`HADEC`/`ITRF` need one — `J2000`/`B1950`/`GALACTIC`/
+`ECLIPTIC`/`ICRS` conversions are fixed rotations that need no epoch at
+all, exactly like the already-working `meas.b1950('J2000', RA, DEC)`
+form with no `mjd`). Live-reproduced the inconsistency directly:
+`meas.j2000('B1950', 1.0, 0.5)` (general form, target `J2000`) worked
+with no `mjd`, but the equivalent `meas.j2000('COLNAME')` (colname form,
+same target frame) threw `"meas.j2000('COLNAME', mjd) in ..."`, forcing
+the caller to supply and thread through an epoch value the conversion
+never uses.
+
+Fixed by making `TQLMeasColDir`'s `mjd` field nullable (mirroring how
+its `xyz` field already was) and computing the colname form's required
+argument count the same way the numeric form already does:
+`(need_ep ? 1 : 0) + (need_p ? 3 : 0)` instead of the old unconditional
+`1 + (need_p ? 3 : 0)`. `_meas_dir_needs_pos(R)` already implies
+`_meas_dir_needs_epoch(R)` for every frame in `_MEAS_DIR_FRAMES` (only
+`AZEL`/`HADEC`/`ITRF` need position, and all three already need epoch
+too), so the fix needed no extra case analysis. Live-verified the fixed
+colname form (`meas.j2000('B1950')`, no `mjd`) gives byte-identical
+results to the general numeric form given the same `lon`/`lat`, and
+that an epoch-dependent target (`meas.azel('COLNAME')`) still correctly
+demands its `mjd`/`x`/`y`/`z` arguments.
+
+Fixing this uncovered that the Phase 110 testset itself had baked in
+the old, wrong requirement — it used `GALACTIC` (which needs *no* epoch)
+as its "colname form successfully takes an `mjd`" example, and as its
+"colname form errors without an `mjd`" example, both backwards from the
+corrected behaviour; two further assertions supplied a now-superfluous
+`mjd` to a `J2000`/`GALACTIC`-target colname call purely to satisfy the
+old arity check en route to testing an unrelated error path (no
+`MEASINFO`; a `VarRefCol` frame). All four call sites updated to match
+the corrected, and now internally consistent, behaviour; two new
+assertions added pinning `.mjd === nothing` / `.mjd !== nothing` for the
+no-epoch-needed and epoch-needed cases respectively.
+
+3 net new assertions. No real-TaQL cross-check — `meas.*` is this
+package's own function-library subset, not a real casacore/`libmeas` UDF
+surface with a byte-for-byte equivalent to compare against.
+
+Full suite green: 5240 baseline + 3 new = 5243/5243. README/memory
+updated, merge on the user's word.

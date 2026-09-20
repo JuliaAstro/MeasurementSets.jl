@@ -54,11 +54,6 @@ _ratio_dop(::Type{GAMMA},   F) = (1 + F^2) / (2F)
 _ratio_dop(::Type{C}, F) where {C} =
     error("MeasurementSets: `$(nameof(C))` is not a Doppler convention")
 
-"""
-    measconvert(d::MDoppler{C}, C2::Type{<:DopplerType}) -> MDoppler{C2}
-
-Re-express a Doppler shift in another convention.
-"""
 # Phase 224 fix: every OTHER measure's `measconvert` (the generic
 # `Measure -> RefFrame` one in `types.jl`) validates `_all_finite` on
 # its input before converting (Phase 195) -- but `MDoppler`'s own
@@ -74,6 +69,20 @@ Re-express a Doppler shift in another convention.
 # still skips the check, matching the generic version's own identical
 # `reftype(m) === R && return m` early-return -- a genuine no-op needs
 # no validation either way.)
+#
+# Phase 228 docs fix: a `"""..."""` docstring is silently DROPPED (not
+# attached to anything, no error) if ANYTHING -- even a bare `#
+# comment` -- sits between it and the expression it documents; this
+# comment used to sit between the docstring below and `function
+# measconvert(...)`, so this method's docstring never attached at all
+# (only found because it broke Documenter's `@docs` build for the
+# OTHER `measconvert` method in `types.jl`, a related-but-separate
+# instance of the same mistake, fixed alongside this one).
+"""
+    measconvert(d::MDoppler{C}, C2::Type{<:DopplerType}) -> MDoppler{C2}
+
+Re-express a Doppler shift in another convention.
+"""
 function measconvert(m::MDoppler{C}, ::Type{D}) where {C<:DopplerType,D<:DopplerType}
     C === D && return m
     isfinite(m.d) || throw(ArgumentError(

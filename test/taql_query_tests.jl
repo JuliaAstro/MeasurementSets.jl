@@ -2322,6 +2322,165 @@ end
     @test column(readtable(dst), "LAB")[:] == ["a", "b", "c"]
 end
 
+# Phase 227 finding: a `missing` value anywhere in a WHERE/HAVING/JOIN
+# condition -- reachable in perfectly ordinary usage (an outer `join`
+# routinely produces a `missing`-containing column, and the verbs are
+# explicitly designed to chain) -- used to crash with a raw
+# `TypeError: non-boolean (Missing) used in boolean context` instead of
+# excluding the row, matching real SQL/TaQL's three-valued logic. Two
+# distinct crash shapes: (1) the final "does this row pass" decision
+# (every `if`/`::Bool`-context consumer across `query`/`groupby`/`join`);
+# (2) `&&`/`||` THEMSELVES inside `TQLAnd`/`TQLOr` -- Julia's `&&`/`||`
+# require specifically the LEFT operand to satisfy `x::Bool`
+# (`missing && true` throws, `true && missing` does not), so which side
+# of an `AND`/`OR` a `missing` sub-condition landed on determined
+# whether it crashed -- fixed with genuine 3-valued `_tql_and`/`_tql_or`,
+# not "coalesce to `false` early" (which would silently break `NOT`:
+# `!missing === missing`, but `!false === true`). No real-TaQL cross-
+# check here -- this is a MeasurementSets-chaining scenario (an outer
+# `join`'s `missing` fill), not something a plain casacore MS ever
+# produces.
+@testset "missing-value 3-valued logic in WHERE/HAVING/JOIN (Phase 227)" begin
+    dir = joinpath(mktempdir(), "missing3vl")
+    write_table(joinpath(dir, "L"), "L",
+        Pair{String,Any}["ID" => Int32[1, 2, 3], "ANTENNA1" => Int32[0, 1, 9]]; nrow=3)
+    write_table(joinpath(dir, "R1"), "R1", Pair{String,Any}["KEY" => [10, 20]]; nrow=2)
+    write_table(joinpath(dir, "R2"), "R2", Pair{String,Any}["X" => [100, 200]]; nrow=2)
+    l = readtable(joinpath(dir, "L"))
+    r1 = readtable(joinpath(dir, "R1"))
+    r2 = readtable(joinpath(dir, "R2"))
+
+    # an outer join makes row 3's KEY `missing` (ANTENNA1=9 is out of range)
+    g1 = join(l, r1; on="ANTENNA1", rightcols=["KEY"], unmatched=:missing)
+    @test isequal(collect(g1.KEY), [10, 20, missing])
+
+    # index-lookup `on=` with a `missing` value: no crash, treated as
+    # "no match" exactly like an out-of-range index
+    g2 = join(g1, r2; on="KEY", rightcols=["X"], unmatched=:missing)
+    @test isequal(collect(g2.X), [missing, missing, missing])   # KEY=10/20 are also out of range for r2
+
+    # predicate join `on=`: no crash for a `missing`-valued row.KEY
+    g3 = join(g1, r2; on=(lr, rr) -> lr.KEY == rr.X, rightcols=["X"], unmatched=:missing)
+    @test isequal(collect(g3.X), [missing, missing, missing])
+
+    # string L./R.-qualified condition join: same
+    g4 = join(g1, r2; on="L.KEY == R.X", rightcols=["X"], unmatched=:missing)
+    @test isequal(collect(g4.X), [missing, missing, missing])
+
+    # query WHERE (string form): a `missing` result excludes the row
+    @test collect(query(g1, "KEY > 5").KEY) == [10, 20]
+
+    # query WHERE (closure form)
+    @test collect(query(g1) do row
+        row.KEY > 5
+    end.KEY) == [10, 20]
+
+    # groupby HAVING (string form)
+    gg = groupby(g1, "ID"; select=["ID" => :ID, "K" => "KEY"], having="KEY > 5")
+    @test collect(gg.K) == [10, 20]
+
+    # groupby HAVING (closure form)
+    gg2 = groupby(g1, "ID"; select=["ID" => :ID, "K" => "KEY"], having=gs -> gs.KEY[1] > 5)
+    @test collect(gg2.K) == [10, 20]
+
+    # AND: `missing` on either side of the operator, order must not matter
+    @test collect(query(g1, "KEY > 5 AND ID > 0").KEY) == [10, 20]
+    @test collect(query(g1, "ID > 0 AND KEY > 5").KEY) == [10, 20]
+
+    # OR: genuine 3-valued logic -- `missing OR true` is `true`, so the
+    # row with `KEY == missing` but `ID == 3` (definitely true) must be
+    # INCLUDED, not excluded -- this is the case "coalesce missing to
+    # false early" would get wrong
+    r7 = query(g1, "KEY > 5 OR ID == 3")
+    @test length(r7.KEY) == 3   # all 3 rows, including the missing-KEY one
+    r7b = query(g1, "ID == 3 OR KEY > 5")   # missing on the right this time
+    @test length(r7b.KEY) == 3
+
+    # NOT on a `missing` comparison must stay excluded (`missing`, not
+    # flipped to `true`) -- the case naive early-coalescing gets wrong
+    @test isempty(query(g1, "NOT (KEY > 5)").KEY)
+
+    # iif() with a `missing` condition propagates `missing`, no crash
+    r8 = query(g1, "ID > 0"; select=["V" => "iif(KEY > 5, 1, 0)"])
+    @test isequal(collect(r8.V), [1, 1, missing])
+
+    # non-missing usage is completely unaffected by any of the above
+    write_table(joinpath(dir, "L2"), "L2",
+        Pair{String,Any}["ANTENNA1" => Int32[0, 1]]; nrow=2)
+    l2 = readtable(joinpath(dir, "L2"))
+    g5 = join(l2, r1; on="ANTENNA1", rightcols=["KEY"])
+    @test collect(g5.KEY) == [10, 20]
+    @test collect(query(g5, "KEY > 5 AND KEY < 15").KEY) == [10]
+    @test collect(query(g5, "KEY < 5 OR KEY > 15").KEY) == [20]
+end
+
+# Phase 229 finding: the Phase 227 fix above introduced its own new
+# regression -- `_tql_and`/`_tql_or` accepted a raw, unvalidated operand
+# of ANY type, not just `Bool`/`Missing`. Before Phase 227, `TQLAnd`/
+# `TQLOr` used plain `&&`/`||`, which correctly `throw`s for a non-Bool,
+# non-Missing operand; live-reproduced: `query(t, "K AND FLAG")` (`K` an
+# Int32 column) silently returned ZERO rows instead of the same clear
+# "must evaluate to Bool" error every other malformed-predicate shape
+# gives -- `_tql_and(5, true)` gave `missing`, and `_tql_truthy(missing)
+# == false`. Separately, `_apply_orderby` (`query.jl`) and its
+# `groupby.jl` sibling `_gt_sort` both compared sort keys with raw `vi ==
+# vj`, which crashes with a raw `TypeError` the moment either side is
+# `missing` (`missing && continue`) -- genuinely reachable via `ORDER
+# BY`/`orderby` on a `missing`-containing column from an outer `join`, or
+# a `rollup=true`/`cube=true` grouping-set's aggregated-away key.
+@testset "AND/OR type validation + ORDER BY with missing (Phase 229)" begin
+    dir = joinpath(mktempdir(), "phase229")
+    write_table(dir, "T", Pair{String,Any}["K" => Int32[1, 2, 3],
+                                            "FLAG" => Bool[true, false, true]]; nrow=3)
+    t = readtable(dir)
+
+    # a genuine type error (not `missing`) still raises clearly
+    @test_throws ArgumentError query(t, "K AND FLAG")
+    @test_throws ArgumentError query(t, "FLAG AND K")
+    @test_throws ArgumentError query(t, "K OR FLAG")
+    err = try
+        query(t, "K AND FLAG")
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError && occursin("must evaluate to Bool", err.msg)
+
+    # legitimate 3-valued logic (missing) unaffected by the validation
+    @test MSv2._tql_and(missing, true) === missing
+    @test MSv2._tql_and(missing, false) === false
+    @test MSv2._tql_and(true, missing) === missing
+    @test MSv2._tql_or(missing, true) === true
+    @test MSv2._tql_or(missing, false) === missing
+    @test MSv2._tql_and(missing, missing) === missing
+
+    # ORDER BY / orderby on a `missing`-containing column: no crash,
+    # `missing` sorts last ascending / first descending (Julia's `sort`
+    # convention via `isless`)
+    l = readtable(write_table(mktempdir(), "L", Pair{String,Any}["K" => Int32[1, 2, 3]]; nrow=3))
+    r = readtable(write_table(mktempdir(), "R",
+        Pair{String,Any}["K" => Int32[1, 2], "NAME" => ["a", "b"]]; nrow=2))
+    j = join(l, r; on="K" => "K", rightcols=["NAME"], unmatched=:missing)
+    @test isequal(collect(query(j, "TRUE ORDER BY NAME").NAME), ["a", "b", missing])
+    @test isequal(collect(query(j, "TRUE ORDER BY NAME DESC").NAME), [missing, "b", "a"])
+
+    # groupby rollup + orderby on a rolled-up key: no crash, `missing`
+    # subtotal rows sort per the same convention
+    dir2 = joinpath(mktempdir(), "rollup229")
+    write_table(dir2, "G",
+        Pair{String,Any}["K1" => Int32[1, 1, 2, 2], "K2" => Int32[10, 20, 10, 20],
+                          "V" => Float64[1, 2, 3, 4]]; nrow=4)
+    gt = readtable(dir2)
+    g = groupby(gt, ["K1", "K2"]; select=["K1" => :K1, "K2" => :K2, "N" => "gcount()"],
+               rollup=true, orderby=["K1", "K2"])
+    k1 = collect(column(g, "K1")); k2 = collect(column(g, "K2"))
+    @test length(k1) == 7   # 4 detailed + 2 K1-subtotals + 1 grand total
+    @test count(ismissing, k1) == 1
+    @test count(ismissing, k2) == 3
+    # K1-missing (grand total) row sorts last ascending
+    @test ismissing(k1[end])
+end
+
 # ---- Phase 42: array indexing + slices ---------------------------------
 
 @testset "TaQL-lite parser — array indexing unit" begin
@@ -2829,12 +2988,23 @@ end
 
 @testset "Phase 110 — meas.<frame>() column-MEASINFO-driven direction argument" begin
     # parser (no SOFA needed) -- disambiguation: a recognized frame name
-    # is still the existing numeric form; anything else is a colname
+    # is still the existing numeric form; anything else is a colname.
+    #
+    # Phase 230 finding: `mjd` is only required (in the colname form, as
+    # in the numeric one) when the TARGET frame actually needs an epoch
+    # (`_meas_dir_needs_epoch` -- APP/AZEL/HADEC/ITRF); GALACTIC does not
+    # (a fixed rotation, like B1950<->J2000), so `meas.galactic('DIR')`
+    # (0 rest args) is the VALID colname-form call and `meas.galactic
+    # ('DIR', T)` (an unwanted extra arg) is the wrong-arity one -- the
+    # reverse of what this testset originally asserted, before the fix.
     p(s) = MSv2._taqllite_parse(s, Set(["DIR", "T"]))
-    @test p("meas.galactic('DIR', T)") isa MSv2.TQLMeasColDir         # colname form
-    @test p("meas.galactic('DIR', T)").colname == "DIR"
+    @test p("meas.galactic('DIR')") isa MSv2.TQLMeasColDir            # colname form
+    @test p("meas.galactic('DIR')").colname == "DIR"
+    @test p("meas.galactic('DIR')").mjd === nothing                   # target needs no epoch
+    @test p("meas.azel('DIR', T, T, T, T)") isa MSv2.TQLMeasColDir    # colname form, needs mjd+xyz
+    @test p("meas.azel('DIR', T, T, T, T)").mjd !== nothing
     @test p("meas.galactic('J2000', T, T)") isa MSv2.TQLFunc          # still the numeric form
-    @test_throws ArgumentError p("meas.galactic('DIR')")              # wrong arity (needs mjd)
+    @test_throws ArgumentError p("meas.galactic('DIR', T)")           # wrong arity (needs no args)
     @test_throws ArgumentError p("meas.azel('DIR', T)")               # azel needs mjd, x, y, z
 
     ext = Base.get_extension(MSv2, :SOFAExt)
@@ -2847,8 +3017,8 @@ end
     t = readtable(joinpath(d, "T"))
 
     ref = measconvert(MDirection{J2000}(2.0, 0.5), GALACTIC)
-    gt = query(t, "TIME > 0"; select = ["l" => "meas.galactic('DIR', TIME/86400.0)[1]",
-                                        "b" => "meas.galactic('DIR', TIME/86400.0)[2]"])
+    gt = query(t, "TIME > 0"; select = ["l" => "meas.galactic('DIR')[1]",
+                                        "b" => "meas.galactic('DIR')[2]"])
     @test collect(gt.l)[1] ≈ ref.lon
     @test collect(gt.b)[1] ≈ ref.lat
     # agrees with the plain numeric form given the same lon/lat directly
@@ -2864,7 +3034,7 @@ end
     d2 = mktempdir()
     write_table(joinpath(d2, "T2"), "T2", Pair{String,Any}["X" => [1.0, 2.0]]; nrow = 2)
     t2 = readtable(joinpath(d2, "T2"))
-    @test_throws ErrorException query(t2, "X > 0"; select = ["z" => "meas.j2000('X', 1.0)"])
+    @test_throws ErrorException query(t2, "X > 0"; select = ["z" => "meas.j2000('X')"])
 
     d3 = mktempdir()
     write_table(joinpath(d3, "T3"), "T3", Pair{String,Any}[
@@ -2872,7 +3042,7 @@ end
         measures = Dict("DIR" => (; kind = :direction, varrefcol = "REFC",
                                    tabtypes = ["J2000"], tabcodes = [0])))
     t3 = readtable(joinpath(d3, "T3"))
-    @test_throws ErrorException query(t3, "REFC >= 0"; select = ["z" => "meas.galactic('DIR', 1.0)"])
+    @test_throws ErrorException query(t3, "REFC >= 0"; select = ["z" => "meas.galactic('DIR')"])
 end
 
 @testset "Phase 104 — meas.freq() / meas.rv() / meas.doppler() / meas.riseset()" begin

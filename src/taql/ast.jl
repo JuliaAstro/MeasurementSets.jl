@@ -185,13 +185,85 @@ _bcast(f, x, y::TQLMArray) = TQLMArray(_bcast(f, x, y.data), copy(y.mask))
 _bcast(f, x::TQLMArray, y::TQLMArray) =
     TQLMArray(_bcast(f, x.data, y.data), x.mask .| y.mask)
 
+# Phase 227 finding: a `missing` value anywhere in a WHERE/HAVING/JOIN
+# condition -- reachable in perfectly ordinary usage, not just contrived
+# input, since an outer `join`/masked column routinely produces one --
+# used to crash with a raw, unhelpful `TypeError: non-boolean (Missing)
+# used in boolean context` instead of excluding the row, the way real
+# SQL/TaQL's three-valued (`true`/`false`/`unknown`) logic does. Two
+# DISTINCT crash shapes, both live-reproduced: (1) the FINAL "does this
+# row pass" decision (every `if`/`::Bool`-context consumer of a
+# `_tqleval`/`_geval`/predicate-closure result, across `query.jl`/
+# `groupby.jl`/`join.jl`) -- fixed by routing every such site through
+# `_tql_truthy` below; (2) `&&`/`||` themselves, used by `TQLAnd`/
+# `TQLOr` -- Julia's `&&`/`||` are special syntax that require
+# specifically the LEFT operand to satisfy `x::Bool` before even
+# looking at the right (`missing && true` throws; `true && missing`
+# does NOT -- confirmed live, an asymmetry that meant whether a
+# `missing` sub-condition crashed depended on which side of an `AND`/
+# `OR` it happened to land on), so no amount of wrapping the outer
+# consumer can catch a crash that happens *inside* `_tqleval`/`_geval`
+# itself. Fixed with genuine 3-valued `_tql_and`/`_tql_or` (`missing`
+# propagates like SQL NULL: `false AND missing = false`, `true AND
+# missing = missing`, etc.) -- NOT "coalesce each operand to `false`
+# first", which would silently change the meaning of `NOT (missing
+# comparison)` from "still unknown, excluded" to "definitely true,
+# included" (`!missing === missing`, but `!false === true`). `TQLNot`/
+# `TQLCmp`/`TQLIn` already propagate `missing` correctly with no fix
+# needed -- Base's `!(::Missing)`, comparison operators, and `any`
+# (which `in` uses) are already `missing`-safe; only `&&`/`||`/`if`/
+# `ifelse` require exactly `Bool` and crash otherwise.
+#
+# Phase 229 finding: the Phase 227 fix above introduced its own new
+# regression -- `_tql_and`/`_tql_or` accepted a raw, unvalidated operand
+# of ANY type, not just `Bool`/`Missing`. Before Phase 227, `TQLAnd`/
+# `TQLOr` used plain `&&`/`||`, which correctly `throw`s a `TypeError`
+# for a non-Bool, non-Missing operand (e.g. `K AND FLAG` where `K` is an
+# `Int32` column) -- live-reproduced: `_tql_and(5, true)` silently gave
+# `missing` (not an error), and because `_tql_truthy(missing) == false`,
+# a WHOLE malformed query like `query(t, "K AND FLAG")` silently
+# returned ZERO rows instead of raising the same clear "must evaluate to
+# Bool" error every other malformed-predicate shape in this file gives.
+# Worse: `_tql_and(5, false)` gave `false` -- a garbage LEFT operand
+# combined with a literal `false` on the right was never even inspected,
+# short-circuited away by the `b === false` branch. Fixed by validating
+# each operand through `_tql_boolish` (mirrors `_tql_truthy` above, but
+# preserves rather than coalesces a genuine `missing`) before the
+# 3-valued combination -- a real type error still raises clearly, and
+# only `true`/`false`/`missing` ever reach the SQL-NULL-style logic.
+_tql_boolish(x::Bool) = x
+_tql_boolish(::Missing) = missing
+_tql_boolish(x) = throw(ArgumentError(
+    "TaQL-lite: an AND/OR operand must evaluate to Bool, got $(typeof(x))"))
+
+function _tql_and(a, b)
+    va, vb = _tql_boolish(a), _tql_boolish(b)
+    return (va === false || vb === false) ? false :
+           (va === true && vb === true) ? true : missing
+end
+function _tql_or(a, b)
+    va, vb = _tql_boolish(a), _tql_boolish(b)
+    return (va === true || vb === true) ? true :
+           (va === false && vb === false) ? false : missing
+end
+
+# The single point every WHERE/HAVING/JOIN-condition result passes
+# through before deciding row inclusion -- `missing` (SQL's "unknown")
+# is excluded, exactly like `false`; a genuinely non-Bool, non-missing
+# result (a malformed predicate) still raises a clear error rather than
+# silently including/excluding the row.
+_tql_truthy(x::Bool) = x
+_tql_truthy(::Missing) = false
+_tql_truthy(x) = throw(ArgumentError(
+    "TaQL-lite: a WHERE/HAVING/join condition must evaluate to Bool, got $(typeof(x))"))
+
 _tqleval(e::TQLCol, cols, i) = cols[e.name][i]
 _tqleval(e::TQLLit, cols, i) = e.value
 _tqleval(e::TQLQuantityLit, cols, i) = e.value
 _tqleval(e::TQLArrayLit, cols, i) = [_tqleval(x, cols, i) for x in e.elems]
 _tqleval(e::TQLCmp, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
-_tqleval(e::TQLAnd, cols, i) = _tqleval(e.a, cols, i) && _tqleval(e.b, cols, i)
-_tqleval(e::TQLOr, cols, i) = _tqleval(e.a, cols, i) || _tqleval(e.b, cols, i)
+_tqleval(e::TQLAnd, cols, i) = _tql_and(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
+_tqleval(e::TQLOr, cols, i) = _tql_or(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLNot, cols, i) = _bcast(!, _tqleval(e.a, cols, i))
 _tqleval(e::TQLIn, cols, i) = _tqleval(e.lhs, cols, i) in e.vals
 _tqleval(e::TQLArith, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
