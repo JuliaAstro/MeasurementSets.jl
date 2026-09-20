@@ -252,6 +252,41 @@ _hostconv(z::Complex, big::Bool) = Complex(_hostconv(real(z), big), _hostconv(im
     return dest
 end
 
+# Bit-packed (`Bool`) counterpart of `_rd_run!` -- unpacks `n` consecutive
+# LSB-first bits starting at 0-based bit offset `bitoff` within byte range
+# `bytes[base+1:...]`, into `dest[doff+1:doff+n]`. `unsafe_load` on a
+# pinned pointer avoids the bounds-checked `bytes[...]` indexing AND the
+# per-element `CartesianIndex`/`_colmajor_offset` tuple recomputation the
+# original doubly-nested-`CartesianIndices` loop paid on every bit --
+# ~3,100 allocations / ~90 KiB per `getcell` for a 4x64 `FLAG` plane before
+# this fix, live-measured (Phase 234), vs. 32 allocs / ~3.4 KiB for the
+# equal-size `DATA` cell via `_rd_run!` -- a 111x wall-clock gap against a
+# real casacore (Casacore.jl) cross-check on the same MS.
+@inline function _rd_bits!(dest::AbstractVector{Bool}, doff::Int,
+                           bytes::AbstractVector{UInt8}, base::Int, bitoff::Int, n::Int)
+    n == 0 && return dest
+    GC.@preserve bytes begin
+        p = pointer(bytes) + base
+        bytei = bitoff >> 3
+        biti = bitoff & 7
+        byte = unsafe_load(p, bytei + 1)
+        @inbounds for k in 1:n
+            # lazy reload, only on the iteration that actually needs the
+            # next byte -- never fetches a byte past what `n` requires
+            # (an eager prefetch on every 8th bit could read one byte
+            # past a mmap/array that ends exactly on a byte boundary).
+            if biti == 8
+                biti = 0
+                bytei += 1
+                byte = unsafe_load(p, bytei + 1)
+            end
+            dest[doff + k] = (byte >> biti) & 0x01 == 0x01
+            biti += 1
+        end
+    end
+    return dest
+end
+
 """
     read_plane(tsm, cube, lastpos, colidx) -> Array
 
@@ -277,26 +312,24 @@ function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int, colidx::Int)
     tlast_tile = lastpos ÷ ts[nd]
     tlast_in   = lastpos % ts[nd]
 
-    if T === Bool
-        # bit-unpack (rare); per-element
-        for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, nd-1))
-            tilecoord = ntuple(d -> d < nd ? lt[d] : tlast_tile, nd)
-            base = cube.offset + _colmajor_offset(tilecoord, tpd) * bbytes + coloff
-            los = ntuple(d -> lt[d] * ts[d], nd-1)
-            his = ntuple(d -> min((lt[d]+1) * ts[d], cs[d]) - 1, nd-1)
-            for pix in CartesianIndices(ntuple(d -> los[d]:his[d], nd-1))
-                tl = ntuple(d -> d < nd ? pix[d] - los[d] : tlast_in, nd)
-                k = _colmajor_offset(tl, ts)
-                byte = bytes[base + (k >> 3) + 1]
-                out[CartesianIndex(ntuple(d -> pix[d] + 1, nd-1))] =
-                    (byte >> (k & 7)) & 0x01 == 0x01
-            end
-        end
-    elseif all(d -> tpd[d] == 1, 1:nd-1)
+    # Phase 234: `T === Bool` used to be its own branch, always taking the
+    # doubly-nested-`CartesianIndices` per-bit path below regardless of
+    # tiling -- ~100x slower wall-clock than the equal-size `DATA` cell
+    # (live-measured against a real casacore/Casacore.jl cross-check on a
+    # real MS: ~3,100 allocations / ~90 KiB per `getcell` for a 4x64
+    # `FLAG` plane, vs. 32 allocs / ~3.4 KiB for `DATA`). `Bool` now takes
+    # the SAME contiguous-run fast path as every other type, via
+    # `_rd_bits!` (the bit-packed counterpart of `_rd_run!`) instead of
+    # `_rd_run!` itself.
+    if all(d -> tpd[d] == 1, 1:nd-1)
         # leading axes untiled (the common MS layout): the whole plane is
-        # one contiguous run inside the last tile -- one bulk copy.
+        # one contiguous run inside the last tile -- one bulk copy/bit-run.
         base = cube.offset + tlast_tile * bbytes + coloff
-        _rd_run!(vec(out), 0, T, bytes, base + tlast_in * prod(ps) * esz, prod(ps), big)
+        if T === Bool
+            _rd_bits!(vec(out), 0, bytes, base, tlast_in * prod(ps), prod(ps))
+        else
+            _rd_run!(vec(out), 0, T, bytes, base + tlast_in * prod(ps) * esz, prod(ps), big)
+        end
     else
         # leading axes tiled (rare): one contiguous dim-1 run per tile /
         # higher-dim position.
@@ -310,7 +343,11 @@ function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int, colidx::Int)
                 tl = ntuple(d -> d == 1 ? 0 : d < nd ? pix[d] - los[d] : tlast_in, nd)
                 k  = _colmajor_offset(tl, ts)
                 doff = _colmajor_offset(ntuple(d -> d == 1 ? los[1] : pix[d], nd-1), ps)
-                _rd_run!(vec(out), doff, T, bytes, base + k * esz, n1, big)
+                if T === Bool
+                    _rd_bits!(vec(out), doff, bytes, base, k, n1)
+                else
+                    _rd_run!(vec(out), doff, T, bytes, base + k * esz, n1, big)
+                end
             end
         end
     end
@@ -338,8 +375,12 @@ function read_cube_whole(tsm::TiledStMan, colidx::Int, cube::TSMCube;
     esz = T === Bool ? 0 : sizeof(T)
     big = tsm.endian === :big
 
-    if T !== Bool && all(d -> tpd[d] == 1, 1:nd)
-        _rd_run!(vec(out), 0, T, bytes, cube.offset + coloff, prod(cs), big)   # single tile
+    if all(d -> tpd[d] == 1, 1:nd)                                     # single tile
+        if T === Bool
+            _rd_bits!(vec(out), 0, bytes, cube.offset + coloff, 0, prod(cs))
+        else
+            _rd_run!(vec(out), 0, T, bytes, cube.offset + coloff, prod(cs), big)
+        end
         return out
     end
     for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, nd))
@@ -352,10 +393,7 @@ function read_cube_whole(tsm::TiledStMan, colidx::Int, cube::TSMCube;
             k    = _colmajor_offset(ntuple(d -> d == 1 ? 0 : pix[d] - los[d], nd), ts)
             doff = _colmajor_offset(ntuple(d -> d == 1 ? los[1] : pix[d], nd), cs)
             if T === Bool
-                for m in 0:n1-1
-                    byte = bytes[base + ((k + m) >> 3) + 1]
-                    out[doff + m + 1] = (byte >> ((k + m) & 7)) & 0x01 == 0x01
-                end
+                _rd_bits!(vec(out), doff, bytes, base, k, n1)
             else
                 _rd_run!(vec(out), doff, T, bytes, base + k * esz, n1, big)
             end

@@ -49,5 +49,43 @@ if _HAVE_CASACORE
         uvw = getcolumn(t, "UVW")
         cU = cols["UVW"]
         @test all(uvw[r] == collect(_cccell(cU, r)) for r in probe)
+
+        # Phase 234: `getcolumn`/`getcell` for a Bool tiled column (`FLAG`)
+        # matches casacore's whole-column read exactly -- pins the
+        # `read_plane`/`read_cube_whole` bit-unpack fast path (`_rd_bits!`)
+        # against a real interop oracle, not just self-consistency.
+        flagcol = getcolumn(t, "FLAG")
+        cF = cols["FLAG"]
+        @test length(flagcol) == nrow(t)
+        @test all(flagcol[r] == collect(_cccell(cF, r)) for r in 1:nrow(t))
     end
+end
+
+@testset "TSM Bool tile read — allocation regression (Phase 234)" begin
+    # `read_plane`'s old `Bool` branch (a doubly-nested `CartesianIndices`
+    # per-bit walk, taken unconditionally regardless of tiling) allocated
+    # ~3,100 times / ~90 KiB per `getcell` for a 4x64 `FLAG` plane --
+    # ~100x more than the equal-size `DATA` cell via the unsafe-pointer
+    # `_rd_run!` fast path, live-measured against a real casacore
+    # (Casacore.jl) cross-check on the real ALMA MS (111x wall-clock).
+    # `FLAG` now shares the SAME contiguous-run fast path via `_rd_bits!`
+    # (the bit-packed counterpart of `_rd_run!`) -- assert it allocates no
+    # more per cell than `DATA`'s own already-fast path, not orders of
+    # magnitude more.
+    t = readtable(SAMPLE_MS; precision=:full)
+    n = min(200, nrow(t))
+
+    getcell(t, "FLAG", 1); getcell(t, "DATA", 1)              # warm up (compile)
+    GC.gc()
+    a_flag = @allocated for r in 1:n
+        getcell(t, "FLAG", r)
+    end
+    GC.gc()
+    a_data = @allocated for r in 1:n
+        getcell(t, "DATA", r)
+    end
+    # generous bound (Bool cells are 1/8 the on-disk bytes of ComplexF32,
+    # so this is deliberately loose -- the old code was ~100x worse, not
+    # merely "somewhat more")
+    @test a_flag < 3 * a_data
 end

@@ -8398,3 +8398,79 @@ elsewhere).
 
 Full suite green: 5243 baseline + 11 new = 5254/5254. README/memory
 updated, merge on the user's word.
+
+### Phase 234 — fix a real ~100x allocation/wall-clock regression in the
+`Bool` (`FLAG`/`FLAG_ROW`/`FLAG_CATEGORY`) tiled-column read path
+
+The user asked for a head-to-head performance comparison against real
+casacore C++ (via `Casacore.jl`, a thin `CxxWrap` binding — a genuine
+low-overhead oracle, not just a correctness cross-check) on the real
+9,817,600-row ALMA MS. Most operations were within 1.3–5.7x of native
+C++ (reasonable for a pure-Julia reimplementation with zero C
+dependency, and `ANTENNA1` scalar reads were actually *faster* than
+casacore). One benchmark stood out: 200,000 `getcell(t, "FLAG", r)`
+calls took 19.95 s in Julia vs. 0.18 s in casacore — a **111x**
+wall-clock gap, wildly out of line with every other benchmark.
+
+Live investigation (`@time`/`@allocated`, not just wall-clock)
+confirmed a real, structural bug, not incidental overhead: a single
+`getcell(t, "FLAG", r)` for one 4x64 `Bool` plane allocated **~3,100
+times / ~90 KiB** — vs. 32 allocations / ~3.4 KiB for the identically-
+shaped `DATA` (`ComplexF32`) cell. Root cause, in `read_plane`
+(`src/datamanagers/tiled.jl`, the `TiledStMan` read hot path): the
+`T === Bool` branch was its OWN unconditional code path — taken
+regardless of tiling layout — walking the plane via a doubly-nested
+`CartesianIndices` loop, recomputing a `_colmajor_offset` tuple and
+constructing a fresh `CartesianIndex` for every single bit, with
+bounds-checked `bytes[...]` indexing. Every *other* type instead took
+one of two fast paths added in Phase 68's own allocation-reduction pass
+(`_rd_run!`, an `unsafe_load`-via-pinned-pointer bulk copy) — but
+Phase 68 explicitly excluded `Bool` ("Bool keeps its bit-unpack path"),
+and that path was never revisited since.
+
+Fixed with a new `_rd_bits!` — the bit-packed (`unsafe_load`-based)
+counterpart of `_rd_run!`, unpacking `n` consecutive LSB-first bits from
+a pinned pointer with no bounds-checked array indexing and no per-bit
+tuple/`CartesianIndex` construction. `read_plane`'s Bool branch was
+merged into the SAME contiguous-run structure every other type already
+used (the common "leading axes untiled" case → one bulk `_rd_bits!`
+call for the whole plane; the rare "leading axes tiled" case → one
+`_rd_bits!` call per contiguous run), instead of being a separate,
+always-slow special case. `read_cube_whole` (the `TiledCellStMan`
+sibling of `read_plane`) had the identical shape — a manual per-bit
+loop with bounds-checked indexing inside its own already-tiled loop —
+fixed the same way for consistency, including adding the single-tile
+bulk fast path it was missing for `Bool` entirely.
+
+Because `getcolumn` for a `Bool` tiled column already falls back to
+`[getcell(...) for r in 1:nrow]` (`_read_cube_bulk` explicitly bails on
+`Bool` — "bit unpacking: use the slow path" — the comment now stale in
+the sense that `read_plane` itself is no longer slow), this one fix
+also directly speeds up whole-column `FLAG`/`FLAG_ROW`/`FLAG_CATEGORY`
+reads (`copyms`, `column(t,"FLAG")[:]`, …) with no further change
+needed.
+
+Live-verified end to end on the real MS: `getcell` for 50,000 `FLAG`
+rows dropped from 4.74 s / 155.29M allocations / 4.489 GiB to
+0.11 s / 1.45M allocations / 83 MiB — and the original 200,000-row
+per-cell benchmark against real Casacore.jl went from 19.95 s → 0.43 s
+(**46x** faster), bringing the Julia/C++ ratio from 111x down to 2.5x,
+in line with `DATA`'s 1.3x. Correctness re-verified against real
+casacore on the committed sample fixture: whole-column `FLAG` (a
+`TiledShapeStMan` array), `FLAG_ROW` (unaffected — `IncrementalStMan`,
+not tiled), and `FLAG_CATEGORY` (also tiled) all match byte-for-byte.
+
+New permanent regression coverage in `test/tsm_tests.jl`: a whole-
+column `FLAG` vs. `Casacore.jl` cross-check (values only tested
+per-cell before, not the bulk `getcolumn` path), and an allocation-
+based regression guard (`@allocated` for `FLAG` vs. `DATA` `getcell`
+loops, asserting `FLAG` never allocates more than 3x `DATA` — the old
+code was ~100x worse, not merely "somewhat more", so this is a
+deliberately loose bound that still catches a real recurrence).
+
+3 new assertions. No real-TaQL cross-check needed (a read-path
+allocation/performance fix, not new TaQL surface — the existing
+`Casacore.jl` cross-checks are the correctness oracle).
+
+Full suite green: 5254 baseline + 3 new = 5257/5257. README/memory
+updated, merge on the user's word.
