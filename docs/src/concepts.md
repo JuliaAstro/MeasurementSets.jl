@@ -56,6 +56,26 @@ Tables can also be packed into a single `MultiFile` (`table.mf`) or
 resolves through these transparently. `MultiHDF5` needs `HDF5.jl` — do
 `import HDF5` first (it is an optional weak dependency).
 
+### Whole-column reads: `BlockColumn` and `rawblock`
+
+`col[:]` (equivalently `getcolumn(t, name)`) for a **fixed-shape array**
+column — `DATA`, `FLAG`, `WEIGHT`, `UVW`, a subtable's `POSITION`, …,
+bound to `StandardStMan` or a `TiledStMan` variant — returns a
+[`BlockColumn`](@ref): every row's cell shares ONE decoded backing
+buffer, and `col[:][i]` computes that row's view on demand instead of
+pre-building `nrow` separate array objects. It behaves like an ordinary
+`AbstractVector` (`Tables.jl`, the query engine, `copyms`, … all work
+unchanged), so this is transparent — the payoff is purely fewer
+allocations for a bulk read, and it's largest for a column with a small
+per-row payload (`UVW`'s `(3,)` cell) where a per-row wrapper object
+would otherwise cost more than the data itself.
+
+[`rawblock`](@ref)`(t, name)` exposes the same backing buffer directly as
+one real `(cellshape..., nrow)` `Array`, with no per-row objects at all —
+for bulk numeric work across a whole column (`sum(abs2, rawblock(t,
+"DATA"))`, …). `collect(col)` (or `collect(column(t, name))`) forces
+ordinary eager materialisation when you need a genuine `Vector`.
+
 ## The query engine
 
 [`query`](@ref) / [`groupby`](@ref) / `join` / [`update!`](@ref) /

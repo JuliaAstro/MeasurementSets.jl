@@ -85,7 +85,7 @@ export MeasurementSet, subtable, subtablenames
 export Record, SubTable, ColumnDesc, TableDesc, CasaType
 export BFloat16                       # re-exported from BFloat16s (for `precision=BFloat16`)
 export VariableShape, VariableDims, isarray
-export Column, column, getcolumn, getcell
+export Column, column, getcolumn, getcell, BlockColumn, rawblock
 export columnunit, qcolumn, UNITS_NO_JULIA_COUNTERPART   # real methods via UnitfulExt
 export measure, measinfo, measconvert, MeasFrame, MeasInfo, observatory   # conversions via SOFAExt
 export MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity, RefFrame, reftype

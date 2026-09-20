@@ -8571,3 +8571,110 @@ representation/allocation fix, not new TaQL surface).
 
 Full suite green: 5257 baseline + 11 new = 5268/5268. README/memory
 updated, merge on the user's word.
+
+### Phase 236 — `BlockColumn`: a lazy, single-backing-buffer whole-column
+representation, plus a tile-batched rewrite of the bulk read loop that
+closes nearly all of `UVW`'s remaining allocation/wall-clock gap
+
+Phase 235's own conclusion was that closing `UVW`'s ~75x-slower-than-C++
+gap for real would need `getcolumn` to return a genuine block `Array`
+instead of a `Vector` of per-row objects — a change big enough to touch
+every consumer of a fixed-shape array column (`Tables.jl`, the TaQL
+engine, `edit.jl`, `copyms`) if done as a literal return-type change.
+The user asked directly whether an *additive* new function would
+actually see use in most situations. It wouldn't — nothing downstream
+would be rewritten to call it. The alternative that WOULD get used
+everywhere automatically, with no consumer needing to change: keep
+`getcolumn`'s contract as "an `AbstractVector`", but stop building that
+`Vector` EAGERLY (`nrow` `reshape(view(...))` wrapper objects, up
+front) and instead return a lazy wrapper that computes each row's view
+on `getindex`, only when actually asked for.
+
+**1. `BlockColumn{T,N,V} <: AbstractVector{AbstractArray{T,N}}`**
+(`src/tables/column.jl`) — wraps the ONE flat `backing::V` buffer a
+fixed-shape array column's bulk decode already builds (unchanged since
+Phase 234/235), plus `cellshape` and `n`. `getindex(bc, i)` computes
+`reshape(view(backing, ...), cellshape)` on demand; nothing is built at
+construction beyond the 3-field struct itself. `Column`'s own
+`getindex(::Colon)` already just forwards whatever the data manager's
+`getcolumn` returns with no wrapping, so this is transparent —
+`Tables.jl`/the TaQL engine/`edit.jl`/`copyms` (audited directly, not
+assumed: `_read_cells` in `create.jl` already does `Array(v)` on every
+`AbstractArray` cell, the TaQL engine's `_load_col` already keeps
+array-cell columns as a lazy `Column` rather than eagerly materialising
+`[:]` at all, `DataFrames`/`Tables.jl` construction round-tripped
+correctly in a live check) all keep working with zero code changes.
+`collect(col)` (and `Column`'s own `collect`, fixed to route through it
+explicitly) forces genuine eager materialisation when that's actually
+wanted, matching Julia's own `collect` contract.
+
+**2. `rawblock(t, name; precision=nothing) -> Array`** — the true
+zero-indirection escape hatch: the SAME backing buffer, `reshape`d
+directly into one real `(cellshape..., nrow)` `Array`, for a caller
+doing bulk numeric work across a whole column with no per-row objects
+in the picture at all. A scalar or variable-shape/indirect array column
+(no block representation) raises a clear `ArgumentError`.
+
+**3. Wired into both existing bulk-decode sites** (unchanged decode
+logic, just a different final wrapper): `_read_cube_bulk`
+(`tiled.jl`, `TiledStMan`) and `StandardStMan.getcolumn`'s two
+fixed-shape direct-array branches (`standard.jl`, the `Bool` and
+general-numeric cases Phase 235 had just fixed from copying to `@view`)
+now construct a `BlockColumn` instead of an eager comprehension.
+
+**4. The bigger find, mid-implementation: `_read_cube_bulk` itself had
+a real, separate, pre-existing (since Phase 35/68, not introduced by
+this phase) allocation bug**, caught only because `BlockColumn`'s own
+numbers didn't match the theoretical minimum. Investigating why
+`rawblock(t, "UVW")` still allocated ~1.24 GiB against a ~225 MiB
+theoretical backing (a genuine `--track-allocation=user` profile, after
+several dead-end micro-benchmarks turned out to be artifacts of
+top-level *global* variables in the throwaway test scripts themselves,
+not the real code) pinned it to `_read_cube_bulk`'s loop calling
+`_rd_run!`/`_rd_bits!` once PER ROW — ~9.8M calls for a real MAIN
+column — each one individually cheap, but with a small (~8-135
+bytes/call, reproduced in isolation once properly function-scoped)
+per-call cost that Julia's `@inline` hint didn't eliminate, adding up
+at that row count. Fixed by exploiting a structural fact about
+`_read_cube_bulk`'s one real caller (`getcolumn`, `tiled.jl` — verified
+by grep, no other call site exists): the `rowpos` function it's ever
+passed (`identity`, or a single-interval `TiledShapeStMan`'s `r -> pos
+- (lastrow - r)`) is always affine with slope 1. So instead of one
+`_rd_run!`/`_rd_bits!` call per ROW, the loop now walks whole TILES at
+a time — within one tile, consecutive rows are already one contiguous
+byte run (exactly how `read_plane`'s own "leading axes untiled" fast
+path already treats one row's plane; this generalises the same
+principle across multiple rows within a tile) — reducing call count
+from `nrow` down to `cld(nrow, rowspertile)` (≈225 for `UVW` on the
+real 9.8M-row MS, not 9.8M). Live-verified correct on a forced
+multi-tile synthetic table (a large-cell `Bool` and `Float32` column,
+`rowspertile < nrow`, genuinely crossing several tile boundaries).
+
+Live-verified end to end on the real MS: `column(t,"UVW")[:]` (lazy,
+not indexed) dropped from 1.5s / 1.6 GiB (Phase 235) to **0.0048s /
+224.7 MiB** — exactly the theoretical minimum backing size, and
+**0.23x of real casacore C++'s 0.021s — Julia is now FASTER than C++**
+for this read, closing the ORIGINAL 75x gap entirely.
+`collect(column(t,"UVW")[:])` (eager, every row indexed — the
+"old-equivalent" total work) is 0.0125s / 599 MiB, still 0.59x of C++.
+`column(t,"FLAG")[:]` improved too: 1.69s/2.93 GiB (`BlockColumn` alone)
+→ 1.21s/2.34 GiB (tile-batched), staying at 0.12-0.13x of C++
+(unchanged conclusion — already faster). Correctness re-verified
+against real casacore for `UVW`/`DATA`/`FLAG`/`ANTENNA.POSITION`, both
+per-cell and whole-column.
+
+New `test/blockcolumn_tests.jl` (57 assertions): structural
+(`BlockColumn` type + shared-backing-buffer checks across TiledStMan
+AND StandardStMan), `rawblock` correctness + error paths + zero-copy
+(a within-one-decode check — there is no cross-call caching, so two
+separate `column(...)[:]` calls are independent reads, not aliased),
+multi-tile boundary correctness (forced small `rowspertile`, both
+`Bool` and non-`Bool`), `copytable`/`edit` interop (a `BlockColumn`
+source materialises to real independent copies on write; a per-cell
+`edit` write is untouched by any of this and doesn't corrupt a
+neighbouring row), a real-casacore cross-check, and an allocation
+regression pinning `column(t,"UVW")[:]`/`rawblock(t,"UVW")` to within
+2x of the theoretical minimum (was ~5.5x before the tile-batching fix).
+
+Full suite green: 5268 baseline + 57 new = 5325/5325. README/memory
+updated, merge on the user's word.

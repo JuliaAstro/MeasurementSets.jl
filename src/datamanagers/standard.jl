@@ -397,17 +397,18 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
             bits = _read_bits(ssm, bucketptr(ssm, bkt) + coloff, 0, n)
             copyto!(out, (firstrow - 1) * nrelem + 1, bits, 1, n)
         end
-        # Phase 235: `out[range]` (a COPYING slice) used to allocate one
-        # fresh small `Array` per row on top of the single `out` backing
-        # buffer already built above -- for a fixed-shape direct-array
-        # column (e.g. `UVW`, `(3,)` per row) that's `nrow` extra small
-        # allocations for a whole-column read, the same shape of bug
-        # Phase 234 fixed for tiled `Bool` columns. `@view` + `reshape`
-        # (zero-copy, matches `tiled.jl`'s `_read_cube_bulk` precedent —
-        # every consumer that needs an owned copy, e.g. `_read_cells` in
-        # `create.jl`, already does `Array(v)` on the result).
-        return isempty(dims) ? out :
-               [reshape((@view out[(r-1)*nrelem+1 : r*nrelem]), dims...) for r in 1:nrow]
+        # Phase 235/236: `out[range]` (a COPYING slice) used to allocate
+        # one fresh small `Array` per row on top of the single `out`
+        # backing buffer already built above -- for a fixed-shape
+        # direct-array column (e.g. `UVW`, `(3,)` per row) that's `nrow`
+        # extra small allocations for a whole-column read, the same
+        # shape of bug Phase 234 fixed for tiled `Bool` columns. A lazy
+        # `BlockColumn` (zero-copy, no per-row wrapper object until
+        # something actually indexes a row) instead — matches
+        # `tiled.jl`'s `_read_cube_bulk` precedent; every consumer that
+        # needs an owned copy, e.g. `_read_cells` in `create.jl`,
+        # already does `Array(v)` on the result.
+        return isempty(dims) ? out : BlockColumn(out, dims, nrow)
 
     elseif c.type == TpString
         return [getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]
@@ -426,10 +427,11 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
             end
         end
         isempty(dims) && return flat
-        # Phase 235: same copying-slice -> `@view` fix as the `Bool`
-        # branch above (this is the one that hits the real-world `UVW`
-        # column -- a fixed `(3,)` `Float64` vector per row).
-        return [reshape((@view flat[(r-1)*nrelem+1 : r*nrelem]), dims...) for r in 1:nrow]
+        # Phase 235/236: same copying-slice -> lazy `BlockColumn` fix as
+        # the `Bool` branch above (this is the one that hits the
+        # real-world `UVW` column -- a fixed `(3,)` `Float64` vector per
+        # row).
+        return BlockColumn(flat, dims, nrow)
     end
 end
 

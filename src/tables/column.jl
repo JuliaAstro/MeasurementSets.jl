@@ -127,7 +127,74 @@ function Base.getindex(c::Column, ::Colon)
 end
 
 Base.getindex(c::Column, r::AbstractVector{<:Integer}) = [c[i] for i in r]
-Base.collect(c::Column) = c[:]
+Base.collect(c::Column) = collect(c[:])   # force off any lazy `BlockColumn` (below)
+
+# --- block (whole-column, lazy-view) reads --------------------------
+
+"""
+    BlockColumn{T,N} <: AbstractVector{AbstractArray{T,N}}
+
+The lazy whole-column return value of a fixed-shape array column's bulk
+read (Phase 236) — `SSM`- or `TiledStMan`-backed columns like `UVW`,
+`DATA`, or `FLAG`. Every row's cell shares ONE `backing` buffer built up
+front; `getindex` computes that row's `reshape(view(...))` on demand
+instead of building `nrow` such wrapper objects eagerly (Phase 234/235's
+own fix already made each data manager build the shared buffer, but
+still wrapped it into an eager `Vector` of `nrow` view objects — the
+`BlockColumn` here is stored instead, with no further per-row cost until
+something actually indexes it).
+
+Behaves like any other `AbstractVector` — every existing consumer
+(`Tables.jl`, the TaQL engine, `edit.jl`, `copyms`) already treats a
+column's `[:]` result as an opaque `AbstractVector` of `AbstractArray`
+cells (`TiledStMan`'s narrow-precision bulk path has returned
+non-`Array`-typed view wrappers since Phase 35/68), so this is a
+drop-in, non-breaking change to what `getcolumn`/`column(t,name)[:]`
+already returned. `collect(col)` (or `Array.(col)`) forces genuine
+per-row materialisation when an owned copy is actually needed — exactly
+what `_read_cells` (`create.jl`, used by `copyms`/`copytable`) already
+does for every array-cell column, lazy or not.
+
+[`rawblock`](@ref) exposes the underlying buffer directly as one real
+`(cellshape..., nrow)` `Array`, with NO per-row indirection at all, for
+a caller doing a bulk numeric operation across the whole column.
+"""
+struct BlockColumn{T,N,V<:AbstractVector{T}} <: AbstractVector{AbstractArray{T,N}}
+    backing::V
+    cellshape::NTuple{N,Int}
+    n::Int
+end
+
+Base.size(bc::BlockColumn) = (bc.n,)
+Base.IndexStyle(::Type{<:BlockColumn}) = IndexLinear()
+@inline function Base.getindex(bc::BlockColumn, i::Int)
+    @boundscheck checkbounds(bc, i)
+    L = prod(bc.cellshape; init=1)
+    @inbounds reshape(view(bc.backing, (i-1)*L+1 : i*L), bc.cellshape)
+end
+Base.getindex(bc::BlockColumn, ::Colon) = bc
+Base.collect(bc::BlockColumn) = [bc[i] for i in 1:bc.n]   # concrete eltype, inferred
+
+"""
+    rawblock(t, name; precision=nothing) -> Array
+
+The raw `(cellshape..., nrow)` block underlying a fixed-shape array
+column's bulk read — the SAME buffer [`column`](@ref)`(t, name)[:]` (a
+[`BlockColumn`](@ref)) lazily slices per row, exposed directly with NO
+per-row indirection at all (`size(result) == (cellshape..., nrow)`,
+zero-copy `reshape`). Only a fixed-shape `SSM`/`TiledStMan` array
+column (`DATA`, `FLAG`, `UVW`, a subtable's `POSITION`, …) has a block
+representation — a scalar column or a variable-shape/indirect array
+column (`CHAN_FREQ`, …) raises a clear `ArgumentError`.
+"""
+function rawblock(t::AbstractTable, name::AbstractString;
+                  precision::Union{Nothing,Symbol,Type}=nothing)
+    c = _pcolumn(t, name, precision)[:]
+    c isa BlockColumn || throw(ArgumentError(
+        "rawblock: column \"$name\" has no block representation " *
+        "(not a fixed-shape SSM/TiledStMan array column)"))
+    return reshape(c.backing, c.cellshape..., c.n)
+end
 
 # --- reference / concatenation views --------------------------------
 

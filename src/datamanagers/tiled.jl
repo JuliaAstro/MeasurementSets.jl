@@ -424,10 +424,11 @@ alldefined_none(tsm::TiledStMan) =
 # leading axes are not tiled (tilesPerDim == 1 there), so each on-disk tile
 # is a contiguous run of whole cells along the last (row) axis. One shared
 # `backing` buffer for the WHOLE column (`Bool` via `_rd_bits!`, everything
-# else via `_rd_run!`) -- the final `Vector` holds a lightweight `reshape
-# (view(...))` per row, not a fresh per-row `Array` (Phase 234/235: `Bool`
-# used to bail to a per-row-allocating fallback here; fixed to share this
-# same single-backing-buffer structure instead of being a special case).
+# else via `_rd_run!`), returned as a lazy `BlockColumn` (Phase 236) -- no
+# per-row wrapper object is built until something actually indexes a row
+# (Phase 234/235: `Bool` used to bail to a per-row-allocating fallback
+# here entirely; fixed to share this same single-backing-buffer structure
+# instead of being a special case).
 function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
                          nrow::Int, colidx::Int; astype::Union{Nothing,Type}=nothing)
     T = juliatype(tsm.types[colidx])
@@ -445,25 +446,45 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
     big = tsm.endian === :big
 
     backing = Vector{Tout}(undef, nrow * planelen)
+    nrow == 0 && return BlockColumn(backing, planeshape, nrow)
+
+    # `rowpos` (both forms `getcolumn` ever passes -- `identity`, or a
+    # single-interval `TiledShapeStMan`'s `r -> pos - (lastrow - r)`) is
+    # affine with slope 1: `rowpos(r) == p0 + (r-1)` for the `p0` below.
+    # So instead of one `_rd_run!`/`_rd_bits!` CALL PER ROW (9.8M calls
+    # for a real MAIN column -- each one genuinely small, but Julia's
+    # per-call overhead for a function taking this many args turned out
+    # to add up to real allocation at that scale, live-measured via
+    # `--track-allocation=user`), walk whole TILES at a time: within one
+    # tile, consecutive rows are already a single contiguous byte run
+    # (exactly how `read_plane`'s own "leading axes untiled" fast path
+    # already treats one row's plane) -- so this reduces call count from
+    # `nrow` down to `cld(nrow, rowspertile)` (≈225 for `UVW` on a real
+    # 9.8M-row MS, instead of 9.8M).
+    p0 = rowpos(1) - 1                       # 0-based last-axis position of row 1
+    r = 1
     if T === Bool
-        for r in 1:nrow
-            p = rowpos(r) - 1                    # 0-based last-axis position
+        while r <= nrow
+            p = p0 + (r - 1)
             tile = p ÷ rowspertile
-            within = (p % rowspertile) * planelen   # 0-based BIT offset within the tile's block
+            within = p % rowspertile
+            nchunk = min((tile + 1) * rowspertile - p, nrow - r + 1)
             base = cube.offset + tile * bbytes + coloff
-            _rd_bits!(backing, (r - 1) * planelen, bytes, base, within, planelen)
+            _rd_bits!(backing, (r - 1) * planelen, bytes, base, within * planelen, nchunk * planelen)
+            r += nchunk
         end
     else
-        for r in 1:nrow
-            p = rowpos(r) - 1                    # 0-based last-axis position
+        while r <= nrow
+            p = p0 + (r - 1)
             tile = p ÷ rowspertile
-            within = (p % rowspertile) * planelen
-            b = cube.offset + tile * bbytes + coloff + within * sizeof(T)
-            _rd_run!(backing, (r - 1) * planelen, T, bytes, b, planelen, big)
+            within = p % rowspertile
+            nchunk = min((tile + 1) * rowspertile - p, nrow - r + 1)
+            b = cube.offset + tile * bbytes + coloff + within * planelen * sizeof(T)
+            _rd_run!(backing, (r - 1) * planelen, T, bytes, b, nchunk * planelen, big)
+            r += nchunk
         end
     end
-    return [reshape(view(backing, (r-1)*planelen+1 : r*planelen), planeshape...)
-            for r in 1:nrow]
+    return BlockColumn(backing, planeshape, nrow)
 end
 
 """
