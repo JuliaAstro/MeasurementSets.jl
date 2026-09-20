@@ -1741,3 +1741,90 @@ end
         @info "real TaQL unavailable; skipping mscal.field()/state() FLAG_ROW cross-check"
     end
 end
+
+# Phase 232: coverage-instrumented sweep of `src/taql/mscal.jl` (after an
+# extensive manual re-read of the whole 2009-line file found nothing else)
+# turned up several genuinely-reachable, DOCUMENTED code paths that had
+# simply never been directly tested -- each live-verified correct before
+# being pinned here, not a bug fix.
+@testset "TaQL-lite — mscal.* previously-uncovered-but-correct paths (Phase 232)" begin
+    main = readtable(SAMPLE_MS)
+    ms = MeasurementSet(SAMPLE_MS)
+
+    # (1) the array-centre fallback when the array's TELESCOPE_NAME has
+    # no entry in the bundled Observatories table: real casacore falls
+    # back to the MIDDLE antenna (`itsAntPos[0][nant÷2]`, 0-based --
+    # Phase 144), with a @warn. Never exercised end to end via mscal.*
+    # itself (only unit-tested against the bundled table directly).
+    tmp1 = joinpath(mktempdir(), "obs_bogus.ms")
+    copyms(SAMPLE_MS, tmp1)
+    obs_n = nrow(readtable(joinpath(tmp1, "OBSERVATION")))
+    edit(joinpath(tmp1, "OBSERVATION")) do t
+        for i in 1:obs_n
+            t[:TELESCOPE_NAME][i] = "BOGUS_TELESCOPE_XYZ"
+        end
+    end
+    t1 = readtable(tmp1)
+    ant1 = readtable(joinpath(tmp1, "ANTENNA"))
+    nant1 = nrow(ant1)
+    midpos = measure(ant1, "POSITION", nant1 ÷ 2 + 1)
+    fld1 = readtable(joinpath(tmp1, "FIELD"))
+    ep1 = measure(t1, "TIME", 1)
+    dj1 = measconvert(measure(fld1, "PHASE_DIR", 1), J2000; frame = MeasFrame(epoch = ep1))
+    fr1 = MeasFrame(epoch = ep1, position = midpos, direction = dj1)
+    href1 = measconvert(dj1, HADEC; frame = fr1)
+    haval = @test_logs (:warn, r"no Observatories entry.*middle antenna") match_mode=:any begin
+        collect(column(query(t1, "TRUE"; select = ["V" => "mscal.ha()"]), "V"))[1]
+    end
+    @test haval ≈ href1.lon
+
+    # (2) `mscal.*` interpolating a polynomial (NUM_POLY) PHASE_DIR at a
+    # genuinely nonzero dt from FIELD.TIME (Phase 93's interpolation
+    # machinery, never previously exercised THROUGH an mscal.* call --
+    # only via direct `measure()` calls in measures_tests.jl).
+    tm2 = Float64.(column(main, "TIME")[:])
+    tmp2 = joinpath(mktempdir(), "poly.ms")
+    copyms(SAMPLE_MS, tmp2)
+    t0 = tm2[1] - 100.0                  # FIELD.TIME strictly before every MAIN row
+    c = reshape([1.0, 0.4, 1.0e-4, 2.0e-4, 0.0, 0.0], 2, 3)   # (2, npoly+1)
+    rm(joinpath(tmp2, "FIELD"); recursive = true)
+    write_table(joinpath(tmp2, "FIELD"), "FIELD", Pair{String,Any}[
+        "NAME" => ["Poly"], "NUM_POLY" => Int32[2], "TIME" => [t0], "PHASE_DIR" => [c]];
+        nrow = 1, measures = Dict("PHASE_DIR" => (; kind = :direction, ref = "J2000")))
+    t2 = readtable(tmp2)
+    hd2 = collect(column(query(t2, "rownumber() >= 1"; select = ["hd" => "mscal.hadec1()"]), "hd"))[1]
+    fld2 = readtable(joinpath(tmp2, "FIELD"))
+    ant2 = readtable(joinpath(tmp2, "ANTENNA"))
+    a1v2 = column(t2, "ANTENNA1")[:]
+    ep2 = measure(t2, "TIME", 1)
+    dj2 = measconvert(measure(fld2, "PHASE_DIR", 1; epoch = ep2), J2000; frame = MeasFrame(epoch = ep2))
+    pos2 = measure(ant2, "POSITION", a1v2[1] + 1)
+    href2 = measconvert(dj2, HADEC; frame = MeasFrame(epoch = ep2, position = pos2, direction = dj2))
+    @test hd2[1] ≈ href2.lon
+    @test hd2[2] ≈ href2.lat
+    # confirms the polynomial ramp actually fired (not just the dt=0 term)
+    dj2_static = measure(fld2, "PHASE_DIR", 1)
+    @test !isapprox(dj2.lon, dj2_static.lon; rtol = 1e-8)
+
+    # (3) `mscal.spw`/`mscal.chan`'s single-channel-index and `>`/`<`
+    # channel-index-bound selector forms (documented in Phase 83, only
+    # ever tested via the `a~b` range and frequency forms before).
+    spw = subtable(ms, "SPECTRAL_WINDOW")
+    nc = length(column(spw, "CHAN_FREQ")[1])
+    m_single = collect(column(query(main, "rownumber() >= 1";
+        select = ["m" => "mscal.chan('0:5')"]), "m"))[1]
+    @test count(m_single) == 1 && m_single[6]                # 0-based chan 5 -> 1-based index 6
+    m_gt = collect(column(query(main, "rownumber() >= 1";
+        select = ["m" => "mscal.chan('0:>60')"]), "m"))[1]
+    @test count(m_gt) == nc - 61                              # chans 61..nc-1 (0-based, > 60)
+    m_lt = collect(column(query(main, "rownumber() >= 1";
+        select = ["m" => "mscal.chan('0:<3')"]), "m"))[1]
+    @test count(m_lt) == 3                                    # chans 0,1,2
+
+    # (4) the "bad selector" / "malformed spec" error paths for
+    # mscal.chan and mscal.uvdist (a string with no unit suffix and no
+    # recognised numeric form).
+    @test_throws ArgumentError query(main, "mscal.chan('0:1.5')")     # not an integer index
+    @test_throws ArgumentError query(main, "mscal.chan('0:@#')")
+    @test_throws ArgumentError query(main, "mscal.uvdist('@#')")
+end
