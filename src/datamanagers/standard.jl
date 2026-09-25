@@ -394,12 +394,22 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
         # branch below already uses) so each row's reference is read via
         # one O(1) offset within its bucket, no repeated search.
         out = Vector{Any}(undef, nrow)
+        # Phase 242: every undefined (foff == 0) cell shares ONE empty
+        # vector per call instead of allocating a fresh one (~55% of the
+        # cost of a mostly-undefined column, e.g. `SOURCE.SYSVEL`,
+        # `CALDEVICE.CAL_EFF`). Caveat: undefined cells alias each other,
+        # so `push!`-ing into one such cell would show up in the others.
+        empty_cell = astype === nothing ? juliatype(c.type)[] : astype[]
         _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
             base = bucketptr(ssm, bkt) + ssm.offset[ssmcol]
             for row in firstrow:lastrow
                 foff = Int(_i64(ssm, base + (row - firstrow) * SSM_INDARR_REF))
-                v = foff == 0 ? juliatype(c.type)[] : af_read(_arrayfile!(ssm), c.type, foff)
-                out[row] = astype === nothing ? v : astype.(v)
+                if foff == 0
+                    out[row] = empty_cell
+                else
+                    v = af_read(_arrayfile!(ssm), c.type, foff)
+                    out[row] = astype === nothing ? v : astype.(v)
+                end
             end
         end
         # `identity.(out)` narrows the `Vector{Any}` to its actual common
