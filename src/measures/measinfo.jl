@@ -21,7 +21,7 @@
 const _DIRECTION_FRAMES = Dict{String,DataType}(
     "J2000" => J2000, "ICRS" => ICRS, "B1950" => B1950,
     "B1950_VLA" => B1950, "APP" => APP,
-    "GALACTIC" => GALACTIC, "ECLIPTIC" => ECLIPTIC,
+    "GALACTIC" => GALACTIC, "SUPERGAL" => SUPERGAL, "ECLIPTIC" => ECLIPTIC,
     "HADEC" => HADEC,
     "AZEL" => AZEL, "AZELNE" => AZEL,
     "AZELGEO" => AZELGEO, "AZELNEGEO" => AZELGEO,
@@ -182,7 +182,7 @@ _frame_string(R::Type{<:Union{RefFrame,DopplerType}}) = _FRAME_STRING[R]
 const _FRAME_STRING = Dict{DataType,String}(
     UTC => "UTC", TAI => "TAI", TT => "TT", TDB => "TDB", UT1 => "UT1",
     J2000 => "J2000", ICRS => "ICRS", B1950 => "B1950", APP => "APP",
-    GALACTIC => "GALACTIC", ECLIPTIC => "ECLIPTIC", HADEC => "HADEC",
+    GALACTIC => "GALACTIC", SUPERGAL => "SUPERGAL", ECLIPTIC => "ECLIPTIC", HADEC => "HADEC",
     AZEL => "AZEL", AZELGEO => "AZELGEO",
     AZELSW => "AZELSW", AZELSWGEO => "AZELSWGEO", ITRF => "ITRF", WGS84 => "WGS84",
     TOPO => "TOPO", REST => "REST", LSRK => "LSRK", LSRD => "LSRD",

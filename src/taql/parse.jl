@@ -24,6 +24,7 @@ function _taqllite_tokenize(s::AbstractString)
     cs = collect(s)
     n = length(cs)
     i = 1
+    depth = 0                                   # `[`-nesting (so `V[1::2]` keeps its `:` `:`)
     while i <= n
         c = cs[i]
         if isspace(c)
@@ -33,11 +34,27 @@ function _taqllite_tokenize(s::AbstractString)
         elseif c == ')'
             push!(toks, TQLToken(:rparen, ")", nothing)); i += 1
         elseif c == '['
+            depth += 1
             push!(toks, TQLToken(:lbracket, "[", nothing)); i += 1
         elseif c == ']'
+            depth -= 1
             push!(toks, TQLToken(:rbracket, "]", nothing)); i += 1
         elseif c == ','
             push!(toks, TQLToken(:comma, ",", nothing)); i += 1
+        elseif c == ':' && depth <= 0 && i < n && cs[i+1] == ':'
+            # keyword access `::KW` / `COL::KW[.field...]` (Phase 253): the
+            # keyword name (dotted sub-record path allowed) is one ident token
+            push!(toks, TQLToken(:dcolon, "::", nothing))
+            j = i + 2
+            (j <= n && (isletter(cs[j]) || cs[j] == '_')) || throw(ArgumentError(
+                "TaQL-lite: expected a keyword name after `::` in \"$s\""))
+            j0 = j
+            while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_' ||
+                             (cs[j] == '.' && j < n && (isletter(cs[j+1]) || cs[j+1] == '_')))
+                j += 1
+            end
+            push!(toks, TQLToken(:ident, join(cs[j0:j-1]), nothing))
+            i = j
         elseif c == ':'
             push!(toks, TQLToken(:colon, ":", nothing)); i += 1
         elseif c == '+' || c == '-' || c == '%' || c == '^'
@@ -577,6 +594,11 @@ function _parse_atom_base!(p::TQLParser)
         _expect_kind!(p, :rbracket, "']'")
         return TQLArrayLit(elems)
     end
+    if _peek(p).kind === :dcolon             # table keyword `::NAME`
+        _advance!(p)
+        kt = _expect_kind!(p, :ident, "a keyword name")
+        return TQLKeyword("", kt.text)
+    end
     t = _advance!(p)
     if t.kind === :num
         # a spaced postfix unit: `1.4 GHz`, `3 km` -- the next token is a
@@ -595,6 +617,13 @@ function _parse_atom_base!(p::TQLParser)
         return TQLLit(t.value)
     elseif t.kind === :ident
         _peek(p).kind === :lparen && return _parse_funcall!(p, t.text)
+        if _peek(p).kind === :dcolon         # column keyword `COL::NAME[.field]`
+            t.text in p.validnames || throw(ArgumentError(
+                "TaQL-lite: unknown column \"$(t.text)\" in \"$(p.src)\""))
+            _advance!(p)
+            kt = _expect_kind!(p, :ident, "a keyword name")
+            return TQLKeyword(t.text, kt.text)
+        end
         up = uppercase(t.text)
         up == "TRUE" && return TQLLit(true)
         up == "FALSE" && return TQLLit(false)
@@ -629,6 +658,14 @@ function _parse_funcall!(p::TQLParser, name::AbstractString)
     if lowercase(name) == "iscolumn" && length(args) == 1 && args[1] isa TQLLit && args[1].value isa AbstractString
         return TQLLit(String(args[1].value) in p.validnames)
     end
+    # `iskeyword('NAME')` / `iskeyword('COL::NAME[.field]')`: a table-level
+    # test, resolved against the table's keywords at column-load time
+    if lowercase(name) == "iskeyword"
+        (length(args) == 1 && args[1] isa TQLLit && args[1].value isa AbstractString &&
+         !isempty(args[1].value)) || throw(ArgumentError(
+            "TaQL-lite: iskeyword() takes one non-empty string literal in \"$(p.src)\""))
+        return TQLIsKeyword(String(args[1].value))
+    end
     return _make_func(lowercase(name), args, p.src)
 end
 
@@ -637,6 +674,16 @@ end
 # ======================================================================
 
 const _TQL_RE_SPECIAL = Set("^\$.|?*+()[]{}\\")
+
+# compile a pattern, surfacing a bad one as an ArgumentError (like every other
+# TaQL-lite parse failure) rather than a raw PCRE ErrorException
+function _tql_compile(src::AbstractString, flags::AbstractString, what::AbstractString)
+    try
+        return Regex(src, flags)
+    catch
+        throw(ArgumentError("TaQL-lite: invalid $what pattern"))
+    end
+end
 
 # SQL LIKE glob: `%` = any run, `_` = one char, no escape char (casacore
 # `fromSQLPattern`). Anchored (full-string match).
@@ -654,56 +701,116 @@ function _sqlpattern_regex(pat::AbstractString, icase::Bool)
         end
     end
     print(io, '$')
-    return Regex(String(take!(io)), icase ? "i" : "")
+    return _tql_compile(String(take!(io)), icase ? "i" : "", "LIKE")
 end
 
-# shell glob (casacore `fromPattern`, subset -- no `{a,b}` alternation):
-# `*` -> `.*`, `?` -> `.`, `[...]`/`[!...]` char class, `\x` literal.
-# Anchored (full-string match).
-function _glob_regex(pat::AbstractString, icase::Bool)
-    io = IOBuffer()
-    print(io, '^')
-    cs = collect(pat)
-    i = 1
-    while i <= length(cs)
+# shell glob (casacore `fromPattern`): `*` -> `.*`, `?` -> `.`,
+# `[...]`/`[!...]` char class, `\x` literal, `{a,b}` alternation (each
+# alternative is itself a glob; no nesting; `,` / `}` are literal outside
+# braces).  Anchored (full-string match).  Malformed patterns (unbalanced
+# `{`/`[`, nested `{`, trailing `\`) throw, like real TaQL.
+function _glob_body!(io, cs, i, inbrace)
+    n = length(cs)
+    while i <= n
         c = cs[i]
-        if c == '\\' && i < length(cs)
+        if c == '\\'
+            i < n || throw(ArgumentError("TaQL-lite: glob pattern ends with a lone backslash"))
             nxt = cs[i+1]
             nxt in _TQL_RE_SPECIAL && print(io, '\\')
             print(io, nxt)
             i += 2
-            continue
+        elseif inbrace && (c == ',' || c == '}')
+            return i
+        elseif c == '{'
+            inbrace && throw(ArgumentError("TaQL-lite: nested {} in a glob pattern"))
+            print(io, "(?:")
+            i += 1
+            while true
+                i = _glob_body!(io, cs, i, true)
+                i <= n || throw(ArgumentError("TaQL-lite: unbalanced { in a glob pattern"))
+                if cs[i] == ','
+                    print(io, '|')
+                    i += 1
+                else
+                    print(io, ')')
+                    i += 1
+                    break
+                end
+            end
         elseif c == '*'
             print(io, ".*")
+            i += 1
         elseif c == '?'
             print(io, '.')
+            i += 1
         elseif c == '['
             print(io, '[')
             i += 1
-            if i <= length(cs) && (cs[i] == '!' || cs[i] == '^')
+            if i <= n && (cs[i] == '!' || cs[i] == '^')
                 print(io, '^')
                 i += 1
             end
-            while i <= length(cs) && cs[i] != ']'
+            while i <= n && cs[i] != ']'
                 print(io, cs[i])
                 i += 1
             end
+            i <= n || throw(ArgumentError("TaQL-lite: unterminated [ in a glob pattern"))
             print(io, ']')
+            i += 1
         else
             c in _TQL_RE_SPECIAL && print(io, '\\')
             print(io, c)
+            i += 1
         end
-        i += 1
     end
+    return i
+end
+
+function _glob_regex(pat::AbstractString, icase::Bool)
+    io = IOBuffer()
+    print(io, '^')
+    _glob_body!(io, collect(pat), 1, false)
     print(io, '$')
-    return Regex(String(take!(io)), icase ? "i" : "")
+    return _tql_compile(String(take!(io)), icase ? "i" : "", "glob")
 end
 
 # a `~ <flavor><delim>...<delim>[i]` :patlit token value -> Regex
 function _patlit_regex(v)
     flags = v.icase ? "i" : ""
     v.flavor === :glob && return _glob_regex(v.pattern, v.icase)
-    v.flavor === :partial && return Regex(v.pattern, flags)          # occursin anywhere
-    return Regex("^(?:" * v.pattern * ")\$", flags)                  # :full -> anchored
+    v.flavor === :partial && return _tql_compile(v.pattern, flags, "regex")   # occursin anywhere
+    return _tql_compile("^(?:" * v.pattern * ")\$", flags, "regex")           # :full -> anchored
+end
+
+# ----------------------------------------------------------------------
+# regex('..') / pattern('..') / sqlpattern('..'): a pattern VALUE.  `S ==
+# regex(..)` / `!=` is a FULL-string match (like the `~` forms); the value
+# is usable on either side.  Real TaQL rejects `~ regex(..)` and `IN
+# [regex(..)]`, so those stay parse errors here too.
+# ----------------------------------------------------------------------
+struct TQLPatternVal
+    re::Regex
+end
+Base.broadcastable(p::TQLPatternVal) = Ref(p)
+Base.:(==)(s::AbstractString, p::TQLPatternVal) = occursin(p.re, s)
+Base.:(==)(p::TQLPatternVal, s::AbstractString) = occursin(p.re, s)
+
+const _TQL_PATTERN_CACHE = Dict{Tuple{Symbol,String},TQLPatternVal}()
+
+function _tql_pattern(kind::Symbol, s)
+    s isa AbstractString || throw(ArgumentError(
+        "TaQL-lite: $(kind)() takes a string, not $(typeof(s))"))
+    key = (kind, String(s))
+    v = get(_TQL_PATTERN_CACHE, key, nothing)
+    v === nothing || return v
+    re = try
+        kind === :regex ? _tql_compile("^(?:" * String(s) * ")\$", "", "regex") :
+        kind === :pattern ? _glob_regex(s, false) : _sqlpattern_regex(s, false)
+    catch err
+        err isa ArgumentError && rethrow()
+        throw(ArgumentError("TaQL-lite: invalid $(kind) \"$s\""))
+    end
+    length(_TQL_PATTERN_CACHE) >= 2000 && empty!(_TQL_PATTERN_CACHE)
+    return _TQL_PATTERN_CACHE[key] = TQLPatternVal(re)
 end
 

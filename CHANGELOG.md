@@ -9185,6 +9185,60 @@ collect the group's values (scalars → a vector; arrays are stacked along a
 `ghistogram`) — `nbins + 2` integer counts: an underflow bin (`x < lo`),
 `nbins` equal left-closed bins, an overflow bin (`x >= hi`); `nbins`/`lo`/`hi`
 must be numeric literals. They compose with the scalar/array functions
-(`sum(gaggr(X))`, `nelements(growid())`, `growid()[1]`). Still not
-implemented: `iskeyword`, `regex` / `pattern` / `sqlpattern`. New testset with
+(`sum(gaggr(X))`, `nelements(growid())`, `growid()[1]`). New testset with
 an 8-form real cross-check.
+
+### Phase 253 — `regex` / `pattern` / `sqlpattern` values, glob `{a,b}`, keyword access, `iskeyword`, `rowid`
+
+The last open TaQL function items, live-probed against real TaQL (40 + 26 +
+25 + 10 forms):
+
+- **`regex('..')`, `pattern('..')`, `sqlpattern('..')`** build a pattern
+  *value* compared with `==` / `!=` (a **full**-string match, usable on either
+  side, over an expression or a per-row column argument: `S == regex(Q)`).
+  `regex` is a regular expression, `pattern` a shell glob, `sqlpattern` a
+  `LIKE` pattern. Real TaQL rejects `~ regex(..)` / `IN [regex(..)]`, so those
+  stay errors; a constant invalid pattern (`regex('[')`) errors at parse time.
+  (Real TaQL throws an unexplained "Slicer error" for a few forms — e.g.
+  `S == regex('a')` — which TaQL-lite answers sensibly instead.)
+- **Glob `{a,b}` alternation** (`~ p/ab{c,d}/`, `pattern('{ab,xa}*')`) — each
+  alternative is itself a glob; `a{b}c` (one alternative) and `a{}c` (an empty
+  one) work; `,` and `}` are literal outside braces; nested / unbalanced `{`,
+  an unterminated `[` and a trailing `\` are errors, as in real TaQL. Bad
+  regex / glob / LIKE patterns now raise `ArgumentError` rather than a raw PCRE
+  error.
+- **Keyword access**: `::NAME` (table keyword), `COL::NAME` (column keyword)
+  and `.field` into a Record keyword (`D::MEASINFO.type`) in any expression;
+  names are case-sensitive, an array keyword is an array cell (`::KWS[1]`), a
+  missing keyword or a whole-Record value errors. **`iskeyword('NAME')`** /
+  `iskeyword('COL::NAME[.field]')` is the table-level test (true for a Record,
+  false for a missing table/column/field). Resolved once per table, like
+  `mscal.*` (works in `query` / `groupby` / `update!` / `delete!` /
+  `VirtualTaQLColumn`); `::` is only lexed outside `[...]`, so `V[1::2]` keeps
+  its step syntax.
+- **`rowid()`** — the 0-based row id, `rownumber() - 1` over the queried table
+  (a `WHERE` / `ORDER BY` keeps the original row, a sub-select renumbers).
+
+Two new testsets
+(139 assertions) with real-TaQL cross-checks.
+
+### Phase 254 — `SUPERGAL` direction frame
+
+`SUPERGAL` (supergalactic coordinates) joins the direction frames, closing the
+last open item from the TaQL/measures sweep. It is casacore's fixed rotation off
+`GALACTIC` (`MeasTable::galToSupergal` = `Rz(-90°)·Ry(-83.68°)·Rz(-47.37°)`), so
+`measconvert` reaches it from every other direction frame (and `meas.*` /
+`MEASINFO` accept it). Sanity: the supergalactic pole is galactic
+(l, b) = (47.37°, 6.32°) and its origin (137.37°, 0°); cross-checked against the
+CASA `measures` oracle alongside the other frames.
+
+### Phase 255 — `taql()` SELECT `LIMIT … OFFSET`, `OFFSET`, and `LIMIT a:b:s` ranges
+
+`SELECT … LIMIT n OFFSET m`, `OFFSET m [LIMIT n]` and the 0-based half-open
+range `LIMIT a:b[:s]` (every part optional) — live-probed against real TaQL (48
+forms, all match). `n == 0` is no limit, `n < 0` gives `nrow + n` rows from the
+start row; a negative offset or range bound counts from the end; `b == 0` means
+the end and `b` is clipped; an offset / start past the end, an empty range,
+step ≤ 0, and a range combined with `OFFSET` are errors. Applied after
+`ORDER BY` / `DISTINCT`. New testset with a 19-form real-TaQL cross-check.
+

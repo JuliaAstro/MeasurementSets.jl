@@ -68,7 +68,7 @@ d = me.direction("J2000", qa.quantity(SRC_RA, "rad"), qa.quantity(SRC_DEC, "rad"
 me.doframe(e0)
 me.doframe(pos)
 dparts = []
-for frame in ("B1950", "GALACTIC", "APP", "AZEL", "AZELGEO", "AZELSW", "AZELSWGEO", "HADEC"):
+for frame in ("B1950", "GALACTIC", "SUPERGAL", "APP", "AZEL", "AZELGEO", "AZELSW", "AZELSWGEO", "HADEC"):
     m = me.measure(d, frame)
     dparts.append(f"{frame} = ({m['m0']['value']!r}, {m['m1']['value']!r})")
 L.append(f"  direction = ({', '.join(dparts)}),")

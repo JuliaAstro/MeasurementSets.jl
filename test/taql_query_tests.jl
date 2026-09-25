@@ -4363,3 +4363,159 @@ end
         end
     end
 end
+
+# Phase 253: `regex('..')` / `pattern('..')` / `sqlpattern('..')` pattern VALUES
+# (compared with `==` / `!=`, FULL-string match, either side; `~ regex(..)` and
+# `IN [regex(..)]` stay errors, as in real TaQL), and the `{a,b}` alternation the
+# shell-glob (`~ p/../`, `pattern()`) form was missing.  Live-probed against real
+# TaQL (40 + 26 forms).  Real TaQL throws an unexplained "Slicer error" for a few
+# forms (`S == regex('a')`, `regex(P)` over a column of patterns, ...) that
+# TaQL-lite answers sensibly instead; those are not reproduced.
+@testset "TaQL-lite — regex/pattern/sqlpattern values + glob {a,b} (Phase 253)" begin
+    dir = joinpath(mktempdir(), "t")
+    S = ["abc", "Abc", "a.c", "xyz", "ab", "abcabc", "", "A1B2", "hello world", "H_llo"]
+    G = ["abc", "abd", "a{b}c", "a,b", "xab", "ab}", "a}c", "{a", "a[", "ac", "bc", "a*c", "a\\c", "a+b", "a(b)", "abcd"]
+    write_table(dir, "T", Pair{String,Any}["S" => S, "K" => Int32.(1:10), "Q" => ["a.*", "ab", "abc", "x.z", "[Aa]bc", "ab.*", "a.c", ".*o w.*", "h.llo", "ABC"]]; nrow=10)
+    dirg = joinpath(mktempdir(), "g")
+    write_table(dirg, "T", Pair{String,Any}["S" => G, "K" => Int32.(1:16)]; nrow=16)
+    t = readtable(dir); tg = readtable(dirg)
+    rows(tt, w) = Int.(collect(column(query(tt, w), "K")[:]))
+
+    # pattern values (row sets from real TaQL)
+    @test rows(t, "S == regex('a.*')") == [1, 3, 5, 6]
+    @test rows(t, "S == regex('ab')") == [5]                       # FULL match, not substring
+    @test rows(t, "S == regex('A.*')") == [2, 8]                   # case sensitive
+    @test rows(t, "S == regex('(abc)+')") == [1, 6]
+    @test rows(t, "S == regex('(a|x).*')") == [1, 3, 4, 5, 6]
+    @test rows(t, "S != regex('ab.*')") == [2, 3, 4, 7, 8, 9, 10]
+    @test rows(t, "regex('ab') != S") == [1, 2, 3, 4, 6, 7, 8, 9, 10]   # either side
+    @test rows(t, "S == regex('')") == [7] && rows(t, "S == pattern('')") == [7] && rows(t, "S == sqlpattern('')") == [7]
+    @test rows(t, "S == regex('.*')") == rows(t, "S == pattern('*')") == rows(t, "S == sqlpattern('%')") == 1:10
+    @test rows(t, "S == pattern('a*')") == [1, 3, 5, 6] && rows(t, "S == pattern('a?c')") == [1, 3]
+    @test rows(t, "S == pattern('a.c')") == [3]                    # `.` is literal in a glob
+    @test rows(t, "S == pattern('[Aa]bc')") == [1, 2] && rows(t, "S == pattern('ab{c,d}')") == [1]
+    @test rows(t, "S == pattern('[!a]*')") == rows(t, "S == pattern('[^a]*')") == [2, 4, 8, 9, 10]
+    @test rows(t, "S == sqlpattern('a%')") == [1, 3, 5, 6] && rows(t, "S == sqlpattern('a_c')") == [1, 3]
+    @test rows(t, "S == sqlpattern('h_llo%')") == [9]
+    @test rows(t, "NOT (S == pattern('a*'))") == [2, 4, 7, 8, 9, 10]
+    @test rows(t, "S == regex('a.*') AND K > 1") == [3, 5, 6]
+    @test rows(t, "S == regex('a' + 'b')") == [5]                  # constant expression argument
+    @test rows(t, "upper(S) == regex('AB.*')") == [1, 2, 5, 6]     # expression on the other side
+    @test rows(t, "S == regex(Q)") == [1, 4, 6]                    # per-row pattern (a column)
+    @test rows(t, "S == pattern(Q)") isa Vector
+    # errors: invalid constant regex (parse-time), non-string arg, arity, and the
+    # forms real TaQL rejects
+    @test_throws ArgumentError rows(t, "S == regex('[')")
+    @test_throws ArgumentError rows(t, "S == regex('ab', 'x')")
+    @test_throws ArgumentError rows(t, "S == regex(K)")
+    @test_throws ArgumentError rows(t, "S ~ regex('ab')")
+    @test_throws ArgumentError rows(t, "S IN [regex('ab'), 'xyz']")
+
+    # `{a,b}` glob alternation (26 real-TaQL forms)
+    gr(p) = rows(tg, "S ~ p/$p/")
+    @test gr("ab{c,d}") == [1, 2] && gr("{ab,xa}*") == [1, 2, 5, 6, 16] && gr("{ab,ac}{c,d}") == [1, 2]
+    @test gr("a{b}c") == [1] && gr("a{}c") == [10]                  # one alternative / an empty one
+    @test gr("{a*,b*}") == [1, 2, 3, 4, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16]
+    @test gr("*{c,d}") == [1, 2, 3, 7, 10, 11, 12, 13, 16] && gr("[a-c]{b,c}") == [10, 11]
+    @test gr("a,b") == [4] && gr("a}c") == [7]                      # `,` / `}` literal outside braces
+    @test gr("a\\{b\\}c") == [3] && gr("\\{a") == [8] && gr("a\\*c") == [12]
+    @test gr("a+b") == [14] && gr("a(b)") == [15] && gr("a[!b]c") == [7, 12, 13]
+    for bad in ("{a,{b,c}}", "{a", "a{b,c", "a[bc", "a[", "a[]c", "a\\")
+        @test_throws ArgumentError gr(bad)                          # nested / unbalanced / lone backslash
+    end
+
+    if _HAVE_TAQL
+        cref(d, w) = Int.(collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]))
+        for w in ("S == regex('a.*')", "S == regex('ab')", "S == pattern('a*')", "S == pattern('a?c')", "S == sqlpattern('a%')",
+                  "S == sqlpattern('a_c')", "S == pattern('[Aa]bc')", "S == pattern('ab{c,d}')", "S == regex('(abc)+')",
+                  "S != regex('ab.*')", "regex('ab') != S", "S == regex(Q)", "S == regex('a.*') AND K > 1",
+                  "NOT (S == pattern('a*'))", "S == pattern('*')", "S == regex('')", "S == sqlpattern('')", "S == pattern('a.c')",
+                  "S == pattern('hello*')", "S == sqlpattern('h_llo%')", "S == pattern('[!a]*')", "S == regex('(a|x).*')",
+                  "S == regex('A.*')", "S == regex('a' + 'b')", "upper(S) == regex('AB.*')")
+            @test cref(dir, w) == rows(t, w)
+        end
+        for p in ("ab{c,d}", "{ab,xa}*", "a{b}c", "a{}c", "{ab,ac}{c,d}", "{a*,b*}", "*{c,d}", "[a-c]{b,c}", "a,b", "a}c", "a\\{b\\}c", "\\{a", "a+b", "a(b)", "a[!b]c")
+            @test cref(dirg, "S ~ p/$p/") == gr(p)
+        end
+    end
+end
+
+# Phase 253: table / column KEYWORD access (`::NAME`, `COL::NAME`, `COL::REC.field`)
+# and `iskeyword('NAME' | 'COL::NAME[.field]')`, plus `rowid()` (0-based row; live-
+# probed against real TaQL, 25 keyword + 10 rowid forms).  Keyword names are case-
+# sensitive; a missing keyword (or a whole-Record value) errors; `iskeyword` is
+# false for a missing table/column/field and true for a Record; an array keyword is
+# an array cell (indexable).  `rowid()` is `rownumber() - 1` over the queried table:
+# `WHERE` / `ORDER BY` keep the ORIGINAL row, a `FROM (subquery)` renumbers from 0.
+@testset "TaQL-lite — keyword access, iskeyword() and rowid() (Phase 253)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["K" => Int32.(1:4), "D" => [0.1, 0.2, 0.3, 0.4]]; nrow=4,
+                measures=Dict("D" => (; kind=:epoch, ref="UTC", units=["s"])),
+                keywords=Dict{String,Any}("KW1" => 3, "KW2" => "hello", "KWF" => 2.5, "KWB" => true, "KWS" => ["a", "b"]))
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    rows(w) = Int.(collect(column(query(t, w), "K")[:]))
+
+    @test ev("::KW1") == fill(3, 4) && ev("::KWF") == fill(2.5, 4) && ev("::KWB") == fill(true, 4)
+    @test ev("::KW2") == fill("hello", 4) && ev("upper(::KW2)") == fill("HELLO", 4) && ev("::KW2 + 'x'") == fill("hellox", 4)
+    @test ev("::KWS[1]") == fill("a", 4) && ev("nelements(::KWS)") == fill(2, 4)
+    @test collect.(ev("::KWS")) == fill(["a", "b"], 4)
+    @test ev("::KW1 * K") == [3, 6, 9, 12] && ev("K + ::KW1") == [4, 5, 6, 7] && ev("::KWF * K") == [2.5, 5.0, 7.5, 10.0]
+    @test ev("D::MEASINFO.Ref") == fill("UTC", 4) && ev("D::MEASINFO.type == 'epoch'") == fill(true, 4)
+    @test ev("D::QuantumUnits[1]") == fill("s", 4) && collect.(ev("D::QuantumUnits")) == fill(["s"], 4)
+    @test ev("::KW1 IN [1,2,3]") == fill(true, 4)
+    @test rows("::KW1 > 2") == 1:4 && rows("::KW1 > K") == [1, 2] && rows("K > ::KW1") == [4] && rows("K < ::KWF") == [1, 2]
+    @test rows("::KWB") == 1:4 && rows("::KW2 == 'hello'") == 1:4 && rows("D::MEASINFO.type == 'epoch'") == 1:4
+    # missing / case / whole-record / bad-column
+    for bad in ("::NOPE", "::kw1", "D::NOPE", "D::quantumunits", "D::MEASINFO", "D::MEASINFO.nope", "K::x")
+        @test_throws Exception ev(bad)
+    end
+    @test_throws ArgumentError ev("NOPE::KW")                        # unknown column
+    # iskeyword
+    @test ev("iskeyword('KW1')") == fill(true, 4) && ev("iskeyword('KWS')") == fill(true, 4)
+    @test ev("iskeyword('nokw')") == fill(false, 4) && ev("iskeyword('kw1')") == fill(false, 4)   # case-sensitive
+    @test ev("iskeyword('D::QuantumUnits')") == fill(true, 4) && ev("iskeyword('D::MEASINFO')") == fill(true, 4)
+    @test ev("iskeyword('D::MEASINFO.type')") == fill(true, 4) && ev("iskeyword('D::MEASINFO.nope')") == fill(false, 4)
+    @test ev("iskeyword('D::nope')") == fill(false, 4) && ev("iskeyword('nocol::x')") == fill(false, 4) && ev("iskeyword('KW1.a')") == fill(false, 4)
+    @test rows("iskeyword('KW1') AND K > 2") == [3, 4] && rows("iskeyword('nope') OR K > 3") == [4] && rows("iskeyword('KW1')") == 1:4
+    for bad in ("iskeyword(K)", "iskeyword('')", "iskeyword('KW1','x')", "iskeyword()")
+        @test_throws ArgumentError ev(bad)
+    end
+    # `V[1::2]`-style step subscripts still lex (the `::` rule is outside `[...]`)
+    @test MSv2._taqllite_tokenize("V[1::2]")[4].kind === :colon
+
+    # keywords work everywhere expressions do: delete!, groupby, VirtualTaQLColumn
+    g = groupby(t, "K"; select=["K" => "K", "KX" => "gsum(K) * ::KW1"])
+    @test collect(g.KX) == [3, 6, 9, 12]
+    dd = joinpath(mktempdir(), "d"); cp(dir, dd)
+    @test delete!(dd; where="K > ::KW1") == 1 && nrow(readtable(dd)) == 3
+    vdir = joinpath(mktempdir(), "v")
+    write_table(vdir, "T", Pair{String,Any}["K" => Int32.(1:4), "CV" => zeros(4)]; nrow=4,
+                keywords=Dict{String,Any}("KW1" => 3), virtualtaql=Dict("CV" => "K * ::KW1 + 0.5"))
+    @test column(readtable(vdir), "CV")[:] == [3.5, 6.5, 9.5, 12.5]
+
+    # rowid()
+    @test ev("rowid()") == [0, 1, 2, 3] && ev("rowid() + 1") == [1, 2, 3, 4]
+    rt = readtable((d = joinpath(mktempdir(), "r"); write_table(d, "T", Pair{String,Any}["K" => Int32.(1:8)]; nrow=8); d))
+    rr(tt, w, e="rowid()") = collect(column(query(tt, w; select=["X" => e]), "X")[:])
+    @test rr(rt, "TRUE") == 0:7 && rr(rt, "K > 4") == [4, 5, 6, 7]                   # the ORIGINAL row
+    @test rr(query(rt, "K > 4"), "TRUE") == [0, 1, 2, 3]                              # a sub-select renumbers
+    @test rr(rt, "TRUE ORDER BY K DESC") == [7, 6, 5, 4, 3, 2, 1, 0] && rr(rt, "rowid() % 2 == 0", "rowid() + 1") == [1, 3, 5, 7]
+    @test_throws ArgumentError rr(rt, "TRUE", "rowid(1)")
+
+    if _HAVE_TAQL
+        ref(q) = collect(_taqlcmd(q, dir)[:X][:])
+        for e in ("::KW1", "::KWF", "::KWB", "::KW2", "::KWS[1]", "::KW1 * K", "D::MEASINFO.Ref", "D::QuantumUnits[1]", "upper(::KW2)",
+                  "iskeyword('KW1')", "iskeyword('nokw')", "iskeyword('D::QuantumUnits')", "iskeyword('D::MEASINFO.type')", "iskeyword('D::nope')")
+            @test ref("SELECT K, $e AS X FROM \$1") == ev(e)
+        end
+        for w in ("::KW1 > K", "K > ::KW1", "K < ::KWF", "iskeyword('nope') OR K>3", "D::MEASINFO.type == 'epoch'")
+            @test Int.(collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", dir)[:K][:])) == rows(w)
+        end
+        rref(q) = collect(_taqlcmd(q, rt.path)[:X][:])
+        for (q, w) in (("SELECT rowid() AS X FROM \$1", "TRUE"), ("SELECT rowid() AS X FROM \$1 WHERE K>4", "K > 4"),
+                       ("SELECT rowid() AS X FROM \$1 ORDER BY K DESC", "TRUE ORDER BY K DESC"))
+            @test rref(q) == rr(rt, w)
+        end
+    end
+end

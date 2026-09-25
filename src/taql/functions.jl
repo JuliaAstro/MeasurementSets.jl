@@ -1037,6 +1037,9 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "replaceunmasked" => (_tql_replaceunmasked, 2:2),
     # --- string ---
     "strlength" => (length, 1:1), "len" => (length, 1:1),
+    "regex" => (s -> _tql_pattern(:regex, s), 1:1),
+    "pattern" => (s -> _tql_pattern(:pattern, s), 1:1),
+    "sqlpattern" => (s -> _tql_pattern(:sqlpattern, s), 1:1),
     "upcase" => (uppercase, 1:1), "upper" => (uppercase, 1:1), "toupper" => (uppercase, 1:1),
     "to_upper" => (uppercase, 1:1),
     "downcase" => (lowercase, 1:1), "lower" => (lowercase, 1:1), "tolower" => (lowercase, 1:1),
@@ -1321,6 +1324,82 @@ function _measframe_cols(t::AbstractTable, keys::AbstractVector{<:AbstractString
     return d
 end
 
+# ---- Phase 253: table / column KEYWORD access + iskeyword() ----------------
+# `::NAME` (table keyword), `COL::NAME` (column keyword), `.field` into a
+# Record-valued keyword (`D::MEASINFO.type`), and `iskeyword('NAME')` /
+# `iskeyword('COL::NAME[.field]')` (live-probed vs real TaQL: names are
+# case-sensitive; a missing keyword or a whole-Record value errors; an array
+# keyword is an array cell; `iskeyword` accepts a Record and is false for a
+# missing table/column/field).  Threading mirrors `mscal.*` / `meas.<frame>(
+# 'COL')`: `_tqlrefs!` pushes a `"::kw::COL::PATH"` / `"::iskw::SPEC"`
+# sentinel that `_tql_cols` / `_vtq_prepare!` resolve once per table.
+struct TQLKeyword <: TQLExpr
+    col::String               # "" = a table keyword
+    path::String              # NAME or NAME.field.sub
+end
+struct TQLIsKeyword <: TQLExpr
+    spec::String              # "NAME[.field]" or "COL::NAME[.field]"
+end
+_kw_key(e::TQLKeyword) = "::kw::" * e.col * "::" * e.path
+_kw_key(e::TQLIsKeyword) = "::iskw::" * e.spec
+_tqleval(e::Union{TQLKeyword,TQLIsKeyword}, cols, i) = cols[_kw_key(e)][1]
+_geval(e::Union{TQLKeyword,TQLIsKeyword}, cols, g) = cols[_kw_key(e)][1]
+_tqlrefs!(seen, e::Union{TQLKeyword,TQLIsKeyword}) = push!(seen, _kw_key(e))
+_has_aggr(::Union{TQLKeyword,TQLIsKeyword}) = false
+
+function _kw_split(names)
+    rest = String[]
+    keys = String[]
+    for n in names
+        s = String(n)
+        (startswith(s, "::kw::") || startswith(s, "::iskw::")) ? push!(keys, s) : push!(rest, s)
+    end
+    return rest, keys
+end
+
+# walk `NAME.field.sub` through nested Records -> (found, value)
+function _kw_lookup(rec, path::AbstractString)
+    cur = rec
+    parts = split(path, '.')
+    for (k, part) in enumerate(parts)
+        (cur isa Record && haskey(cur, part)) || return (false, nothing)
+        v = cur[part]
+        k == length(parts) && return (true, v)
+        cur = v
+    end
+    return (false, nothing)
+end
+
+function _kw_record(t::AbstractTable, col::AbstractString)
+    isempty(col) ? keywords(t) : columndesc(t, col).keywords
+end
+
+function _kw_cols(t::AbstractTable, keys::AbstractVector{<:AbstractString})
+    d = Dict{String,AbstractVector}()
+    for k in keys
+        if startswith(k, "::iskw::")
+            spec = k[(length("::iskw::") + 1):end]
+            col, path = occursin("::", spec) ? split(spec, "::"; limit=2) : ("", spec)
+            found = try
+                _kw_lookup(_kw_record(t, col), path)[1]
+            catch
+                false                                   # no such column
+            end
+            d[k] = Any[found]
+        else
+            body = k[(length("::kw::") + 1):end]
+            col, path = split(body, "::"; limit=2)
+            found, v = _kw_lookup(_kw_record(t, col), path)
+            found || error("TaQL-lite: keyword \"$(isempty(col) ? "" : col * "::")$path\" not found")
+            (v isa Record || v isa SubTable) && error(
+                "TaQL-lite: keyword \"$(isempty(col) ? "" : col * "::")$path\" is a " *
+                "$(v isa Record ? "record" : "table reference"); access a field with `.name`")
+            d[k] = Any[v]
+        end
+    end
+    return d
+end
+
 # ---- Phase 249: the REAL casacore `meas.*` calling convention -------------
 # (live-probed; ours puts the source frame FIRST with scalar lon/lat, real puts
 # the direction ARRAY first): `meas.b1950([ra,dec] [, 'SRC' [, epoch [, pos]]])`
@@ -1519,6 +1598,12 @@ end
 
 function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     n = length(args)
+    # a constant regex/pattern/sqlpattern is validated at parse time (real
+    # TaQL rejects `regex('[')` up front); a per-row one errors at eval.
+    if name in ("regex", "pattern", "sqlpattern") && n == 1 &&
+       args[1] isa TQLLit && args[1].value isa AbstractString
+        _tql_pattern(Symbol(name), args[1].value)
+    end
     if startswith(name, "mscal.")
         fn = name[7:end]
         # Phase 163: real casacore's own function is registered as
@@ -1662,6 +1747,12 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     if name in ("rownumber", "rownr")
         n == 0 || throw(ArgumentError("TaQL-lite: $name() takes no arguments in \"$src\""))
         return TQLRowNum()
+    elseif name == "rowid"
+        # 0-based row id (Phase 253; live-probed): the queried table's own row
+        # -- `WHERE`/`ORDER BY` keep the ORIGINAL row (`WHERE K>4` -> 4..7) and a
+        # `FROM (subquery)` renumbers from 0 -- i.e. exactly `rownumber() - 1`.
+        n == 0 || throw(ArgumentError("TaQL-lite: rowid() takes no arguments in \"$src\""))
+        return TQLArith(-, TQLRowNum(), TQLLit(1))
     elseif name == "pi" && n == 0
         return TQLLit(π)
     elseif name == "e" && n == 0

@@ -66,6 +66,7 @@ function _vtq_prepare!(v::VirtualTaQLColumn)
     plain, stokes = _stokes_split(plain)
     plain, mssel = _mssel_split(plain)
     plain, measframe = _measframe_split(plain)
+    plain, kwkeys = _kw_split(plain)
     if isempty(refs)
         v.const_value = _tql_result_strip(_tqleval(ast, Dict{String,AbstractVector}(), 1))
     elseif _has_qty(ast)
@@ -75,12 +76,14 @@ function _vtq_prepare!(v::VirtualTaQLColumn)
         isempty(stokes) || merge!(v.cols, _stokes_setups(v.table, stokes))
         isempty(mssel) || merge!(v.cols, _mssel_columns(v.table, mssel))
         isempty(measframe) || merge!(v.cols, _measframe_cols(v.table, measframe))
+        isempty(kwkeys) || merge!(v.cols, _kw_cols(v.table, kwkeys))
     else
         v.cols = Dict{String,AbstractVector}(n => column(v.table, n) for n in plain)
         isempty(mscal) || merge!(v.cols, _mscal_columns(v.table, mscal))
         isempty(stokes) || merge!(v.cols, _stokes_setups(v.table, stokes))
         isempty(mssel) || merge!(v.cols, _mssel_columns(v.table, mssel))
         isempty(measframe) || merge!(v.cols, _measframe_cols(v.table, measframe))
+        isempty(kwkeys) || merge!(v.cols, _kw_cols(v.table, kwkeys))
     end
     v.prepared = true
     return v
