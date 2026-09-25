@@ -262,10 +262,11 @@ end
 
     r2 = query(t, "A >= 1 ORDER BY A DESC")
     @test issorted(A[r2.rows]; rev=true)
-    # stable tie-break: A has a tie at value 3 (original rows 2 and 4) —
-    # descending order must keep row 2 before row 4 among the ties.
+    # tie-break: A has a tie at value 3 (original rows 2 and 4). An all-DESC
+    # sort is the reversed ascending sort in real TaQL, so the ties come out
+    # as row 4 then row 2 (Phase 246; was assumed stable before).
     tiepos = findall(==(3), A[r2.rows])
-    @test r2.rows[tiepos] == [2, 4]
+    @test r2.rows[tiepos] == [4, 2]   # all-DESC: fully-tied rows in reverse row order (real TaQL, Phase 246)
 
     # multi-key
     dir2 = joinpath(mktempdir(), "ob2.tab")
@@ -4076,6 +4077,48 @@ end
                   "string(B*1e10)", "str(A > 2)", "string(B,'%.2f')", "string(A,'%03d')")
             r = real_(e); m = ev(e)
             @test length(r) == length(m) && all(i -> (r[i] isa Number ? isapprox(r[i], m[i]) : r[i] == m[i]), eachindex(r))
+        end
+    end
+end
+
+# Phase 246: `ORDER BY` against real TaQL (32 forms, ties included). Fixed:
+# sort keys are full expressions (`A+B`, `abs(A)`, `upper(S)`, `A>3`), not just
+# bare columns; a leading `ASC`/`DESC` (`ORDER BY DESC A, B`) is the default
+# direction for keys without their own; and when EVERY key is descending the
+# result is the reversed ascending sort (fully-tied rows come out in reverse
+# row order -- real TaQL's behaviour), while mixed directions keep ties in
+# row order.
+@testset "TaQL-lite — ORDER BY expressions / leading direction / DESC ties (Phase 246)" begin
+    dir = joinpath(mktempdir(), "t")
+    A = Int32[5, 3, 9, 1, 7, 3, 0, -4, 3, 5]
+    B = [1.5, 2.5, 0.5, 4.5, 3.5, 2.0, 0.25, -1.5, 2.5, 0.5]
+    S = ["b", "a", "c", "a", "B", "", "b", "z", "a", "c"]
+    write_table(dir, "T", ["A" => A, "B" => B, "S" => S, "R" => Int32.(1:10)]; nrow=10)
+    t = readtable(dir)
+    R(tail) = Int.(collect(column(taql(t, "SELECT R " * tail), "R")[:]))
+
+    @test R("ORDER BY A+B") == sortperm(A .+ B)
+    @test R("ORDER BY abs(A), R DESC") == sortperm(collect(zip(abs.(A), -(1:10))))
+    @test R("ORDER BY -A") == sortperm(-A)
+    @test R("ORDER BY upper(S)") == sortperm(uppercase.(S))
+    @test R("ORDER BY A>3, R") == sortperm(collect(zip(A .> 3, 1:10)))
+    @test R("ORDER BY A % 3, A") == sortperm(collect(zip(mod.(A, 3), A)))
+    @test R("ORDER BY DESC A, B") == reverse(sortperm(collect(zip(A, B))))
+    @test R("ORDER BY ASC A") == sortperm(A)
+    # all-DESC: reversed ascending, fully-tied rows in reverse row order
+    @test R("ORDER BY A DESC") == reverse(sortperm(A))
+    @test R("ORDER BY S DESC") == reverse(sortperm(S))
+    @test R("ORDER BY S DESC, A DESC") == reverse(sortperm(collect(zip(S, A))))
+    # mixed directions keep ties in row order
+    @test R("ORDER BY A, B DESC") == sortperm(collect(zip(A, -B)))
+
+    if _HAVE_TAQL
+        for tail in ("ORDER BY A+B", "ORDER BY abs(A), R DESC", "ORDER BY -A", "ORDER BY upper(S)", "ORDER BY A>3, R",
+                     "ORDER BY A % 3, A", "ORDER BY DESC A, B", "ORDER BY ASC A",
+                     "ORDER BY A DESC", "ORDER BY S DESC", "ORDER BY S DESC, A DESC", "ORDER BY A, B DESC",
+                     "ORDER BY A*B DESC", "WHERE A>0 ORDER BY B LIMIT 3", "ORDER BY strlength(S), S")
+            ref = Int.(collect(_taqlcmd("SELECT R FROM \$1 " * tail, dir)[:R][:]))
+            @test R(tail) == ref
         end
     end
 end

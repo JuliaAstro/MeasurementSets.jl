@@ -9076,3 +9076,17 @@ were truncating (Phase 24 had assumed `DIVIDETRUNC`); new `substr` /
 UTC (off by the UTC offset, 4 h here). `Printf` (stdlib) added as a
 dependency. `rowid()` remains unsupported. New testset with a real-TaQL
 cross-check of sixteen forms.
+
+### Phase 246 — `ORDER BY`: expression keys, leading direction, DESC tie order
+
+`groupby` was probed first (58 `g*`/`HAVING`/`WHERE`/multi-key forms vs real
+`GROUP BY`): all matched except numeric aggregates over `Bool`, which real
+TaQL rejects and we accept — left as is. A 32-form `ORDER BY` probe then
+found three real gaps: (1) sort keys must be full expressions (`ORDER BY
+A+B`, `abs(A)`, `upper(S)`, `A>3`) — only bare columns worked; (2) a
+leading global direction (`ORDER BY DESC A, B`) is the default for keys
+without their own `ASC`/`DESC`; (3) when *every* key is descending the
+result is the reversed ascending sort, so fully-tied rows come out in
+reverse row order (mixed directions keep ties in row order). All three
+match real TaQL now (32/32 incl. ties). New testset with a 16-form
+real-TaQL cross-check.
