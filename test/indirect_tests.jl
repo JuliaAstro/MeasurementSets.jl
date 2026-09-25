@@ -238,3 +238,30 @@ end
         end
     end
 end
+
+# Phase 241: `StandardStMan.getcolumn`'s scalar-`String` branch was a per-row
+# `getcell` loop (fresh `locate` + byte-slice copy each row) -- live-measured
+# `POINTING.NAME` (925,645 rows) 20.7x slower than casacore C++; now a
+# bucket walk + `unsafe_string` for inline strings (0.023 s, 0.23x of C++).
+# Real `POINTING.NAME` is all-empty, so pin empty / inline / long
+# (string-bucket) values across SSM bucket boundaries here.
+@testset "SSM scalar String getcolumn — bulk bucket walk (Phase 241)" begin
+    n = 3000   # 3 SSM buckets (1024 rows/bucket)
+    S = [i % 7 == 0 ? "" : i % 3 == 0 ? "short$(i)" : "a long string value number $(i) " * "x"^(i % 50) for i in 1:n]
+    dir = joinpath(mktempdir(), "ssm_str_bulk")
+    write_table(dir, "T", ["S" => S]; nrow=n)
+    r = readtable(dir)
+    @test columndesc(r, "S").manager == "StandardStMan"
+    col = getcolumn(r, "S")
+    @test col isa Vector{String}
+    @test col == S
+    for i in (1, 1023, 1024, 1025, 2048, 2049, n)
+        @test getcell(r, "S", i) == S[i]
+    end
+    if _HAVE_CASACORE
+        ct = CCT.Table(dir)
+        for i in (1, 1024, 2049, n)
+            @test ct[:S][i] == S[i]
+        end
+    end
+end
