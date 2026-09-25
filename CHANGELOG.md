@@ -9093,7 +9093,7 @@ real-TaQL cross-check.
 
 ### Phase 247 — write commands: float→integer coercion, `INSERT … [(cols)] SELECT … FROM name`
 
-138 `UPDATE` / `DELETE` / `INSERT` forms were applied to twin copies of a
+110 `UPDATE` / `DELETE` / `INSERT` forms were applied to twin copies of a
 table — real TaQL vs `taql()` — and every column compared (46 forms clean,
 then 46 edge forms, then 18 coercion probes). Real gaps found and
 fixed: writing a floating value into an **integer column** errored
