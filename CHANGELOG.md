@@ -9267,3 +9267,11 @@ Sub-queries run first and are substituted (`IN` → a literal list, `EXISTS` →
 *positive* `EXISTS` / `IN` of an empty sub-query errors in real TaQL and simply
 matches no rows here. Only `SELECT` (not `UPDATE` / `DELETE`) takes sub-queries.
 
+### Phase 258 — sub-queries and aliases in `taql()` `UPDATE` / `DELETE`
+
+Phase 257's sub-queries now also work in the `WHERE` of `taql()` `UPDATE` /
+`DELETE` (`x [NOT] IN (SELECT …)`, `[NOT] EXISTS (SELECT …)`; the inner query
+sees the table *before* the write), and `UPDATE t [AS] a SET …` / `DELETE FROM t
+[AS] a` aliases (with `a.COL` qualifiers) are accepted — checked on twin tables
+against real TaQL (9 forms, all match).
+

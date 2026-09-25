@@ -1029,3 +1029,35 @@ end
         end
     end
 end
+
+# Phase 258: sub-queries (`x [NOT] IN (SELECT ..)`, `[NOT] EXISTS (SELECT ..)`) in
+# the WHERE of UPDATE / DELETE, and `UPDATE t [AS] a SET` / `DELETE FROM t [AS] a`
+# aliases, applied to twin copies vs real TaQL (9 forms, all match).  The inner
+# query sees the table BEFORE the write.
+@testset "taql UPDATE/DELETE sub-queries + aliases (Phase 258)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8), "D" => collect(0.5:1:7.5)]; nrow=8); d)
+    col(d, n) = collect(column(readtable(d), n)[:])
+    d = mk(); taql(d, "DELETE FROM t WHERE K IN (SELECT K FROM t WHERE G==1)")
+    @test col(d, "K") == [2, 4, 5, 7, 8]
+    d = mk(); taql(d, "UPDATE t SET D=0 WHERE K IN (SELECT K FROM t WHERE G==1)")
+    @test col(d, "D") == [0.0, 1.5, 0.0, 3.5, 4.5, 0.0, 6.5, 7.5]
+    d = mk(); taql(d, "UPDATE t SET D=-1 WHERE G IN (SELECT G FROM t WHERE K>6)")
+    @test col(d, "D") == [0.5, 1.5, 2.5, -1.0, 4.5, 5.5, -1.0, -1.0]
+    d = mk(); taql(d, "DELETE FROM t WHERE NOT EXISTS (SELECT FROM t WHERE K>100)")
+    @test nrow(readtable(d)) == 0
+    d = mk(); taql(d, "UPDATE t a SET D=0 WHERE a.K>6"); @test col(d, "D")[7:8] == [0.0, 0.0] && col(d, "D")[1] == 0.5
+    d = mk(); taql(d, "DELETE FROM t a WHERE a.K>6"); @test col(d, "K") == 1:6
+    d = mk(); taql(d, "UPDATE t AS a SET D=a.K*2 WHERE a.G==1"); @test col(d, "D")[[1, 3, 6]] == [2.0, 6.0, 12.0]
+    if _HAVE_TAQL
+        for q in ("DELETE FROM \$1 WHERE K IN (SELECT K FROM \$1 WHERE G==1)", "UPDATE \$1 SET D=0 WHERE K IN (SELECT K FROM \$1 WHERE G==1)",
+                  "UPDATE \$1 SET D=0 WHERE EXISTS (SELECT FROM \$1 WHERE K>7)", "DELETE FROM \$1 WHERE NOT EXISTS (SELECT FROM \$1 WHERE K>100)",
+                  "UPDATE \$1 SET D=-1 WHERE G IN (SELECT G FROM \$1 WHERE K>6)", "UPDATE \$1 a SET D=0 WHERE a.K>6",
+                  "DELETE FROM \$1 a WHERE a.K>6", "UPDATE \$1 AS a SET D=a.K*2 WHERE a.G==1",
+                  "UPDATE \$1 SET D=K*2 WHERE K IN (SELECT DISTINCT G FROM \$1)")
+            dr = mk(); dm = mk()
+            _taqlcmd(q, dr); taql(dm, replace(q, "\$1" => "t"))
+            @test col(dr, "K") == col(dm, "K") && col(dr, "D") == col(dm, "D")
+        end
+    end
+end

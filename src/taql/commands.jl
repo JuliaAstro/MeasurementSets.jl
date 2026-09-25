@@ -508,21 +508,9 @@ _sub_literal(x::AbstractString) = "'" * replace(String(x), "'" => "\\'") * "'"
 _sub_literal(x::Bool) = x ? "TRUE" : "FALSE"
 _sub_literal(x) = repr(x)
 
-function _taql_preprocess_select(target, body::AbstractString)
+# `x [NOT] IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` -> literals (evaluated on `target`)
+function _taql_subst_subqueries(target, body::AbstractString)
     body = String(body)
-    # `SELECT FROM t ...` / `SELECT WHERE ...` (no column list) = `SELECT *`
-    body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
-    # FROM (SELECT ...) -> the inner result becomes the queried table
-    m = match(r"\bFROM\s*\("i, body)
-    if m !== nothing
-        open = m.offset + length(m.match) - 1
-        close = _matching_paren(body, open)
-        inner = String(strip(body[open+1:close-1]))
-        occursin(r"^SELECT\b"i, inner) || throw(ArgumentError("taql: FROM (...) must hold a SELECT"))
-        target = taql(target, inner)
-        body = body[1:m.offset-1] * "FROM __sub" * body[close+1:end]
-    end
-    # [NOT] IN / EXISTS (SELECT ...)
     while (m = match(r"\b(NOT\s+)?(IN|EXISTS)\s*\(\s*SELECT\b"i, body)) !== nothing
         open = findnext('(', body, m.offset)
         close = _matching_paren(body, open)
@@ -540,6 +528,38 @@ function _taql_preprocess_select(target, body::AbstractString)
             body = head * lit * body[close+1:end]
         end
     end
+    return body
+end
+
+# UPDATE / DELETE: sub-queries in the WHERE, and `UPDATE t [AS] a SET` /
+# `DELETE FROM t [AS] a` aliases (dropped, with their `a.` qualifiers)
+function _taql_preprocess_write(target, cmd::AbstractString)
+    cmd = _taql_subst_subqueries(target, cmd)
+    am = match(r"^UPDATE\s+\S+\s+(?:AS\s+)?(?!SET\b)(\w+)\s+SET\b"i, cmd)
+    am === nothing && (am = match(r"^DELETE\s+FROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|ORDER|LIMIT)\b)(\w+)"i, cmd))
+    if am !== nothing
+        alias = String(am.captures[1])
+        cmd = replace(am.match, Regex("\\s+(?:AS\\s+)?" * alias * "(?=\\s+SET\\b|\\z)", "i") => "") * cmd[length(am.match)+1:end]
+        cmd = replace(cmd, Regex("\\b" * alias * "\\.(?=[A-Za-z_])") => "")
+    end
+    return cmd
+end
+
+function _taql_preprocess_select(target, body::AbstractString)
+    body = String(body)
+    # `SELECT FROM t ...` / `SELECT WHERE ...` (no column list) = `SELECT *`
+    body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
+    # FROM (SELECT ...) -> the inner result becomes the queried table
+    m = match(r"\bFROM\s*\("i, body)
+    if m !== nothing
+        open = m.offset + length(m.match) - 1
+        close = _matching_paren(body, open)
+        inner = String(strip(body[open+1:close-1]))
+        occursin(r"^SELECT\b"i, inner) || throw(ArgumentError("taql: FROM (...) must hold a SELECT"))
+        target = taql(target, inner)
+        body = body[1:m.offset-1] * "FROM __sub" * body[close+1:end]
+    end
+    body = _taql_subst_subqueries(target, body)
     # `FROM name [AS] alias` -> drop the alias and its `alias.` qualifiers
     am = match(r"\bFROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|INTO|GIVING)\b)(\w+)"i, body)
     if am !== nothing
@@ -582,6 +602,9 @@ string are not supported (use `copytable(dst, groupby(…))`, or
 function taql(target, command::AbstractString)
     cmd = strip(command)
     kw = uppercase(String(first(split(cmd; limit=2))))
+    if kw == "UPDATE" || kw == "DELETE"
+        cmd = _taql_preprocess_write(target isa AbstractTable ? target : readtable(_cmd_path(target)), cmd)
+    end
     if kw == "UPDATE"
         m = match(Regex("^UPDATE\\s+(?:\\S+\\s+)?SET\\s+(.+?)(?:\\s+WHERE\\s+(.+?))?" *
                         "(?:\\s+ORDER\\s+BY\\s+(.+?))?(?:\\s+LIMIT\\s+(-?\\d+))?\\s*\$",
