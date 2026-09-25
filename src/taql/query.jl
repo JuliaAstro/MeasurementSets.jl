@@ -13,7 +13,9 @@
 struct TQLOrderKey
     name::String
     desc::Bool
+    expr::Union{Nothing,TQLExpr}   # Phase 246: an expression sort key (`name` is then synthetic)
 end
+TQLOrderKey(name::AbstractString, desc::Bool) = TQLOrderKey(String(name), desc, nothing)
 
 _at_orderby(p::TQLParser) =
     _iskw(p.toks[p.pos], "ORDER") && p.pos < length(p.toks) &&
@@ -29,10 +31,18 @@ function _taqllite_parse_query(s::AbstractString, validnames::AbstractSet{String
     if _at_orderby(p)
         _advance!(p)
         _advance!(p)
-        push!(orderby, _parse_orderkey!(p))
+        # leading global direction (`ORDER BY DESC A, B`): the default for every
+        # key without its own ASC/DESC (real TaQL, live-verified; Phase 246)
+        defdesc = false
+        if (_iskw(_peek(p), "DESC") || _iskw(_peek(p), "ASC")) &&
+           !(p.pos < length(p.toks) && p.toks[p.pos+1].kind in (:comma, :eof))
+            defdesc = _iskw(_peek(p), "DESC")
+            _advance!(p)
+        end
+        push!(orderby, _parse_orderkey!(p, defdesc, 1))
         while _peek(p).kind === :comma
             _advance!(p)
-            push!(orderby, _parse_orderkey!(p))
+            push!(orderby, _parse_orderkey!(p, defdesc, length(orderby) + 1))
         end
     end
     _peek(p).kind === :eof || throw(ArgumentError(
@@ -40,21 +50,40 @@ function _taqllite_parse_query(s::AbstractString, validnames::AbstractSet{String
     return ast, orderby
 end
 
-function _parse_orderkey!(p::TQLParser)
-    t = _expect_kind!(p, :ident, "a column name in ORDER BY")
-    t.text in p.validnames || throw(ArgumentError(
-        "TaQL-lite: unknown column \"$(t.text)\" in \"$(p.src)\""))
+# A sort key is any expression (Phase 246: `ORDER BY A+B`, `abs(A)`, `A>3`);
+# a bare column stays the plain-column fast path.
+function _parse_orderkey!(p::TQLParser, defdesc::Bool=false, idx::Int=1)
+    e = _parse_or!(p)
     nt = _peek(p)
     desc = if _iskw(nt, "DESC")
-        _advance!(p)
-        true
+        _advance!(p); true
     elseif _iskw(nt, "ASC")
-        _advance!(p)
-        false
+        _advance!(p); false
     else
-        false
+        defdesc
     end
-    return TQLOrderKey(t.text, desc)
+    e isa TQLCol && return TQLOrderKey(e.name, desc)
+    return TQLOrderKey("::orderkey::$idx", desc, e)
+end
+
+# refs of every key (a column name, or the columns an expression key reads)
+function _orderby_refs!(needed::Set{String}, orderby)
+    for k in orderby
+        k.expr === nothing ? push!(needed, k.name) : _tqlrefs!(needed, k.expr)
+    end
+end
+
+# evaluate expression keys for the `rows` that will be sorted, into `cols`
+function _orderby_materialize!(cols::AbstractDict, orderby, rows::Vector{Int}, n::Int)
+    for k in orderby
+        k.expr === nothing && continue
+        v = Vector{Any}(nothing, n)
+        for i in rows
+            v[i] = _tqleval(k.expr, cols, i)
+        end
+        cols[k.name] = v
+    end
+    return cols
 end
 
 # Stable multi-key sort over matched row indices; ties on every key keep
@@ -74,6 +103,13 @@ end
 function _apply_orderby(matched::Vector{Int}, orderby::Vector{TQLOrderKey},
                         cols::AbstractDict)
     isempty(orderby) && return matched
+    # Real TaQL (live-verified, Phase 246): when EVERY key is descending the
+    # result is the reversed *ascending* sort, so fully-tied rows come out in
+    # reverse original order; mixed directions keep ties in original order.
+    if all(k -> k.desc, orderby)
+        asc = [TQLOrderKey(k.name, false, k.expr) for k in orderby]
+        return reverse(_apply_orderby(matched, asc, cols))
+    end
     lt = function (i, j)
         for k in orderby
             vi, vj = cols[k.name][i], cols[k.name][j]
@@ -293,7 +329,7 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `pbgaussian(θ, hpbw)` / `pbairy(θ, diameter, freq[, blockage])` /
   `pbellipse(dlon, dlat, hpbw_major, hpbw_minor, pa)` (primary-beam
   power response, see `src/beam/beam.jl`), `pi`, `e`;
-* an optional trailing `ORDER BY col [ASC|DESC], ...` (bare columns).
+* an optional trailing `ORDER BY key [ASC|DESC], ...` — each key any expression (`A+B`, `abs(A)`, `A>3`); a leading `ASC`/`DESC` (`ORDER BY DESC A, B`) is the default for keys without their own direction; when every key is descending, ties come out in reverse row order (as real TaQL).
 
 Column names are case-sensitive and must name a column of `t`; keywords
 and function names are case-insensitive. Only the columns actually
@@ -444,12 +480,11 @@ function query(t::AbstractTable, wherestr::AbstractString;
     ast, orderby = _taqllite_parse_query(wherestr, validnames)
     needed = Set{String}()
     ast === nothing || _tqlrefs!(needed, ast)
-    for k in orderby
-        push!(needed, k.name)
-    end
+    _orderby_refs!(needed, orderby)
     cols = _tql_cols(t, needed, ast)
     matched = ast === nothing ? collect(1:nrow(t)) :
               [i for i in 1:nrow(t) if _tql_truthy(_tqleval(ast, cols, i))]
+    _orderby_materialize!(cols, orderby, matched, nrow(t))
     matched = _apply_orderby(matched, orderby, cols)
     cls = _select_classify(select, validnames)
     if _select_all_proj(cls)

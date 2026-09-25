@@ -262,10 +262,11 @@ end
 
     r2 = query(t, "A >= 1 ORDER BY A DESC")
     @test issorted(A[r2.rows]; rev=true)
-    # stable tie-break: A has a tie at value 3 (original rows 2 and 4) —
-    # descending order must keep row 2 before row 4 among the ties.
+    # tie-break: A has a tie at value 3 (original rows 2 and 4). An all-DESC
+    # sort is the reversed ascending sort in real TaQL, so the ties come out
+    # as row 4 then row 2 (Phase 246; was assumed stable before).
     tiepos = findall(==(3), A[r2.rows])
-    @test r2.rows[tiepos] == [2, 4]
+    @test r2.rows[tiepos] == [4, 2]   # all-DESC: fully-tied rows in reverse row order (real TaQL, Phase 246)
 
     # multi-key
     dir2 = joinpath(mktempdir(), "ob2.tab")
@@ -364,8 +365,8 @@ end
 
     # / vs // vs %
     @test parse("A / B == 1").lhs.op === (/)
-    @test parse("A // B == 1").lhs.op === div
-    @test parse("A % B == 1").lhs.op === rem
+    @test parse("A // B == 1").lhs.op === MSv2._tql_floordiv
+    @test parse("A % B == 1").lhs.op === MSv2._tql_mod
 
     # LIKE / ILIKE / NOT LIKE build a TQLMatch
     m1 = parse("N LIKE 'CAS%'")
@@ -4014,6 +4015,110 @@ end
                   "'a' + S = 'aabc'", "A > 0x3", "A = 0x5")
             ref = Int.(collect(_taqlcmd("SELECT FROM \$1 WHERE " * w, dir)[:A][:]))
             @test rows(w) == ref
+        end
+    end
+end
+
+# Phase 245: an 83-form batch of numeric / string function and operator
+# expressions compared value-by-value against real TaQL. Fixed: `%` is
+# floor-mod (sign of the divisor; `x % 0 == x`), `//` is FLOOR division
+# with a Double result (`-5 // 2 == -3.0`, `x // 0 == Inf`) -- both were
+# truncating; added `substr`/`substring` (0-based, negative start from the
+# end), `replace` (literal replace-all), `bool`/`boolean`, `string`/`str`
+# (C `%g` floats, `"True "`/`"False"` bools, optional printf format);
+# `mjd()`/`datetime()`/`date()`/`time()` no-arg forms now use UTC (were
+# local time, off by the UTC offset). `rowid()` stays unsupported.
+@testset "TaQL-lite — floor %, //, substr/replace/bool/string (Phase 245)" begin
+    dir = joinpath(mktempdir(), "t")
+    A = Int32[5, 3, 9, 1, 7, 3, 0, -4]
+    B = [1.5, 2.5, 0.5, 4.5, 3.5, 2.0, 0.25, -1.5]
+    S = ["abc", "Abd", "xyz", "", "ABC", "a b", "  pad ", "q1"]
+    write_table(dir, "T", ["A" => A, "B" => B, "S" => S]; nrow=8)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["V" => e]), "V")[:])
+
+    @test ev("-A % 3") == mod.(-A, 3)                 # sign of the divisor
+    @test ev("A % -3") == mod.(A, -3)
+    @test ev("A % 0") == A                             # x % 0 == x
+    @test ev("-B % 2") == mod.(-B, 2)
+    @test ev("-A // 2") == floor.(-A ./ 2)
+    @test ev("A // -2") == floor.(A ./ -2)
+    @test ev("B // 0.5") == floor.(B ./ 0.5)
+    @test all(isinf, ev("A // 0")[[1, 2, 3, 4, 5, 6, 8]]) && isnan(ev("A // 0")[7])
+
+    @test ev("substr(S, 0, 2)") == ["ab", "Ab", "xy", "", "AB", "a ", "  ", "q1"]
+    @test ev("substr(S, 1)") == ["bc", "bd", "yz", "", "BC", " b", " pad ", "1"]
+    @test ev("substring(S, 1, 2)") == ["bc", "bd", "yz", "", "BC", " b", " p", "1"]
+    @test ev("substr(S, -1, 2)") == ["c", "d", "z", "", "C", "b", " ", "1"]
+    @test ev("substr(S, -10, 2)") == ["ab", "Ab", "xy", "", "AB", "a ", "  ", "q1"]
+    @test ev("substr(S, 10)") == fill("", 8)
+    @test ev("substr(S, 1, -1)") == fill("", 8)
+    @test ev("replace(S, 'b', 'X')") == ["aXc", "AXd", "xyz", "", "ABC", "a X", "  pad ", "q1"]
+    @test ev("replace(S + S, 'ab', '')")[1] == "cc"
+    @test ev("replace(S, 'b+', 'X')") == S               # literal, not regex
+    @test ev("replace(S, '', 'X')") == S
+    @test ev("bool(A)") == (A .!= 0)
+    @test ev("boolean(B)") == fill(true, 8)
+    @test ev("string(A)") == string.(A)
+    @test ev("str(B)") == ["1.5", "2.5", "0.5", "4.5", "3.5", "2", "0.25", "-1.5"]
+    @test ev("string(B / 3)")[2] == "0.833333"           # %g: 6 significant digits
+    @test ev("string(B * 1e10)")[1] == "1.5e+10"
+    @test ev("string(B / 0)")[[1, 8]] == ["inf", "-inf"]
+    @test ev("str(A > 2)")[[1, 4]] == ["True ", "False"]  # fixed width 5
+    @test ev("string(B, '%.2f')")[6] == "2.00"
+    @test ev("string(A, '%03d')") == ["005", "003", "009", "001", "007", "003", "000", "-04"]
+    @test ev("string(S, '%5s')")[1] == "  abc"
+    @test abs(ev("mjd()")[1] - (MSv2.Dates.datetime2julian(MSv2.Dates.now(MSv2.Dates.UTC)) - 2400000.5)) < 1e-3
+
+    if _HAVE_TAQL
+        real_(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])
+        for e in ("-A % 3", "A % -3", "-B % 2", "-A // 2", "B // 0.5", "substr(S,-1,2)", "substr(S,0,2)",
+                  "replace(S+S,'ab','')", "bool(B)", "string(A)", "str(B)", "string(B/3)",
+                  "string(B*1e10)", "str(A > 2)", "string(B,'%.2f')", "string(A,'%03d')")
+            r = real_(e); m = ev(e)
+            @test length(r) == length(m) && all(i -> (r[i] isa Number ? isapprox(r[i], m[i]) : r[i] == m[i]), eachindex(r))
+        end
+    end
+end
+
+# Phase 246: `ORDER BY` against real TaQL (32 forms, ties included). Fixed:
+# sort keys are full expressions (`A+B`, `abs(A)`, `upper(S)`, `A>3`), not just
+# bare columns; a leading `ASC`/`DESC` (`ORDER BY DESC A, B`) is the default
+# direction for keys without their own; and when EVERY key is descending the
+# result is the reversed ascending sort (fully-tied rows come out in reverse
+# row order -- real TaQL's behaviour), while mixed directions keep ties in
+# row order.
+@testset "TaQL-lite — ORDER BY expressions / leading direction / DESC ties (Phase 246)" begin
+    dir = joinpath(mktempdir(), "t")
+    A = Int32[5, 3, 9, 1, 7, 3, 0, -4, 3, 5]
+    B = [1.5, 2.5, 0.5, 4.5, 3.5, 2.0, 0.25, -1.5, 2.5, 0.5]
+    S = ["b", "a", "c", "a", "B", "", "b", "z", "a", "c"]
+    write_table(dir, "T", ["A" => A, "B" => B, "S" => S, "R" => Int32.(1:10)]; nrow=10)
+    t = readtable(dir)
+    R(tail) = Int.(collect(column(taql(t, "SELECT R " * tail), "R")[:]))
+
+    @test R("ORDER BY A+B") == sortperm(A .+ B)
+    @test R("ORDER BY abs(A), R DESC") == sortperm(collect(zip(abs.(A), -(1:10))))
+    @test R("ORDER BY -A") == sortperm(-A)
+    @test R("ORDER BY upper(S)") == sortperm(uppercase.(S))
+    @test R("ORDER BY A>3, R") == sortperm(collect(zip(A .> 3, 1:10)))
+    @test R("ORDER BY A % 3, A") == sortperm(collect(zip(mod.(A, 3), A)))
+    @test R("ORDER BY DESC A, B") == reverse(sortperm(collect(zip(A, B))))
+    @test R("ORDER BY ASC A") == sortperm(A)
+    # all-DESC: reversed ascending, fully-tied rows in reverse row order
+    @test R("ORDER BY A DESC") == reverse(sortperm(A))
+    @test R("ORDER BY S DESC") == reverse(sortperm(S))
+    @test R("ORDER BY S DESC, A DESC") == reverse(sortperm(collect(zip(S, A))))
+    # mixed directions keep ties in row order
+    @test R("ORDER BY A, B DESC") == sortperm(collect(zip(A, -B)))
+
+    if _HAVE_TAQL
+        for tail in ("ORDER BY A+B", "ORDER BY abs(A), R DESC", "ORDER BY -A", "ORDER BY upper(S)", "ORDER BY A>3, R",
+                     "ORDER BY A % 3, A", "ORDER BY DESC A, B", "ORDER BY ASC A",
+                     "ORDER BY A DESC", "ORDER BY S DESC", "ORDER BY S DESC, A DESC", "ORDER BY A, B DESC",
+                     "ORDER BY A*B DESC", "WHERE A>0 ORDER BY B LIMIT 3", "ORDER BY strlength(S), S")
+            ref = Int.(collect(_taqlcmd("SELECT R FROM \$1 " * tail, dir)[:R][:]))
+            @test R(tail) == ref
         end
     end
 end

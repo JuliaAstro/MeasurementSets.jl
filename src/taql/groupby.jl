@@ -212,6 +212,7 @@ function query(gt::GroupedTable, wherestr::AbstractString;
     cd = Dict{String,AbstractVector}(n => column(gt, n) for n in columnnames(gt))
     nr = nrow(gt)
     keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tql_truthy(_tqleval(ast, cd, i))]
+    _orderby_materialize!(cd, orderby, keep, nr)
     keep = _apply_orderby(keep, orderby, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
     ps = _select_materialize(cls, gt, keep)

@@ -9060,3 +9060,49 @@ divergences: a column literally named `T`/`F` wins over the literal
 (real TaQL lets the literal win); real TaQL *rejects* a bare `WHERE F`,
 `FALSE` and `5.`, which stay permissive here; the `5L` integer suffix is
 not supported. New testset (real-TaQL cross-check of eight forms).
+
+### Phase 245 — floor `%`/`//`, `substr`/`replace`/`bool`/`string`, UTC `mjd()`
+
+Batch-probed 83 numeric/string function and operator expressions
+value-by-value against real TaQL (then a 67-form detail pass). Fixed:
+`%` is floor-mod (sign of the divisor, `x % 0 == x`) and `//` is *floor*
+division with a Double result (`-5 // 2 == -3.0`, `x // 0 == Inf`) — both
+were truncating (Phase 24 had assumed `DIVIDETRUNC`); new `substr` /
+`substring` (0-based, negative start counts from the end, clamped),
+`replace` (literal replace-all, not regex), `bool` / `boolean`, `string` /
+`str` (C `%g` floats incl. `inf`, plain integers, fixed-width `"True "` /
+`"False"`, optional printf format second argument); the no-argument
+`mjd()` / `datetime()` / `date()` / `time()` used local time instead of
+UTC (off by the UTC offset, 4 h here). `Printf` (stdlib) added as a
+dependency. `rowid()` remains unsupported. New testset with a real-TaQL
+cross-check of sixteen forms.
+
+### Phase 246 — `ORDER BY`: expression keys, leading direction, DESC tie order
+
+`groupby` was probed first (58 `g*`/`HAVING`/`WHERE`/multi-key forms vs real
+`GROUP BY`): all matched except numeric aggregates over `Bool`, which real
+TaQL rejects and we accept — left as is. A 32-form `ORDER BY` probe then
+found three real gaps: (1) sort keys must be full expressions (`ORDER BY
+A+B`, `abs(A)`, `upper(S)`, `A>3`) — only bare columns worked; (2) a
+leading global direction (`ORDER BY DESC A, B`) is the default for keys
+without their own `ASC`/`DESC`; (3) when *every* key is descending the
+result is the reversed ascending sort, so fully-tied rows come out in
+reverse row order (mixed directions keep ties in row order). All three
+match real TaQL now (32/32 incl. ties). New testset with a 16-form
+real-TaQL cross-check.
+
+### Phase 247 — write commands: float→integer coercion, `INSERT … [(cols)] SELECT … FROM name`
+
+110 `UPDATE` / `DELETE` / `INSERT` forms were applied to twin copies of a
+table — real TaQL vs `taql()` — and every column compared (46 forms clean,
+then 46 edge forms, then 18 coercion probes). Real gaps found and
+fixed: writing a floating value into an **integer column** errored
+(`UPDATE t SET A = B`, `SET A = A / 2`, `INSERT … VALUES (2.9)`); real
+TaQL truncates toward zero, saturates at the type's limits (`1e12` and
+`Inf` → `typemax`), and maps `NaN` to 0 — now matched for both `UPDATE`
+and `INSERT`. And `INSERT INTO t [(cols)] SELECT … FROM <name|'path'>`:
+a target column list was rejected, and a bare `FROM name` (the target
+itself, real TaQL's `INSERT INTO t SELECT … FROM t`) was unsupported.
+Deliberately not copied: real TaQL's adjacent-literal `'it''s'` → `its`
+and `VALUES (A)` → default, and it rejects `Bool`↔numeric writes that we
+allow. New testset (cross-checks 13 forms against twin tables).
