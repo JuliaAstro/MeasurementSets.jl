@@ -9156,3 +9156,21 @@ collapse returns a 1-element vector; axis 0 / negative / duplicate /
 non-integer axes are errors; `variances` / `stddevs` are population
 (`sample*` = n−1); `medians` / `fractiles` never average (lower-middle
 element, like `gmedian`). New testset with a 17-form real-TaQL cross-check.
+
+### Phase 251 — array-reshaping functions (`transpose`, `reversearray`, `array`, `resize`, `diagonals`, …)
+
+Implements the array-reshaping family flagged since Phase 190, live-probed
+against real TaQL (68 forms, all match): `transpose` (reverses **all**
+axes), `reversearray(arr[, axes…])` (1-based axes, each occurrence toggles so
+`[1,1]` is the identity; axes beyond the rank are ignored and, if none
+remain, all axes are reversed; axis 0 is an error), `flatten` /
+`arrayflatten`, `array(v, shape…)` (a scalar fills; an array is cycled or
+truncated column-major into the shape; the shape is one array *or* separate
+integers, not mixed), `resize(arr, shape)` (elements keep their index
+positions, cropped or zero-padded; the shape's rank may differ from the
+array's), `diagonals(arr[, 1])` / `diagonal` (the first two axes must be
+equal-sized → shape `(n, rest…)`; other first-axes unsupported),
+`nullarray`, `isdefined` / `isnull`, and a parse-time `iscolumn('NAME')`
+(a table-level test resolved against the table's columns). Still not
+implemented: `iskeyword`, `regex`/`pattern`/`sqlpattern`. New testset with an
+18-form real-TaQL cross-check.

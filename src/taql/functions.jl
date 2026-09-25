@@ -847,6 +847,80 @@ _tql_rms1(v) = sqrt(sum(abs2, v) / length(v))
 _tql_sumsqr1(v) = sum(y -> y^2, v)
 _tql_axfn(f) = (x, axes...) -> _tql_axcollapse(f, x, axes...)
 
+# ---- Phase 251: array-reshaping functions (live-probed vs real TaQL) ----
+# `transpose` reverses ALL axes; `reversearray(arr[, axes...])` reverses the
+# listed 1-based axes (each occurrence toggles, so `[1,1]` is the identity;
+# axes beyond the rank are ignored and, if none remain, ALL axes are reversed;
+# axis 0 is an error); `flatten`/`arrayflatten` = column-major vector;
+# `array(v, shape...)` fills with a scalar, or cycles/truncates an array's
+# elements column-major into `shape` (a scalar shape may be several args);
+# `resize(arr, shape)` keeps elements at their index positions, cropping or
+# zero-padding (the shape's rank may differ from the array's); `diagonals(
+# arr[, 1])` takes the diagonal of the first two axes (they must be equal-sized)
+# -> shape (n, rest...); `nullarray(arr)` an empty array; `isdefined`/`isnull`.
+_tql_arr(x, who) = x isa AbstractArray ? x :
+    throw(ArgumentError("TaQL-lite: `$who` needs an array cell"))
+function _tql_intlist(args, who; min=0)
+    out = Int[]
+    for a in args
+        if a isa Integer
+            push!(out, Int(a))
+        elseif a isa AbstractArray && all(v -> v isa Integer, a)
+            append!(out, Int.(vec(a)))
+        else
+            throw(ArgumentError("TaQL-lite: `$who` needs integer arguments"))
+        end
+    end
+    all(>=(min), out) || throw(ArgumentError("TaQL-lite: `$who`: values must be >= $min (got $out)"))
+    return out
+end
+_tql_transpose(x) = (a = _tql_arr(x, "transpose"); ndims(a) <= 1 ? collect(a) : permutedims(a, ndims(a):-1:1))
+function _tql_reversearray(x, axes...)
+    a = _tql_arr(x, "reversearray")
+    isempty(axes) && return collect(reverse(a; dims=Tuple(1:ndims(a))))
+    ax = _tql_intlist(axes, "reversearray"; min=1)
+    ax = filter(<=(ndims(a)), ax)
+    isempty(ax) && return collect(reverse(a; dims=Tuple(1:ndims(a))))
+    odd = [d for d in 1:ndims(a) if isodd(count(==(d), ax))]
+    isempty(odd) ? collect(a) : collect(reverse(a; dims=Tuple(odd)))
+end
+_tql_flatten(x) = vec(collect(_tql_arr(x, "flatten")))
+function _tql_array(v, shape...)
+    # the shape is EITHER one array `[2,3]` OR several scalars `2, 3` (not mixed)
+    (length(shape) <= 1 || all(x -> x isa Integer, shape)) || throw(ArgumentError(
+        "TaQL-lite: `array`: give the shape as one array or as separate integers"))
+    sh = _tql_intlist(shape, "array"; min=0)
+    isempty(sh) && throw(ArgumentError("TaQL-lite: `array(value, shape...)` needs a shape"))
+    n = prod(sh)
+    v isa AbstractArray || return fill(v, sh...)
+    d = vec(collect(v))
+    (isempty(d) && n > 0) && throw(ArgumentError("TaQL-lite: `array`: cannot fill a shape from an empty array"))
+    return reshape([d[mod1(i, length(d))] for i in 1:n], sh...)
+end
+function _tql_resize(x, shape...)
+    a = _tql_arr(x, "resize")
+    sh = _tql_intlist(shape, "resize"; min=0)
+    isempty(sh) && throw(ArgumentError("TaQL-lite: `resize(arr, shape)` needs a shape"))
+    out = zeros(eltype(a), sh...)
+    nd = ndims(a); k = length(sh)
+    rng = [1:min(sh[d], d <= nd ? size(a, d) : 1) for d in 1:k]     # overlap, per target axis
+    any(isempty, rng) && return out
+    srcidx = [d <= k ? rng[d] : 1:1 for d in 1:nd]                   # extra source axes: index 1 only
+    out[rng...] = reshape(a[srcidx...], length.(rng)...)
+    return out
+end
+function _tql_diagonals(x, first=1)
+    a = _tql_arr(x, "diagonals")
+    (first isa Integer && first == 1) || throw(ArgumentError(
+        "TaQL-lite: `diagonals(arr, 1)`: only the first axis is supported"))
+    (ndims(a) >= 2 && size(a, 1) == size(a, 2)) || throw(ArgumentError(
+        "TaQL-lite: `diagonals` needs the first two axes to have equal length"))
+    n = size(a, 1); rest = size(a)[3:end]
+    return reshape([a[i, i, I] for I in CartesianIndices(rest) for i in 1:n], n, rest...)
+end
+_tql_nullarray(x) = similar(_tql_arr(x, "nullarray"), 0)
+_tql_isdefined(x) = !(x isa AbstractArray && isempty(x))
+
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- unary elementwise numeric ---
     "abs" => (_ew(abs), 1:1), "amplitude" => (_ew(abs), 1:1), "ampl" => (_ew(abs), 1:1),
@@ -898,6 +972,12 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "anys" => (_tql_axfn(any), 2:8), "alls" => (_tql_axfn(all), 2:8),
     "ntrues" => (_tql_axfn(v -> count(identity, v)), 2:8), "nfalses" => (_tql_axfn(v -> count(!, v)), 2:8),
     "fractiles" => ((x, fr, axes...) -> _tql_axcollapse(v -> _tql_fractile(v, fr), x, axes...), 3:9),
+    "transpose" => (_tql_transpose, 1:1), "reversearray" => (_tql_reversearray, 1:8),
+    "flatten" => (_tql_flatten, 1:1), "arrayflatten" => (_tql_flatten, 1:1),
+    "array" => (_tql_array, 2:9), "resize" => (_tql_resize, 2:9),
+    "diagonals" => (_tql_diagonals, 1:2), "diagonal" => (_tql_diagonals, 1:2),
+    "nullarray" => (_tql_nullarray, 1:1), "isdefined" => (_tql_isdefined, 1:1),
+    "isnull" => (x -> !_tql_isdefined(x), 1:1),
     "sumsqr" => (_tql_sumsqr, 1:1), "sumsquare" => (_tql_sumsqr, 1:1),
     "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
     "median" => (_red(_tql_median), 1:1),

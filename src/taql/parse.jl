@@ -624,6 +624,11 @@ function _parse_funcall!(p::TQLParser, name::AbstractString)
         end
     end
     _expect_kind!(p, :rparen, "')'")
+    # `iscolumn('NAME')`: resolved at parse time against the table's columns
+    # (real TaQL: a table-level test; Phase 251)
+    if lowercase(name) == "iscolumn" && length(args) == 1 && args[1] isa TQLLit && args[1].value isa AbstractString
+        return TQLLit(String(args[1].value) in p.validnames)
+    end
     return _make_func(lowercase(name), args, p.src)
 end
 

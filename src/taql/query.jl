@@ -302,6 +302,8 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   overlapping bins (SMALLER shape); the width is a scalar or a
   `ndims(arr)`-element array, one per axis), string
   ops (`strlength`/`len`, `upper`/`lower`, `trim`/`ltrim`/`rtrim`),
+  array reshaping `transpose`/`reversearray(arr[, axes...])`/`flatten`/`array(v, shape...)`/
+  `resize(arr, shape)`/`diagonals(arr)`/`nullarray`/`isdefined`/`isnull` and `iscolumn('NAME')`,
   axis-collapse reductions `sums`/`products`/`means`(`avgs`)/`mins`/`maxs`/
   `medians`/`variances`/`stddevs`/`samplevariances`/`samplestddevs`/`avdevs`/
   `rmss`/`sumsqrs`/`anys`/`alls`/`ntrues`/`nfalses`(arr, axes...) and

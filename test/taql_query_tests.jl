@@ -4245,3 +4245,70 @@ end
         end
     end
 end
+
+# Phase 251: the array-reshaping family (Phase 190's flagged gap), live-probed
+# against real TaQL (68 forms, all match): `transpose` reverses ALL axes;
+# `reversearray(arr[, axes...])` toggles the listed 1-based axes (`[1,1]` is the
+# identity; axes beyond the rank are ignored -- if none remain ALL are
+# reversed; axis 0 errors); `flatten`/`arrayflatten`; `array(v, shape...)` fills
+# with a scalar or cycles/truncates an array's elements column-major (shape =
+# one array OR separate integers, not mixed; negative/absent shape errors);
+# `resize` keeps elements at their index positions, cropping/zero-padding (the
+# shape's rank may differ from the array's); `diagonals(arr[, 1])` needs equal
+# first two axes -> shape (n, rest...); `nullarray`, `isdefined`/`isnull`,
+# and parse-time `iscolumn('NAME')`.
+@testset "TaQL-lite — array reshaping transpose/reversearray/array/resize/diagonals (Phase 251)" begin
+    dir = joinpath(mktempdir(), "t")
+    V = [Float64.(reshape(1:12, 3, 4)) .* i .+ (i - 1) for i in 1:2]
+    W = [Float64.(reshape(1:24, 2, 3, 4)) .* i for i in 1:2]
+    U = [Float64.(1:6) .* i for i in 1:2]
+    Q = [Float64.(reshape(1:9, 3, 3)) .* i for i in 1:2]
+    X = [Float64.(reshape(1:18, 3, 3, 2)) .* i for i in 1:2]
+    write_table(dir, "T", Pair{String,Any}["V" => V, "W" => W, "U" => U, "Q" => Q, "X" => X, "A" => Int32[2, 3]];
+                nrow=2, tsm=[["V"], ["W"], ["U"], ["Q"], ["X"]])
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["R" => e]), "R")[:])
+    v = V[1]; x = X[1]
+
+    @test ev("transpose(V)")[1] == permutedims(v) && size(ev("transpose(V)")[1]) == (4, 3)
+    @test ev("transpose(W)")[1] == permutedims(W[1], (3, 2, 1))
+    @test ev("transpose(X)")[1] == permutedims(x, (3, 2, 1)) && ev("transpose(U)")[1] == U[1]
+    @test ev("reversearray(V)")[1] == reverse(v; dims=(1, 2)) && ev("reversearray(U)")[1] == reverse(U[1])
+    @test ev("reversearray(V, 1)")[1] == reverse(v; dims=1) && ev("reversearray(V, 2)")[1] == reverse(v; dims=2)
+    @test ev("reversearray(V, [1,2])")[1] == reverse(v; dims=(1, 2))
+    @test ev("reversearray(X, 1, 3)")[1] == reverse(x; dims=(1, 3)) == ev("reversearray(X, [1,3])")[1]
+    @test ev("reversearray(X, [1,1])")[1] == x                          # toggles: identity
+    @test ev("reversearray(X, 4)")[1] == reverse(x; dims=(1, 2, 3))     # no valid axis -> all
+    @test ev("flatten(W)")[1] == vec(W[1]) == ev("arrayflatten(W)")[1]
+    @test ev("array(V, [4,3])")[1] == reshape(vec(v), 4, 3) && ev("array(V, [5])")[1] == vec(v)[1:5]
+    @test ev("array([1,2,3], [3,2])")[1] == [1 1; 2 2; 3 3]           # cycles column-major
+    @test ev("array(7, [2,3])")[1] == fill(7, 2, 3) && ev("array(1, 2, 3)")[1] == fill(1, 2, 3)
+    @test ev("array(7.5, [3])")[1] == [7.5, 7.5, 7.5] && size(ev("array(X, [0])")[1]) == (0,)
+    @test ev("resize(V, [2,2])")[1] == v[1:2, 1:2]
+    @test size(ev("resize(V, [4,5])")[1]) == (4, 5)
+    @test ev("resize(V, [4,5])")[1][1:3, 1:4] == v && all(iszero, ev("resize(V, [4,5])")[1][4, :])
+    @test ev("resize(U, [8])")[1] == [U[1]; 0.0; 0.0] && ev("resize(U, [3])")[1] == U[1][1:3]
+    @test ev("resize(X, [5])")[1] == [1.0, 2.0, 3.0, 0.0, 0.0]        # rank differs: extra axes at index 1
+    @test ev("resize(X, [2,2,2,2])")[1][:, :, :, 1] == x[1:2, 1:2, :] && all(iszero, ev("resize(X, [2,2,2,2])")[1][:, :, :, 2])
+    @test ev("diagonals(Q)")[1] == [1.0, 5.0, 9.0] == ev("diagonal(Q, 1)")[1]
+    @test ev("diagonals(X)")[1] == [x[i, i, k] for i in 1:3, k in 1:2] && size(ev("diagonals(X)")[1]) == (3, 2)
+    @test size(ev("nullarray(V)")[1]) == (0,) && eltype(ev("nullarray(V)")[1]) == Float64
+    @test ev("isdefined(V)") == [true, true] && ev("isnull(V)") == [false, false]
+    @test ev("iscolumn('V')") == [true, true] && ev("iscolumn('ZZ')") == [false, false]
+    @test ev("shape(transpose(V))")[1] == [4, 3] && ev("transpose(V)[1,2]")[1] == 2.0   # compose
+    @test ev("sums(transpose(V), 1)")[1] == vec(sum(permutedims(v); dims=1))
+    for bad in ("reversearray(V, 0)", "array(1)", "array(X, [2,-1])", "array(1, [2,3], 4)", "diagonal(Q, -1)",
+                "diagonals(V)", "diagonals(W)", "diagonals(X, 2)", "transpose(A)", "flatten(A)")
+        @test_throws Exception ev(bad)
+    end
+
+    if _HAVE_TAQL
+        cref(e) = collect(_taqlcmd("SELECT $e AS R FROM \$1", dir)[:R][:])
+        for e in ("transpose(V)", "transpose(W)", "transpose(X)", "reversearray(V)", "reversearray(V,1)", "reversearray(X,[1,3])",
+                  "reversearray(X,4)", "flatten(V)", "array(V,[4,3])", "array(V,[5])", "array([1,2,3],[3,2])", "array(7,[2,3])",
+                  "resize(V,[4,5])", "resize(X,[5])", "resize(X,[2,2,2,2])", "diagonals(Q)", "diagonals(X)", "nullarray(V)")
+            r = cref(e); m = ev(e)
+            @test length(r) == length(m) && all(i -> collect(r[i]) == collect(m[i]), eachindex(r))
+        end
+    end
+end
