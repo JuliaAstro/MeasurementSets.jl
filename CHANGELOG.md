@@ -9106,3 +9106,17 @@ itself, real TaQL's `INSERT INTO t SELECT … FROM t`) was unsupported.
 Deliberately not copied: real TaQL's adjacent-literal `'it''s'` → `its`
 and `VALUES (A)` → default, and it rejects `Bool`↔numeric writes that we
 allow. New testset (cross-checks 13 forms against twin tables).
+
+### Phase 248 — `mscal.baseline` bare `<N`/`>N` are lengths; `spw` `^step`
+
+115 `mscal.baseline` / `field` / `spw` / `uvdist` selection specs compared
+row-for-row against real `derivedmscal` on the sample MS (real casacore
+*throws* on an empty selection where TaQL-lite returns 0 rows, so those
+were compared as "real errors ⇔ ours empty"; every `uvdist` form errors in
+this build's real casacore, so those were not comparable). Everything
+agreed except two forms: (1) a bare `<N` / `>N` / `<=N` / `>=N` in
+`mscal.baseline` with no `&` and no unit is a **baseline length in metres**
+(`>3000` ≡ `>3000m`, `>3` matches every baseline) — we treated it as an
+antenna-id comparison (a unit-less `a~b` stays an antenna-id range); (2)
+`spw('0:^2')`, a channel stride with no range, errored. Both fixed. New
+testset with a 13-spec real cross-check.

@@ -1272,8 +1272,13 @@ _mssel_or2(p, q) = (a1, a2) -> p(a1, a2) || q(a1, a2)
 
 # a bare baseline-length range/bound, no `&` involved (casacore's
 # `blengthlist` — `LT`/`GT`/`a-b`, unit `m`/`km`, default `m`).
+# Phase 248 (live-verified vs real derivedmscal): a bare `<N`/`>N`/`<=N`/`>=N`
+# with NO unit is ALSO a length in metres (`>3000` == `>3000m`, 347 rows; `>3`
+# matches every baseline), not an antenna-id comparison. A unit-less `a~b`
+# stays an antenna-id range; `a~b<unit>` needs the unit.
 _mssel_is_blength(spec::AbstractString) =
-    !occursin('&', spec) && occursin(r"^(?:[<>]|.*[-~])\s*[\d.]+\s*k?m\s*$"i, spec)
+    !occursin('&', spec) &&
+    occursin(r"^(?:[<>]=?\s*[\d.]+\s*(?:k?m)?|.*[-~]\s*[\d.]+\s*k?m)\s*$"i, spec)
 
 function _mssel_blength_pred(spec::AbstractString)
     ranges = Tuple{Float64,Float64}[]
@@ -1285,9 +1290,9 @@ function _mssel_blength_pred(spec::AbstractString)
         body = strip(um === nothing ? term : term[1:prevind(term, um.offset)])
         num(s) = parse(Float64, strip(s)) * scale
         if startswith(body, ">")
-            push!(ranges, (num(body[2:end]), Inf))
+            push!(ranges, (num(lstrip(body[2:end], '=')), Inf))
         elseif startswith(body, "<")
-            push!(ranges, (-Inf, num(body[2:end])))
+            push!(ranges, (-Inf, num(lstrip(body[2:end], '='))))
         else
             m = match(r"^(.+?)\s*[-~]\s*(.+)$", body)
             m === nothing && throw(ArgumentError(
@@ -1837,6 +1842,8 @@ function _parse_chan_elem(s::AbstractString)
     m = match(r"^(\d+)\s*~\s*(\d+)(?:\s*\^\s*(\d+))?$", s)
     m !== nothing && return (:idx, parse(Int, m[1]), parse(Int, m[2]),
                              m[3] === nothing ? 1 : parse(Int, m[3]))
+    # a step with no range (`0:^2`): every channel, stride N (Phase 248, real casacore)
+    (sm = match(r"^\^\s*(\d+)$", s)) !== nothing && return (:idx, 0, typemax(Int) ÷ 2, parse(Int, sm[1]))
     startswith(s, ">") && return (:idx, parse(Int, strip(s[2:end])) + 1, typemax(Int) ÷ 2, 1)
     startswith(s, "<") && return (:idx, 0, parse(Int, strip(s[2:end])) - 1, 1)
     occursin(r"^\d+$", s) && return (:idx, parse(Int, s), parse(Int, s), 1)

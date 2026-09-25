@@ -1828,3 +1828,55 @@ end
     @test_throws ArgumentError query(main, "mscal.chan('0:@#')")
     @test_throws ArgumentError query(main, "mscal.uvdist('@#')")
 end
+
+# Phase 248: 115 `mscal.baseline` / `field` / `spw` / `uvdist` selection specs
+# compared row-for-row against real `derivedmscal` on the sample MS (real
+# casacore THROWS on an empty selection where TaQL-lite returns 0 rows, so
+# those pairs are compared as "real errors <=> ours empty"). Found + fixed:
+# (1) a bare `<N`/`>N`/`<=N`/`>=N` in `mscal.baseline` (no `&`, no unit) is a
+# baseline LENGTH in metres, exactly like `>Nm` -- not an antenna-id
+# comparison (`>3` matches every baseline; `>3000` == `>3000m`); a unit-less
+# `a~b` stays an antenna-id range. (2) `spw('0:^2')`: a channel step with no
+# range (every channel, stride 2).
+@testset "TaQL-lite — mscal.baseline bare <N/>N are lengths, spw '^step' (Phase 248)" begin
+    main = readtable(SAMPLE_MS)
+    a1 = column(main, "ANTENNA1")[:]; a2 = column(main, "ANTENNA2")[:]
+    pos = column(subtable(MeasurementSet(SAMPLE_MS), "ANTENNA"), "POSITION")[:]
+    blen(i, j) = hypot((Float64.(pos[i + 1]) .- Float64.(pos[j + 1]))...)
+    nb(pred) = count(i -> pred(blen(Int(a1[i]), Int(a2[i]))), 1:nrow(main))
+    cnt(spec) = nrow(query(main, "mscal.baseline('$spec')"))
+
+    @test cnt(">3") == nb(>(3.0)) == nrow(main)
+    @test cnt(">=3") == nrow(main)
+    @test cnt("<3") == 0 == cnt("<=3")
+    @test cnt(">3000") == cnt(">3000m") == nb(>(3000.0))
+    @test cnt("<3000") == nb(<(3000.0))
+    @test cnt(">=3000") == nb(>=(3000.0)) && cnt("<=3000") == nb(<=(3000.0))
+    @test cnt("<1000") == cnt("<1km") == cnt("<1000m") == nb(<(1000.0))
+    @test cnt("3~4") == count(i -> a1[i] in (3, 4) || a2[i] in (3, 4), 1:nrow(main))  # antenna ids (either end)
+    @test MSv2._mssel_is_blength(">3") && MSv2._mssel_is_blength("<=5") && MSv2._mssel_is_blength(">1.5km")
+    @test !MSv2._mssel_is_blength("3~4") && !MSv2._mssel_is_blength(">3&<5") && MSv2._mssel_is_blength("3~4km")
+
+    # spw '0:^2': every channel of spw 0, stride 2 (and the row selection is spw 0's rows)
+    @test nrow(query(main, "mscal.spw('0:^2')")) == nrow(query(main, "mscal.spw('0')"))
+    e = MSv2._parse_chan_elem("^2")
+    @test e[1] === :idx && e[2] == 0 && e[4] == 2
+    m = MSv2._chan_mask(Any[e], collect(1.0:10.0))
+    @test findall(m) == [1, 3, 5, 7, 9]
+
+    if _HAVE_TAQL
+        real_rows(fn, spec) = try
+            Int.(collect(_taqlcmd("SELECT rownumber() AS R FROM \$1 WHERE mscal.$fn('$spec')", SAMPLE_MS)[:R][:]))
+        catch
+            nothing                      # real casacore throws on an empty selection
+        end
+        mine_rows(fn, spec) = Int.(collect(column(query(main, "mscal.$fn('$spec')";
+                                  select=["R" => "rownumber()"]), "R")[:]))
+        for (fn, spec) in [("baseline", ">3"), ("baseline", ">=3"), ("baseline", "<3"), ("baseline", ">3000"),
+                           ("baseline", "<3000"), ("baseline", "<1000"), ("baseline", ">3000m"), ("baseline", "3~4"),
+                           ("baseline", "0~3"), ("baseline", "!0"), ("baseline", "0&&1"), ("spw", "0:^2"), ("spw", "0:0~10")]
+            r = real_rows(fn, spec); m = mine_rows(fn, spec)
+            @test r === nothing ? isempty(m) : r == m
+        end
+    end
+end
