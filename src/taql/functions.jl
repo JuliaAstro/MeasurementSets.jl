@@ -1278,7 +1278,7 @@ function _tqleval(e::TQLMeasColDir, cols, i)
     _meas_dir_convert(e.target, sref, lonlat[1], lonlat[2], mjd, xyz)
 end
 function _geval(e::TQLMeasColDir, cols, g)
-    lonlat = cols[e.colname][g[1]]
+    lonlat = cols[e.colname][g[end]]
     sref = cols[_measframe_key(e.colname)][1]
     mjd = e.mjd === nothing ? nothing : _geval(e.mjd, cols, g)
     xyz = e.xyz === nothing ? nothing :

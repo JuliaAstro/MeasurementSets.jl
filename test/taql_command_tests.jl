@@ -941,3 +941,49 @@ end
         end
     end
 end
+
+# Phase 256: `taql()` SELECT with aggregates / GROUP BY / HAVING (routed through
+# `groupby`), live-probed vs real TaQL (26 forms; group order is unspecified so
+# results are compared sorted).  Aggregates without GROUP BY = ONE group over the
+# whole table; a non-aggregate, non-key select expression takes the group's LAST
+# row (real TaQL -- was the first row before); `GROUP BY expr` groups on a computed
+# key; ORDER BY / LIMIT / OFFSET apply to the grouped result.  Divergence: an empty
+# single-group aggregate (`WHERE K>100`) is a 0-row result here, an (odd) error in
+# real TaQL.
+@testset "taql() SELECT aggregates / GROUP BY / HAVING (Phase 256)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8),
+                "D" => collect(0.5:1:7.5), "H" => Int32[1, 1, 2, 2, 1, 2, 1, 2]]; nrow=8)
+    t = readtable(dir)
+    cols(q, cs) = (r = taql(t, q); [collect(column(r, c)[:]) for c in cs])
+    srt(a) = (p = sortperm(collect(zip(a...))); [x[p] for x in a])
+    @test cols("SELECT gsum(K) AS X FROM t", ["X"]) == [[36]]
+    @test cols("SELECT gsum(K)+1 AS X, gcount() AS Y FROM t", ["X", "Y"]) == [[37], [8]]
+    @test cols("SELECT gsum(K) AS X FROM t WHERE K>2 HAVING gsum(K)>5", ["X"]) == [[33]]
+    @test srt(cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G", ["X", "Y"])) == [[1, 2, 3], [10, 7, 19]]
+    gm = srt(cols("SELECT G AS X, gcount() AS Y, gmean(D) AS Z FROM t GROUP BY G", ["X", "Y", "Z"]))
+    @test gm[1] == [1, 2, 3] && gm[2] == [3, 2, 3] && gm[3] ≈ [17/6, 3.0, 35/6]
+    @test srt(cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G HAVING gsum(K)>8", ["X", "Y"])) == [[1, 3], [10, 19]]
+    @test cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY Y DESC", ["X", "Y"]) == [[3, 1, 2], [19, 10, 7]]
+    @test cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY X DESC LIMIT 2", ["X", "Y"]) == [[3, 2], [19, 7]]
+    @test cols("SELECT G AS X, gcount() AS Y FROM t GROUP BY G ORDER BY X LIMIT 1 OFFSET 1", ["X", "Y"]) == [[2], [2]]
+    @test srt(cols("SELECT G AS X, H AS Y, gsum(K) AS Z FROM t GROUP BY G, H", ["X", "Y", "Z"])) ==
+          [[1, 1, 2, 3, 3], [1, 2, 1, 1, 2], [1, 9, 7, 7, 12]]
+    # LAST row of the group for a non-key, non-aggregate select expression
+    @test srt(cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY H", ["X", "Y"])) == [[3, 3], [15, 21]]
+    # an expression group key
+    @test srt(cols("SELECT G+H AS X, gsum(K) AS Y FROM t GROUP BY G+H", ["X", "Y"])) == [[2, 3, 4, 5], [1, 16, 7, 12]]
+    @test_throws ArgumentError taql(t, "SELECT G AS X, gsum(K) AS Y FROM t GROUP BY NOPE")
+    if _HAVE_TAQL
+        real(q, cs) = (r = _taqlcmd(q, dir); [collect(r[Symbol(c)][:]) for c in cs])
+        for (q, cs) in [("SELECT gsum(K) AS X FROM \$1", ["X"]), ("SELECT gsum(K)+1 AS X, gcount() AS Y FROM \$1", ["X", "Y"]),
+                        ("SELECT gsum(K) AS X FROM \$1 HAVING gsum(K)>5", ["X"]), ("SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY G", ["X", "Y"]),
+                        ("SELECT G AS X, gcount() AS Y, gmean(D) AS Z FROM \$1 GROUP BY G", ["X", "Y", "Z"]),
+                        ("SELECT G AS X, gsum(K) AS Y FROM \$1 WHERE K>2 GROUP BY G HAVING gcount()>1", ["X", "Y"]),
+                        ("SELECT G AS X, H AS Y, gsum(K) AS Z FROM \$1 GROUP BY G, H", ["X", "Y", "Z"]),
+                        ("SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY H", ["X", "Y"]), ("SELECT G+H AS X, gsum(K) AS Y FROM \$1 GROUP BY G+H", ["X", "Y"]),
+                        ("SELECT G AS X, gfirst(K) AS Y, glast(K) AS Z FROM \$1 GROUP BY G", ["X", "Y", "Z"])]
+            @test srt(real(q, cs)) == srt(cols(replace(q, "\$1" => "t"), cs))
+        end
+    end
+end

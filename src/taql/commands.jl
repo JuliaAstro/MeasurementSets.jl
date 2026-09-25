@@ -490,7 +490,7 @@ open `Table`):
   → [`update!`](@ref), returns `Int`
 * `DELETE [FROM t] [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
   → [`delete!`](@ref), returns `Int`
-* `SELECT [DISTINCT] [*|col [AS a], …] [FROM t] [WHERE cond] [ORDER BY k] [LIMIT n] [(INTO|GIVING) 'path']`  → [`copytable`](@ref), returns the path
+* `SELECT [DISTINCT] [*|col [AS a], …] [FROM t] [WHERE cond] [GROUP BY k, …] [HAVING cond] [ORDER BY k] [LIMIT n [OFFSET m]] [(INTO|GIVING) 'path']`  → [`copytable`](@ref), returns the path
 * `SELECT …` with no `INTO`/`GIVING`              → [`query`](@ref), returns the result
 * `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…) [LIMIT n]`  → [`insert!`](@ref), returns `Int`
 * `INSERT [LIMIT n] INTO t SET c1 = v1, c2 = v2`   → [`insert!`](@ref), returns `Int`
@@ -543,11 +543,14 @@ function taql(target, command::AbstractString)
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
         # and `DISTINCT` all mis-parsed or errored).
         bm = match(r"^SELECT\s+(DISTINCT\s+)?(.*?)(?:\s+FROM\s+\S+)?(?:\s+WHERE\s+(.+?))?" *
+                   r"(?:\s+GROUP\s+BY\s+(.+?))?(?:\s+HAVING\s+(.+?))?" *
                    r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+((?:LIMIT|OFFSET)\s+.+?))?\s*$"is, body)
         bm === nothing && throw(ArgumentError("taql: malformed SELECT command"))
         distinct = bm.captures[1] !== nothing
-        orderstr = bm.captures[4] === nothing ? nothing : String(strip(bm.captures[4]))
-        window = bm.captures[5] === nothing ? nothing : _parse_select_window(bm.captures[5])
+        groupstr = bm.captures[4] === nothing ? nothing : String(strip(bm.captures[4]))
+        havingstr = bm.captures[5] === nothing ? nothing : String(strip(bm.captures[5]))
+        orderstr = bm.captures[6] === nothing ? nothing : String(strip(bm.captures[6]))
+        window = bm.captures[7] === nothing ? nothing : _parse_select_window(bm.captures[7])
         collist = String(strip(bm.captures[2]))
         wherestr = bm.captures[3] === nothing ? nothing : String(strip(bm.captures[3]))
         t = target isa AbstractTable ? target : readtable(_cmd_path(target))
@@ -577,9 +580,43 @@ function taql(target, command::AbstractString)
             end
         end
 
+        # Phase 256: aggregates (`gsum(K)`, ...) and/or GROUP BY / HAVING -> `groupby`
+        # (no GROUP BY = ONE group over the whole table, like real TaQL)
+        vn = Set(columnnames(t))
+        isagg(e) = try _has_aggr(_taqllite_parse(String(e), vn)) catch; false end
+        grouped = groupstr !== nothing || havingstr !== nothing ||
+                  any(p -> isagg(last(p)), select)
+        if grouped
+            any(p -> first(p) isa AbstractString && startswith(first(p), "("), select) &&
+                throw(ArgumentError("taql: `AS (val, mask)` is not supported with aggregates"))
+            gkeys = groupstr === nothing ? String[] : String.(strip.(_split_commas(groupstr)))
+            # an EXPRESSION key (`GROUP BY G+H`) is materialised as a hidden column
+            # first (WHERE applied at that stage), then grouped on by name
+            gt = t; gwhere = wherestr
+            if !all(k -> k in vn, gkeys)
+                hidden = Pair{String,String}[n => n for n in columnnames(t)]
+                for (i, k) in enumerate(gkeys)
+                    k in vn && continue
+                    push!(hidden, "_gk$i" => k)
+                    gkeys[i] = "_gk$i"
+                end
+                gt = query(t, wherestr === nothing ? "TRUE" : wherestr; select = hidden)
+                gwhere = nothing
+            end
+            ob = orderstr === nothing ? nothing : map(_split_commas(orderstr)) do piece
+                mo = match(r"^(\w+)(?:\s+(ASC|DESC))?$"is, strip(piece))
+                mo === nothing && throw(ArgumentError(
+                    "taql: ORDER BY of a grouped SELECT takes output column names"))
+                mo.captures[2] !== nothing && uppercase(mo.captures[2]) == "DESC" ?
+                    String(mo.captures[1]) => :desc : String(mo.captures[1])
+            end
+            result = groupby(gt, gkeys; select = [String(first(p)) => String(last(p)) for p in select],
+                             where = gwhere, having = havingstr, orderby = ob)
+        else
         qstr = (wherestr === nothing ? "TRUE" : wherestr) *
                (orderstr === nothing ? "" : " ORDER BY " * orderstr)
         result = query(t, qstr; select)
+        end
         if distinct || window !== nothing
             keep = collect(1:nrow(result))
             if distinct

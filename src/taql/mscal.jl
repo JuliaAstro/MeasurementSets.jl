@@ -92,7 +92,7 @@ const _MSCAL_FUNCS = Set([
     "uvwapp", "uvwappwvl", "uvwappwvls"])
 
 _tqleval(e::TQLMScal, cols, i) = cols[_mscal_key(e)][i]
-_geval(e::TQLMScal, cols, g)   = cols[_mscal_key(e)][g[1]]
+_geval(e::TQLMScal, cols, g)   = cols[_mscal_key(e)][g[end]]
 _tqlrefs!(seen, e::TQLMScal)   = push!(seen, _mscal_key(e))
 _has_aggr(::TQLMScal)          = false
 
@@ -1006,7 +1006,7 @@ end
 _mssel_key(e::TQLMSSel) = "::mssel::" * e.fn * "::" * e.spec
 
 _tqleval(e::TQLMSSel, cols, i) = cols[_mssel_key(e)][i]
-_geval(e::TQLMSSel, cols, g)   = cols[_mssel_key(e)][g[1]]
+_geval(e::TQLMSSel, cols, g)   = cols[_mssel_key(e)][g[end]]
 _tqlrefs!(seen, e::TQLMSSel)   = push!(seen, _mssel_key(e))
 _has_aggr(::TQLMSSel)          = false
 _has_qty(::TQLMSSel)           = false
