@@ -9275,3 +9275,15 @@ sees the table *before* the write), and `UPDATE t [AS] a SET …` / `DELETE FROM
 [AS] a` aliases (with `a.COL` qualifiers) are accepted — checked on twin tables
 against real TaQL (9 forms, all match).
 
+### Phase 259 — `taql()` SELECT … JOIN
+
+`taql(target, cmd, others...)` runs `SELECT … FROM $1 a JOIN $2 b ON a.K == b.K`
+(`$1` is `target`, `$2`… the extra tables; columns are `a.COL` / `b.COL`;
+`ON … IN …` and the reversed order also work), live-probed against real TaQL
+(11 forms + every column type). Real TaQL's JOIN is a **left join with type
+sentinels** for unmatched left rows — Int → `typemax(Int64)`, Float → `NaN`,
+Complex → `NaN+NaN·im`, Bool → `false`, String → `"none"` — reproduced exactly;
+`WHERE` / `ORDER BY` / `LIMIT` / aggregates compose. One condition only (real
+TaQL rejects `AND` and comma joins, as does this), and the right key must be
+unique.
+

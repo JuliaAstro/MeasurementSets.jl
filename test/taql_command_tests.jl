@@ -1061,3 +1061,45 @@ end
         end
     end
 end
+
+# Phase 259: `taql(target, cmd, others...)` SELECT ... FROM $1 a JOIN $2 b ON
+# a.K == b.K, live-probed vs real TaQL (11 forms + per-type sentinels).  Real TaQL's
+# JOIN is a LEFT join filling unmatched left rows with type sentinels: Int ->
+# typemax(Int64), Float / Float32 -> NaN, Complex -> NaN+NaN·im, Bool -> false,
+# String -> "none".  `$1` is the target, `$2`... the extra arguments; columns are
+# `a.COL` / `b.COL`.  One `==` (or `IN`) condition, either order; the right key must
+# be unique.  (Real TaQL rejects `AND` conditions and comma joins; so do we.)
+@testset "taql SELECT ... JOIN (Phase 259)" begin
+    d1 = joinpath(mktempdir(), "a"); d2 = joinpath(mktempdir(), "b")
+    write_table(d1, "A", Pair{String,Any}["K" => Int32[1, 2, 3, 4, 5, 2], "V" => [10.0, 20, 30, 40, 50, 60], "Z" => Int32[0, 1, 2, 0, 1, 2]]; nrow=6)
+    write_table(d2, "B", Pair{String,Any}["K" => Int32[2, 3, 5, 9], "N" => ["two", "three", "five", "nine"], "W" => [0.2, 0.3, 0.5, 0.9],
+                "I" => Int32[7, 8, 9, 10], "F" => Bool[1, 1, 1, 1], "C" => ComplexF32[1, 2, 3, 4], "R" => Float32[1, 2, 3, 4]]; nrow=4)
+    t1 = readtable(d1); t2 = readtable(d2)
+    xy(q) = (r = taql(t1, q, t2); (collect(column(r, "X")[:]), collect(column(r, "Y")[:])))
+    j = "FROM \$1 a JOIN \$2 b ON a.K == b.K"
+    @test xy("SELECT a.V AS X, b.N AS Y $j") == ([10.0, 20, 30, 40, 50, 60], ["none", "two", "three", "none", "five", "two"])
+    x, y = xy("SELECT a.V AS X, b.W AS Y $j"); @test x == [10.0, 20, 30, 40, 50, 60] && isequal(y, [NaN, 0.2, 0.3, NaN, 0.5, 0.2])
+    @test xy("SELECT a.V AS X, b.I AS Y $j")[2] == [typemax(Int64), 7, 8, typemax(Int64), 9, 7]
+    @test xy("SELECT a.V AS X, b.F AS Y $j")[2] == Bool[0, 1, 1, 0, 1, 1]
+    y = xy("SELECT a.V AS X, b.C AS Y $j")[2]; @test isnan(real(y[1])) && isnan(imag(y[1])) && y[2] == 1 && y[5] == 3
+    @test isequal(xy("SELECT a.V AS X, b.R AS Y $j")[2], Float32[NaN, 1, 2, NaN, 3, 1])
+    @test xy("SELECT a.V AS X, b.N AS Y $j WHERE a.V>20")[1] == [30.0, 40, 50, 60]
+    @test xy("SELECT a.K AS X, b.N AS Y $j ORDER BY a.V DESC") == (Int32[2, 5, 4, 3, 2, 1], ["two", "five", "none", "three", "two", "none"])
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.K")[2] == ["none", "none", "two", "none", "none", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON b.K == a.K")[2] == ["none", "two", "three", "none", "five", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K IN b.K")[2] == ["none", "two", "three", "none", "five", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y $j LIMIT 2") == ([10.0, 20.0], ["none", "two"])
+    x, y = xy("SELECT gsum(a.V) AS X, gcount() AS Y $j"); @test x == [210.0] && y == [6]
+    x, y = xy("SELECT a.V*b.W AS X, b.N AS Y $j"); @test isequal(x, [NaN, 4.0, 9.0, NaN, 25.0, 12.0])
+    @test_throws ArgumentError xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K AND a.Z == 2")
+    @test_throws ArgumentError taql(t1, "SELECT a.V AS X, b.N AS Y $j")            # no \$2 supplied
+    if _HAVE_TAQL
+        for q in ("SELECT a.V AS X, b.N AS Y $j", "SELECT a.V AS X, b.W AS Y $j WHERE a.V>20", "SELECT a.K AS X, b.N AS Y $j ORDER BY a.V DESC",
+                  "SELECT a.V AS X, b.I AS Y $j", "SELECT a.V AS X, b.F AS Y $j", "SELECT a.V AS X, b.R AS Y $j",
+                  "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.K", "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON b.K == a.K",
+                  "SELECT a.V AS X, b.W AS Y FROM \$1 a JOIN \$2 b ON a.K IN b.K", "SELECT gsum(a.V) AS X, gcount() AS Y $j", "SELECT a.V*b.W AS X, b.N AS Y $j")
+            r = _taqlcmd(q, d1, d2); m = xy(q)
+            @test isequal(collect(r[:X][:]), m[1]) && isequal(collect(r[:Y][:]), m[2])
+        end
+    end
+end

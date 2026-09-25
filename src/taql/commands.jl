@@ -480,6 +480,48 @@ _select_rows(r::RefTable, keep) =
 _select_rows(r::GroupedTable, keep) =
     GroupedTable(getfield(r, :names), AbstractVector[getfield(r, :cols)[j][keep] for j in eachindex(getfield(r, :cols))])
 
+# ---- SELECT ... FROM $1 a JOIN $2 b ON a.K == b.K (Phase 259; live-probed) ----
+# Real TaQL's JOIN is a LEFT join with type sentinels for unmatched left rows:
+# Int -> typemax(Int64), Float -> NaN, Complex -> NaN+NaNim, Bool -> false,
+# String -> "none".  `taql(target, cmd, others...)`: `\$1` is `target`, `\$2` ... the
+# extra tables.  The joined columns are named `a.COL` / `b.COL`.  One `==` condition
+# (real TaQL rejects `AND`); the right key must be unique.
+function _taql_sentinel(c::AbstractVector)
+    Missing <: eltype(c) || return c
+    T = nonmissingtype(eltype(c))
+    T <: Bool && return Bool[ismissing(x) ? false : x for x in c]
+    T <: Integer && return Int64[ismissing(x) ? typemax(Int64) : Int64(x) for x in c]
+    T <: AbstractFloat && return T[ismissing(x) ? T(NaN) : x for x in c]
+    T <: Complex && return T[ismissing(x) ? T(NaN, NaN) : x for x in c]
+    T <: AbstractString && return String[ismissing(x) ? "none" : String(x) for x in c]
+    throw(ArgumentError("taql: JOIN of a column of type $T is not supported"))
+end
+
+function _taql_join_from(target, body::AbstractString, others)
+    m = match(r"\bFROM\s+\$(\d+)\s+(?:AS\s+)?(\w+)\s+JOIN\s+\$(\d+)\s+(?:AS\s+)?(\w+)\s+ON\s+(\w+)\.(\w+)\s*(?:==|\bIN\b)\s*(\w+)\.(\w+)"i, body)
+    m === nothing && return target, body
+    tab(k) = (i = parse(Int, k);
+              i == 1 ? (target isa AbstractTable ? target : readtable(_cmd_path(target))) :
+              (i - 1 <= length(others) ? (o = others[i-1]; o isa AbstractTable ? o : readtable(_cmd_path(o))) :
+               throw(ArgumentError("taql: no table \$$i (pass it as an extra argument)"))))
+    left, right = tab(m.captures[1]), tab(m.captures[3])
+    la, ra = String(m.captures[2]), String(m.captures[4])
+    (q1, c1, q2, c2) = (String(m.captures[5]), String(m.captures[6]), String(m.captures[7]), String(m.captures[8]))
+    if q1 == la && q2 == ra
+        lk, rk = c1, c2
+    elseif q1 == ra && q2 == la
+        lk, rk = c2, c1
+    else
+        throw(ArgumentError("taql: the JOIN condition must relate the two table aliases"))
+    end
+    lcols = [n => la * "." * n for n in columnnames(left)]   # join pairs are src => out
+    rcols = [n => ra * "." * n for n in columnnames(right)]
+    j = join(left, right; on = lk => rk, leftcols = lcols, rightcols = rcols, unmatched = :missing)
+    joined = GroupedTable(copy(j.names), AbstractVector[_taql_sentinel(c) for c in j.cols])
+    body = body[1:m.offset-1] * "FROM __join" * body[m.offset+length(m.match):end]
+    return joined, body
+end
+
 # ---- SELECT sub-queries + table aliases (Phase 257; live-probed vs real TaQL) ----
 # `FROM (SELECT ...)` runs the inner SELECT and queries its result; `x IN (SELECT
 # col ...)` / `NOT IN` become a literal list (an empty one: FALSE / TRUE);
@@ -599,7 +641,7 @@ the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
 string are not supported (use `copytable(dst, groupby(…))`, or
 `insert!(t, groupby(…))`).
 """
-function taql(target, command::AbstractString)
+function taql(target, command::AbstractString, others...)
     cmd = strip(command)
     kw = uppercase(String(first(split(cmd; limit=2))))
     if kw == "UPDATE" || kw == "DELETE"
@@ -633,6 +675,7 @@ function taql(target, command::AbstractString)
         into = match(r"^(.*?)\s+(?:INTO|GIVING)\s+'([^']+)'\s*$"is, cmd)
         body = into === nothing ? cmd : String(strip(into.captures[1]))
         dst = into === nothing ? nothing : String(into.captures[2])
+        target, body = _taql_join_from(target, body, others)
         target, body = _taql_preprocess_select(target, body)
         # Phase 242: SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
