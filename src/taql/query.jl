@@ -170,6 +170,7 @@ function _tql_cols(t::AbstractTable, names, asts...)
     plain, stokes = _stokes_split(plain)
     plain, mssel = _mssel_split(plain)
     plain, measframe = _measframe_split(plain)
+    plain, kwkeys = _kw_split(plain)
     d = Dict{String,AbstractVector}(
         n => (c = _load_col(column(t, n)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
         for n in plain)
@@ -177,6 +178,7 @@ function _tql_cols(t::AbstractTable, names, asts...)
     isempty(stokes) || merge!(d, _stokes_setups(t, stokes))
     isempty(mssel) || merge!(d, _mssel_columns(t, mssel))
     isempty(measframe) || merge!(d, _measframe_cols(t, measframe))
+    isempty(kwkeys) || merge!(d, _kw_cols(t, kwkeys))
     return d
 end
 
@@ -311,7 +313,10 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   collapsed axes are dropped from the shape), `isnan`/`isinf`/`isfinite`/`nonfinite`, masked arrays
   (`marray(d, m)`, `arraydata`, `arraymask`; `V[boolexpr]` yields a
   masked array whose reductions skip the excluded elements),
-  `iif(cond, a, b)`, `rownumber()` (1-based),
+  `iif(cond, a, b)`, `rownumber()` (1-based) / `rowid()` (0-based),
+  pattern values `S == regex('..')` / `pattern('..')` (shell glob, incl.
+  `{a,b}`) / `sqlpattern('..')` (full-string match), table / column keyword
+  access `::NAME` / `COL::NAME[.field]` and `iskeyword('NAME')`,
   `observatory('VLA')` (a telescope's ITRF `[x,y,z]`),
   `meas.<frame>(['SRC',] lon, lat[, mjd[, x, y, z]])` — or, in place of
   `'SRC', lon, lat`, a single `'COLNAME'` naming a direction column

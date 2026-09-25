@@ -295,7 +295,7 @@ function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing
         where isa AbstractString ? collect(_tql_where_refs(where, rd)) :
         String[]
     names = union(names, (k.name for k in orderkeys))
-    cols = Dict{String,AbstractVector}(n => _load_col(column(rd, n)) for n in names)
+    cols = _tql_cols(rd, names)
     rows = _where_rows(rd, where, cols)
     isempty(rows) && return 0
     rows = _apply_orderby(rows, orderkeys, cols)

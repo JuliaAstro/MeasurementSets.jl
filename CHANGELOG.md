@@ -9185,6 +9185,39 @@ collect the group's values (scalars → a vector; arrays are stacked along a
 `ghistogram`) — `nbins + 2` integer counts: an underflow bin (`x < lo`),
 `nbins` equal left-closed bins, an overflow bin (`x >= hi`); `nbins`/`lo`/`hi`
 must be numeric literals. They compose with the scalar/array functions
-(`sum(gaggr(X))`, `nelements(growid())`, `growid()[1]`). Still not
-implemented: `iskeyword`, `regex` / `pattern` / `sqlpattern`. New testset with
+(`sum(gaggr(X))`, `nelements(growid())`, `growid()[1]`). New testset with
 an 8-form real cross-check.
+
+### Phase 253 — `regex` / `pattern` / `sqlpattern` values, glob `{a,b}`, keyword access, `iskeyword`, `rowid`
+
+The last open TaQL function items, live-probed against real TaQL (40 + 26 +
+25 + 10 forms):
+
+- **`regex('..')`, `pattern('..')`, `sqlpattern('..')`** build a pattern
+  *value* compared with `==` / `!=` (a **full**-string match, usable on either
+  side, over an expression or a per-row column argument: `S == regex(Q)`).
+  `regex` is a regular expression, `pattern` a shell glob, `sqlpattern` a
+  `LIKE` pattern. Real TaQL rejects `~ regex(..)` / `IN [regex(..)]`, so those
+  stay errors; a constant invalid pattern (`regex('[')`) errors at parse time.
+  (Real TaQL throws an unexplained "Slicer error" for a few forms — e.g.
+  `S == regex('a')` — which TaQL-lite answers sensibly instead.)
+- **Glob `{a,b}` alternation** (`~ p/ab{c,d}/`, `pattern('{ab,xa}*')`) — each
+  alternative is itself a glob; `a{b}c` (one alternative) and `a{}c` (an empty
+  one) work; `,` and `}` are literal outside braces; nested / unbalanced `{`,
+  an unterminated `[` and a trailing `\` are errors, as in real TaQL. Bad
+  regex / glob / LIKE patterns now raise `ArgumentError` rather than a raw PCRE
+  error.
+- **Keyword access**: `::NAME` (table keyword), `COL::NAME` (column keyword)
+  and `.field` into a Record keyword (`D::MEASINFO.type`) in any expression;
+  names are case-sensitive, an array keyword is an array cell (`::KWS[1]`), a
+  missing keyword or a whole-Record value errors. **`iskeyword('NAME')`** /
+  `iskeyword('COL::NAME[.field]')` is the table-level test (true for a Record,
+  false for a missing table/column/field). Resolved once per table, like
+  `mscal.*` (works in `query` / `groupby` / `update!` / `delete!` /
+  `VirtualTaQLColumn`); `::` is only lexed outside `[...]`, so `V[1::2]` keeps
+  its step syntax.
+- **`rowid()`** — the 0-based row id, `rownumber() - 1` over the queried table
+  (a `WHERE` / `ORDER BY` keeps the original row, a sub-select renumbers).
+
+Still not implemented: the `SUPERGAL` direction frame. Two new testsets
+(139 assertions) with real-TaQL cross-checks.
