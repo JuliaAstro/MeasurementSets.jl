@@ -1188,6 +1188,24 @@ function _measframe_cols(t::AbstractTable, keys::AbstractVector{<:AbstractString
     return d
 end
 
+# ---- Phase 249: the REAL casacore `meas.*` calling convention -------------
+# (live-probed; ours puts the source frame FIRST with scalar lon/lat, real puts
+# the direction ARRAY first): `meas.b1950([ra,dec] [, 'SRC' [, epoch [, pos]]])`
+# with `pos` a 3-vector (metres) or an observatory name, `meas.doppler('TO',
+# value [, 'FROM'])`, and `meas.last(epoch, pos)`. Plain numbers are radians /
+# MJD days / metres (real TaQL also takes unit quantities, coerced by the
+# Unitful extension when loaded).
+_tql_plain(x, kind::Symbol) = float(x)
+# real casacore returns a direction's longitude in (-pi, pi]
+_meas_lon_pm_pi(d) = (d[1] = atan(sin(d[1]), cos(d[1])); d)
+_meas_pos_arg(a::TQLLit) = a.value isa AbstractString ?
+    (p = observatory(a.value); p === nothing ?
+        throw(ArgumentError("meas: unknown observatory \"$(a.value)\"")) :
+        TQLLit(Float64[p.x, p.y, p.z])) : a
+_meas_pos_arg(a) = a
+_meas_xyz(p) = (length(p) == 3 || throw(ArgumentError("meas: a position needs 3 values [x, y, z]")); 
+                (_tql_plain(p[1], :length), _tql_plain(p[2], :length), _tql_plain(p[3], :length)))
+
 function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
     R = get(_MEAS_DIR_FRAMES, fn, nothing)
     if R !== nothing
@@ -1195,6 +1213,36 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
         need_ep = _meas_dir_needs_epoch(R); need_p = _meas_dir_needs_pos(R)
         is_frame1 = has_str1 &&
             haskey(_MEAS_DIR_FRAMES, lowercase(strip(String(args[1].value))))
+        # real value-first form: `meas.<frame>(dir [, 'SRC' [, epoch [, pos]]])` -- the
+        # first arg is an array expression, and any 2nd arg is the source-frame string
+        if !has_str1 && (length(args) == 1 || (args[2] isa TQLLit && args[2].value isa AbstractString))
+            sref = length(args) >= 2 ? String(args[2].value) : "J2000"
+            rest = args[3:end]
+            # epoch / position are needed if the SOURCE frame (e.g. AZEL -> J2000)
+            # or the TARGET frame needs them
+            S0 = get(_DIRECTION_FRAMES, uppercase(strip(sref)), nothing)
+            S0 === nothing && throw(ArgumentError("meas: unknown source frame \"$sref\""))
+            need_ep = need_ep || _meas_dir_needs_epoch(S0)
+            need_p = need_p || _meas_dir_needs_pos(S0)
+            wantr = (need_ep ? 1 : 0) + (need_p ? 1 : 0)
+            # real tolerates an extra trailing position when the frames don't need one
+            max(length(args) - 2, 0) in wantr:2 || throw(ArgumentError(
+                "TaQL-lite: meas.$fn(dir, 'SRC'" * (need_ep ? ", epoch" : "") *
+                (need_p ? ", pos" : "") * ") in \"$src\""))
+            fargs = TQLExpr[args[1]]
+            need_ep && push!(fargs, rest[1])
+            need_p && push!(fargs, _meas_pos_arg(rest[need_ep ? 2 : 1]))
+            cbr = if need_p
+                (d, e, p) -> _meas_dir_convert(R, sref, _tql_plain(d[1], :angle), _tql_plain(d[2], :angle),
+                                               _tql_plain(e, :time), _meas_xyz(p))
+            elseif need_ep
+                (d, e) -> _meas_dir_convert(R, sref, _tql_plain(d[1], :angle), _tql_plain(d[2], :angle),
+                                            _tql_plain(e, :time), nothing)
+            else
+                (d,) -> _meas_dir_convert(R, sref, _tql_plain(d[1], :angle), _tql_plain(d[2], :angle), nothing, nothing)
+            end
+            return TQLFunc((a...) -> _meas_lon_pm_pi(cbr(a...)), fargs)
+        end
         if has_str1 && !is_frame1
             # Phase 110: meas.<frame>('COLNAME'[, mjd[, x, y, z]]) -- the
             # source frame comes from COLNAME's own MEASINFO, not a literal.
@@ -1236,6 +1284,11 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
         T === nothing && throw(ArgumentError("meas.epoch: unknown scale \"$(args[1].value)\""))
         return TQLFunc(m -> measconvert(MEpoch{UTC}(float(m)), T).mjd, args[2:end])
     end
+    if (fn == "last" || fn == "lst") && length(args) == 2      # real form: meas.last(epoch, pos)
+        # real returns the local sidereal time as SECONDS of the sidereal day
+        return TQLFunc((m, p) -> _lst(_meas_frame(_tql_plain(m, :time), _meas_xyz(p))) / (2pi) * 86400.0,
+                       TQLExpr[args[1], _meas_pos_arg(args[2])])
+    end
     if fn == "last" || fn == "lst"
         length(args) == 4 || throw(ArgumentError(
             "TaQL-lite: meas.last(mjd, x, y, z) in \"$src\""))
@@ -1254,6 +1307,22 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
             "TaQL-lite: meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec) in \"$src\""))
         return TQLFunc((v, m, x, y, z, ra, dec) -> _meas_rv_convert(S, T, v, m, x, y, z, ra, dec),
                        args[3:end])
+    end
+    if fn == "doppler" && length(args) in (2, 3) &&
+       !(args[2] isa TQLLit && args[2].value isa AbstractString)
+        # real form: meas.doppler('TO', value [, 'FROM']) (FROM defaults to radio)
+        args[1] isa TQLLit && args[1].value isa AbstractString || throw(ArgumentError(
+            "TaQL-lite: meas.doppler('TCONV', value[, 'SCONV']) in \"$src\""))
+        T = get(_MEAS_DOPPLER_CONV, lowercase(strip(String(args[1].value))), nothing)
+        T === nothing && throw(ArgumentError("meas.doppler: unknown convention \"$(args[1].value)\""))
+        S = RADIO
+        if length(args) == 3
+            args[3] isa TQLLit && args[3].value isa AbstractString || throw(ArgumentError(
+                "TaQL-lite: meas.doppler('TCONV', value[, 'SCONV']) in \"$src\""))
+            S = get(_MEAS_DOPPLER_CONV, lowercase(strip(String(args[3].value))), nothing)
+            S === nothing && throw(ArgumentError("meas.doppler: unknown convention \"$(args[3].value)\""))
+        end
+        return TQLFunc(v -> measconvert(MDoppler{S}(float(v)), T).d, TQLExpr[args[2]])
     end
     if fn == "doppler"
         (S, T) = _meas_two_scale_args("doppler", _MEAS_DOPPLER_CONV, args, src)

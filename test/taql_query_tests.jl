@@ -4122,3 +4122,68 @@ end
         end
     end
 end
+
+# Phase 249: real casacore's `meas.*` TaQL UDFs use a VALUE-FIRST calling
+# convention -- `meas.b1950([ra,dec] [, 'SRC' [, epoch [, pos]]])`, `meas.doppler(
+# 'TO', value [, 'FROM'])`, `meas.last(epoch, pos)` -- while TaQL-lite's own
+# (Phase 97) puts the source frame first with scalar lon/lat. Both are now
+# accepted (they can't collide: real's first arg is an array expression).
+# Matches real casacore (98-form probe; longitudes in (-pi, pi], `meas.last`
+# in SECONDS of the sidereal day, an extra unused position argument is
+# tolerated); epochs are plain MJD days and positions plain metres or an
+# observatory name (real also takes `60454d` / `[x m, ...]` quantities). Not
+# supported: the `SUPERGAL` frame.
+@testset "TaQL-lite — real-casacore value-first meas.* forms (Phase 249)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", ["A" => Int32[1]]; nrow=1)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["V" => e]), "V")[:])[1]
+    p(e) = MSv2._taqllite_parse(e, Set(["A"]))
+
+    # parse-level: both conventions build a TQLFunc, no SOFA needed for frames w/o epoch
+    @test p("meas.b1950([1.2, 0.5])") isa MSv2.TQLFunc
+    @test p("meas.b1950([1.2, 0.5], 'J2000')") isa MSv2.TQLFunc
+    @test p("meas.b1950('J2000', 1.2, 0.5)") isa MSv2.TQLFunc          # ours, unchanged
+    @test p("meas.doppler('optical', 0.1)") isa MSv2.TQLFunc
+    @test p("meas.doppler('radio', 'optical', 0.1)") isa MSv2.TQLFunc  # ours, unchanged
+    @test_throws ArgumentError p("meas.azel([1.2, 0.5], 'J2000')")      # needs epoch + pos
+    @test_throws ArgumentError p("meas.b1950([1.2, 0.5], 'BOGUS')")
+
+    @test ev("meas.doppler('optical', 0.1)") ≈ 0.11111111111111116      # radio 0.1 -> optical
+    @test ev("meas.doppler('radio', 0.1, 'optical')") ≈ 0.09090909090909094
+    @test ev("meas.doppler('beta', 0.3)") ≈ ev("meas.doppler('radio', 'beta', 0.3)")
+
+    if Base.get_extension(MSv2, :SOFAExt) !== nothing
+        d = ev("meas.b1950([1.2, 0.5])")
+        @test d ≈ ev("meas.b1950('J2000', 1.2, 0.5)")                    # same answer both ways
+        @test d ≈ [1.1863574834469928, 0.4982090952225761] atol = 1e-6   # real casacore's value
+        @test ev("meas.galactic([1.2, 0.5])") ≈ [2.9857820692320334, -0.2211172043436338] atol = 1e-6
+        @test ev("meas.j2000([1.2, 0.5])") ≈ [1.2, 0.5]
+        @test ev("meas.b1950([1.2, 0.5], 'B1950')") ≈ [1.2, 0.5] atol = 1e-9
+        @test ev("meas.b1950([-1.2, 0.5])")[1] < 0                       # (-pi, pi]
+        pos = "[2225061.164, -5440057.370, -2481681.150]"
+        @test ev("meas.azel([1.2, 0.5], 'J2000', 60454.0, $pos)") ≈
+              [-1.1757889104253296, -0.4100691887135492] atol = 5e-5
+        @test ev("meas.azel([1.2, 0.5], 'J2000', 60454.0, 'VLA')") ≈
+              [-1.331572240150506, 0.6084838427316985] atol = 5e-5
+        @test ev("meas.hadec([1.2, 0.5], 'J2000', 60454.0, 'VLA')") ≈
+              [1.1403562674454237, 0.5008768338038833] atol = 5e-5
+        @test ev("meas.app([1.2, 0.5], 'J2000', 60454.0)") ≈
+              [1.2065198712116731, 0.5008743973860424] atol = 5e-5
+        @test ev("meas.app([1.2, 0.5], 'J2000', 60454.0, 'VLA')") ≈ ev("meas.app([1.2, 0.5], 'J2000', 60454.0)")
+        @test ev("meas.j2000([1.2, 0.5], 'AZEL', 60454.0, 'VLA')") ≈       # source frame needs epoch+pos
+              [-2.633725693988767, 0.5622498577253711] atol = 5e-5
+        @test ev("meas.last(60454.0, 'VLA')") ≈ 32271.87519581057 atol = 1e-2   # seconds
+    end
+
+    if _HAVE_TAQL && Base.get_extension(MSv2, :SOFAExt) !== nothing
+        cref(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])[1]
+        for (r, m) in [("meas.b1950([1.2,0.5])", "meas.b1950([1.2,0.5])"),
+                       ("meas.galactic([1.2,0.5],'B1950')", "meas.galactic([1.2,0.5],'B1950')"),
+                       ("meas.ecliptic([1.2,0.5],'GALACTIC')", "meas.ecliptic([1.2,0.5],'GALACTIC')"),
+                       ("meas.doppler('optical',0.1,'radio')", "meas.doppler('optical',0.1,'radio')"),
+                       ("meas.doppler('gamma',0.1)", "meas.doppler('gamma',0.1)")]
+            @test ev(m) ≈ cref(r) atol = 5e-5
+        end
+    end
+end

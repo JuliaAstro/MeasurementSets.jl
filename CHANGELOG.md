@@ -9120,3 +9120,20 @@ agreed except two forms: (1) a bare `<N` / `>N` / `<=N` / `>=N` in
 antenna-id comparison (a unit-less `a~b` stays an antenna-id range); (2)
 `spw('0:^2')`, a channel stride with no range, errored. Both fixed. New
 testset with a 13-spec real cross-check.
+
+### Phase 249 — real-casacore value-first `meas.*` calling forms
+
+A 98-form probe of the `meas.*` TaQL functions against real casacore's
+`meas.*` UDFs found them essentially incomparable at first — real uses a
+different, **value-first** convention (`meas.b1950([ra,dec] [, 'SRC' [,
+epoch [, pos]]])`, `meas.doppler('TO', value [, 'FROM'])`, `meas.last(epoch,
+pos)`), while Phase 97's puts the source frame first with scalar lon/lat.
+Both are now accepted (real's first argument is an array expression, so the
+two can't collide). Behaviour matches real casacore where compared:
+longitudes in (−π, π], `meas.last` returned as seconds of the sidereal day,
+epoch/position needed when the *source* frame (e.g. `'AZEL'` → J2000) needs
+them, and an extra unused position argument tolerated. Epochs are plain MJD
+days and positions plain metres or an observatory name (real also takes
+`60454d` / `[x m, …]` quantities — real TaQL's `d`/`h` units have a
+time/angle duality we don't reproduce). Not supported: the `SUPERGAL`
+frame. New testset.
