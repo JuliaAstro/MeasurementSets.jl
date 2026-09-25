@@ -446,7 +446,22 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
         return isempty(dims) ? out : BlockColumn(out, dims, nrow)
 
     elseif c.type == TpString
-        return [getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]
+        # Phase 241: bucket walk (no per-row `locate`) + `unsafe_string`
+        # for inline strings (no intermediate byte-slice copy).
+        (c.maxlength > 0 || !isempty(dims)) && return [getcell(ssm, ssmcol, c, r, 1) for r in 1:nrow]
+        out = Vector{String}(undef, nrow)
+        _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
+            base = bucketptr(ssm, bkt) + coloff
+            for row in firstrow:lastrow
+                off = base + (row - firstrow) * SSM_STRING_REF
+                len = Int(_i32(ssm, off + 2 * SSM_INT))
+                out[row] = len <= 0 ? "" :
+                    len <= SSM_STRING_INLINE_MAX ?
+                        GC.@preserve(ssm, unsafe_string(pointer(ssm.data, off + 1), len)) :
+                        _read_string_bucket(ssm, Int(_i32(ssm, off)), Int(_i32(ssm, off + SSM_INT)), len)
+            end
+        end
+        return out
 
     else
         T = juliatype(c.type)

@@ -8987,3 +8987,28 @@ and the undefined rows, plus a `_HAVE_CASACORE` cross-check.
 
 Full suite green: 5354 baseline + 54 new = 5408/5408. README/memory
 updated, merge on the user's word.
+
+### Phase 241 — `POINTING.NAME`: bulk read for scalar `String` columns on `StandardStMan`
+
+Direct follow-up ask: "Improve the performance of `POINTING.NAME`" — the
+one real subtable outlier left after Phase 240's re-survey (20.7x slower
+than casacore C++ at 925,645 rows; every other benchmarked subtable
+column was within ~1.8x, most of those timer noise).
+
+**Root cause:** `StandardStMan.getcolumn`'s `TpString` branch was still
+`[getcell(...) for r in 1:nrow]` — a fresh `locate` (O(log nbucket)
+search) plus a byte-slice copy per inline string, per row — the same
+per-row-`getcell` shape Phase 240 fixed for the indirect-array kinds.
+
+**Fix:** walk the column's buckets directly and build each inline string
+with `unsafe_string` straight from the pinned buffer; strings longer than
+the inline limit still go through the string-bucket reader. Fixed-length
+(`maxlength > 0`) and array-shaped string columns keep the old path
+(unchanged behaviour/errors).
+
+Live-verified on the real MS: `POINTING.NAME` 3.05 s → 0.023 s (135x),
+now 0.23x of C++ (faster); values identical to `Casacore.jl`. New
+`test/indirect_tests.jl` testset covers empty / inline / long
+(string-bucket) values across three SSM buckets, plus a `_HAVE_CASACORE`
+cross-check (the real column is all-empty, so it can't exercise those
+paths itself).
