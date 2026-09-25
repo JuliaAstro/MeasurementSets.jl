@@ -4187,3 +4187,179 @@ end
         end
     end
 end
+
+# Phase 250: the axis-collapse array reductions (`sums(arr, axes...)`, `means`,
+# `mins`, `maxs`, `medians`, `variances`, `stddevs`, `samplevariances`,
+# `samplestddevs`, `avdevs`, `rmss`, `sumsqrs`, `products`, `anys`, `alls`,
+# `ntrues`, `nfalses`, `fractiles(arr, frac, axes...)`) -- Phase 186's flagged
+# gap. Real TaQL (62-form probe, all matched): axes are 1-BASED (scalar, array
+# or several arguments); the collapsed axes are dropped from the shape; axes
+# beyond the array's rank are ignored; a full collapse is a 1-element vector;
+# axis 0 / negative / duplicate / non-integer axes are errors; `variances` /
+# `stddevs` are population (`sample*` = n-1); `medians` / `fractiles` never
+# average (lower-middle element).
+@testset "TaQL-lite — axis-collapse reductions sums/means/... (Phase 250)" begin
+    dir = joinpath(mktempdir(), "t")
+    V = [Float64.(reshape(1:12, 3, 4)) .* i .+ (i - 1) for i in 1:2]
+    W = [Float64.(reshape(1:24, 2, 3, 4)) .* i for i in 1:2]
+    write_table(dir, "T", Pair{String,Any}["V" => V, "W" => W]; nrow=2, tsm=[["V"], ["W"]])
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    v1 = V[1]
+
+    @test ev("sums(V, 1)")[1] == vec(sum(v1; dims=1)) && size(ev("sums(V, 1)")[1]) == (4,)
+    @test ev("sums(V, 2)")[1] == vec(sum(v1; dims=2))
+    @test ev("sums(V, [1])")[1] == ev("sums(V, 1)")[1]
+    @test ev("sums(V, [1,2])")[1] == [sum(v1)]                         # full collapse: 1-vector
+    @test ev("sums(V, 1, 2)")[1] == [sum(v1)]                          # several axis args
+    @test ev("sums(V, 3)")[1] == v1                                     # axis beyond rank: no-op
+    @test ev("sums(W, [2,3])")[1] == vec(sum(W[1]; dims=(2, 3))) && ev("sums(W, [3,2])")[1] == ev("sums(W, [2,3])")[1]
+    @test size(ev("sums(W, 1)")[1]) == (3, 4) && size(ev("sums(W, [1,2])")[1]) == (4,)
+    @test ev("means(V, 1)")[2] == vec(Statistics.mean(V[2]; dims=1)) == ev("avgs(V, 1)")[2]
+    @test ev("mins(V, 2)")[1] == vec(minimum(v1; dims=2)) && ev("maxs(V, 2)")[1] == vec(maximum(v1; dims=2))
+    @test ev("products(V, 1)")[1] == vec(prod(v1; dims=1))
+    @test ev("sumsqrs(V, 1)")[1] == vec(sum(abs2, v1; dims=1))
+    @test ev("variances(V, 1)")[1] ≈ vec(Statistics.var(v1; dims=1, corrected=false))
+    @test ev("samplevariances(V, 1)")[1] ≈ vec(Statistics.var(v1; dims=1))
+    @test ev("stddevs(V, 2)")[1] ≈ vec(Statistics.std(v1; dims=2, corrected=false))
+    @test ev("samplestddevs(V, 1)")[1] ≈ vec(Statistics.std(v1; dims=1))
+    @test ev("rmss(V, 1)")[1] ≈ vec(sqrt.(Statistics.mean(abs2, v1; dims=1)))
+    @test ev("avdevs(V, 1)")[1] ≈ fill(2 / 3, 4)
+    @test ev("medians(V, 2)")[1] == [4.0, 5.0, 6.0]                    # lower-middle, never averaged
+    @test ev("medians(V, [1,2])")[1] == [6.0] && ev("fractiles(V, 0.25, 2)")[1] == [1.0, 2.0, 3.0]
+    @test ev("anys(V > 5, 1)")[1] == [false, true, true, true] && ev("alls(V > 1, 1)")[1] == [false, true, true, true]
+    @test ev("ntrues(V > 5, 1)")[1] == [0, 1, 3, 3] && ev("nfalses(V > 5, 1)")[1] == [3, 2, 0, 0]
+    @test ev("sums(V, 1)[2]")[1] == 15.0 && ev("nelements(sums(V, 1))")[1] == 4    # composes
+    @test ev("sqrt(sums(V, 2))")[1] ≈ sqrt.(vec(sum(v1; dims=2)))
+    for bad in ("sums(V, 0)", "sums(V)", "sums(V, [1,1])", "sums(V, 1.0)", "sums(V, -1)", "sums(A, 1)")
+        @test_throws Exception ev(bad)
+    end
+
+    if _HAVE_TAQL
+        cref(e) = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:])
+        for e in ("sums(V,1)", "sums(V,2)", "sums(V,[1,2])", "sums(V,3)", "sums(W,[2,3])", "means(V,1)", "medians(V,2)",
+                  "medians(W,[1,2])", "variances(V,1)", "samplestddevs(V,1)", "avdevs(V,1)", "rmss(W,[1,3])",
+                  "products(V,1)", "anys(V>5,1)", "ntrues(W>10,[1,2])", "fractiles(V,0.25,2)", "maxs(W,[1,3])")
+            r = cref(e); m = ev(e)
+            @test length(r) == length(m) && all(i -> isapprox(collect(r[i]), collect(m[i])), eachindex(r))
+        end
+    end
+end
+
+# Phase 251: the array-reshaping family (Phase 190's flagged gap), live-probed
+# against real TaQL (68 forms, all match): `transpose` reverses ALL axes;
+# `reversearray(arr[, axes...])` toggles the listed 1-based axes (`[1,1]` is the
+# identity; axes beyond the rank are ignored -- if none remain ALL are
+# reversed; axis 0 errors); `flatten`/`arrayflatten`; `array(v, shape...)` fills
+# with a scalar or cycles/truncates an array's elements column-major (shape =
+# one array OR separate integers, not mixed; negative/absent shape errors);
+# `resize` keeps elements at their index positions, cropping/zero-padding (the
+# shape's rank may differ from the array's); `diagonals(arr[, 1])` needs equal
+# first two axes -> shape (n, rest...); `nullarray`, `isdefined`/`isnull`,
+# and parse-time `iscolumn('NAME')`.
+@testset "TaQL-lite — array reshaping transpose/reversearray/array/resize/diagonals (Phase 251)" begin
+    dir = joinpath(mktempdir(), "t")
+    V = [Float64.(reshape(1:12, 3, 4)) .* i .+ (i - 1) for i in 1:2]
+    W = [Float64.(reshape(1:24, 2, 3, 4)) .* i for i in 1:2]
+    U = [Float64.(1:6) .* i for i in 1:2]
+    Q = [Float64.(reshape(1:9, 3, 3)) .* i for i in 1:2]
+    X = [Float64.(reshape(1:18, 3, 3, 2)) .* i for i in 1:2]
+    write_table(dir, "T", Pair{String,Any}["V" => V, "W" => W, "U" => U, "Q" => Q, "X" => X, "A" => Int32[2, 3]];
+                nrow=2, tsm=[["V"], ["W"], ["U"], ["Q"], ["X"]])
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["R" => e]), "R")[:])
+    v = V[1]; x = X[1]
+
+    @test ev("transpose(V)")[1] == permutedims(v) && size(ev("transpose(V)")[1]) == (4, 3)
+    @test ev("transpose(W)")[1] == permutedims(W[1], (3, 2, 1))
+    @test ev("transpose(X)")[1] == permutedims(x, (3, 2, 1)) && ev("transpose(U)")[1] == U[1]
+    @test ev("reversearray(V)")[1] == reverse(v; dims=(1, 2)) && ev("reversearray(U)")[1] == reverse(U[1])
+    @test ev("reversearray(V, 1)")[1] == reverse(v; dims=1) && ev("reversearray(V, 2)")[1] == reverse(v; dims=2)
+    @test ev("reversearray(V, [1,2])")[1] == reverse(v; dims=(1, 2))
+    @test ev("reversearray(X, 1, 3)")[1] == reverse(x; dims=(1, 3)) == ev("reversearray(X, [1,3])")[1]
+    @test ev("reversearray(X, [1,1])")[1] == x                          # toggles: identity
+    @test ev("reversearray(X, 4)")[1] == reverse(x; dims=(1, 2, 3))     # no valid axis -> all
+    @test ev("flatten(W)")[1] == vec(W[1]) == ev("arrayflatten(W)")[1]
+    @test ev("array(V, [4,3])")[1] == reshape(vec(v), 4, 3) && ev("array(V, [5])")[1] == vec(v)[1:5]
+    @test ev("array([1,2,3], [3,2])")[1] == [1 1; 2 2; 3 3]           # cycles column-major
+    @test ev("array(7, [2,3])")[1] == fill(7, 2, 3) && ev("array(1, 2, 3)")[1] == fill(1, 2, 3)
+    @test ev("array(7.5, [3])")[1] == [7.5, 7.5, 7.5] && size(ev("array(X, [0])")[1]) == (0,)
+    @test ev("resize(V, [2,2])")[1] == v[1:2, 1:2]
+    @test size(ev("resize(V, [4,5])")[1]) == (4, 5)
+    @test ev("resize(V, [4,5])")[1][1:3, 1:4] == v && all(iszero, ev("resize(V, [4,5])")[1][4, :])
+    @test ev("resize(U, [8])")[1] == [U[1]; 0.0; 0.0] && ev("resize(U, [3])")[1] == U[1][1:3]
+    @test ev("resize(X, [5])")[1] == [1.0, 2.0, 3.0, 0.0, 0.0]        # rank differs: extra axes at index 1
+    @test ev("resize(X, [2,2,2,2])")[1][:, :, :, 1] == x[1:2, 1:2, :] && all(iszero, ev("resize(X, [2,2,2,2])")[1][:, :, :, 2])
+    @test ev("diagonals(Q)")[1] == [1.0, 5.0, 9.0] == ev("diagonal(Q, 1)")[1]
+    @test ev("diagonals(X)")[1] == [x[i, i, k] for i in 1:3, k in 1:2] && size(ev("diagonals(X)")[1]) == (3, 2)
+    @test size(ev("nullarray(V)")[1]) == (0,) && eltype(ev("nullarray(V)")[1]) == Float64
+    @test ev("isdefined(V)") == [true, true] && ev("isnull(V)") == [false, false]
+    @test ev("iscolumn('V')") == [true, true] && ev("iscolumn('ZZ')") == [false, false]
+    @test ev("shape(transpose(V))")[1] == [4, 3] && ev("transpose(V)[1,2]")[1] == 2.0   # compose
+    @test ev("sums(transpose(V), 1)")[1] == vec(sum(permutedims(v); dims=1))
+    for bad in ("reversearray(V, 0)", "array(1)", "array(X, [2,-1])", "array(1, [2,3], 4)", "diagonal(Q, -1)",
+                "diagonals(V)", "diagonals(W)", "diagonals(X, 2)", "transpose(A)", "flatten(A)")
+        @test_throws Exception ev(bad)
+    end
+
+    if _HAVE_TAQL
+        cref(e) = collect(_taqlcmd("SELECT $e AS R FROM \$1", dir)[:R][:])
+        for e in ("transpose(V)", "transpose(W)", "transpose(X)", "reversearray(V)", "reversearray(V,1)", "reversearray(X,[1,3])",
+                  "reversearray(X,4)", "flatten(V)", "array(V,[4,3])", "array(V,[5])", "array([1,2,3],[3,2])", "array(7,[2,3])",
+                  "resize(V,[4,5])", "resize(X,[5])", "resize(X,[2,2,2,2])", "diagonals(Q)", "diagonals(X)", "nullarray(V)")
+            r = cref(e); m = ev(e)
+            @test length(r) == length(m) && all(i -> collect(r[i]) == collect(m[i]), eachindex(r))
+        end
+    end
+end
+
+# Phase 252: the group functions `growid()`, `gaggr(x)` / `gstack(x)` and
+# `ghist(x, nbins, lo, hi)` (Phase 26's remaining non-goals), live-probed against
+# real GROUP BY (33 forms, all match): `growid()` is the group's 0-BASED row ids;
+# `gaggr`/`gstack` collect the group's values (scalars -> a vector, arrays
+# stacked along a NEW LAST axis); `ghist` returns `nbins + 2` integer counts --
+# underflow (`x < lo`), `nbins` equal left-closed bins, overflow (`x >= hi`).
+@testset "TaQL-lite — growid / gaggr / gstack / ghist group functions (Phase 252)" begin
+    dir = joinpath(mktempdir(), "t")
+    K = Int32[1, 2, 3, 1, 2, 3, 1, 2]
+    X = Float64[0.5, 3.5, 7.0, 1.5, 4.0, 9.5, 2.5, 6.0]
+    I = Int32[3, 1, 4, 1, 5, 9, 2, 6]
+    Vv = [Float64.(1:3) .* i for i in 1:8]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X, "I" => I, "V" => Vv,
+                "S" => ["a", "b", "c", "d", "e", "f", "g", "h"]]; nrow=8, tsm=[["V"]])
+    t = readtable(dir)
+    gb(e; kw...) = (g = groupby(t, "K"; select=["K" => "K", "X" => e], kw...);
+                    Dict(zip(collect(g.K), collect(g.X))))
+
+    @test gb("growid()") == Dict(1 => [0, 3, 6], 2 => [1, 4, 7], 3 => [2, 5])
+    @test gb("gaggr(X)") == Dict(1 => [0.5, 1.5, 2.5], 2 => [3.5, 4.0, 6.0], 3 => [7.0, 9.5])
+    @test gb("gaggr(I)")[3] == [4, 9] && gb("gaggr(S)")[1] == ["a", "d", "g"]
+    a = gb("gaggr(V)")
+    @test size(a[1]) == (3, 3) && a[1] == hcat(Vv[1], Vv[4], Vv[7]) && a[3] == hcat(Vv[3], Vv[6])
+    @test gb("gstack(V)") == a && gb("gstack(X)") == gb("gaggr(X)")
+    @test gb("ghist(X, 5, 0.0, 10.0)") == Dict(1 => [0, 2, 1, 0, 0, 0, 0], 2 => [0, 0, 1, 1, 1, 0, 0], 3 => [0, 0, 0, 0, 1, 1, 0])
+    @test gb("ghistogram(I, 5, 0, 10)")[1] == [0, 1, 2, 0, 0, 0, 0]
+    @test gb("ghist(X, 5, 2.0, 8.0)")[1] == [2, 1, 0, 0, 0, 0, 0]        # underflow bin
+    @test gb("ghist(X, 5, 2.0, 8.0)")[3] == [0, 0, 0, 0, 0, 1, 1]        # 7.0 in bin 5, 9.5 overflow
+    @test all(length.(values(gb("ghist(X, 4, 0.0, 8.0)"))) .== 6)          # nbins + 2
+    @test gb("ghist(X, 1, 0.0, 10.0)")[1] == [0, 3, 0]
+    @test gb("ghist(X, 5, 0.0, 10.0)"; where="X > 2") == Dict(1 => [0, 0, 1, 0, 0, 0, 0], 2 => [0, 0, 1, 1, 1, 0, 0], 3 => [0, 0, 0, 0, 1, 1, 0])
+    @test gb("growid()"; where="X > 2") == Dict(1 => [6], 2 => [1, 4, 7], 3 => [2, 5])     # original 0-based rows
+    @test gb("sum(gaggr(X))")[2] ≈ 13.5 && gb("nelements(growid())")[3] == 2 && gb("growid()[1]")[3] == 2
+    @test gb("count(growid())") == Dict(1 => 3, 2 => 3, 3 => 2)
+    for bad in ("growid(X)", "ghist(X, 5)", "ghist(X, 5, 0.0, 10.0, 1)", "ghist(X, 0, 0.0, 10.0)", "ghist(X, 5, 10.0, 0.0)")
+        @test_throws ArgumentError gb(bad)
+    end
+
+    if _HAVE_TAQL
+        cref(e, tail="GROUP BY K") = (r = _taqlcmd("SELECT K, $e AS X FROM \$1 $tail", dir);
+                                      Dict(zip(collect(r[:K][:]), collect(r[:X][:]))))
+        for (e, tail, w) in [("growid()", "GROUP BY K", nothing), ("gaggr(X)", "GROUP BY K", nothing), ("gaggr(V)", "GROUP BY K", nothing),
+                             ("ghist(X, 5, 0.0, 10.0)", "GROUP BY K", nothing), ("ghist(I, 4, 0, 8)", "GROUP BY K", nothing),
+                             ("ghist(X, 5, 2.0, 8.0)", "GROUP BY K", nothing), ("growid()", "WHERE X > 2 GROUP BY K", "X > 2"),
+                             ("gaggr(X)", "WHERE I > 1 GROUP BY K", "I > 1")]
+            r = cref(e, tail); m = w === nothing ? gb(e) : gb(e; where=w)
+            @test keys(r) == keys(m) && all(k -> collect(r[k]) == collect(m[k]), keys(r))
+        end
+    end
+end

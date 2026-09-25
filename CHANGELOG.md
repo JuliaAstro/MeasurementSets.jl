@@ -9140,3 +9140,51 @@ days and positions plain metres or an observatory name (real also takes
 `60454d` / `[x m, …]` quantities — real TaQL's `d`/`h` units have a
 time/angle duality we don't reproduce). Not supported: the `SUPERGAL`
 frame. New testset.
+
+### Phase 250 — axis-collapse array reductions (`sums`, `means`, `mins`, …)
+
+The "s"-suffixed reductions that collapse chosen axes of an array cell —
+flagged as an unimplemented family since Phase 186 — are now implemented:
+`sums` / `products` / `means` (`avgs`) / `mins` / `maxs` / `medians` /
+`variances` / `stddevs` / `samplevariances` / `samplestddevs` / `avdevs` /
+`rmss` / `sumsqrs` / `anys` / `alls` / `ntrues` / `nfalses` and
+`fractiles(arr, frac, axes…)`. Semantics probed live (62 forms, all match
+real TaQL): axes are **1-based**, given as a scalar, an array, or several
+arguments; the collapsed axes are dropped from the result shape (`sums(V, 1)`
+on a 3×4 cell → a 4-vector); axes beyond the array's rank are ignored; a full
+collapse returns a 1-element vector; axis 0 / negative / duplicate /
+non-integer axes are errors; `variances` / `stddevs` are population
+(`sample*` = n−1); `medians` / `fractiles` never average (lower-middle
+element, like `gmedian`). New testset with a 17-form real-TaQL cross-check.
+
+### Phase 251 — array-reshaping functions (`transpose`, `reversearray`, `array`, `resize`, `diagonals`, …)
+
+Implements the array-reshaping family flagged since Phase 190, live-probed
+against real TaQL (68 forms, all match): `transpose` (reverses **all**
+axes), `reversearray(arr[, axes…])` (1-based axes, each occurrence toggles so
+`[1,1]` is the identity; axes beyond the rank are ignored and, if none
+remain, all axes are reversed; axis 0 is an error), `flatten` /
+`arrayflatten`, `array(v, shape…)` (a scalar fills; an array is cycled or
+truncated column-major into the shape; the shape is one array *or* separate
+integers, not mixed), `resize(arr, shape)` (elements keep their index
+positions, cropped or zero-padded; the shape's rank may differ from the
+array's), `diagonals(arr[, 1])` / `diagonal` (the first two axes must be
+equal-sized → shape `(n, rest…)`; other first-axes unsupported),
+`nullarray`, `isdefined` / `isnull`, and a parse-time `iscolumn('NAME')`
+(a table-level test resolved against the table's columns). Still not
+implemented: `iskeyword`, `regex`/`pattern`/`sqlpattern`. New testset with an
+18-form real-TaQL cross-check.
+
+### Phase 252 — group functions `growid`, `gaggr`/`gstack`, `ghist`
+
+The group functions Phase 26 listed as non-goals, live-probed against real
+`GROUP BY` (33 forms, all match): `growid()` — the group's **0-based** row
+ids (original table rows, also under `WHERE`); `gaggr(x)` / `gstack(x)` —
+collect the group's values (scalars → a vector; arrays are stacked along a
+**new last axis**, all the same shape); `ghist(x, nbins, lo, hi)` (alias
+`ghistogram`) — `nbins + 2` integer counts: an underflow bin (`x < lo`),
+`nbins` equal left-closed bins, an overflow bin (`x >= hi`); `nbins`/`lo`/`hi`
+must be numeric literals. They compose with the scalar/array functions
+(`sum(gaggr(X))`, `nelements(growid())`, `growid()[1]`). Still not
+implemented: `iskeyword`, `regex` / `pattern` / `sqlpattern`. New testset with
+an 8-form real cross-check.

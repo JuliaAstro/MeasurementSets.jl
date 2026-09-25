@@ -394,7 +394,10 @@ so the verbs chain.
   `gsamplestddevs`, `grmss`, `gmins`, `gmaxs`, `ganys`, `galls`,
   `gntrues`, `gnfalses`) reduce the group's array cells per position —
   over the rows where that cell is unmasked (all cells if unmasked),
-  giving one array.
+  giving one array. Also `growid()` (the group's 0-based row ids), `gaggr(x)` /
+  `gstack(x)` (collect the group's values; arrays are stacked along a new
+  last axis) and `ghist(x, nbins, lo, hi)` (`nbins + 2` counts: underflow,
+  `nbins` left-closed bins, overflow).
 * a **`Symbol`** — shorthand for a bare column name (`:K` ≡ `"K"`).
 * a **function** `g -> value` — called with a [`GroupSlice`](@ref) (see
   the do-block form below); use for aggregates the `g*` set can't
