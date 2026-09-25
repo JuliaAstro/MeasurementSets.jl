@@ -1061,3 +1061,119 @@ end
         end
     end
 end
+
+# Phase 259: `taql(target, cmd, others...)` SELECT ... FROM $1 a JOIN $2 b ON
+# a.K == b.K, live-probed vs real TaQL (11 forms + per-type sentinels).  Real TaQL's
+# JOIN is a LEFT join filling unmatched left rows with type sentinels: Int ->
+# typemax(Int64), Float / Float32 -> NaN, Complex -> NaN+NaN·im, Bool -> false,
+# String -> "none".  `$1` is the target, `$2`... the extra arguments; columns are
+# `a.COL` / `b.COL`.  One `==` (or `IN`) condition, either order; the right key must
+# be unique.  (Real TaQL rejects `AND` conditions and comma joins; so do we.)
+@testset "taql SELECT ... JOIN (Phase 259)" begin
+    d1 = joinpath(mktempdir(), "a"); d2 = joinpath(mktempdir(), "b")
+    write_table(d1, "A", Pair{String,Any}["K" => Int32[1, 2, 3, 4, 5, 2], "V" => [10.0, 20, 30, 40, 50, 60], "Z" => Int32[0, 1, 2, 0, 1, 2]]; nrow=6)
+    write_table(d2, "B", Pair{String,Any}["K" => Int32[2, 3, 5, 9], "N" => ["two", "three", "five", "nine"], "W" => [0.2, 0.3, 0.5, 0.9],
+                "I" => Int32[7, 8, 9, 10], "F" => Bool[1, 1, 1, 1], "C" => ComplexF32[1, 2, 3, 4], "R" => Float32[1, 2, 3, 4]]; nrow=4)
+    t1 = readtable(d1); t2 = readtable(d2)
+    xy(q) = (r = taql(t1, q, t2); (collect(column(r, "X")[:]), collect(column(r, "Y")[:])))
+    j = "FROM \$1 a JOIN \$2 b ON a.K == b.K"
+    @test xy("SELECT a.V AS X, b.N AS Y $j") == ([10.0, 20, 30, 40, 50, 60], ["none", "two", "three", "none", "five", "two"])
+    x, y = xy("SELECT a.V AS X, b.W AS Y $j"); @test x == [10.0, 20, 30, 40, 50, 60] && isequal(y, [NaN, 0.2, 0.3, NaN, 0.5, 0.2])
+    @test xy("SELECT a.V AS X, b.I AS Y $j")[2] == [typemax(Int64), 7, 8, typemax(Int64), 9, 7]
+    @test xy("SELECT a.V AS X, b.F AS Y $j")[2] == Bool[0, 1, 1, 0, 1, 1]
+    y = xy("SELECT a.V AS X, b.C AS Y $j")[2]; @test isnan(real(y[1])) && isnan(imag(y[1])) && y[2] == 1 && y[5] == 3
+    @test isequal(xy("SELECT a.V AS X, b.R AS Y $j")[2], Float32[NaN, 1, 2, NaN, 3, 1])
+    @test xy("SELECT a.V AS X, b.N AS Y $j WHERE a.V>20")[1] == [30.0, 40, 50, 60]
+    @test xy("SELECT a.K AS X, b.N AS Y $j ORDER BY a.V DESC") == (Int32[2, 5, 4, 3, 2, 1], ["two", "five", "none", "three", "two", "none"])
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.K")[2] == ["none", "none", "two", "none", "none", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON b.K == a.K")[2] == ["none", "two", "three", "none", "five", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K IN b.K")[2] == ["none", "two", "three", "none", "five", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y $j LIMIT 2") == ([10.0, 20.0], ["none", "two"])
+    x, y = xy("SELECT gsum(a.V) AS X, gcount() AS Y $j"); @test x == [210.0] && y == [6]
+    x, y = xy("SELECT a.V*b.W AS X, b.N AS Y $j"); @test isequal(x, [NaN, 4.0, 9.0, NaN, 25.0, 12.0])
+    @test_throws ArgumentError xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K AND a.Z == 2")
+    @test_throws ArgumentError taql(t1, "SELECT a.V AS X, b.N AS Y $j")            # no \$2 supplied
+    if _HAVE_TAQL
+        for q in ("SELECT a.V AS X, b.N AS Y $j", "SELECT a.V AS X, b.W AS Y $j WHERE a.V>20", "SELECT a.K AS X, b.N AS Y $j ORDER BY a.V DESC",
+                  "SELECT a.V AS X, b.I AS Y $j", "SELECT a.V AS X, b.F AS Y $j", "SELECT a.V AS X, b.R AS Y $j",
+                  "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.K", "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON b.K == a.K",
+                  "SELECT a.V AS X, b.W AS Y FROM \$1 a JOIN \$2 b ON a.K IN b.K", "SELECT gsum(a.V) AS X, gcount() AS Y $j", "SELECT a.V*b.W AS X, b.N AS Y $j")
+            r = _taqlcmd(q, d1, d2); m = xy(q)
+            @test isequal(collect(r[:X][:]), m[1]) && isequal(collect(r[:Y][:]), m[2])
+        end
+    end
+end
+
+# Phase 260: more JOIN forms (live-probed vs real TaQL, 20 forms): chained joins
+# (`JOIN $2 b ON .. JOIN $3 c ON b.N == c.N`, matched against the joined table so
+# far), an INDEX lookup `ON a.K == b.rowid()` (the left value is the 0-based right
+# row), `a.rowid()` / `b.rowid()` as columns, `=` as well as `==`, and a duplicate
+# right key matching its FIRST row (was an error).  Divergence: real TaQL returns
+# NaN for the reversed index form `ON b.rowid() == a.K`; here it is the same lookup.
+@testset "taql SELECT ... JOIN: chained, rowid(), duplicate keys (Phase 260)" begin
+    d1 = joinpath(mktempdir(), "a"); d2 = joinpath(mktempdir(), "b"); d3 = joinpath(mktempdir(), "c")
+    write_table(d1, "A", Pair{String,Any}["K" => Int32[1, 2, 3, 4, 5, 2], "V" => [10.0, 20, 30, 40, 50, 60], "Z" => Int32[0, 1, 2, 0, 1, 2]]; nrow=6)
+    write_table(d2, "B", Pair{String,Any}["K" => Int32[2, 3, 5, 9], "N" => ["two", "three", "five", "nine"], "W" => [0.2, 0.3, 0.5, 0.9]]; nrow=4)
+    write_table(d3, "C", Pair{String,Any}["N" => ["two", "five", "zzz"], "Q" => Int32[100, 200, 300]]; nrow=3)
+    t1, t2, t3 = readtable(d1), readtable(d2), readtable(d3)
+    xy(q) = (r = taql(t1, q, t2, t3); (collect(column(r, "X")[:]), collect(column(r, "Y")[:])))
+    big = typemax(Int64)
+    @test xy("SELECT a.V AS X, c.Q AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K JOIN \$3 c ON b.N == c.N")[2] == [big, 100, big, big, 200, 100]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K JOIN \$3 c ON b.N == c.N")[2] == ["none", "two", "three", "none", "five", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == b.rowid()")[2] == ["three", "five", "nine", "none", "none", "five"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.rowid()")[2] == ["two", "three", "five", "two", "three", "five"]
+    @test xy("SELECT a.V AS X, a.V AS Y FROM \$1 a JOIN \$2 b ON a.K == b.rowid() WHERE b.N == 'five'") == ([20.0, 60.0], [20.0, 60.0])
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K = b.K")[2] == ["none", "two", "three", "none", "five", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 AS a JOIN \$2 AS b ON a.K == b.K WHERE b.N != 'none'")[2] == ["two", "three", "five", "two"]
+    @test xy("SELECT a.V AS X, upper(b.N) AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K")[2] == ["NONE", "TWO", "THREE", "NONE", "FIVE", "TWO"]
+    g = taql(t1, "SELECT b.N AS X, gsum(a.V) AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K GROUP BY b.N", t2)
+    @test sort(collect(column(g, "X")[:])) == ["five", "none", "three", "two"] && sum(column(g, "Y")[:]) == 210
+    # self-join, duplicate right key -> the FIRST matching row; a./b.rowid()
+    s(q) = (r = taql(t1, q); (collect(column(r, "X")[:]), collect(column(r, "Y")[:])))
+    @test s("SELECT a.V AS X, b.V AS Y FROM \$1 a JOIN \$1 b ON a.K == b.K")[2] == [10.0, 20, 30, 40, 50, 20]
+    @test s("SELECT a.V AS X, b.rowid() AS Y FROM \$1 a JOIN \$1 b ON a.K == b.K")[2] == [0, 1, 2, 3, 4, 1]
+    @test s("SELECT a.rowid() AS X, b.V AS Y FROM \$1 a JOIN \$1 b ON a.Z == b.rowid()") == ([0, 1, 2, 3, 4, 5], [10.0, 20, 30, 10, 20, 30])
+    @test_throws ArgumentError xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == a.Z")
+    if _HAVE_TAQL
+        for q in ("SELECT a.V AS X, c.Q AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K JOIN \$3 c ON b.N == c.N",
+                  "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == b.rowid()", "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.rowid()",
+                  "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K = b.K", "SELECT a.V AS X, b.N AS Y FROM \$1 AS a JOIN \$2 AS b ON a.K == b.K WHERE b.N != 'none'",
+                  "SELECT a.V AS X, upper(b.N) AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K",
+                  "SELECT a.V AS X, b.V AS Y FROM \$1 a JOIN \$1 b ON a.K == b.K", "SELECT a.V AS X, b.rowid() AS Y FROM \$1 a JOIN \$1 b ON a.K == b.K",
+                  "SELECT a.rowid() AS X, b.V AS Y FROM \$1 a JOIN \$1 b ON a.Z == b.rowid()")
+            ps = occursin("\$3", q) ? (d1, d2, d3) : occursin("\$2", q) ? (d1, d2) : (d1,)
+            r = _taqlcmd(q, ps...); m = taql(t1, q, t2, t3)
+            @test isequal(collect(r[:X][:]), collect(column(m, "X")[:])) && isequal(collect(r[:Y][:]), collect(column(m, "Y")[:]))
+        end
+    end
+end
+
+# Phase 261: SELECT odds and ends, live-probed vs real TaQL (~45 forms): `SELECT
+# ALL`, the one-word `ORDERBY`, a grouped SELECT's HAVING naming a select ALIAS
+# (`HAVING Y > 10`), and an ORDER BY that is an EXPRESSION over the group
+# (`ORDER BY G*-1`).  (Real TaQL rejects `ORDER BY gsum(K)`; that and
+# `NOT G==3` are accepted here.)
+@testset "taql SELECT: ALL, ORDERBY, HAVING alias, ORDER BY expression (Phase 261)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8), "S" => ["a", "b", "a", "c", "b", "a", "c", "c"]]; nrow=8)
+    t = readtable(dir)
+    cs(q, c...) = (r = taql(t, q); [collect(column(r, n)[:]) for n in c])
+    @test cs("SELECT ALL K AS X FROM t", "X") == [collect(1:8)]
+    @test cs("SELECT K AS X FROM t ORDERBY K DESC", "X") == [collect(8:-1:1)]
+    @test cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G HAVING Y>10", "X", "Y") == [[3], [19]]
+    @test sort(cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G HAVING Y>5 AND gcount()>2", "X")[1]) == [1, 3]
+    @test cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY G*-1", "X", "Y") == [[3, 2, 1], [19, 7, 10]]
+    @test cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY Y DESC", "X", "Y") == [[3, 1, 2], [19, 10, 7]]
+    @test cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY gmax(K) DESC", "X") == [[3, 1, 2]]
+    @test columnnames(taql(t, "SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY G*-1")) == ["X", "Y"]   # hidden key dropped
+    if _HAVE_TAQL
+        for q in ("SELECT ALL K AS X FROM \$1", "SELECT K AS X FROM \$1 ORDERBY K DESC",
+                  "SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY G HAVING Y>10", "SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY G ORDER BY G*-1",
+                  "SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY G ORDER BY Y DESC")
+            r = _taqlcmd(q, dir); m = taql(t, replace(q, "\$1" => "t"))
+            xs = names -> [collect(column(m, n)[:]) for n in names]
+            hasY = occursin("AS Y", q)
+            @test collect(r[:X][:]) == xs(["X"])[1] && (!hasY || collect(r[:Y][:]) == xs(["Y"])[1])
+        end
+    end
+end

@@ -9275,3 +9275,36 @@ sees the table *before* the write), and `UPDATE t [AS] a SET …` / `DELETE FROM
 [AS] a` aliases (with `a.COL` qualifiers) are accepted — checked on twin tables
 against real TaQL (9 forms, all match).
 
+### Phase 259 — `taql()` SELECT … JOIN
+
+`taql(target, cmd, others...)` runs `SELECT … FROM $1 a JOIN $2 b ON a.K == b.K`
+(`$1` is `target`, `$2`… the extra tables; columns are `a.COL` / `b.COL`;
+`ON … IN …` and the reversed order also work), live-probed against real TaQL
+(11 forms + every column type). Real TaQL's JOIN is a **left join with type
+sentinels** for unmatched left rows — Int → `typemax(Int64)`, Float → `NaN`,
+Complex → `NaN+NaN·im`, Bool → `false`, String → `"none"` — reproduced exactly;
+`WHERE` / `ORDER BY` / `LIMIT` / aggregates compose. One condition only (real
+TaQL rejects `AND` and comma joins, as does this), and the right key must be
+unique.
+
+### Phase 260 — more `taql()` JOIN forms: chained, `rowid()`, duplicate keys
+
+Live-probed against real TaQL (20 forms, all match): **chained joins**
+(`… JOIN $2 b ON a.K == b.K JOIN $3 c ON b.N == c.N`, each matched against the
+joined table so far), an **index lookup** `ON a.K == b.rowid()` (the left value is
+the 0-based right row), `a.rowid()` / `b.rowid()` as columns (0-based source row;
+sentinel when unmatched), `=` as well as `==`, and a **duplicate right key now
+matches its first row** (was an error). Divergence: real TaQL returns `NaN` for
+the reversed index form `ON b.rowid() == a.K`; here it is the same lookup.
+
+### Phase 261 — `taql()` SELECT odds and ends
+
+Probing ~45 more SELECT forms against real TaQL turned up four small gaps, now
+closed: `SELECT ALL …` (the default), the one-word `ORDERBY`, a grouped SELECT's
+`HAVING` naming a select **alias** (`HAVING Y > 10`), and an `ORDER BY` that is
+an **expression** over the group (`ORDER BY G*-1`, evaluated as a hidden column
+and dropped). Everything else probed already matched (`LIKE`, `~ p/…/`, `IN`
+ranges, `BETWEEN`, `%`, `rownr()`, `DISTINCT`, multi-key `ORDER BY`, …). Real
+TaQL rejects `ORDER BY gsum(K)` and `NOT G==3` (`NOT` binds tighter than `==`
+there); both are accepted here.
+

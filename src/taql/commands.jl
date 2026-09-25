@@ -480,6 +480,83 @@ _select_rows(r::RefTable, keep) =
 _select_rows(r::GroupedTable, keep) =
     GroupedTable(getfield(r, :names), AbstractVector[getfield(r, :cols)[j][keep] for j in eachindex(getfield(r, :cols))])
 
+# ---- SELECT ... FROM $1 a JOIN $2 b ON a.K == b.K (Phase 259; live-probed) ----
+# Real TaQL's JOIN is a LEFT join with type sentinels for unmatched left rows:
+# Int -> typemax(Int64), Float -> NaN, Complex -> NaN+NaNim, Bool -> false,
+# String -> "none".  `taql(target, cmd, others...)`: `\$1` is `target`, `\$2` ... the
+# extra tables.  The joined columns are named `a.COL` / `b.COL`.  One `==` condition
+# (real TaQL rejects `AND`); the right key must be unique.
+function _taql_sentinel(c::AbstractVector)
+    Missing <: eltype(c) || return c
+    T = nonmissingtype(eltype(c))
+    T <: Bool && return Bool[ismissing(x) ? false : x for x in c]
+    T <: Integer && return Int64[ismissing(x) ? typemax(Int64) : Int64(x) for x in c]
+    T <: AbstractFloat && return T[ismissing(x) ? T(NaN) : x for x in c]
+    T <: Complex && return T[ismissing(x) ? T(NaN, NaN) : x for x in c]
+    T <: AbstractString && return String[ismissing(x) ? "none" : String(x) for x in c]
+    throw(ArgumentError("taql: JOIN of a column of type $T is not supported"))
+end
+
+# `FROM $1 a JOIN $2 b ON <cond> [JOIN $3 c ON <cond> ...]`, <cond> = `x.p == y.q`
+# (`=` / `IN` too, either order); `q` may be `rowid()` (an INDEX lookup: the other
+# side's value is the 0-based right row).  A duplicate right key matches its FIRST
+# row (real TaQL).  Chained joins match against the joined table so far.  `a.rowid()`
+# / `b.rowid()` are the 0-based source row of each side (sentinel when unmatched).
+const _JOIN_SIDE = raw"(\w+)\.(\w+(?:\(\))?)"
+function _taql_join_from(target, body::AbstractString, others)
+    m = match(Regex("\\bFROM\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+JOIN\\b", "i"), body)
+    m === nothing && return target, body
+    tab(k) = (i = parse(Int, k);
+              i == 1 ? (target isa AbstractTable ? target : readtable(_cmd_path(target))) :
+              (i - 1 <= length(others) ? (o = others[i-1]; o isa AbstractTable ? o : readtable(_cmd_path(o))) :
+               throw(ArgumentError("taql: no table \$$i (pass it as an extra argument)"))))
+    left = tab(m.captures[1]); la = String(m.captures[2])
+    names = String[la * "." * n for n in columnnames(left)]
+    cols = AbstractVector[collect(column(left, n)[:]) for n in columnnames(left)]
+    push!(names, la * ".__rowid"); push!(cols, collect(0:nrow(left)-1))
+    pos = m.offset + length(m.match) - length("JOIN")       # start of the first JOIN
+    jre = Regex("^JOIN\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+ON\\s+" * _JOIN_SIDE *
+                "\\s*(?:==|=|\\bIN\\b)\\s*" * _JOIN_SIDE * "\\s*", "i")
+    rest = body[pos:end]
+    while (jm = match(jre, rest)) !== nothing
+        right = tab(jm.captures[1]); ra = String(jm.captures[2])
+        (q1, c1, q2, c2) = (String(jm.captures[3]), String(jm.captures[4]), String(jm.captures[5]), String(jm.captures[6]))
+        if q1 == ra && q2 != ra
+            (rc, oq, oc) = (c1, q2, c2)
+        elseif q2 == ra && q1 != ra
+            (rc, oq, oc) = (c2, q1, c1)
+        else
+            throw(ArgumentError("taql: the JOIN condition must relate the new alias \"$ra\" to an earlier one"))
+        end
+        oc == "rowid()" && throw(ArgumentError("taql: rowid() is only supported on the joined (right) side of ON"))
+        lidx = findfirst(==(oq * "." * oc), names)
+        lidx === nothing && throw(ArgumentError("taql: unknown column \"$oq.$oc\" in the JOIN condition"))
+        lk = cols[lidx]; nr = nrow(right)
+        if rc == "rowid()"
+            mr = Int[(ismissing(v) ? 0 : (0 <= v < nr ? Int(v) + 1 : 0)) for v in lk]
+        else
+            rcol = collect(column(right, rc)[:])
+            first = Dict{Any,Int}()
+            for (i, v) in enumerate(rcol); haskey(first, v) || (first[v] = i); end
+            mr = Int[get(first, v, 0) for v in lk]
+        end
+        for n in columnnames(right)
+            rcx = collect(column(right, n)[:])
+            T = eltype(rcx)
+            push!(names, ra * "." * n)
+            push!(cols, any(iszero, mr) ? _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) :
+                                         T[rcx[r] for r in mr])
+        end
+        push!(names, ra * ".__rowid")
+        push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])
+        rest = rest[length(jm.match)+1:end]
+    end
+    joined = GroupedTable(Symbol.(names), cols)
+    body = body[1:m.offset-1] * "FROM __join " * rest
+    body = replace(body, r"\b(\w+)\.rowid\(\)" => s"\1.__rowid")
+    return joined, body
+end
+
 # ---- SELECT sub-queries + table aliases (Phase 257; live-probed vs real TaQL) ----
 # `FROM (SELECT ...)` runs the inner SELECT and queries its result; `x IN (SELECT
 # col ...)` / `NOT IN` become a literal list (an empty one: FALSE / TRUE);
@@ -549,6 +626,8 @@ function _taql_preprocess_select(target, body::AbstractString)
     body = String(body)
     # `SELECT FROM t ...` / `SELECT WHERE ...` (no column list) = `SELECT *`
     body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
+    body = replace(body, r"^SELECT\s+ALL\s+"i => "SELECT ")          # `SELECT ALL` = the default
+    body = replace(body, r"\bORDERBY\b"i => "ORDER BY")               # one-word spelling
     # FROM (SELECT ...) -> the inner result becomes the queried table
     m = match(r"\bFROM\s*\("i, body)
     if m !== nothing
@@ -599,7 +678,7 @@ the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
 string are not supported (use `copytable(dst, groupby(…))`, or
 `insert!(t, groupby(…))`).
 """
-function taql(target, command::AbstractString)
+function taql(target, command::AbstractString, others...)
     cmd = strip(command)
     kw = uppercase(String(first(split(cmd; limit=2))))
     if kw == "UPDATE" || kw == "DELETE"
@@ -633,6 +712,7 @@ function taql(target, command::AbstractString)
         into = match(r"^(.*?)\s+(?:INTO|GIVING)\s+'([^']+)'\s*$"is, cmd)
         body = into === nothing ? cmd : String(strip(into.captures[1]))
         dst = into === nothing ? nothing : String(into.captures[2])
+        target, body = _taql_join_from(target, body, others)
         target, body = _taql_preprocess_select(target, body)
         # Phase 242: SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
@@ -698,15 +778,35 @@ function taql(target, command::AbstractString)
                 gt = query(t, wherestr === nothing ? "TRUE" : wherestr; select = hidden)
                 gwhere = nothing
             end
-            ob = orderstr === nothing ? nothing : map(_split_commas(orderstr)) do piece
-                mo = match(r"^(\w+)(?:\s+(ASC|DESC))?$"is, strip(piece))
-                mo === nothing && throw(ArgumentError(
-                    "taql: ORDER BY of a grouped SELECT takes output column names"))
-                mo.captures[2] !== nothing && uppercase(mo.captures[2]) == "DESC" ?
-                    String(mo.captures[1]) => :desc : String(mo.captures[1])
+            sel = [String(first(p)) => String(last(p)) for p in select]
+            outnames = Set(first.(sel))
+            # HAVING may name a select alias (`HAVING Y > 10`): substitute its expression
+            if havingstr !== nothing
+                for (al, ex) in sel
+                    (al == ex || al in vn) && continue
+                    havingstr = replace(havingstr, Regex("\\b" * al * "\\b") => "(" * ex * ")")
+                end
             end
-            result = groupby(gt, gkeys; select = [String(first(p)) => String(last(p)) for p in select],
-                             where = gwhere, having = havingstr, orderby = ob)
+            # ORDER BY: an output name, or ANY expression (evaluated as a hidden column)
+            ob = nothing; nhid = 0
+            if orderstr !== nothing
+                ob = Any[]
+                for piece in _split_commas(orderstr)
+                    mo = match(r"^(.*?)(?:\s+(ASC|DESC))?$"is, strip(piece))
+                    key = String(strip(mo.captures[1]))
+                    desc = mo.captures[2] !== nothing && uppercase(mo.captures[2]) == "DESC"
+                    if !(key in outnames)
+                        nhid += 1; hn = "__ord$nhid"
+                        push!(sel, hn => key); key = hn
+                    end
+                    push!(ob, desc ? key => :desc : key)
+                end
+            end
+            result = groupby(gt, gkeys; select = sel, where = gwhere, having = havingstr, orderby = ob)
+            if nhid > 0
+                keepn = [n for n in columnnames(result) if !startswith(n, "__ord")]
+                result = GroupedTable(Symbol.(keepn), AbstractVector[column(result, n) for n in keepn])
+            end
         else
         qstr = (wherestr === nothing ? "TRUE" : wherestr) *
                (orderstr === nothing ? "" : " ORDER BY " * orderstr)
