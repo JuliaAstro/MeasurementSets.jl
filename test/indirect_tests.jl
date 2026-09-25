@@ -265,24 +265,3 @@ end
         end
     end
 end
-
-# Phase 242: undefined (never-`put`) SSM-indirect cells share one empty vector per
-# `getcolumn` call (was a fresh allocation per cell -- ~55% of the cost of a
-# mostly-undefined column like `SOURCE.SYSVEL`); values are unchanged, and
-# defined cells are never aliased.
-@testset "SSM indirect getcolumn — shared empty cell for undefined rows (Phase 242)" begin
-    n = 2500
-    V = [i in (1, 1100, n) ? [Float64(i), 2.0] : Float64[] for i in 1:n]
-    dir = joinpath(mktempdir(), "ssm_empty_share")
-    write_table(dir, "T", ["V" => V]; nrow=n)
-    r = readtable(dir)
-    col = getcolumn(r, "V")
-    @test col == V
-    @test eltype(col) == Vector{Float64}
-    @test col[2] === col[3]                      # undefined cells share one empty vector
-    @test col[1] !== col[1100] && col[1] == V[1] # defined cells are distinct arrays
-    @test getcell(r, "V", 2) == Float64[]        # per-cell path is unaffected
-    copy_dir = joinpath(mktempdir(), "copy")
-    copytable(copy_dir, r)                       # copy path must not alias/corrupt
-    @test getcolumn(readtable(copy_dir), "V") == V
-end

@@ -9012,18 +9012,3 @@ now 0.23x of C++ (faster); values identical to `Casacore.jl`. New
 (string-bucket) values across three SSM buckets, plus a `_HAVE_CASACORE`
 cross-check (the real column is all-empty, so it can't exercise those
 paths itself).
-
-### Phase 242 — shared empty cell for undefined SSM-indirect array rows
-
-Follow-up to the post-Phase-241 survey: the six slowest subtable columns
-(`CALDEVICE.CAL_EFF`, `SOURCE.SYSVEL`, …, 1.1–1.7x C++) are all
-mostly-*undefined* SSM-indirect array columns. A scaling check showed a
-constant ~0.3 µs/row Julia cost (ratio only drifted toward 1x because C++
-slowed at large sizes), ~55% of it allocating a fresh empty `Vector` per
-undefined cell. `getcolumn` now hands every undefined (`foff == 0`) cell
-one shared empty vector per call: ~0.3 → ~0.045 µs/row on synthetic
-mostly-empty columns (0.14–0.28x of C++), and all 171 subtable columns of
-the real MS now read faster than C++ (worst 0.75x). **Caveat:** undefined
-cells alias each other within one returned column, so `push!` into one
-would appear in the others (copy paths already `Array(v)`-copy). Defined
-cells are unaffected. New `indirect_tests.jl` testset.
