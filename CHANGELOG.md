@@ -9012,3 +9012,51 @@ now 0.23x of C++ (faster); values identical to `Casacore.jl`. New
 (string-bucket) values across three SSM buckets, plus a `_HAVE_CASACORE`
 cross-check (the real column is all-empty, so it can't exercise those
 paths itself).
+
+### Phase 242 — `taql()` SELECT: `ORDER BY` / `LIMIT` without a `WHERE`, `FROM`, `DISTINCT`
+
+Resumed the `src/taql/` sweep at `commands.jl`'s `taql()` string
+dispatcher. Its SELECT parser only understood `cols [WHERE c]`, so
+`SELECT A ORDER BY A` (no WHERE) swallowed `ORDER BY A` into the column
+list and errored ("computed SELECT column … needs an AS alias"), even
+though the docstring promises `ORDER BY`; `FROM t`, `LIMIT` and
+`DISTINCT` were unsupported (`… WHERE c LIMIT 2` errored inside the
+expression parser). Live-probed against real `tableCommand`.
+
+Now `SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
+[(INTO|GIVING) 'path']`, all cross-checked live. `LIMIT` semantics match
+real TaQL SELECT (verified, and *different* from what a naive reading
+suggests): `LIMIT 0` = no limit; `LIMIT -k` = all but the last k rows
+(first `nrow - k`, not the last k); applied after `ORDER BY` / `DISTINCT`.
+`DISTINCT` de-duplicates on the selected columns in first-occurrence
+order. New helper `_select_rows` (row-subset of a `RefTable` /
+`GroupedTable` result). New testset (23 assertions, incl. a real-TaQL
+cross-check of eight forms).
+
+### Phase 243 — `IN [lo:hi[:step]]` range elements
+
+Swept a 57-form batch of WHERE expressions (comparisons, strings,
+`LIKE`/regex, booleans, arithmetic, functions, `IN`/`NOT IN`) against real
+TaQL. Everything agreed except TaQL's **range elements in an `IN` list**
+(`A IN [1:5]`, `[1:5:2]`, `[2:]`, mixed `[1,3:5,9]`), which errored
+("expected ']'") — listed as a non-goal since Phase 43. Live probing showed
+the real semantics differ from an interval: `lo:hi[:step]` is a *discrete
+lattice* `lo, lo+step, …` up to `hi` (default step 1; `[lo:]` unbounded
+above), matched by equality — `B IN [1:2.5]` over Double 0, .5, …, 4.5
+matches only 1 and 2, not 1.5 or 2.5. Descending, zero- and negative-step
+ranges are errors (as in real TaQL); `[:hi]` stays unsupported (real TaQL
+rejects it too). New `TQLRangeSet` element + `_tql_in`, used by both the
+row (`_tqleval`) and group (`_geval`) evaluators. New testset with a
+real-TaQL cross-check of nine forms.
+
+### Phase 244 — `T`/`F` bool literals, string `+`, hex integer literals
+
+A 60-form batch of literal / string-operation WHERE expressions against
+real TaQL agreed except three forms real TaQL accepts and TaQL-lite
+rejected: `T` / `F` boolean literals (`G = T`, `A > 2 AND T`),
+`+` as string concatenation (`S + 'x' = 'abcx'`), and `0x..` hex integers
+(`A > 0x3`). All three now work and are cross-checked live. Documented
+divergences: a column literally named `T`/`F` wins over the literal
+(real TaQL lets the literal win); real TaQL *rejects* a bare `WHERE F`,
+`FALSE` and `5.`, which stay permissive here; the `5L` integer suffix is
+not supported. New testset (real-TaQL cross-check of eight forms).

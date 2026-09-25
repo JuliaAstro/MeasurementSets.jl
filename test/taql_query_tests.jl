@@ -340,7 +340,7 @@ end
     # arithmetic precedence: * binds tighter than +
     e = parse("A + B * C == 0")
     @test e isa MSv2.TQLCmp
-    @test e.lhs isa MSv2.TQLArith && e.lhs.op === (+)
+    @test e.lhs isa MSv2.TQLArith && e.lhs.op === MSv2._tql_add
     @test e.lhs.rhs isa MSv2.TQLArith && e.lhs.rhs.op === (*)
 
     # left-assoc for - : (A - B) - C
@@ -3936,4 +3936,84 @@ end
     hd = q("hdms([0.0/0.0, 1.0])")
     @test hd[1] == "00h00m00.000"
     @test hd[2] == MSv2._tql_dms(1.0)
+end
+
+# Phase 243: `x IN [lo:hi[:step]]` -- TaQL's range elements in an IN list.
+# Live-verified against real TaQL: a DISCRETE lattice lo, lo+step, ... up to
+# hi (default step 1; `[lo:]` unbounded above), matched by equality -- NOT a
+# continuous interval (`B IN [1:2.5]` over Double 0,.5,..,4.5 matches only
+# 1 and 2). Descending/zero/negative-step ranges are errors; `[:hi]` is
+# unsupported (real TaQL rejects it too).
+@testset "TaQL-lite — IN [lo:hi[:step]] ranges (Phase 243)" begin
+    dir = joinpath(mktempdir(), "t")
+    A = Int32.(0:9); B = Float64.(0:9) ./ 2
+    write_table(dir, "T", ["A" => A, "B" => B]; nrow=10)
+    t = readtable(dir)
+    rows(w) = collect(column(query(t, w), "A")[:])
+    @test rows("A IN [2:5]") == 2:5
+    @test rows("A IN [2:5:2]") == [2, 4]
+    @test rows("A IN [2:9:3]") == [2, 5, 8]
+    @test rows("A IN [2:]") == 2:9
+    @test rows("A NOT IN [2:5]") == [0, 1, 6, 7, 8, 9]
+    @test rows("A IN [2:5,8:9]") == [2, 3, 4, 5, 8, 9]
+    @test rows("A IN [2,4:5]") == [2, 4, 5]
+    @test rows("A IN [1:3] OR A IN [7:8]") == [1, 2, 3, 7, 8]
+    @test rows("B IN [1:2.5]") == [2, 4]              # lattice 1, 2 -- not the interval
+    @test rows("B IN [0.5:2:0.5]") == [1, 2, 3, 4]
+    @test rows("B IN [1.5:]") == [3, 5, 7, 9]         # 1.5, 2.5, 3.5, 4.5
+    @test rows("A IN [3]") == [3]
+    @test rows("A IN [1,3,5]") == [1, 3, 5]           # plain lists unchanged
+    for bad in ("A IN [5:2]", "A IN [2:5:0]", "A IN [2:5:-1]", "A IN [:5]")
+        @test_throws ArgumentError query(t, bad)
+    end
+    # groupby/having and the lattice tolerance
+    g = groupby(t, "A"; select=["A" => :A, "N" => "gcount()"], having="A IN [2:4]")
+    @test collect(g.A) == [2, 3, 4]
+
+    if _HAVE_TAQL
+        for w in ("A IN [2:5]", "A IN [2:5:2]", "A IN [2:]", "A NOT IN [2:5]", "A IN [2:5,8:9]",
+                  "B IN [1:2.5]", "B IN [0.5:2:0.5]", "B IN [1.5:]", "B IN [1:2.5:0.5]")
+            ref = Int.(collect(_taqlcmd("SELECT FROM \$1 WHERE " * w, dir)[:A][:]))
+            @test rows(w) == ref
+        end
+    end
+end
+
+# Phase 244: literal forms real TaQL accepts that TaQL-lite rejected --
+# `T` / `F` bool literals (a same-named column wins here, unlike real TaQL),
+# `+` as string concatenation, and `0x..` hex integers. (Real TaQL *rejects*
+# a bare `WHERE F` / `FALSE` and `5.`, so those stay permissive here.)
+@testset "TaQL-lite — T/F literals, string +, hex ints (Phase 244)" begin
+    dir = joinpath(mktempdir(), "t")
+    A = Int32[5, 3, 9, 1, 7, 3, 0, -4]
+    S = ["abc", "Abd", "xyz", "", "ABC", "a b", "it's", "q"]
+    G = [true, false, true, false, true, false, true, false]
+    write_table(dir, "T", ["A" => A, "S" => S, "G" => G]; nrow=8)
+    t = readtable(dir)
+    rows(w) = collect(column(query(t, w), "A")[:])
+    @test rows("G = T") == A[G]
+    @test rows("G = F") == A[.!G]
+    @test rows("G != T") == A[.!G]
+    @test rows("G = T AND A > 3") == filter(>(3), A[G])
+    @test rows("A > 2 AND T") == filter(>(2), A)
+    @test rows("A > 2 OR F") == filter(>(2), A)
+    @test rows("S + 'x' = 'abcx'") == [5]
+    @test rows("S + S = 'abcabc'") == [5]
+    @test rows("'a' + S = 'aabc'") == [5]
+    @test rows("A > 0x3") == filter(>(3), A)
+    @test rows("A = 0x5") == [5]
+    @test rows("A = 0XFF - 250") == [5]
+    @test rows("A + 1 = 6") == [5]                        # numeric + unchanged
+    # a column named T / F still wins
+    d2 = joinpath(mktempdir(), "u")
+    write_table(d2, "U", Pair{String,Any}["A" => Int32[1, 2], "F" => [true, false]]; nrow=2)
+    @test collect(column(query(readtable(d2), "F"), "A")[:]) == [1]
+
+    if _HAVE_TAQL
+        for w in ("G = T", "G = F", "G = T AND A > 3", "A > 2 AND T", "S + 'x' = 'abcx'",
+                  "'a' + S = 'aabc'", "A > 0x3", "A = 0x5")
+            ref = Int.(collect(_taqlcmd("SELECT FROM \$1 WHERE " * w, dir)[:A][:]))
+            @test rows(w) == ref
+        end
+    end
 end
