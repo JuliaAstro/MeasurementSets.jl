@@ -134,6 +134,16 @@ end
     b = measconvert(measconvert(d, GALACTIC), J2000)
     @test b.lon ≈ d.lon atol=1e-10
     @test b.lat ≈ d.lat atol=1e-10
+    # SUPERGAL (Phase 254): a fixed rotation of GALACTIC; its north pole is at
+    # galactic (l, b) = (47.37°, 6.32°) and its origin at (137.37°, 0°)
+    s = measconvert(d, SUPERGAL); g = measconvert(d, GALACTIC)
+    @test measconvert(s, J2000).lon ≈ d.lon atol=1e-10
+    @test measconvert(s, J2000).lat ≈ d.lat atol=1e-10
+    @test measconvert(measconvert(MDirection{SUPERGAL}(0.0, pi/2), GALACTIC), GALACTIC).lon ≈ deg2rad(47.37) atol=1e-4
+    @test measconvert(MDirection{SUPERGAL}(0.0, pi/2), GALACTIC).lat ≈ deg2rad(6.32) atol=1e-3
+    @test measconvert(MDirection{SUPERGAL}(0.0, 0.0), GALACTIC).lon ≈ deg2rad(137.37) atol=1e-3
+    @test abs(measconvert(MDirection{SUPERGAL}(0.0, 0.0), GALACTIC).lat) < 1e-3
+    @test MSv2._frame_type(:direction, "SUPERGAL") === SUPERGAL
     # B1950 (FK4 e-terms) / ECLIPTIC round-trip to sub-arcsecond
     for R in (B1950, ECLIPTIC)
         b = measconvert(measconvert(d, R), J2000)
@@ -815,7 +825,7 @@ if _HAVE_MEAS_CASA
         # package (`_frame_type` fell back to `OtherRef{:AZELSW}`).
         d = MDirection{J2000}(ref.src_ra, ref.src_dec)
         as = MSv2.ARCSEC
-        for (frame, T) in (("B1950", B1950), ("GALACTIC", GALACTIC),
+        for (frame, T) in (("B1950", B1950), ("GALACTIC", GALACTIC), ("SUPERGAL", SUPERGAL),
                            ("APP", APP), ("AZEL", AZEL), ("AZELGEO", AZELGEO),
                            ("AZELSW", AZELSW), ("AZELSWGEO", AZELSWGEO),
                            ("HADEC", HADEC))

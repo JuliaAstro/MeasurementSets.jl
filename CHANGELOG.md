@@ -9219,5 +9219,16 @@ The last open TaQL function items, live-probed against real TaQL (40 + 26 +
 - **`rowid()`** — the 0-based row id, `rownumber() - 1` over the queried table
   (a `WHERE` / `ORDER BY` keeps the original row, a sub-select renumbers).
 
-Still not implemented: the `SUPERGAL` direction frame. Two new testsets
+Two new testsets
 (139 assertions) with real-TaQL cross-checks.
+
+### Phase 254 — `SUPERGAL` direction frame
+
+`SUPERGAL` (supergalactic coordinates) joins the direction frames, closing the
+last open item from the TaQL/measures sweep. It is casacore's fixed rotation off
+`GALACTIC` (`MeasTable::galToSupergal` = `Rz(-90°)·Ry(-83.68°)·Rz(-47.37°)`), so
+`measconvert` reaches it from every other direction frame (and `meas.*` /
+`MEASINFO` accept it). Sanity: the supergalactic pole is galactic
+(l, b) = (47.37°, 6.32°) and its origin (137.37°, 0°); cross-checked against the
+CASA `measures` oracle alongside the other frames.
+

@@ -18,7 +18,7 @@ using StaticArrays: SVector, SMatrix
 using MeasurementSets: MEpoch, MDirection, MPosition, MFrequency, MRadialVelocity,
     MBaseline, MuvW, MEarthMagnetic, IGRF,
     RefFrame, MeasFrame, reftype,
-    UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, ECLIPTIC,
+    UTC, TAI, TT, TDB, UT1, J2000, ICRS, B1950, APP, GALACTIC, SUPERGAL, ECLIPTIC,
     HADEC, AZEL, AZELGEO, AZELSW, AZELSWGEO, ITRF, WGS84, TOPO, REST, LSRK, LSRD, BARY, GEO, GALACTO,
     LGROUP, CMB,
     MERCURY, VENUS, MARS, JUPITER, SATURN, URANUS, NEPTUNE, SUN, MOON,
@@ -322,7 +322,21 @@ end
 # (z unchanged) -- azimuth += π, elevation unchanged; its own inverse.
 _azelsw_flip(lon::Real) = mod2pi(lon + pi)
 
+# casacore `MeasTable::galToSupergal` = RotMatrix(Euler(-90°,3, -83.68°,2, -47.37°,3))
+# = Rz(-90°)·Ry(-83.68°)·Rz(-47.37°); GAL->SUPERGAL is `R·v`, the inverse `Rᵀ·v`.
+const _GAL_TO_SUPERGAL = let
+    rz(a) = SMatrix{3,3,Float64}(cos(a), sin(a), 0.0, -sin(a), cos(a), 0.0, 0.0, 0.0, 1.0)
+    ry(a) = SMatrix{3,3,Float64}(cos(a), 0.0, -sin(a), 0.0, 1.0, 0.0, sin(a), 0.0, cos(a))
+    rz(deg2rad(-90.0)) * ry(deg2rad(-83.68)) * rz(deg2rad(-47.37))
+end
+function _gal_sg(lon, lat, inverse::Bool)
+    v = SVector(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
+    w = inverse ? _GAL_TO_SUPERGAL' * v : _GAL_TO_SUPERGAL * v
+    return (mod2pi(atan(w[2], w[1])), asin(clamp(w[3], -1.0, 1.0)))
+end
+
 function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
+    A === SUPERGAL && return _dir_to_icrs(MDirection{GALACTIC}(_gal_sg(m.lon, m.lat, true)...), frame)
     _is_icrsish(A) && return (m.lon, m.lat)
     _is_body(A) && return _body_dir_icrs(A, frame, false)
     A === AZELSW && return _dir_to_icrs(MDirection{AZEL}(_azelsw_flip(m.lon), m.lat), frame)
@@ -381,6 +395,8 @@ function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) w
         return MDirection{B}(r.ra, r.dec)
     elseif B === GALACTIC
         r = SOFA.icrs2g(lon, lat);       return MDirection{B}(r.lon, r.lat)
+    elseif B === SUPERGAL
+        r = SOFA.icrs2g(lon, lat);       return MDirection{B}(_gal_sg(r.lon, r.lat, false)...)
     elseif B === ECLIPTIC
         r = SOFA.eqec06(SOFA.JD2000, 0.0, lon, lat);  return MDirection{B}(r.lon, r.lat)
     elseif B === APP

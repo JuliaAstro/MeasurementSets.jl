@@ -27,7 +27,7 @@ subtypes, used as the type parameter of a measure value
 | group | frames |
 |---|---|
 | epoch (time scale) | `UTC` `TAI` `TT` `TDB` `UT1` |
-| direction | `J2000` `ICRS` `B1950` `APP` `GALACTIC` `ECLIPTIC` `HADEC` `AZEL` `AZELGEO` `AZELSW` `AZELSWGEO` |
+| direction | `J2000` `ICRS` `B1950` `APP` `GALACTIC` `SUPERGAL` `ECLIPTIC` `HADEC` `AZEL` `AZELGEO` `AZELSW` `AZELSWGEO` |
 | earth-fixed | `ITRF` `WGS84` `TOPO` |
 | frequency / radial velocity | `REST` `LSRK` `LSRD` `BARY` `GEO` `GALACTO` |
 
@@ -47,6 +47,7 @@ for (T, doc) in [
         (:B1950,    "FK4 B1950.0 (direction)."),
         (:APP,      "Geocentric apparent place, equinox of date (direction)."),
         (:GALACTIC, "Galactic coordinates (direction)."),
+        (:SUPERGAL, "Supergalactic coordinates (direction; a fixed rotation of `GALACTIC`)."),
         (:ECLIPTIC, "J2000 ecliptic coordinates (direction)."),
         (:HADEC,    "Topocentric hour angle / declination (direction)."),
         (:AZEL,     "Azimuth / elevation about the geocentric vertical, N=0 E=90 (direction)."),
