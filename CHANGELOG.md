@@ -9032,3 +9032,19 @@ suggests): `LIMIT 0` = no limit; `LIMIT -k` = all but the last k rows
 order. New helper `_select_rows` (row-subset of a `RefTable` /
 `GroupedTable` result). New testset (23 assertions, incl. a real-TaQL
 cross-check of eight forms).
+
+### Phase 243 — `IN [lo:hi[:step]]` range elements
+
+Swept a 57-form batch of WHERE expressions (comparisons, strings,
+`LIKE`/regex, booleans, arithmetic, functions, `IN`/`NOT IN`) against real
+TaQL. Everything agreed except TaQL's **range elements in an `IN` list**
+(`A IN [1:5]`, `[1:5:2]`, `[2:]`, mixed `[1,3:5,9]`), which errored
+("expected ']'") — listed as a non-goal since Phase 43. Live probing showed
+the real semantics differ from an interval: `lo:hi[:step]` is a *discrete
+lattice* `lo, lo+step, …` up to `hi` (default step 1; `[lo:]` unbounded
+above), matched by equality — `B IN [1:2.5]` over Double 0, .5, …, 4.5
+matches only 1 and 2, not 1.5 or 2.5. Descending, zero- and negative-step
+ranges are errors (as in real TaQL); `[:hi]` stays unsupported (real TaQL
+rejects it too). New `TQLRangeSet` element + `_tql_in`, used by both the
+row (`_tqleval`) and group (`_geval`) evaluators. New testset with a
+real-TaQL cross-check of nine forms.

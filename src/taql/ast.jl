@@ -93,8 +93,27 @@ struct TQLNot <: TQLExpr
 end
 struct TQLIn <: TQLExpr
     lhs::TQLExpr
-    vals::Vector{Any}
+    vals::Vector{Any}      # literals and/or `TQLRangeSet`s
 end
+# `lo:hi[:step]` element of an `IN [...]` list (Phase 243). Live-verified
+# against real TaQL: a DISCRETE lattice `lo, lo+step, ...` up to `hi`
+# (default step 1; `hi` absent = unbounded above), matched by equality --
+# NOT a continuous interval (`B IN [1:2.5]` on Double values 1, 1.5, 2, 2.5
+# matches only 1 and 2).
+struct TQLRangeSet
+    lo::Real
+    hi::Union{Nothing,Real}
+    step::Real
+end
+function _tql_in_range(x, r::TQLRangeSet)
+    x isa Real || return false
+    x >= r.lo && (r.hi === nothing || x <= r.hi) || return false
+    k = (x - r.lo) / r.step
+    return abs(k - round(k)) <= 1e-9 * max(1.0, abs(k))
+end
+_tql_in(x, vals) = any(v -> v isa TQLRangeSet, vals) ?
+    (ismissing(x) ? missing : any(v -> v isa TQLRangeSet ? _tql_in_range(x, v) : x == v, vals)) :
+    x in vals
 struct TQLArith{F} <: TQLExpr      # op ∈ {+, -, *, /, rem (%), div (//), ^ (**)}
     op::F
     lhs::TQLExpr
@@ -265,7 +284,7 @@ _tqleval(e::TQLCmp, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e
 _tqleval(e::TQLAnd, cols, i) = _tql_and(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLOr, cols, i) = _tql_or(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLNot, cols, i) = _bcast(!, _tqleval(e.a, cols, i))
-_tqleval(e::TQLIn, cols, i) = _tqleval(e.lhs, cols, i) in e.vals
+_tqleval(e::TQLIn, cols, i) = _tql_in(_tqleval(e.lhs, cols, i), e.vals)
 _tqleval(e::TQLArith, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLNeg, cols, i) = _bcast(-, _tqleval(e.a, cols, i))
 _tqleval(e::TQLBitNot, cols, i) = _bcast((~), _tqleval(e.a, cols, i))

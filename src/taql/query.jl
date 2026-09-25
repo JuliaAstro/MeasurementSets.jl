@@ -248,7 +248,7 @@ Row-filter `t` with a small TaQL-like WHERE expression:
 * arithmetic `+ - * / % // **` and unary `-` on numeric operands
   (`A + 1 > B`, `ANTENNA1 % 4 == 0`, `2 ** N`) — Julia numeric
   semantics (`/` yields a float, `//` truncates, `%` is `rem`);
-* `col IN [v1, v2, ...]` / `col NOT IN [...]`;
+* `col IN [v1, v2, lo:hi, lo:hi:step, lo:, ...]` / `col NOT IN [...]` (a range is a discrete lattice, default step 1; `lo:` is unbounded above);
 * `col LIKE 'pat'` / `ILIKE` (case-insensitive) / `NOT LIKE` — SQL glob
   (`%` = any run, `_` = one char); and TaQL's `col ~ p/glob/`,
   `~ m/regex/`, `~ f/regex/` (and `!~`), delimiters `/ % @`, optional

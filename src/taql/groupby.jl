@@ -66,7 +66,7 @@ _geval(e::TQLMaskOf, cols, g) = (v = _geval(e.e, cols, g);
 _geval(e::TQLAnd, cols, g) = _tql_and(_geval(e.a, cols, g), _geval(e.b, cols, g))
 _geval(e::TQLOr, cols, g) = _tql_or(_geval(e.a, cols, g), _geval(e.b, cols, g))
 _geval(e::TQLNot, cols, g) = _bcast(!, _geval(e.a, cols, g))
-_geval(e::TQLIn, cols, g) = _geval(e.lhs, cols, g) in e.vals
+_geval(e::TQLIn, cols, g) = _tql_in(_geval(e.lhs, cols, g), e.vals)
 _geval(e::TQLMatch, cols, g) =
     xor(occursin(e.regex, _geval(e.lhs, cols, g)::AbstractString), e.negate)
 _geval(e::TQLFunc, cols, g) =

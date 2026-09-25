@@ -347,12 +347,34 @@ function _parse_comparison!(p::TQLParser)
     end
 end
 
+# one `IN [...]` element: a literal, or `lo:hi[:step]` / `lo:` (Phase 243)
+function _parse_in_element!(p::TQLParser)
+    lo = _parse_literal_value!(p)
+    _peek(p).kind === :colon || return lo
+    lo isa Real || throw(ArgumentError("TaQL-lite: a range in IN [...] needs numeric bounds in \"$(p.src)\""))
+    _advance!(p)
+    hi = nothing
+    if !(_peek(p).kind in (:comma, :rbracket, :colon))
+        hi = _parse_literal_value!(p)
+        hi isa Real || throw(ArgumentError("TaQL-lite: a range in IN [...] needs numeric bounds in \"$(p.src)\""))
+        hi >= lo || throw(ArgumentError("TaQL-lite: empty range $lo:$hi in IN [...] in \"$(p.src)\""))
+    end
+    step = 1
+    if _peek(p).kind === :colon
+        _advance!(p)
+        step = _parse_literal_value!(p)
+        (step isa Real && step > 0) || throw(ArgumentError(
+            "TaQL-lite: the step of a range in IN [...] must be a positive number in \"$(p.src)\""))
+    end
+    return TQLRangeSet(lo, hi, step)
+end
+
 function _parse_in_list!(p::TQLParser, lhs::TQLExpr, negate::Bool)
     _expect_kind!(p, :lbracket, "'['")
-    vals = Any[_parse_literal_value!(p)]
+    vals = Any[_parse_in_element!(p)]
     while _peek(p).kind === :comma
         _advance!(p)
-        push!(vals, _parse_literal_value!(p))
+        push!(vals, _parse_in_element!(p))
     end
     _expect_kind!(p, :rbracket, "']'")
     e = TQLIn(lhs, vals)
