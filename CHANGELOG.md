@@ -9060,3 +9060,19 @@ divergences: a column literally named `T`/`F` wins over the literal
 (real TaQL lets the literal win); real TaQL *rejects* a bare `WHERE F`,
 `FALSE` and `5.`, which stay permissive here; the `5L` integer suffix is
 not supported. New testset (real-TaQL cross-check of eight forms).
+
+### Phase 245 — floor `%`/`//`, `substr`/`replace`/`bool`/`string`, UTC `mjd()`
+
+Batch-probed 83 numeric/string function and operator expressions
+value-by-value against real TaQL (then a 67-form detail pass). Fixed:
+`%` is floor-mod (sign of the divisor, `x % 0 == x`) and `//` is *floor*
+division with a Double result (`-5 // 2 == -3.0`, `x // 0 == Inf`) — both
+were truncating (Phase 24 had assumed `DIVIDETRUNC`); new `substr` /
+`substring` (0-based, negative start counts from the end, clamped),
+`replace` (literal replace-all, not regex), `bool` / `boolean`, `string` /
+`str` (C `%g` floats incl. `inf`, plain integers, fixed-width `"True "` /
+`"False"`, optional printf format second argument); the no-argument
+`mjd()` / `datetime()` / `date()` / `time()` used local time instead of
+UTC (off by the UTC offset, 4 h here). `Printf` (stdlib) added as a
+dependency. `rowid()` remains unsupported. New testset with a real-TaQL
+cross-check of sixteen forms.

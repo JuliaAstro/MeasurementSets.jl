@@ -1,3 +1,4 @@
+import Printf
 # ======================================================================
 # functions -- NAME(args...).  A curated "lite" subset of TaQL's library
 # (scalar math, complex parts, array-cell reductions, string ops, date/
@@ -283,7 +284,7 @@ end
 
 function _tql_parse_datetime(s::AbstractString)
     ss = strip(String(s))
-    isempty(ss) && return _tql_mjd_of(Dates.now())
+    isempty(ss) && return _tql_mjd_of(Dates.now(Dates.UTC))
     # Tried FIRST, ahead of the `_TQL_DT_FORMATS` list below: a plain
     # `Dates.DateFormat("yyyy-mm-dd")` will happily match a short
     # numeric field it shouldn't (e.g. it reads "12-02-20" as year=12,
@@ -304,9 +305,9 @@ function _tql_parse_datetime(s::AbstractString)
         "(`2020-02-12`, `2020-02-12T03:04:05`) or `dd-mm-yyyy`"))
 end
 
-_tql_datetime(a...) = isempty(a) ? _tql_mjd_of(Dates.now()) :
+_tql_datetime(a...) = isempty(a) ? _tql_mjd_of(Dates.now(Dates.UTC)) :
     a[1] isa AbstractString ? _tql_parse_datetime(a[1]) : float(a[1])
-_tql_now_mjd() = _tql_mjd_of(Dates.now())
+_tql_now_mjd() = _tql_mjd_of(Dates.now(Dates.UTC))
 
 _pad2(n) = lpad(n, 2, '0')
 # radians -> `HHhMMmSS.sss` (of time) / `+DDDdMMmSS.sss` (of arc) --
@@ -777,6 +778,33 @@ _tql_iif(cond, a, b) = cond === missing ? missing : ifelse(cond, a, b)
 
 # name => (callable-over-arg-values, allowed arg count).  `min`/`max` and
 # `angdist` are arity-overloaded and handled in `_make_func`, not here.
+
+# ---- Phase 245: arithmetic / string functions found by batch-probing real TaQL ----
+# `string`/`str`: C `%g` for floats (`inf`), plain integers, `"True "`/`"False"`
+# (fixed width 5) for bools; an optional C printf format as the 2nd argument.
+function _tql_str(x, fmt::AbstractString...)
+    isempty(fmt) || return Printf.format(Printf.Format(String(fmt[1])), x)
+    x isa Bool && return x ? "True " : "False"
+    x isa Integer && return string(x)
+    if x isa AbstractFloat
+        isnan(x) && return "nan"
+        isinf(x) && return x > 0 ? "inf" : "-inf"
+        return Printf.format(Printf.Format("%g"), x)
+    end
+    return string(x)
+end
+# `substr(s, start[, len])`: 0-based start, negative start counts from the end
+# (clamped at 0), negative/zero len gives "", no len = rest of the string.
+function _tql_substr(s::AbstractString, start::Real, len::Real=typemax(Int))
+    n = length(s); st = Int(start); st < 0 && (st = max(0, st + n))
+    (len <= 0 || st >= n) && return ""
+    return String(SubString(s, nextind(s, 0, st + 1), nextind(s, 0, min(n, st + Int(min(len, n))))))
+end
+# `replace(s, pat, rep)`: literal (not regex) replace-all; empty pattern = no-op.
+_tql_replace(s::AbstractString, pat::AbstractString, rep::AbstractString) =
+    isempty(pat) ? String(s) : replace(String(s), pat => rep)
+_tql_bool(x) = x isa AbstractArray ? x .!= 0 : x != 0
+
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- unary elementwise numeric ---
     "abs" => (_ew(abs), 1:1), "amplitude" => (_ew(abs), 1:1), "ampl" => (_ew(abs), 1:1),
@@ -881,6 +909,10 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "downcase" => (lowercase, 1:1), "lower" => (lowercase, 1:1), "tolower" => (lowercase, 1:1),
     "to_lower" => (lowercase, 1:1),
     "capitalize" => (_tql_capitalize, 1:1),
+    "string" => (_tql_str, 1:2), "str" => (_tql_str, 1:2),
+    "substr" => (_tql_substr, 2:3), "substring" => (_tql_substr, 2:3),
+    "replace" => (_tql_replace, 3:3),
+    "bool" => (_tql_bool, 1:1), "boolean" => (_tql_bool, 1:1),
     "reversestring" => (reverse, 1:1), "sreverse" => (reverse, 1:1),
     "trim" => (_tql_trim, 1:1), "ltrim" => (_tql_ltrim, 1:1), "rtrim" => (_tql_rtrim, 1:1),
     # --- misc ---

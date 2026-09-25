@@ -302,15 +302,21 @@ const _TQL_CMPOPS = Dict{String,Function}(
     "<" => (<), "<=" => (<=), ">" => (>), ">=" => (>=),
     "~=" => _tql_near, "!~=" => _tql_nnear)
 
-# `/` is Julia's `/` (always Float); `%` -> `rem`; `//` -> `div`
+# `/` is Julia's `/` (always Float); `%` -> floor-mod, `//` -> floor division (Phase 245, live-verified)
 # (truncating, matching TaQL DIVIDETRUNC); `**` is handled separately in
 # `_parse_power!` (-> `_tql_pow`, not this dict -- casacore's `**` and
 # `pow()` are the same runtime `powFUNC`/std::pow, Phase 184).
 # `+` is string concatenation on two strings (real TaQL; Phase 244), else numeric `+`
+# `%`: result takes the sign of the divisor (floor-mod); `x % 0 == x`.
+_tql_mod(a::Real, b::Real) = b == 0 ? a : mod(a, b)
+_tql_mod(a, b) = rem(a, b)
+# `//`: FLOOR division with a Double result (`-5 // 2 == -3.0`, `A // 0 == Inf`).
+_tql_floordiv(a::Real, b::Real) = floor(a / b)
+_tql_floordiv(a, b) = div(a, b)
 _tql_add(a, b) = a + b
 _tql_add(a::AbstractString, b::AbstractString) = string(a, b)
 const _TQL_ARITHOPS = Dict{String,Function}(
-    "+" => _tql_add, "-" => (-), "*" => (*), "/" => (/), "%" => rem, "//" => div)
+    "+" => _tql_add, "-" => (-), "*" => (*), "/" => (/), "%" => _tql_mod, "//" => _tql_floordiv)
 
 # operator tokens this subset deliberately rejects, with a clear message
 const _TQL_REJECTED_OPS = Dict{String,String}()

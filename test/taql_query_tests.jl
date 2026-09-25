@@ -364,8 +364,8 @@ end
 
     # / vs // vs %
     @test parse("A / B == 1").lhs.op === (/)
-    @test parse("A // B == 1").lhs.op === div
-    @test parse("A % B == 1").lhs.op === rem
+    @test parse("A // B == 1").lhs.op === MSv2._tql_floordiv
+    @test parse("A % B == 1").lhs.op === MSv2._tql_mod
 
     # LIKE / ILIKE / NOT LIKE build a TQLMatch
     m1 = parse("N LIKE 'CAS%'")
@@ -4014,6 +4014,68 @@ end
                   "'a' + S = 'aabc'", "A > 0x3", "A = 0x5")
             ref = Int.(collect(_taqlcmd("SELECT FROM \$1 WHERE " * w, dir)[:A][:]))
             @test rows(w) == ref
+        end
+    end
+end
+
+# Phase 245: an 83-form batch of numeric / string function and operator
+# expressions compared value-by-value against real TaQL. Fixed: `%` is
+# floor-mod (sign of the divisor; `x % 0 == x`), `//` is FLOOR division
+# with a Double result (`-5 // 2 == -3.0`, `x // 0 == Inf`) -- both were
+# truncating; added `substr`/`substring` (0-based, negative start from the
+# end), `replace` (literal replace-all), `bool`/`boolean`, `string`/`str`
+# (C `%g` floats, `"True "`/`"False"` bools, optional printf format);
+# `mjd()`/`datetime()`/`date()`/`time()` no-arg forms now use UTC (were
+# local time, off by the UTC offset). `rowid()` stays unsupported.
+@testset "TaQL-lite — floor %, //, substr/replace/bool/string (Phase 245)" begin
+    dir = joinpath(mktempdir(), "t")
+    A = Int32[5, 3, 9, 1, 7, 3, 0, -4]
+    B = [1.5, 2.5, 0.5, 4.5, 3.5, 2.0, 0.25, -1.5]
+    S = ["abc", "Abd", "xyz", "", "ABC", "a b", "  pad ", "q1"]
+    write_table(dir, "T", ["A" => A, "B" => B, "S" => S]; nrow=8)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["V" => e]), "V")[:])
+
+    @test ev("-A % 3") == mod.(-A, 3)                 # sign of the divisor
+    @test ev("A % -3") == mod.(A, -3)
+    @test ev("A % 0") == A                             # x % 0 == x
+    @test ev("-B % 2") == mod.(-B, 2)
+    @test ev("-A // 2") == floor.(-A ./ 2)
+    @test ev("A // -2") == floor.(A ./ -2)
+    @test ev("B // 0.5") == floor.(B ./ 0.5)
+    @test all(isinf, ev("A // 0")[[1, 2, 3, 4, 5, 6, 8]]) && isnan(ev("A // 0")[7])
+
+    @test ev("substr(S, 0, 2)") == ["ab", "Ab", "xy", "", "AB", "a ", "  ", "q1"]
+    @test ev("substr(S, 1)") == ["bc", "bd", "yz", "", "BC", " b", " pad ", "1"]
+    @test ev("substring(S, 1, 2)") == ["bc", "bd", "yz", "", "BC", " b", " p", "1"]
+    @test ev("substr(S, -1, 2)") == ["c", "d", "z", "", "C", "b", " ", "1"]
+    @test ev("substr(S, -10, 2)") == ["ab", "Ab", "xy", "", "AB", "a ", "  ", "q1"]
+    @test ev("substr(S, 10)") == fill("", 8)
+    @test ev("substr(S, 1, -1)") == fill("", 8)
+    @test ev("replace(S, 'b', 'X')") == ["aXc", "AXd", "xyz", "", "ABC", "a X", "  pad ", "q1"]
+    @test ev("replace(S + S, 'ab', '')")[1] == "cc"
+    @test ev("replace(S, 'b+', 'X')") == S               # literal, not regex
+    @test ev("replace(S, '', 'X')") == S
+    @test ev("bool(A)") == (A .!= 0)
+    @test ev("boolean(B)") == fill(true, 8)
+    @test ev("string(A)") == string.(A)
+    @test ev("str(B)") == ["1.5", "2.5", "0.5", "4.5", "3.5", "2", "0.25", "-1.5"]
+    @test ev("string(B / 3)")[2] == "0.833333"           # %g: 6 significant digits
+    @test ev("string(B * 1e10)")[1] == "1.5e+10"
+    @test ev("string(B / 0)")[[1, 8]] == ["inf", "-inf"]
+    @test ev("str(A > 2)")[[1, 4]] == ["True ", "False"]  # fixed width 5
+    @test ev("string(B, '%.2f')")[6] == "2.00"
+    @test ev("string(A, '%03d')") == ["005", "003", "009", "001", "007", "003", "000", "-04"]
+    @test ev("string(S, '%5s')")[1] == "  abc"
+    @test abs(ev("mjd()")[1] - (MSv2.Dates.datetime2julian(MSv2.Dates.now(MSv2.Dates.UTC)) - 2400000.5)) < 1e-3
+
+    if _HAVE_TAQL
+        real_(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])
+        for e in ("-A % 3", "A % -3", "-B % 2", "-A // 2", "B // 0.5", "substr(S,-1,2)", "substr(S,0,2)",
+                  "replace(S+S,'ab','')", "bool(B)", "string(A)", "str(B)", "string(B/3)",
+                  "string(B*1e10)", "str(A > 2)", "string(B,'%.2f')", "string(A,'%03d')")
+            r = real_(e); m = ev(e)
+            @test length(r) == length(m) && all(i -> (r[i] isa Number ? isapprox(r[i], m[i]) : r[i] == m[i]), eachindex(r))
         end
     end
 end
