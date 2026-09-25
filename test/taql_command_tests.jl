@@ -907,3 +907,37 @@ end
         end
     end
 end
+
+# Phase 255: SELECT `LIMIT n OFFSET m`, `OFFSET m [LIMIT n]` and the 0-based
+# half-open range `LIMIT a:b[:s]` (each part optional), live-probed vs real TaQL
+# (48 forms, all match): n == 0 no limit, n < 0 = `nr + n` rows from the start
+# row, negative offset / range bounds count from the end, b == 0 = end, an offset
+# or start beyond the end / an empty range / step <= 0 error, a range cannot be
+# combined with OFFSET; applies after ORDER BY.
+@testset "taql() SELECT LIMIT/OFFSET/range (Phase 255)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["K" => Int32.(1:10)]; nrow=10)
+    t = readtable(dir)
+    ks(q) = Int.(collect(column(taql(t, "SELECT K " * q), "K")[:]))
+    @test ks("LIMIT 3 OFFSET 2") == [3, 4, 5] && ks("OFFSET 2 LIMIT 3") == [3, 4, 5]
+    @test ks("LIMIT 2:5") == [3, 4, 5] && ks("LIMIT 2:8:2") == [3, 5, 7] && ks("LIMIT 1:10:3") == [2, 5, 8]
+    @test ks("LIMIT :4") == 1:4 && ks("LIMIT 3:") == 4:10 && ks("LIMIT ::2") == [1, 3, 5, 7, 9] && ks("LIMIT 2::3") == [3, 6, 9]
+    @test ks("LIMIT 2:20") == 3:10 && ks("LIMIT 0:0") == 1:10 && ks("LIMIT -3:") == [8, 9, 10]
+    @test ks("LIMIT :-2") == 1:8 && ks("LIMIT 3:-1") == 4:9 && ks("LIMIT -5:-2") == [6, 7, 8]
+    @test ks("LIMIT 3 OFFSET -1") == [10] && ks("OFFSET -3") == [8, 9, 10] && ks("LIMIT 3 OFFSET -20") == [1, 2, 3]
+    @test ks("OFFSET 3") == 4:10 && ks("LIMIT 0 OFFSET 4") == 5:10 && ks("LIMIT 20 OFFSET 8") == [9, 10]
+    @test ks("LIMIT -3 OFFSET 2") == 3:9 && ks("LIMIT -1 OFFSET 2") == 3:10 && ks("LIMIT -2") == 1:8
+    @test ks("WHERE K>2 LIMIT 2 OFFSET 1") == [4, 5] && ks("WHERE K>3 LIMIT 1:3") == [5, 6]
+    @test ks("ORDER BY K DESC LIMIT 3 OFFSET 2") == [8, 7, 6] && ks("ORDER BY K DESC LIMIT 2:5") == [8, 7, 6]
+    for bad in ("LIMIT 3:3", "LIMIT 5:2", "LIMIT 20:30", "OFFSET 10", "OFFSET 20", "LIMIT 3 OFFSET 20", "LIMIT 2:8:0",
+                "LIMIT 2:8:-1", "LIMIT 1:2 OFFSET 1", "LIMIT 3 OFFSET 2 OFFSET 1", "LIMIT 2, 3")
+        @test_throws ArgumentError ks(bad)
+    end
+    if _HAVE_TAQL
+        for q in ("LIMIT 3 OFFSET 2", "LIMIT 2:5", "LIMIT 2:8:2", "LIMIT 1:10:3", "OFFSET 3", "LIMIT 3 OFFSET -1", "LIMIT :4", "LIMIT 3:",
+                  "LIMIT ::2", "LIMIT -3:", "LIMIT :-2", "LIMIT -5:-2", "LIMIT -3 OFFSET 2", "LIMIT 0 OFFSET 4", "WHERE K>3 LIMIT 1:3",
+                  "ORDER BY K DESC LIMIT 2:5", "OFFSET -3", "LIMIT 20 OFFSET 8", "LIMIT 2::3")
+            @test Int.(collect(_taqlcmd("SELECT K FROM \$1 " * q, dir)[:K][:])) == ks(q)
+        end
+    end
+end

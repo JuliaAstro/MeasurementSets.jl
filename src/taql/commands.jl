@@ -419,6 +419,61 @@ function _split_commas(s::AbstractString)
     return out
 end
 
+# ---- SELECT LIMIT / OFFSET (Phase 255; live-probed vs real TaQL) -------------
+# `LIMIT n [OFFSET m]`, `OFFSET m [LIMIT n]`, or the 0-based half-open range
+# `LIMIT a:b[:s]` (each part optional).  Over the `nr` result rows:
+#  * n > 0 = that many rows; n == 0 = no limit; n < 0 = `nr + n` rows (all but the
+#    last |n|, counted from the START row, then clipped);
+#  * m < 0 counts from the end (clipped at 0); m >= nr is an error;
+#  * a range: a/b default 0/end, a negative a/b counts from the end, b == 0 = end,
+#    b is clipped to nr, an empty range / a >= nr / step <= 0 are errors; a range
+#    cannot be combined with OFFSET.
+function _parse_select_window(tail::AbstractString)
+    limit = nothing; offset = nothing; range = nothing
+    rest = String(strip(tail))
+    while !isempty(rest)
+        m = match(r"^(LIMIT|OFFSET)\s+(-?\d*(?::-?\d*(?::\d*)?)?)(?:\s+(.*))?$"is, rest)
+        m === nothing && throw(ArgumentError("taql: malformed LIMIT/OFFSET clause \"$tail\""))
+        kw = uppercase(m.captures[1]); v = m.captures[2]
+        rest = m.captures[3] === nothing ? "" : String(strip(m.captures[3]))
+        if kw == "LIMIT"
+            (limit === nothing && range === nothing) || throw(ArgumentError("taql: duplicate LIMIT"))
+            if occursin(':', v)
+                ps = split(v, ':')
+                num(x) = isempty(x) ? nothing : parse(Int, x)
+                range = (num(ps[1]), num(ps[2]), length(ps) > 2 ? num(ps[3]) : nothing)
+            else
+                isempty(v) && throw(ArgumentError("taql: LIMIT needs a number"))
+                limit = parse(Int, v)
+            end
+        else
+            (offset === nothing && !occursin(':', v) && !isempty(v)) ||
+                throw(ArgumentError("taql: bad OFFSET \"$v\""))
+            offset = parse(Int, v)
+        end
+    end
+    (range !== nothing && offset !== nothing) &&
+        throw(ArgumentError("taql: LIMIT a:b cannot be combined with OFFSET"))
+    return (; limit, offset, range)
+end
+
+function _select_window(nr::Integer, w)
+    if w.range !== nothing
+        a, b, s = w.range
+        a = a === nothing ? 0 : (a < 0 ? nr + a : a)
+        b = (b === nothing || b == 0) ? nr : (b < 0 ? nr + b : min(b, nr))
+        s = s === nothing ? 1 : s
+        (s > 0 && 0 <= a < nr && a < b) ||
+            throw(ArgumentError("taql: invalid LIMIT range"))
+        return (a + 1):s:b
+    end
+    start = w.offset === nothing ? 0 : (w.offset < 0 ? max(0, nr + w.offset) : w.offset)
+    (w.offset === nothing || start < nr) || throw(ArgumentError("taql: OFFSET beyond the end"))
+    l = w.limit === nothing ? 0 : w.limit
+    cnt = l > 0 ? l : l == 0 ? nr : max(0, nr + l)
+    return (start + 1):min(start + cnt, nr)
+end
+
 # row subset (in the given order) of a `query`/`groupby` result, keeping its kind
 _select_rows(r::RefTable, keep) =
     RefTable(r.path, r.parent, r.rows[keep], r.namemap, r.order, r.type, r.subtype, r.readme)
@@ -488,11 +543,11 @@ function taql(target, command::AbstractString)
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
         # and `DISTINCT` all mis-parsed or errored).
         bm = match(r"^SELECT\s+(DISTINCT\s+)?(.*?)(?:\s+FROM\s+\S+)?(?:\s+WHERE\s+(.+?))?" *
-                   r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+(-?\d+))?\s*$"is, body)
+                   r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+((?:LIMIT|OFFSET)\s+.+?))?\s*$"is, body)
         bm === nothing && throw(ArgumentError("taql: malformed SELECT command"))
         distinct = bm.captures[1] !== nothing
         orderstr = bm.captures[4] === nothing ? nothing : String(strip(bm.captures[4]))
-        limit = bm.captures[5] === nothing ? nothing : parse(Int, bm.captures[5])
+        window = bm.captures[5] === nothing ? nothing : _parse_select_window(bm.captures[5])
         collist = String(strip(bm.captures[2]))
         wherestr = bm.captures[3] === nothing ? nothing : String(strip(bm.captures[3]))
         t = target isa AbstractTable ? target : readtable(_cmd_path(target))
@@ -525,19 +580,14 @@ function taql(target, command::AbstractString)
         qstr = (wherestr === nothing ? "TRUE" : wherestr) *
                (orderstr === nothing ? "" : " ORDER BY " * orderstr)
         result = query(t, qstr; select)
-        if distinct || limit !== nothing
+        if distinct || window !== nothing
             keep = collect(1:nrow(result))
             if distinct
                 cols = [column(result, n) for n in columnnames(result)]
                 seen = Set{Any}()
                 keep = [i for i in keep if (k = Tuple(c[i] for c in cols); k in seen ? false : (push!(seen, k); true))]
             end
-            if limit !== nothing
-                # real TaQL SELECT (live-verified): `LIMIT 0` = no limit; a negative
-                # `LIMIT -k` = all but the last k rows (first `nrow - k`).
-                limit > 0 && (keep = keep[1:min(limit, end)])
-                limit < 0 && (keep = keep[1:max(0, end + limit)])
-            end
+            window === nothing || (keep = keep[_select_window(length(keep), window)])
             result = _select_rows(result, keep)
         end
         dst === nothing && return result

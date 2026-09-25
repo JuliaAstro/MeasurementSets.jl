@@ -9232,3 +9232,13 @@ last open item from the TaQL/measures sweep. It is casacore's fixed rotation off
 (l, b) = (47.37°, 6.32°) and its origin (137.37°, 0°); cross-checked against the
 CASA `measures` oracle alongside the other frames.
 
+### Phase 255 — `taql()` SELECT `LIMIT … OFFSET`, `OFFSET`, and `LIMIT a:b:s` ranges
+
+`SELECT … LIMIT n OFFSET m`, `OFFSET m [LIMIT n]` and the 0-based half-open
+range `LIMIT a:b[:s]` (every part optional) — live-probed against real TaQL (48
+forms, all match). `n == 0` is no limit, `n < 0` gives `nrow + n` rows from the
+start row; a negative offset or range bound counts from the end; `b == 0` means
+the end and `b` is clipped; an offset / start past the end, an empty range,
+step ≤ 0, and a range combined with `OFFSET` are errors. Applied after
+`ORDER BY` / `DISTINCT`. New testset with a 19-form real-TaQL cross-check.
+
