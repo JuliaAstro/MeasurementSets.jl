@@ -9012,3 +9012,23 @@ now 0.23x of C++ (faster); values identical to `Casacore.jl`. New
 (string-bucket) values across three SSM buckets, plus a `_HAVE_CASACORE`
 cross-check (the real column is all-empty, so it can't exercise those
 paths itself).
+
+### Phase 242 — `taql()` SELECT: `ORDER BY` / `LIMIT` without a `WHERE`, `FROM`, `DISTINCT`
+
+Resumed the `src/taql/` sweep at `commands.jl`'s `taql()` string
+dispatcher. Its SELECT parser only understood `cols [WHERE c]`, so
+`SELECT A ORDER BY A` (no WHERE) swallowed `ORDER BY A` into the column
+list and errored ("computed SELECT column … needs an AS alias"), even
+though the docstring promises `ORDER BY`; `FROM t`, `LIMIT` and
+`DISTINCT` were unsupported (`… WHERE c LIMIT 2` errored inside the
+expression parser). Live-probed against real `tableCommand`.
+
+Now `SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
+[(INTO|GIVING) 'path']`, all cross-checked live. `LIMIT` semantics match
+real TaQL SELECT (verified, and *different* from what a naive reading
+suggests): `LIMIT 0` = no limit; `LIMIT -k` = all but the last k rows
+(first `nrow - k`, not the last k); applied after `ORDER BY` / `DISTINCT`.
+`DISTINCT` de-duplicates on the selected columns in first-occurrence
+order. New helper `_select_rows` (row-subset of a `RefTable` /
+`GroupedTable` result). New testset (23 assertions, incl. a real-TaQL
+cross-check of eight forms).

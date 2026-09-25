@@ -410,6 +410,12 @@ function _split_commas(s::AbstractString)
     return out
 end
 
+# row subset (in the given order) of a `query`/`groupby` result, keeping its kind
+_select_rows(r::RefTable, keep) =
+    RefTable(r.path, r.parent, r.rows[keep], r.namemap, r.order, r.type, r.subtype, r.readme)
+_select_rows(r::GroupedTable, keep) =
+    GroupedTable(getfield(r, :names), AbstractVector[getfield(r, :cols)[j][keep] for j in eachindex(getfield(r, :cols))])
+
 """
     taql(target, command::AbstractString)
 
@@ -420,7 +426,7 @@ open `Table`):
   → [`update!`](@ref), returns `Int`
 * `DELETE [FROM t] [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
   → [`delete!`](@ref), returns `Int`
-* `SELECT [*|col [AS a], …] [WHERE cond] (INTO|GIVING) 'path'`  → [`copytable`](@ref), returns the path
+* `SELECT [DISTINCT] [*|col [AS a], …] [FROM t] [WHERE cond] [ORDER BY k] [LIMIT n] [(INTO|GIVING) 'path']`  → [`copytable`](@ref), returns the path
 * `SELECT …` with no `INTO`/`GIVING`              → [`query`](@ref), returns the result
 * `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…) [LIMIT n]`  → [`insert!`](@ref), returns `Int`
 * `INSERT [LIMIT n] INTO t SET c1 = v1, c2 = v2`   → [`insert!`](@ref), returns `Int`
@@ -469,10 +475,17 @@ function taql(target, command::AbstractString)
         into = match(r"^(.*?)\s+(?:INTO|GIVING)\s+'([^']+)'\s*$"is, cmd)
         body = into === nothing ? cmd : String(strip(into.captures[1]))
         dst = into === nothing ? nothing : String(into.captures[2])
-        bm = match(r"^SELECT\s+(.*?)(?:\s+WHERE\s+(.+))?\s*$"is, body)
+        # Phase 242: SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
+        # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
+        # and `DISTINCT` all mis-parsed or errored).
+        bm = match(r"^SELECT\s+(DISTINCT\s+)?(.*?)(?:\s+FROM\s+\S+)?(?:\s+WHERE\s+(.+?))?" *
+                   r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+LIMIT\s+(-?\d+))?\s*$"is, body)
         bm === nothing && throw(ArgumentError("taql: malformed SELECT command"))
-        collist = String(strip(bm.captures[1]))
-        wherestr = bm.captures[2] === nothing ? nothing : String(strip(bm.captures[2]))
+        distinct = bm.captures[1] !== nothing
+        orderstr = bm.captures[4] === nothing ? nothing : String(strip(bm.captures[4]))
+        limit = bm.captures[5] === nothing ? nothing : parse(Int, bm.captures[5])
+        collist = String(strip(bm.captures[2]))
+        wherestr = bm.captures[3] === nothing ? nothing : String(strip(bm.captures[3]))
         t = target isa AbstractTable ? target : readtable(_cmd_path(target))
 
         if collist == "*" || isempty(collist)
@@ -500,8 +513,24 @@ function taql(target, command::AbstractString)
             end
         end
 
-        result = wherestr === nothing ?
-                 query(t, "TRUE"; select) : query(t, wherestr; select)
+        qstr = (wherestr === nothing ? "TRUE" : wherestr) *
+               (orderstr === nothing ? "" : " ORDER BY " * orderstr)
+        result = query(t, qstr; select)
+        if distinct || limit !== nothing
+            keep = collect(1:nrow(result))
+            if distinct
+                cols = [column(result, n) for n in columnnames(result)]
+                seen = Set{Any}()
+                keep = [i for i in keep if (k = Tuple(c[i] for c in cols); k in seen ? false : (push!(seen, k); true))]
+            end
+            if limit !== nothing
+                # real TaQL SELECT (live-verified): `LIMIT 0` = no limit; a negative
+                # `LIMIT -k` = all but the last k rows (first `nrow - k`).
+                limit > 0 && (keep = keep[1:min(limit, end)])
+                limit < 0 && (keep = keep[1:max(0, end + limit)])
+            end
+            result = _select_rows(result, keep)
+        end
         dst === nothing && return result
         return copytable(dst, result)
     elseif kw == "INSERT"

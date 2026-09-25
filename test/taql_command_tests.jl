@@ -789,3 +789,53 @@ if _HAVE_TAQL
         end
     end
 end
+
+# Phase 242: `taql()`'s SELECT parser only understood `cols [WHERE c]`: an
+# `ORDER BY` / `LIMIT` with no WHERE was swallowed into the column list
+# (error), and `FROM t` / `DISTINCT` / `LIMIT` were unsupported. Now
+# `SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]`, with
+# real-TaQL SELECT LIMIT semantics (live-verified): `LIMIT 0` = no limit,
+# `LIMIT -k` = all but the last k rows (first nrow-k), applied after
+# ORDER BY / DISTINCT.
+@testset "taql SELECT — ORDER BY / LIMIT / DISTINCT / FROM (Phase 242)" begin
+    dir = joinpath(mktempdir(), "t")
+    A = Int32[5, 3, 9, 1, 7, 3]
+    write_table(dir, "T", ["A" => A, "B" => [1.5, 2.5, 0.5, 4.5, 3.5, 2.0]]; nrow=6)
+    t = readtable(dir)
+    col(q) = collect(column(taql(t, q), "A")[:])
+
+    @test col("SELECT A ORDER BY A") == sort(A)
+    @test col("SELECT A ORDER BY A DESC") == sort(A; rev=true)
+    @test col("SELECT A WHERE A > 2 ORDER BY A") == sort(filter(>(2), A))
+    @test col("SELECT A LIMIT 3") == A[1:3]
+    @test col("SELECT A WHERE A > 2 LIMIT 2") == filter(>(2), A)[1:2]
+    @test col("SELECT A ORDER BY A LIMIT 3") == sort(A)[1:3]
+    @test col("SELECT A LIMIT -2") == A[1:4]
+    @test col("SELECT A ORDER BY A LIMIT -2") == sort(A)[1:4]
+    @test col("SELECT A LIMIT 0") == A
+    @test col("SELECT A LIMIT 99") == A
+    @test col("SELECT DISTINCT A") == unique(A)
+    @test col("SELECT DISTINCT A ORDER BY A DESC LIMIT 2") == sort(unique(A); rev=true)[1:2]
+    @test col("SELECT A FROM t WHERE A > 2") == filter(>(2), A)
+    @test length(column(taql(t, "SELECT DISTINCT A, B WHERE A = 3"), "A")) == 2   # (3,2.5),(3,2.0)
+
+    # INTO persists the limited result
+    out = joinpath(mktempdir(), "o")
+    taql(t, "SELECT A ORDER BY A LIMIT 2 INTO '$out'")
+    @test collect(column(readtable(out), "A")[:]) == sort(A)[1:2]
+
+    if _HAVE_TAQL
+        for (rq, mq) in [("SELECT A FROM \$1 ORDER BY A", "SELECT A ORDER BY A"),
+                         ("SELECT A FROM \$1 LIMIT 3", "SELECT A LIMIT 3"),
+                         ("SELECT A FROM \$1 LIMIT -2", "SELECT A LIMIT -2"),
+                         ("SELECT A FROM \$1 ORDER BY A LIMIT -2", "SELECT A ORDER BY A LIMIT -2"),
+                         ("SELECT A FROM \$1 LIMIT 0", "SELECT A LIMIT 0"),
+                         ("SELECT DISTINCT A FROM \$1", "SELECT DISTINCT A"),
+                         ("SELECT DISTINCT A FROM \$1 ORDER BY A DESC LIMIT 2",
+                          "SELECT DISTINCT A ORDER BY A DESC LIMIT 2"),
+                         ("SELECT A FROM \$1 WHERE A>2 LIMIT 2", "SELECT A WHERE A>2 LIMIT 2")]
+            ref = collect(_taqlcmd(rq, dir)[:A][:])
+            @test Float64.(col(mq)) == Float64.(ref)
+        end
+    end
+end
