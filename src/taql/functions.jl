@@ -805,6 +805,48 @@ _tql_replace(s::AbstractString, pat::AbstractString, rep::AbstractString) =
     isempty(pat) ? String(s) : replace(String(s), pat => rep)
 _tql_bool(x) = x isa AbstractArray ? x .!= 0 : x != 0
 
+# ---- Phase 250: axis-collapse array functions (`sums(arr, axes...)`, ...) ----
+# Real TaQL (live-probed): the "s"-suffixed reductions collapse the given
+# 1-BASED axes of an array cell and drop them from the shape (`sums(V,1)` on a
+# (3,4) cell -> a 4-vector of column sums). `axes` is a scalar, an array, or
+# several arguments; axes beyond the array's rank are ignored (no-op if none
+# remain); a full collapse gives a 1-element vector; axis 0 / negative /
+# duplicate / non-integer axes are errors. `variances`/`stddevs` are the
+# population forms (`sample*` for n-1); `medians`/`fractiles` never average.
+function _tql_axcollapse(f, x, axes...)
+    x isa AbstractArray || throw(ArgumentError(
+        "TaQL-lite: an axis-collapse function (`sums`, `means`, ...) needs an array cell"))
+    ax = Int[]
+    for a in axes
+        if a isa Integer
+            push!(ax, Int(a))
+        elseif a isa AbstractArray && all(v -> v isa Integer, a)
+            append!(ax, Int.(vec(a)))
+        else
+            throw(ArgumentError("TaQL-lite: the axes of an axis-collapse function must be integers"))
+        end
+    end
+    isempty(ax) && throw(ArgumentError("TaQL-lite: an axis-collapse function needs at least one axis"))
+    all(>=(1), ax) || throw(ArgumentError("TaQL-lite: axes are 1-based (got $(ax))"))
+    allunique(ax) || throw(ArgumentError("TaQL-lite: duplicate axes in $(ax)"))
+    nd = ndims(x)
+    ax = sort!(filter(<=(nd), ax))
+    isempty(ax) && return x
+    keep = [d for d in 1:nd if !(d in ax)]
+    isempty(keep) && return [f(vec(x))]
+    P = permutedims(x, vcat(keep, ax))
+    ksz = size(P)[1:length(keep)]
+    r = reshape(P, prod(ksz), :)
+    out = [f(@view r[i, :]) for i in 1:size(r, 1)]
+    return reshape(out, ksz...)
+end
+_tql_var0(v) = Statistics.var(v; corrected=false)
+_tql_std0(v) = Statistics.std(v; corrected=false)
+_tql_avdev1(v) = Statistics.mean(abs.(v .- Statistics.mean(v)))
+_tql_rms1(v) = sqrt(sum(abs2, v) / length(v))
+_tql_sumsqr1(v) = sum(y -> y^2, v)
+_tql_axfn(f) = (x, axes...) -> _tql_axcollapse(f, x, axes...)
+
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- unary elementwise numeric ---
     "abs" => (_ew(abs), 1:1), "amplitude" => (_ew(abs), 1:1), "ampl" => (_ew(abs), 1:1),
@@ -845,6 +887,17 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "fmod" => (_ew2(rem), 2:2),
     # --- array-cell reductions ---
     "sum" => (_red(sum), 1:1), "product" => (_red(prod), 1:1),
+    "sums" => (_tql_axfn(sum), 2:8), "products" => (_tql_axfn(prod), 2:8),
+    "means" => (_tql_axfn(Statistics.mean), 2:8), "avgs" => (_tql_axfn(Statistics.mean), 2:8),
+    "mins" => (_tql_axfn(minimum), 2:8), "maxs" => (_tql_axfn(maximum), 2:8),
+    "medians" => (_tql_axfn(_tql_median_lo), 2:8),
+    "variances" => (_tql_axfn(_tql_var0), 2:8), "stddevs" => (_tql_axfn(_tql_std0), 2:8),
+    "samplevariances" => (_tql_axfn(Statistics.var), 2:8), "samplestddevs" => (_tql_axfn(Statistics.std), 2:8),
+    "avdevs" => (_tql_axfn(_tql_avdev1), 2:8), "rmss" => (_tql_axfn(_tql_rms1), 2:8),
+    "sumsqrs" => (_tql_axfn(_tql_sumsqr1), 2:8), "sumsquares" => (_tql_axfn(_tql_sumsqr1), 2:8),
+    "anys" => (_tql_axfn(any), 2:8), "alls" => (_tql_axfn(all), 2:8),
+    "ntrues" => (_tql_axfn(v -> count(identity, v)), 2:8), "nfalses" => (_tql_axfn(v -> count(!, v)), 2:8),
+    "fractiles" => ((x, fr, axes...) -> _tql_axcollapse(v -> _tql_fractile(v, fr), x, axes...), 3:9),
     "sumsqr" => (_tql_sumsqr, 1:1), "sumsquare" => (_tql_sumsqr, 1:1),
     "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
     "median" => (_red(_tql_median), 1:1),

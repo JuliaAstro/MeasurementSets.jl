@@ -9140,3 +9140,19 @@ days and positions plain metres or an observatory name (real also takes
 `60454d` / `[x m, …]` quantities — real TaQL's `d`/`h` units have a
 time/angle duality we don't reproduce). Not supported: the `SUPERGAL`
 frame. New testset.
+
+### Phase 250 — axis-collapse array reductions (`sums`, `means`, `mins`, …)
+
+The "s"-suffixed reductions that collapse chosen axes of an array cell —
+flagged as an unimplemented family since Phase 186 — are now implemented:
+`sums` / `products` / `means` (`avgs`) / `mins` / `maxs` / `medians` /
+`variances` / `stddevs` / `samplevariances` / `samplestddevs` / `avdevs` /
+`rmss` / `sumsqrs` / `anys` / `alls` / `ntrues` / `nfalses` and
+`fractiles(arr, frac, axes…)`. Semantics probed live (62 forms, all match
+real TaQL): axes are **1-based**, given as a scalar, an array, or several
+arguments; the collapsed axes are dropped from the result shape (`sums(V, 1)`
+on a 3×4 cell → a 4-vector); axes beyond the array's rank are ignored; a full
+collapse returns a 1-element vector; axis 0 / negative / duplicate /
+non-integer axes are errors; `variances` / `stddevs` are population
+(`sample*` = n−1); `medians` / `fractiles` never average (lower-middle
+element, like `gmedian`). New testset with a 17-form real-TaQL cross-check.

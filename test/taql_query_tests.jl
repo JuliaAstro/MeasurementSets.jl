@@ -4187,3 +4187,61 @@ end
         end
     end
 end
+
+# Phase 250: the axis-collapse array reductions (`sums(arr, axes...)`, `means`,
+# `mins`, `maxs`, `medians`, `variances`, `stddevs`, `samplevariances`,
+# `samplestddevs`, `avdevs`, `rmss`, `sumsqrs`, `products`, `anys`, `alls`,
+# `ntrues`, `nfalses`, `fractiles(arr, frac, axes...)`) -- Phase 186's flagged
+# gap. Real TaQL (62-form probe, all matched): axes are 1-BASED (scalar, array
+# or several arguments); the collapsed axes are dropped from the shape; axes
+# beyond the array's rank are ignored; a full collapse is a 1-element vector;
+# axis 0 / negative / duplicate / non-integer axes are errors; `variances` /
+# `stddevs` are population (`sample*` = n-1); `medians` / `fractiles` never
+# average (lower-middle element).
+@testset "TaQL-lite — axis-collapse reductions sums/means/... (Phase 250)" begin
+    dir = joinpath(mktempdir(), "t")
+    V = [Float64.(reshape(1:12, 3, 4)) .* i .+ (i - 1) for i in 1:2]
+    W = [Float64.(reshape(1:24, 2, 3, 4)) .* i for i in 1:2]
+    write_table(dir, "T", Pair{String,Any}["V" => V, "W" => W]; nrow=2, tsm=[["V"], ["W"]])
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    v1 = V[1]
+
+    @test ev("sums(V, 1)")[1] == vec(sum(v1; dims=1)) && size(ev("sums(V, 1)")[1]) == (4,)
+    @test ev("sums(V, 2)")[1] == vec(sum(v1; dims=2))
+    @test ev("sums(V, [1])")[1] == ev("sums(V, 1)")[1]
+    @test ev("sums(V, [1,2])")[1] == [sum(v1)]                         # full collapse: 1-vector
+    @test ev("sums(V, 1, 2)")[1] == [sum(v1)]                          # several axis args
+    @test ev("sums(V, 3)")[1] == v1                                     # axis beyond rank: no-op
+    @test ev("sums(W, [2,3])")[1] == vec(sum(W[1]; dims=(2, 3))) && ev("sums(W, [3,2])")[1] == ev("sums(W, [2,3])")[1]
+    @test size(ev("sums(W, 1)")[1]) == (3, 4) && size(ev("sums(W, [1,2])")[1]) == (4,)
+    @test ev("means(V, 1)")[2] == vec(Statistics.mean(V[2]; dims=1)) == ev("avgs(V, 1)")[2]
+    @test ev("mins(V, 2)")[1] == vec(minimum(v1; dims=2)) && ev("maxs(V, 2)")[1] == vec(maximum(v1; dims=2))
+    @test ev("products(V, 1)")[1] == vec(prod(v1; dims=1))
+    @test ev("sumsqrs(V, 1)")[1] == vec(sum(abs2, v1; dims=1))
+    @test ev("variances(V, 1)")[1] ≈ vec(Statistics.var(v1; dims=1, corrected=false))
+    @test ev("samplevariances(V, 1)")[1] ≈ vec(Statistics.var(v1; dims=1))
+    @test ev("stddevs(V, 2)")[1] ≈ vec(Statistics.std(v1; dims=2, corrected=false))
+    @test ev("samplestddevs(V, 1)")[1] ≈ vec(Statistics.std(v1; dims=1))
+    @test ev("rmss(V, 1)")[1] ≈ vec(sqrt.(Statistics.mean(abs2, v1; dims=1)))
+    @test ev("avdevs(V, 1)")[1] ≈ fill(2 / 3, 4)
+    @test ev("medians(V, 2)")[1] == [4.0, 5.0, 6.0]                    # lower-middle, never averaged
+    @test ev("medians(V, [1,2])")[1] == [6.0] && ev("fractiles(V, 0.25, 2)")[1] == [1.0, 2.0, 3.0]
+    @test ev("anys(V > 5, 1)")[1] == [false, true, true, true] && ev("alls(V > 1, 1)")[1] == [false, true, true, true]
+    @test ev("ntrues(V > 5, 1)")[1] == [0, 1, 3, 3] && ev("nfalses(V > 5, 1)")[1] == [3, 2, 0, 0]
+    @test ev("sums(V, 1)[2]")[1] == 15.0 && ev("nelements(sums(V, 1))")[1] == 4    # composes
+    @test ev("sqrt(sums(V, 2))")[1] ≈ sqrt.(vec(sum(v1; dims=2)))
+    for bad in ("sums(V, 0)", "sums(V)", "sums(V, [1,1])", "sums(V, 1.0)", "sums(V, -1)", "sums(A, 1)")
+        @test_throws Exception ev(bad)
+    end
+
+    if _HAVE_TAQL
+        cref(e) = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:])
+        for e in ("sums(V,1)", "sums(V,2)", "sums(V,[1,2])", "sums(V,3)", "sums(W,[2,3])", "means(V,1)", "medians(V,2)",
+                  "medians(W,[1,2])", "variances(V,1)", "samplestddevs(V,1)", "avdevs(V,1)", "rmss(W,[1,3])",
+                  "products(V,1)", "anys(V>5,1)", "ntrues(W>10,[1,2])", "fractiles(V,0.25,2)", "maxs(W,[1,3])")
+            r = cref(e); m = ev(e)
+            @test length(r) == length(m) && all(i -> isapprox(collect(r[i]), collect(m[i])), eachindex(r))
+        end
+    end
+end
