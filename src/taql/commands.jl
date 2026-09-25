@@ -480,6 +480,97 @@ _select_rows(r::RefTable, keep) =
 _select_rows(r::GroupedTable, keep) =
     GroupedTable(getfield(r, :names), AbstractVector[getfield(r, :cols)[j][keep] for j in eachindex(getfield(r, :cols))])
 
+# ---- SELECT sub-queries + table aliases (Phase 257; live-probed vs real TaQL) ----
+# `FROM (SELECT ...)` runs the inner SELECT and queries its result; `x IN (SELECT
+# col ...)` / `NOT IN` become a literal list (an empty one: FALSE / TRUE);
+# `[NOT] EXISTS (SELECT ...)` becomes TRUE / FALSE (real TaQL errors on a POSITIVE
+# `EXISTS` / `IN` of an empty sub-query -- 0 rows here); `FROM t [AS] a` strips
+# the `a.` qualifier from every column reference.
+function _matching_paren(s::AbstractString, i::Int)
+    depth = 0; q = '\0'
+    for j in i:lastindex(s)
+        c = s[j]
+        if q != '\0'
+            c == q && (q = '\0')
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '('
+            depth += 1
+        elseif c == ')'
+            depth -= 1
+            depth == 0 && return j
+        end
+    end
+    throw(ArgumentError("taql: unbalanced parentheses in a sub-query"))
+end
+
+_sub_literal(x::AbstractString) = "'" * replace(String(x), "'" => "\\'") * "'"
+_sub_literal(x::Bool) = x ? "TRUE" : "FALSE"
+_sub_literal(x) = repr(x)
+
+# `x [NOT] IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` -> literals (evaluated on `target`)
+function _taql_subst_subqueries(target, body::AbstractString)
+    body = String(body)
+    while (m = match(r"\b(NOT\s+)?(IN|EXISTS)\s*\(\s*SELECT\b"i, body)) !== nothing
+        open = findnext('(', body, m.offset)
+        close = _matching_paren(body, open)
+        inner = String(strip(body[open+1:close-1]))
+        r = taql(target, inner)
+        neg = m.captures[1] !== nothing
+        if uppercase(m.captures[2]) == "EXISTS"
+            v = nrow(r) > 0
+            body = body[1:m.offset-1] * (xor(v, neg) ? "TRUE" : "FALSE") * body[close+1:end]
+        else
+            names = columnnames(r)
+            vals = isempty(names) ? Any[] : collect(column(r, first(names))[:])
+            lit = isempty(vals) ? "[]" : "[" * join((_sub_literal(v) for v in unique(vals)), ", ") * "]"
+            head = body[1:m.offset-1] * (neg ? "NOT " : "") * "IN "
+            body = head * lit * body[close+1:end]
+        end
+    end
+    return body
+end
+
+# UPDATE / DELETE: sub-queries in the WHERE, and `UPDATE t [AS] a SET` /
+# `DELETE FROM t [AS] a` aliases (dropped, with their `a.` qualifiers)
+function _taql_preprocess_write(target, cmd::AbstractString)
+    cmd = _taql_subst_subqueries(target, cmd)
+    am = match(r"^UPDATE\s+\S+\s+(?:AS\s+)?(?!SET\b)(\w+)\s+SET\b"i, cmd)
+    am === nothing && (am = match(r"^DELETE\s+FROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|ORDER|LIMIT)\b)(\w+)"i, cmd))
+    if am !== nothing
+        alias = String(am.captures[1])
+        cmd = replace(am.match, Regex("\\s+(?:AS\\s+)?" * alias * "(?=\\s+SET\\b|\\z)", "i") => "") * cmd[length(am.match)+1:end]
+        cmd = replace(cmd, Regex("\\b" * alias * "\\.(?=[A-Za-z_])") => "")
+    end
+    return cmd
+end
+
+function _taql_preprocess_select(target, body::AbstractString)
+    body = String(body)
+    # `SELECT FROM t ...` / `SELECT WHERE ...` (no column list) = `SELECT *`
+    body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
+    # FROM (SELECT ...) -> the inner result becomes the queried table
+    m = match(r"\bFROM\s*\("i, body)
+    if m !== nothing
+        open = m.offset + length(m.match) - 1
+        close = _matching_paren(body, open)
+        inner = String(strip(body[open+1:close-1]))
+        occursin(r"^SELECT\b"i, inner) || throw(ArgumentError("taql: FROM (...) must hold a SELECT"))
+        target = taql(target, inner)
+        body = body[1:m.offset-1] * "FROM __sub" * body[close+1:end]
+    end
+    body = _taql_subst_subqueries(target, body)
+    # `FROM name [AS] alias` -> drop the alias and its `alias.` qualifiers
+    am = match(r"\bFROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|INTO|GIVING)\b)(\w+)"i, body)
+    if am !== nothing
+        alias = String(am.captures[1])
+        body = body[1:am.offset-1] * replace(am.match, Regex("\\s+(?:AS\\s+)?" * alias * "\\z", "i") => "") *
+               body[am.offset+length(am.match):end]
+        body = replace(body, Regex("\\b" * alias * "\\.(?=[A-Za-z_])") => "")
+    end
+    return target, body
+end
+
 """
     taql(target, command::AbstractString)
 
@@ -490,7 +581,7 @@ open `Table`):
   → [`update!`](@ref), returns `Int`
 * `DELETE [FROM t] [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
   → [`delete!`](@ref), returns `Int`
-* `SELECT [DISTINCT] [*|col [AS a], …] [FROM t] [WHERE cond] [ORDER BY k] [LIMIT n] [(INTO|GIVING) 'path']`  → [`copytable`](@ref), returns the path
+* `SELECT [DISTINCT] [*|col [AS a], …] [FROM t] [WHERE cond] [GROUP BY k, …] [HAVING cond] [ORDER BY k] [LIMIT n [OFFSET m]] [(INTO|GIVING) 'path']`  → [`copytable`](@ref), returns the path
 * `SELECT …` with no `INTO`/`GIVING`              → [`query`](@ref), returns the result
 * `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…) [LIMIT n]`  → [`insert!`](@ref), returns `Int`
 * `INSERT [LIMIT n] INTO t SET c1 = v1, c2 = v2`   → [`insert!`](@ref), returns `Int`
@@ -511,6 +602,9 @@ string are not supported (use `copytable(dst, groupby(…))`, or
 function taql(target, command::AbstractString)
     cmd = strip(command)
     kw = uppercase(String(first(split(cmd; limit=2))))
+    if kw == "UPDATE" || kw == "DELETE"
+        cmd = _taql_preprocess_write(target isa AbstractTable ? target : readtable(_cmd_path(target)), cmd)
+    end
     if kw == "UPDATE"
         m = match(Regex("^UPDATE\\s+(?:\\S+\\s+)?SET\\s+(.+?)(?:\\s+WHERE\\s+(.+?))?" *
                         "(?:\\s+ORDER\\s+BY\\s+(.+?))?(?:\\s+LIMIT\\s+(-?\\d+))?\\s*\$",
@@ -539,15 +633,19 @@ function taql(target, command::AbstractString)
         into = match(r"^(.*?)\s+(?:INTO|GIVING)\s+'([^']+)'\s*$"is, cmd)
         body = into === nothing ? cmd : String(strip(into.captures[1]))
         dst = into === nothing ? nothing : String(into.captures[2])
+        target, body = _taql_preprocess_select(target, body)
         # Phase 242: SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
         # and `DISTINCT` all mis-parsed or errored).
         bm = match(r"^SELECT\s+(DISTINCT\s+)?(.*?)(?:\s+FROM\s+\S+)?(?:\s+WHERE\s+(.+?))?" *
+                   r"(?:\s+GROUP\s+BY\s+(.+?))?(?:\s+HAVING\s+(.+?))?" *
                    r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+((?:LIMIT|OFFSET)\s+.+?))?\s*$"is, body)
         bm === nothing && throw(ArgumentError("taql: malformed SELECT command"))
         distinct = bm.captures[1] !== nothing
-        orderstr = bm.captures[4] === nothing ? nothing : String(strip(bm.captures[4]))
-        window = bm.captures[5] === nothing ? nothing : _parse_select_window(bm.captures[5])
+        groupstr = bm.captures[4] === nothing ? nothing : String(strip(bm.captures[4]))
+        havingstr = bm.captures[5] === nothing ? nothing : String(strip(bm.captures[5]))
+        orderstr = bm.captures[6] === nothing ? nothing : String(strip(bm.captures[6]))
+        window = bm.captures[7] === nothing ? nothing : _parse_select_window(bm.captures[7])
         collist = String(strip(bm.captures[2]))
         wherestr = bm.captures[3] === nothing ? nothing : String(strip(bm.captures[3]))
         t = target isa AbstractTable ? target : readtable(_cmd_path(target))
@@ -577,9 +675,43 @@ function taql(target, command::AbstractString)
             end
         end
 
+        # Phase 256: aggregates (`gsum(K)`, ...) and/or GROUP BY / HAVING -> `groupby`
+        # (no GROUP BY = ONE group over the whole table, like real TaQL)
+        vn = Set(columnnames(t))
+        isagg(e) = try _has_aggr(_taqllite_parse(String(e), vn)) catch; false end
+        grouped = groupstr !== nothing || havingstr !== nothing ||
+                  any(p -> isagg(last(p)), select)
+        if grouped
+            any(p -> first(p) isa AbstractString && startswith(first(p), "("), select) &&
+                throw(ArgumentError("taql: `AS (val, mask)` is not supported with aggregates"))
+            gkeys = groupstr === nothing ? String[] : String.(strip.(_split_commas(groupstr)))
+            # an EXPRESSION key (`GROUP BY G+H`) is materialised as a hidden column
+            # first (WHERE applied at that stage), then grouped on by name
+            gt = t; gwhere = wherestr
+            if !all(k -> k in vn, gkeys)
+                hidden = Pair{String,String}[n => n for n in columnnames(t)]
+                for (i, k) in enumerate(gkeys)
+                    k in vn && continue
+                    push!(hidden, "_gk$i" => k)
+                    gkeys[i] = "_gk$i"
+                end
+                gt = query(t, wherestr === nothing ? "TRUE" : wherestr; select = hidden)
+                gwhere = nothing
+            end
+            ob = orderstr === nothing ? nothing : map(_split_commas(orderstr)) do piece
+                mo = match(r"^(\w+)(?:\s+(ASC|DESC))?$"is, strip(piece))
+                mo === nothing && throw(ArgumentError(
+                    "taql: ORDER BY of a grouped SELECT takes output column names"))
+                mo.captures[2] !== nothing && uppercase(mo.captures[2]) == "DESC" ?
+                    String(mo.captures[1]) => :desc : String(mo.captures[1])
+            end
+            result = groupby(gt, gkeys; select = [String(first(p)) => String(last(p)) for p in select],
+                             where = gwhere, having = havingstr, orderby = ob)
+        else
         qstr = (wherestr === nothing ? "TRUE" : wherestr) *
                (orderstr === nothing ? "" : " ORDER BY " * orderstr)
         result = query(t, qstr; select)
+        end
         if distinct || window !== nothing
             keep = collect(1:nrow(result))
             if distinct

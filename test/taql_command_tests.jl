@@ -941,3 +941,123 @@ end
         end
     end
 end
+
+# Phase 256: `taql()` SELECT with aggregates / GROUP BY / HAVING (routed through
+# `groupby`), live-probed vs real TaQL (26 forms; group order is unspecified so
+# results are compared sorted).  Aggregates without GROUP BY = ONE group over the
+# whole table; a non-aggregate, non-key select expression takes the group's LAST
+# row (real TaQL -- was the first row before); `GROUP BY expr` groups on a computed
+# key; ORDER BY / LIMIT / OFFSET apply to the grouped result.  Divergence: an empty
+# single-group aggregate (`WHERE K>100`) is a 0-row result here, an (odd) error in
+# real TaQL.
+@testset "taql() SELECT aggregates / GROUP BY / HAVING (Phase 256)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8),
+                "D" => collect(0.5:1:7.5), "H" => Int32[1, 1, 2, 2, 1, 2, 1, 2]]; nrow=8)
+    t = readtable(dir)
+    cols(q, cs) = (r = taql(t, q); [collect(column(r, c)[:]) for c in cs])
+    srt(a) = (p = sortperm(collect(zip(a...))); [x[p] for x in a])
+    @test cols("SELECT gsum(K) AS X FROM t", ["X"]) == [[36]]
+    @test cols("SELECT gsum(K)+1 AS X, gcount() AS Y FROM t", ["X", "Y"]) == [[37], [8]]
+    @test cols("SELECT gsum(K) AS X FROM t WHERE K>2 HAVING gsum(K)>5", ["X"]) == [[33]]
+    @test srt(cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G", ["X", "Y"])) == [[1, 2, 3], [10, 7, 19]]
+    gm = srt(cols("SELECT G AS X, gcount() AS Y, gmean(D) AS Z FROM t GROUP BY G", ["X", "Y", "Z"]))
+    @test gm[1] == [1, 2, 3] && gm[2] == [3, 2, 3] && gm[3] ≈ [17/6, 3.0, 35/6]
+    @test srt(cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G HAVING gsum(K)>8", ["X", "Y"])) == [[1, 3], [10, 19]]
+    @test cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY Y DESC", ["X", "Y"]) == [[3, 1, 2], [19, 10, 7]]
+    @test cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY X DESC LIMIT 2", ["X", "Y"]) == [[3, 2], [19, 7]]
+    @test cols("SELECT G AS X, gcount() AS Y FROM t GROUP BY G ORDER BY X LIMIT 1 OFFSET 1", ["X", "Y"]) == [[2], [2]]
+    @test srt(cols("SELECT G AS X, H AS Y, gsum(K) AS Z FROM t GROUP BY G, H", ["X", "Y", "Z"])) ==
+          [[1, 1, 2, 3, 3], [1, 2, 1, 1, 2], [1, 9, 7, 7, 12]]
+    # LAST row of the group for a non-key, non-aggregate select expression
+    @test srt(cols("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY H", ["X", "Y"])) == [[3, 3], [15, 21]]
+    # an expression group key
+    @test srt(cols("SELECT G+H AS X, gsum(K) AS Y FROM t GROUP BY G+H", ["X", "Y"])) == [[2, 3, 4, 5], [1, 16, 7, 12]]
+    @test_throws ArgumentError taql(t, "SELECT G AS X, gsum(K) AS Y FROM t GROUP BY NOPE")
+    if _HAVE_TAQL
+        real(q, cs) = (r = _taqlcmd(q, dir); [collect(r[Symbol(c)][:]) for c in cs])
+        for (q, cs) in [("SELECT gsum(K) AS X FROM \$1", ["X"]), ("SELECT gsum(K)+1 AS X, gcount() AS Y FROM \$1", ["X", "Y"]),
+                        ("SELECT gsum(K) AS X FROM \$1 HAVING gsum(K)>5", ["X"]), ("SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY G", ["X", "Y"]),
+                        ("SELECT G AS X, gcount() AS Y, gmean(D) AS Z FROM \$1 GROUP BY G", ["X", "Y", "Z"]),
+                        ("SELECT G AS X, gsum(K) AS Y FROM \$1 WHERE K>2 GROUP BY G HAVING gcount()>1", ["X", "Y"]),
+                        ("SELECT G AS X, H AS Y, gsum(K) AS Z FROM \$1 GROUP BY G, H", ["X", "Y", "Z"]),
+                        ("SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY H", ["X", "Y"]), ("SELECT G+H AS X, gsum(K) AS Y FROM \$1 GROUP BY G+H", ["X", "Y"]),
+                        ("SELECT G AS X, gfirst(K) AS Y, glast(K) AS Z FROM \$1 GROUP BY G", ["X", "Y", "Z"])]
+            @test srt(real(q, cs)) == srt(cols(replace(q, "\$1" => "t"), cs))
+        end
+    end
+end
+
+# Phase 257: `taql()` SELECT sub-queries and table aliases, live-probed vs real
+# TaQL (34 forms): `FROM (SELECT ...)` (nested ok), `x [NOT] IN (SELECT col ...)`
+# (with WHERE / ORDER BY / LIMIT / DISTINCT / computed columns inside),
+# `[NOT] EXISTS (SELECT ...)`, `SELECT FROM t` (no column list), and `FROM t [AS] a`
+# with `a.COL` qualifiers.  Divergence: a POSITIVE `EXISTS` / `IN` of an EMPTY
+# sub-query errors in real TaQL; here it simply matches no rows.
+@testset "taql() SELECT sub-queries + aliases (Phase 257)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8), "D" => collect(0.5:1:7.5)]; nrow=8)
+    t = readtable(dir)
+    xs(q) = collect(column(taql(t, q), "X")[:])
+    @test xs("SELECT K AS X FROM t a") == 1:8 && xs("SELECT a.K AS X FROM t AS a WHERE a.K>3") == 4:8
+    @test xs("SELECT K AS X FROM t q WHERE q.G==1 AND K>1") == [3, 6] && xs("SELECT q.K AS X FROM t q ORDER BY q.K DESC") == 8:-1:1
+    @test xs("SELECT K AS X FROM (SELECT FROM t WHERE K>3)") == 4:8
+    @test xs("SELECT K AS X FROM (SELECT FROM t WHERE K>3) WHERE K<7") == [4, 5, 6]
+    @test xs("SELECT K AS X FROM (SELECT FROM (SELECT FROM t WHERE K>2) WHERE K<7)") == 3:6
+    @test xs("SELECT K AS X FROM (SELECT K FROM t WHERE G==1) ORDER BY K DESC") == [6, 3, 1]
+    @test xs("SELECT gsum(K) AS X FROM (SELECT FROM t WHERE G==1)") == [10]
+    @test xs("SELECT K AS X FROM t WHERE K IN (SELECT K FROM t WHERE G==1)") == [1, 3, 6]
+    @test xs("SELECT K AS X FROM t WHERE K NOT IN (SELECT K FROM t WHERE G==1)") == [2, 4, 5, 7, 8]
+    @test xs("SELECT K AS X FROM t WHERE G IN (SELECT G FROM t WHERE K>6)") == [4, 7, 8]
+    @test xs("SELECT K AS X FROM t WHERE K IN (SELECT K FROM t WHERE G==1 ORDER BY K DESC LIMIT 2)") == [3, 6]
+    @test xs("SELECT K AS X FROM t WHERE D IN (SELECT D FROM t WHERE G==2)") == [2, 5]
+    @test xs("SELECT K AS X FROM t WHERE K IN (SELECT K+1 AS K FROM t WHERE G==2)") == [3, 6]
+    @test xs("SELECT K AS X FROM t WHERE K IN (SELECT DISTINCT G FROM t)") == [1, 2, 3]
+    @test xs("SELECT K AS X FROM t WHERE EXISTS (SELECT FROM t WHERE K>7)") == 1:8
+    @test xs("SELECT K AS X FROM t WHERE NOT EXISTS (SELECT FROM t WHERE K>100)") == 1:8
+    @test isempty(xs("SELECT K AS X FROM t WHERE EXISTS (SELECT FROM t WHERE K>100)"))
+    @test isempty(xs("SELECT K AS X FROM t WHERE K IN (SELECT K FROM t WHERE G==9)"))
+    @test_throws ArgumentError taql(t, "SELECT K AS X FROM (K>3)")
+    if _HAVE_TAQL
+        for q in ("SELECT K AS X FROM \$1 a", "SELECT a.K AS X FROM \$1 AS a WHERE a.K>3", "SELECT K AS X FROM (SELECT FROM \$1 WHERE K>3) WHERE K<7",
+                  "SELECT K AS X FROM (SELECT FROM (SELECT FROM \$1 WHERE K>2) WHERE K<7)", "SELECT gsum(K) AS X FROM (SELECT FROM \$1 WHERE G==1)",
+                  "SELECT K AS X FROM \$1 WHERE K IN (SELECT K FROM \$1 WHERE G==1)", "SELECT K AS X FROM \$1 WHERE K NOT IN (SELECT K FROM \$1 WHERE G==1)",
+                  "SELECT K AS X FROM \$1 WHERE K IN (SELECT K FROM \$1 WHERE G==1 ORDER BY K DESC LIMIT 2)",
+                  "SELECT K AS X FROM \$1 WHERE K IN (SELECT K+1 AS K FROM \$1 WHERE G==2)", "SELECT K AS X FROM \$1 WHERE EXISTS (SELECT FROM \$1 WHERE K>7)",
+                  "SELECT K AS X FROM \$1 WHERE NOT EXISTS (SELECT FROM \$1 WHERE K>100)", "SELECT K AS X FROM \$1 t WHERE t.G==1 AND K>1")
+            @test collect(_taqlcmd(q, dir)[:X][:]) == xs(replace(q, "\$1" => "t"))
+        end
+    end
+end
+
+# Phase 258: sub-queries (`x [NOT] IN (SELECT ..)`, `[NOT] EXISTS (SELECT ..)`) in
+# the WHERE of UPDATE / DELETE, and `UPDATE t [AS] a SET` / `DELETE FROM t [AS] a`
+# aliases, applied to twin copies vs real TaQL (9 forms, all match).  The inner
+# query sees the table BEFORE the write.
+@testset "taql UPDATE/DELETE sub-queries + aliases (Phase 258)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8), "D" => collect(0.5:1:7.5)]; nrow=8); d)
+    col(d, n) = collect(column(readtable(d), n)[:])
+    d = mk(); taql(d, "DELETE FROM t WHERE K IN (SELECT K FROM t WHERE G==1)")
+    @test col(d, "K") == [2, 4, 5, 7, 8]
+    d = mk(); taql(d, "UPDATE t SET D=0 WHERE K IN (SELECT K FROM t WHERE G==1)")
+    @test col(d, "D") == [0.0, 1.5, 0.0, 3.5, 4.5, 0.0, 6.5, 7.5]
+    d = mk(); taql(d, "UPDATE t SET D=-1 WHERE G IN (SELECT G FROM t WHERE K>6)")
+    @test col(d, "D") == [0.5, 1.5, 2.5, -1.0, 4.5, 5.5, -1.0, -1.0]
+    d = mk(); taql(d, "DELETE FROM t WHERE NOT EXISTS (SELECT FROM t WHERE K>100)")
+    @test nrow(readtable(d)) == 0
+    d = mk(); taql(d, "UPDATE t a SET D=0 WHERE a.K>6"); @test col(d, "D")[7:8] == [0.0, 0.0] && col(d, "D")[1] == 0.5
+    d = mk(); taql(d, "DELETE FROM t a WHERE a.K>6"); @test col(d, "K") == 1:6
+    d = mk(); taql(d, "UPDATE t AS a SET D=a.K*2 WHERE a.G==1"); @test col(d, "D")[[1, 3, 6]] == [2.0, 6.0, 12.0]
+    if _HAVE_TAQL
+        for q in ("DELETE FROM \$1 WHERE K IN (SELECT K FROM \$1 WHERE G==1)", "UPDATE \$1 SET D=0 WHERE K IN (SELECT K FROM \$1 WHERE G==1)",
+                  "UPDATE \$1 SET D=0 WHERE EXISTS (SELECT FROM \$1 WHERE K>7)", "DELETE FROM \$1 WHERE NOT EXISTS (SELECT FROM \$1 WHERE K>100)",
+                  "UPDATE \$1 SET D=-1 WHERE G IN (SELECT G FROM \$1 WHERE K>6)", "UPDATE \$1 a SET D=0 WHERE a.K>6",
+                  "DELETE FROM \$1 a WHERE a.K>6", "UPDATE \$1 AS a SET D=a.K*2 WHERE a.G==1",
+                  "UPDATE \$1 SET D=K*2 WHERE K IN (SELECT DISTINCT G FROM \$1)")
+            dr = mk(); dm = mk()
+            _taqlcmd(q, dr); taql(dm, replace(q, "\$1" => "t"))
+            @test col(dr, "K") == col(dm, "K") && col(dr, "D") == col(dm, "D")
+        end
+    end
+end

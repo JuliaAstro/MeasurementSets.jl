@@ -403,7 +403,7 @@ end
 
 function _parse_in_list!(p::TQLParser, lhs::TQLExpr, negate::Bool)
     _expect_kind!(p, :lbracket, "'['")
-    vals = Any[_parse_in_element!(p)]
+    vals = _peek(p).kind === :rbracket ? Any[] : Any[_parse_in_element!(p)]   # `IN []` matches nothing
     while _peek(p).kind === :comma
         _advance!(p)
         push!(vals, _parse_in_element!(p))

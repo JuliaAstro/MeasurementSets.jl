@@ -9242,3 +9242,36 @@ the end and `b` is clipped; an offset / start past the end, an empty range,
 step ≤ 0, and a range combined with `OFFSET` are errors. Applied after
 `ORDER BY` / `DISTINCT`. New testset with a 19-form real-TaQL cross-check.
 
+### Phase 256 — `taql()` SELECT with aggregates, `GROUP BY`, `HAVING`
+
+`taql()`'s SELECT now takes `[GROUP BY k, …] [HAVING cond]` and `g*` aggregates
+(routed through `groupby`), live-probed against real TaQL (26 forms, all match
+sorted): aggregates without `GROUP BY` are **one group** over the whole table
+(`SELECT gsum(K) AS X FROM t`); `GROUP BY` takes columns or an **expression**
+(`GROUP BY G+H`, materialised as a hidden key); `ORDER BY` (output names),
+`LIMIT` / `OFFSET` apply to the grouped result. **Behaviour fix:** a
+non-aggregate, non-key select expression now takes the group's **last** row, as
+real TaQL does (it was the first row; `mscal.*` / `meas.<frame>('COL')` group
+values follow suit). Divergence: an empty single-group aggregate (`WHERE K>100`)
+is a 0-row result here, an (unexplained) error in real TaQL. `CALC` / `COUNT`
+commands cannot be cross-checked (Casacore.jl only wraps table results) and stay
+unimplemented.
+
+### Phase 257 — `taql()` SELECT sub-queries and table aliases
+
+`taql()` SELECT gains `FROM (SELECT …)` (nested), `x [NOT] IN (SELECT col …)`,
+`[NOT] EXISTS (SELECT …)`, a column-less `SELECT FROM t …`, and `FROM t [AS] a`
+with `a.COL` qualifiers — live-probed against real TaQL (34 forms, all match).
+Sub-queries run first and are substituted (`IN` → a literal list, `EXISTS` →
+`TRUE`/`FALSE`); a `FROM (…)` result becomes the queried table. Divergence: a
+*positive* `EXISTS` / `IN` of an empty sub-query errors in real TaQL and simply
+matches no rows here. Only `SELECT` (not `UPDATE` / `DELETE`) takes sub-queries.
+
+### Phase 258 — sub-queries and aliases in `taql()` `UPDATE` / `DELETE`
+
+Phase 257's sub-queries now also work in the `WHERE` of `taql()` `UPDATE` /
+`DELETE` (`x [NOT] IN (SELECT …)`, `[NOT] EXISTS (SELECT …)`; the inner query
+sees the table *before* the write), and `UPDATE t [AS] a SET …` / `DELETE FROM t
+[AS] a` aliases (with `a.COL` qualifiers) are accepted — checked on twin tables
+against real TaQL (9 forms, all match).
+
