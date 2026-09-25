@@ -1147,3 +1147,33 @@ end
         end
     end
 end
+
+# Phase 261: SELECT odds and ends, live-probed vs real TaQL (~45 forms): `SELECT
+# ALL`, the one-word `ORDERBY`, a grouped SELECT's HAVING naming a select ALIAS
+# (`HAVING Y > 10`), and an ORDER BY that is an EXPRESSION over the group
+# (`ORDER BY G*-1`).  (Real TaQL rejects `ORDER BY gsum(K)`; that and
+# `NOT G==3` are accepted here.)
+@testset "taql SELECT: ALL, ORDERBY, HAVING alias, ORDER BY expression (Phase 261)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8), "S" => ["a", "b", "a", "c", "b", "a", "c", "c"]]; nrow=8)
+    t = readtable(dir)
+    cs(q, c...) = (r = taql(t, q); [collect(column(r, n)[:]) for n in c])
+    @test cs("SELECT ALL K AS X FROM t", "X") == [collect(1:8)]
+    @test cs("SELECT K AS X FROM t ORDERBY K DESC", "X") == [collect(8:-1:1)]
+    @test cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G HAVING Y>10", "X", "Y") == [[3], [19]]
+    @test sort(cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G HAVING Y>5 AND gcount()>2", "X")[1]) == [1, 3]
+    @test cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY G*-1", "X", "Y") == [[3, 2, 1], [19, 7, 10]]
+    @test cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY Y DESC", "X", "Y") == [[3, 1, 2], [19, 10, 7]]
+    @test cs("SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY gmax(K) DESC", "X") == [[3, 1, 2]]
+    @test columnnames(taql(t, "SELECT G AS X, gsum(K) AS Y FROM t GROUP BY G ORDER BY G*-1")) == ["X", "Y"]   # hidden key dropped
+    if _HAVE_TAQL
+        for q in ("SELECT ALL K AS X FROM \$1", "SELECT K AS X FROM \$1 ORDERBY K DESC",
+                  "SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY G HAVING Y>10", "SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY G ORDER BY G*-1",
+                  "SELECT G AS X, gsum(K) AS Y FROM \$1 GROUP BY G ORDER BY Y DESC")
+            r = _taqlcmd(q, dir); m = taql(t, replace(q, "\$1" => "t"))
+            xs = names -> [collect(column(m, n)[:]) for n in names]
+            hasY = occursin("AS Y", q)
+            @test collect(r[:X][:]) == xs(["X"])[1] && (!hasY || collect(r[:Y][:]) == xs(["Y"])[1])
+        end
+    end
+end

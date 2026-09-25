@@ -9297,3 +9297,14 @@ sentinel when unmatched), `=` as well as `==`, and a **duplicate right key now
 matches its first row** (was an error). Divergence: real TaQL returns `NaN` for
 the reversed index form `ON b.rowid() == a.K`; here it is the same lookup.
 
+### Phase 261 — `taql()` SELECT odds and ends
+
+Probing ~45 more SELECT forms against real TaQL turned up four small gaps, now
+closed: `SELECT ALL …` (the default), the one-word `ORDERBY`, a grouped SELECT's
+`HAVING` naming a select **alias** (`HAVING Y > 10`), and an `ORDER BY` that is
+an **expression** over the group (`ORDER BY G*-1`, evaluated as a hidden column
+and dropped). Everything else probed already matched (`LIKE`, `~ p/…/`, `IN`
+ranges, `BETWEEN`, `%`, `rownr()`, `DISTINCT`, multi-key `ORDER BY`, …). Real
+TaQL rejects `ORDER BY gsum(K)` and `NOT G==3` (`NOT` binds tighter than `==`
+there); both are accepted here.
+

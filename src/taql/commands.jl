@@ -626,6 +626,8 @@ function _taql_preprocess_select(target, body::AbstractString)
     body = String(body)
     # `SELECT FROM t ...` / `SELECT WHERE ...` (no column list) = `SELECT *`
     body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
+    body = replace(body, r"^SELECT\s+ALL\s+"i => "SELECT ")          # `SELECT ALL` = the default
+    body = replace(body, r"\bORDERBY\b"i => "ORDER BY")               # one-word spelling
     # FROM (SELECT ...) -> the inner result becomes the queried table
     m = match(r"\bFROM\s*\("i, body)
     if m !== nothing
@@ -776,15 +778,35 @@ function taql(target, command::AbstractString, others...)
                 gt = query(t, wherestr === nothing ? "TRUE" : wherestr; select = hidden)
                 gwhere = nothing
             end
-            ob = orderstr === nothing ? nothing : map(_split_commas(orderstr)) do piece
-                mo = match(r"^(\w+)(?:\s+(ASC|DESC))?$"is, strip(piece))
-                mo === nothing && throw(ArgumentError(
-                    "taql: ORDER BY of a grouped SELECT takes output column names"))
-                mo.captures[2] !== nothing && uppercase(mo.captures[2]) == "DESC" ?
-                    String(mo.captures[1]) => :desc : String(mo.captures[1])
+            sel = [String(first(p)) => String(last(p)) for p in select]
+            outnames = Set(first.(sel))
+            # HAVING may name a select alias (`HAVING Y > 10`): substitute its expression
+            if havingstr !== nothing
+                for (al, ex) in sel
+                    (al == ex || al in vn) && continue
+                    havingstr = replace(havingstr, Regex("\\b" * al * "\\b") => "(" * ex * ")")
+                end
             end
-            result = groupby(gt, gkeys; select = [String(first(p)) => String(last(p)) for p in select],
-                             where = gwhere, having = havingstr, orderby = ob)
+            # ORDER BY: an output name, or ANY expression (evaluated as a hidden column)
+            ob = nothing; nhid = 0
+            if orderstr !== nothing
+                ob = Any[]
+                for piece in _split_commas(orderstr)
+                    mo = match(r"^(.*?)(?:\s+(ASC|DESC))?$"is, strip(piece))
+                    key = String(strip(mo.captures[1]))
+                    desc = mo.captures[2] !== nothing && uppercase(mo.captures[2]) == "DESC"
+                    if !(key in outnames)
+                        nhid += 1; hn = "__ord$nhid"
+                        push!(sel, hn => key); key = hn
+                    end
+                    push!(ob, desc ? key => :desc : key)
+                end
+            end
+            result = groupby(gt, gkeys; select = sel, where = gwhere, having = havingstr, orderby = ob)
+            if nhid > 0
+                keepn = [n for n in columnnames(result) if !startswith(n, "__ord")]
+                result = GroupedTable(Symbol.(keepn), AbstractVector[column(result, n) for n in keepn])
+            end
         else
         qstr = (wherestr === nothing ? "TRUE" : wherestr) *
                (orderstr === nothing ? "" : " ORDER BY " * orderstr)
