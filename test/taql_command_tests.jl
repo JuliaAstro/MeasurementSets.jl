@@ -839,3 +839,67 @@ end
         end
     end
 end
+
+# Phase 247: 110 UPDATE / DELETE / INSERT forms applied to twin copies of a
+# table (real TaQL vs `taql()`), every column compared. Found + fixed:
+# writing a FLOAT into an INTEGER column errored (real TaQL truncates toward
+# zero, saturates at the type's limits -- `1e12` -> typemax, `Inf` ->
+# typemax -- and maps NaN to 0), for both UPDATE ... SET and INSERT; and
+# `INSERT INTO t [(cols)] SELECT ... FROM <name|'path'>` -- a column list
+# was rejected and a bare `FROM name` (the target itself) unsupported.
+# (Not copied: real TaQL's adjacent-literal `'it''s'` -> "its" and its
+# `VALUES (A)` -> default; it also rejects Bool <-> numeric writes we allow.)
+@testset "taql writes — float→int coercion, INSERT [(cols)] SELECT ... FROM name (Phase 247)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["A" => Int32[5, 3, 9, 1, 7, 3], "B" => [1.5, 2.5, 0.5, 4.5, 3.5, 2.0],
+                       "S" => ["ab", "cd", "", "x y", "Q", "zz"], "G" => Bool[1, 0, 1, 0, 1, 0]]; nrow=6); d)
+    col(d, n) = collect(column(readtable(d), n)[:])
+
+    d = mk(); taql(d, "UPDATE t SET A = B")
+    @test col(d, "A") == Int32[1, 2, 0, 4, 3, 2]                 # trunc toward zero
+    d = mk(); taql(d, "UPDATE t SET A = B * -1")
+    @test col(d, "A") == Int32[-1, -2, 0, -4, -3, -2]
+    d = mk(); taql(d, "UPDATE t SET A = B * 1e12")
+    @test all(==(typemax(Int32)), col(d, "A"))                     # saturates
+    d = mk(); taql(d, "UPDATE t SET A = 0.0/0")
+    @test all(==(0), col(d, "A"))                                  # NaN -> 0
+    d = mk(); taql(d, "UPDATE t SET A = 1.0/0")
+    @test all(==(typemax(Int32)), col(d, "A"))
+    d = mk(); taql(d, "UPDATE t SET A = B, B = A")                 # chained: A trunc'd first
+    @test col(d, "A") == Int32[1, 2, 0, 4, 3, 2] && col(d, "B") == [1.0, 2.0, 0.0, 4.0, 3.0, 2.0]
+    d = mk(); taql(d, "UPDATE t SET A = A / 2 WHERE A > 4")
+    @test col(d, "A") == Int32[2, 3, 4, 1, 3, 3]
+    d = mk(); taql(d, "INSERT INTO t (A) VALUES (2.9),(-1.5)")
+    @test col(d, "A")[7:8] == Int32[2, -1]
+    d = mk(); taql(d, "INSERT INTO t SET A = 7.9")
+    @test col(d, "A")[7] == 7
+    d = mk(); taql(d, "INSERT INTO t (A) VALUES (1e12)")
+    @test col(d, "A")[7] == typemax(Int32)
+    d = mk(); taql(d, "UPDATE t SET B = A")                        # int -> float unchanged
+    @test col(d, "B") == Float64.(Int32[5, 3, 9, 1, 7, 3])
+
+    # INSERT ... SELECT: optional target column list, bare `FROM name` = the target
+    d = mk(); @test taql(d, "INSERT INTO t SELECT A,B,S,G FROM t WHERE A > 4") == 3
+    @test col(d, "A")[7:9] == Int32[5, 9, 7] && col(d, "S")[7:9] == ["ab", "", "Q"]
+    d = mk(); @test taql(d, "INSERT INTO t (A,B) SELECT A,B FROM t WHERE A < 4") == 3
+    @test col(d, "A")[7:9] == Int32[3, 1, 3] && col(d, "S")[7:9] == ["", "", ""]
+    d = mk(); @test taql(d, "INSERT INTO t SELECT * FROM t") == 6
+    @test col(d, "A") == vcat(Int32[5, 3, 9, 1, 7, 3], Int32[5, 3, 9, 1, 7, 3])
+    d = mk(); @test_throws ArgumentError taql(d, "INSERT INTO t (A) SELECT A,B FROM t")
+
+    if _HAVE_TAQL
+        for cmd in ("UPDATE \$1 SET A = B", "UPDATE \$1 SET A = B * -1", "UPDATE \$1 SET A = B * 1e12",
+                    "UPDATE \$1 SET A = 0.0/0", "UPDATE \$1 SET A = 1.0/0", "UPDATE \$1 SET A = B, B = A",
+                    "UPDATE \$1 SET A = A / 2 WHERE A > 4", "INSERT INTO \$1 (A) VALUES (2.9),(-1.5)",
+                    "INSERT INTO \$1 SET A = 7.9", "INSERT INTO \$1 (A) VALUES (1e12)",
+                    "INSERT INTO \$1 SELECT A,B,S,G FROM \$1 WHERE A > 4",
+                    "INSERT INTO \$1 (A,B) SELECT A,B FROM \$1 WHERE A < 4", "INSERT INTO \$1 SELECT * FROM \$1")
+            dr = mk(); dm = mk()
+            _taqlcmd(cmd, dr)
+            taql(dm, replace(cmd, "\$1" => "t"))
+            for n in ("A", "B", "S", "G")
+                @test col(dr, n) == col(dm, n)
+            end
+        end
+    end
+end

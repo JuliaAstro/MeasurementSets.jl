@@ -9090,3 +9090,19 @@ result is the reversed ascending sort, so fully-tied rows come out in
 reverse row order (mixed directions keep ties in row order). All three
 match real TaQL now (32/32 incl. ties). New testset with a 16-form
 real-TaQL cross-check.
+
+### Phase 247 — write commands: float→integer coercion, `INSERT … [(cols)] SELECT … FROM name`
+
+138 `UPDATE` / `DELETE` / `INSERT` forms were applied to twin copies of a
+table — real TaQL vs `taql()` — and every column compared (46 forms clean,
+then 46 edge forms, then 18 coercion probes). Real gaps found and
+fixed: writing a floating value into an **integer column** errored
+(`UPDATE t SET A = B`, `SET A = A / 2`, `INSERT … VALUES (2.9)`); real
+TaQL truncates toward zero, saturates at the type's limits (`1e12` and
+`Inf` → `typemax`), and maps `NaN` to 0 — now matched for both `UPDATE`
+and `INSERT`. And `INSERT INTO t [(cols)] SELECT … FROM <name|'path'>`:
+a target column list was rejected, and a bare `FROM name` (the target
+itself, real TaQL's `INSERT INTO t SELECT … FROM t`) was unsupported.
+Deliberately not copied: real TaQL's adjacent-literal `'it''s'` → `its`
+and `VALUES (A)` → default, and it rejects `Bool`↔numeric writes that we
+allow. New testset (cross-checks 13 forms against twin tables).

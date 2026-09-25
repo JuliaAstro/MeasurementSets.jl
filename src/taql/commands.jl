@@ -21,6 +21,14 @@ function _cmd_path(t::AbstractTable)
     return t.path
 end
 
+# Writing a floating value into an integer column (Phase 247, live-verified vs
+# real TaQL): truncate toward zero, saturate at the type's limits (`1e12` ->
+# typemax, `Inf` -> typemax), `NaN` -> 0. Anything else is unchanged.
+_tql_coerce(::Type{J}, v) where {J<:Integer} = v isa AbstractFloat ?
+    (isnan(v) ? zero(J) : v >= typemax(J) ? typemax(J) : v <= typemin(J) ? typemin(J) : trunc(J, v)) : v
+_tql_coerce(::Type{Bool}, v) = v
+_tql_coerce(::Type, v) = v
+
 """
     update!(target; set, where=nothing) -> Int
 
@@ -164,9 +172,10 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
         for (c, levels, a) in specs
             u = colunit(c)
             ec = t[c]
+            Jc = juliatype(columndesc(rd, c).type)
             if levels === nothing
                 if where === nothing && !limited
-                    vals = [_tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u) for i in 1:nr]
+                    vals = [_tql_coerce(Jc, _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u)) for i in 1:nr]
                     ec[:] = vals
                     for i in 1:nr
                         cols[c][i] = vals[i]
@@ -174,7 +183,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
                     end
                 else
                     for i in rows
-                        val = _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u)
+                        val = _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u))
                         ec[i] = val
                         cols[c][i] = val
                         curval[(c, i)] = val
@@ -337,7 +346,7 @@ function Base.insert!(target::Union{AbstractString,AbstractTable}; values,
     edit(path) do t
         addrows!(t, k)
         for (ri, r) in enumerate(rows), (c, v) in r
-            t[c][old + ri] = (sc[c] && v isa Number) ? convert(J[c], v) : v
+            t[c][old + ri] = (sc[c] && v isa Number) ? convert(J[c], _tql_coerce(J[c], v)) : v
         end
     end
     return k
@@ -604,12 +613,16 @@ function _taql_insert(target, cmd::AbstractString)
         limit = Int(_taql_const(tm.captures[2]))
         cmd = String(tm.captures[1])
     end
-    msel = match(r"^INSERT\s+INTO\s+\S+\s+SELECT\s+(.*?)\s+FROM\s+'([^']+)'\s*" *
+    msel = match(r"^INSERT\s+INTO\s+\S+\s*(?:\(([^)]*)\)\s*)?SELECT\s+(.*?)\s+FROM\s+(?:'([^']+)'|(\w+))\s*" *
                 r"(?:WHERE\s+(.+))?\s*$"is, cmd)
     if msel !== nothing
-        collist = String(strip(msel.captures[1]))
-        src = readtable(String(msel.captures[2]))
-        wherestr = msel.captures[3] === nothing ? nothing : String(strip(msel.captures[3]))
+        tcols = msel.captures[1] === nothing ? nothing : String.(strip.(split(msel.captures[1], ',')))
+        collist = String(strip(msel.captures[2]))
+        # `FROM 'path'` reads another table; a bare `FROM name` is the target itself
+        # (real TaQL's `INSERT INTO t SELECT ... FROM t`; Phase 247)
+        src = msel.captures[3] !== nothing ? readtable(String(msel.captures[3])) :
+              (target isa AbstractTable ? target : readtable(_cmd_path(target)))
+        wherestr = msel.captures[5] === nothing ? nothing : String(strip(msel.captures[5]))
         if collist == "*" || isempty(collist)
             select = [n => n for n in columnnames(src)]
         else
@@ -621,6 +634,11 @@ function _taql_insert(target, cmd::AbstractString)
                 alias = cm.captures[2]
                 push!(select, (alias === nothing ? srcname : String(alias)) => srcname)
             end
+        end
+        if tcols !== nothing        # `INSERT INTO t (a, b) SELECT x, y ...`: positional
+            length(tcols) == length(select) || throw(ArgumentError(
+                "taql: INSERT column list has $(length(tcols)) names but the SELECT has $(length(select)) columns"))
+            select = [tcols[k] => last(select[k]) for k in eachindex(select)]
         end
         result = wherestr === nothing ? query(src, "TRUE"; select) : query(src, wherestr; select)
         return insert!(target; values=result, limit)
