@@ -9257,3 +9257,13 @@ is a 0-row result here, an (unexplained) error in real TaQL. `CALC` / `COUNT`
 commands cannot be cross-checked (Casacore.jl only wraps table results) and stay
 unimplemented.
 
+### Phase 257 — `taql()` SELECT sub-queries and table aliases
+
+`taql()` SELECT gains `FROM (SELECT …)` (nested), `x [NOT] IN (SELECT col …)`,
+`[NOT] EXISTS (SELECT …)`, a column-less `SELECT FROM t …`, and `FROM t [AS] a`
+with `a.COL` qualifiers — live-probed against real TaQL (34 forms, all match).
+Sub-queries run first and are substituted (`IN` → a literal list, `EXISTS` →
+`TRUE`/`FALSE`); a `FROM (…)` result becomes the queried table. Divergence: a
+*positive* `EXISTS` / `IN` of an empty sub-query errors in real TaQL and simply
+matches no rows here. Only `SELECT` (not `UPDATE` / `DELETE`) takes sub-queries.
+

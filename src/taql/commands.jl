@@ -480,6 +480,77 @@ _select_rows(r::RefTable, keep) =
 _select_rows(r::GroupedTable, keep) =
     GroupedTable(getfield(r, :names), AbstractVector[getfield(r, :cols)[j][keep] for j in eachindex(getfield(r, :cols))])
 
+# ---- SELECT sub-queries + table aliases (Phase 257; live-probed vs real TaQL) ----
+# `FROM (SELECT ...)` runs the inner SELECT and queries its result; `x IN (SELECT
+# col ...)` / `NOT IN` become a literal list (an empty one: FALSE / TRUE);
+# `[NOT] EXISTS (SELECT ...)` becomes TRUE / FALSE (real TaQL errors on a POSITIVE
+# `EXISTS` / `IN` of an empty sub-query -- 0 rows here); `FROM t [AS] a` strips
+# the `a.` qualifier from every column reference.
+function _matching_paren(s::AbstractString, i::Int)
+    depth = 0; q = '\0'
+    for j in i:lastindex(s)
+        c = s[j]
+        if q != '\0'
+            c == q && (q = '\0')
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '('
+            depth += 1
+        elseif c == ')'
+            depth -= 1
+            depth == 0 && return j
+        end
+    end
+    throw(ArgumentError("taql: unbalanced parentheses in a sub-query"))
+end
+
+_sub_literal(x::AbstractString) = "'" * replace(String(x), "'" => "\\'") * "'"
+_sub_literal(x::Bool) = x ? "TRUE" : "FALSE"
+_sub_literal(x) = repr(x)
+
+function _taql_preprocess_select(target, body::AbstractString)
+    body = String(body)
+    # `SELECT FROM t ...` / `SELECT WHERE ...` (no column list) = `SELECT *`
+    body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
+    # FROM (SELECT ...) -> the inner result becomes the queried table
+    m = match(r"\bFROM\s*\("i, body)
+    if m !== nothing
+        open = m.offset + length(m.match) - 1
+        close = _matching_paren(body, open)
+        inner = String(strip(body[open+1:close-1]))
+        occursin(r"^SELECT\b"i, inner) || throw(ArgumentError("taql: FROM (...) must hold a SELECT"))
+        target = taql(target, inner)
+        body = body[1:m.offset-1] * "FROM __sub" * body[close+1:end]
+    end
+    # [NOT] IN / EXISTS (SELECT ...)
+    while (m = match(r"\b(NOT\s+)?(IN|EXISTS)\s*\(\s*SELECT\b"i, body)) !== nothing
+        open = findnext('(', body, m.offset)
+        close = _matching_paren(body, open)
+        inner = String(strip(body[open+1:close-1]))
+        r = taql(target, inner)
+        neg = m.captures[1] !== nothing
+        if uppercase(m.captures[2]) == "EXISTS"
+            v = nrow(r) > 0
+            body = body[1:m.offset-1] * (xor(v, neg) ? "TRUE" : "FALSE") * body[close+1:end]
+        else
+            names = columnnames(r)
+            vals = isempty(names) ? Any[] : collect(column(r, first(names))[:])
+            lit = isempty(vals) ? "[]" : "[" * join((_sub_literal(v) for v in unique(vals)), ", ") * "]"
+            head = body[1:m.offset-1] * (neg ? "NOT " : "") * "IN "
+            body = head * lit * body[close+1:end]
+        end
+    end
+    # `FROM name [AS] alias` -> drop the alias and its `alias.` qualifiers
+    am = match(r"\bFROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|INTO|GIVING)\b)(\w+)"i, body)
+    if am !== nothing
+        alias = String(am.captures[1])
+        body = body[1:am.offset-1] * replace(am.match, Regex("\\s+(?:AS\\s+)?" * alias * "\\z", "i") => "") *
+               body[am.offset+length(am.match):end]
+        body = replace(body, Regex("\\b" * alias * "\\.(?=[A-Za-z_])") => "")
+    end
+    return target, body
+end
+
 """
     taql(target, command::AbstractString)
 
@@ -539,6 +610,7 @@ function taql(target, command::AbstractString)
         into = match(r"^(.*?)\s+(?:INTO|GIVING)\s+'([^']+)'\s*$"is, cmd)
         body = into === nothing ? cmd : String(strip(into.captures[1]))
         dst = into === nothing ? nothing : String(into.captures[2])
+        target, body = _taql_preprocess_select(target, body)
         # Phase 242: SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
         # and `DISTINCT` all mis-parsed or errored).

@@ -987,3 +987,45 @@ end
         end
     end
 end
+
+# Phase 257: `taql()` SELECT sub-queries and table aliases, live-probed vs real
+# TaQL (34 forms): `FROM (SELECT ...)` (nested ok), `x [NOT] IN (SELECT col ...)`
+# (with WHERE / ORDER BY / LIMIT / DISTINCT / computed columns inside),
+# `[NOT] EXISTS (SELECT ...)`, `SELECT FROM t` (no column list), and `FROM t [AS] a`
+# with `a.COL` qualifiers.  Divergence: a POSITIVE `EXISTS` / `IN` of an EMPTY
+# sub-query errors in real TaQL; here it simply matches no rows.
+@testset "taql() SELECT sub-queries + aliases (Phase 257)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8), "D" => collect(0.5:1:7.5)]; nrow=8)
+    t = readtable(dir)
+    xs(q) = collect(column(taql(t, q), "X")[:])
+    @test xs("SELECT K AS X FROM t a") == 1:8 && xs("SELECT a.K AS X FROM t AS a WHERE a.K>3") == 4:8
+    @test xs("SELECT K AS X FROM t q WHERE q.G==1 AND K>1") == [3, 6] && xs("SELECT q.K AS X FROM t q ORDER BY q.K DESC") == 8:-1:1
+    @test xs("SELECT K AS X FROM (SELECT FROM t WHERE K>3)") == 4:8
+    @test xs("SELECT K AS X FROM (SELECT FROM t WHERE K>3) WHERE K<7") == [4, 5, 6]
+    @test xs("SELECT K AS X FROM (SELECT FROM (SELECT FROM t WHERE K>2) WHERE K<7)") == 3:6
+    @test xs("SELECT K AS X FROM (SELECT K FROM t WHERE G==1) ORDER BY K DESC") == [6, 3, 1]
+    @test xs("SELECT gsum(K) AS X FROM (SELECT FROM t WHERE G==1)") == [10]
+    @test xs("SELECT K AS X FROM t WHERE K IN (SELECT K FROM t WHERE G==1)") == [1, 3, 6]
+    @test xs("SELECT K AS X FROM t WHERE K NOT IN (SELECT K FROM t WHERE G==1)") == [2, 4, 5, 7, 8]
+    @test xs("SELECT K AS X FROM t WHERE G IN (SELECT G FROM t WHERE K>6)") == [4, 7, 8]
+    @test xs("SELECT K AS X FROM t WHERE K IN (SELECT K FROM t WHERE G==1 ORDER BY K DESC LIMIT 2)") == [3, 6]
+    @test xs("SELECT K AS X FROM t WHERE D IN (SELECT D FROM t WHERE G==2)") == [2, 5]
+    @test xs("SELECT K AS X FROM t WHERE K IN (SELECT K+1 AS K FROM t WHERE G==2)") == [3, 6]
+    @test xs("SELECT K AS X FROM t WHERE K IN (SELECT DISTINCT G FROM t)") == [1, 2, 3]
+    @test xs("SELECT K AS X FROM t WHERE EXISTS (SELECT FROM t WHERE K>7)") == 1:8
+    @test xs("SELECT K AS X FROM t WHERE NOT EXISTS (SELECT FROM t WHERE K>100)") == 1:8
+    @test isempty(xs("SELECT K AS X FROM t WHERE EXISTS (SELECT FROM t WHERE K>100)"))
+    @test isempty(xs("SELECT K AS X FROM t WHERE K IN (SELECT K FROM t WHERE G==9)"))
+    @test_throws ArgumentError taql(t, "SELECT K AS X FROM (K>3)")
+    if _HAVE_TAQL
+        for q in ("SELECT K AS X FROM \$1 a", "SELECT a.K AS X FROM \$1 AS a WHERE a.K>3", "SELECT K AS X FROM (SELECT FROM \$1 WHERE K>3) WHERE K<7",
+                  "SELECT K AS X FROM (SELECT FROM (SELECT FROM \$1 WHERE K>2) WHERE K<7)", "SELECT gsum(K) AS X FROM (SELECT FROM \$1 WHERE G==1)",
+                  "SELECT K AS X FROM \$1 WHERE K IN (SELECT K FROM \$1 WHERE G==1)", "SELECT K AS X FROM \$1 WHERE K NOT IN (SELECT K FROM \$1 WHERE G==1)",
+                  "SELECT K AS X FROM \$1 WHERE K IN (SELECT K FROM \$1 WHERE G==1 ORDER BY K DESC LIMIT 2)",
+                  "SELECT K AS X FROM \$1 WHERE K IN (SELECT K+1 AS K FROM \$1 WHERE G==2)", "SELECT K AS X FROM \$1 WHERE EXISTS (SELECT FROM \$1 WHERE K>7)",
+                  "SELECT K AS X FROM \$1 WHERE NOT EXISTS (SELECT FROM \$1 WHERE K>100)", "SELECT K AS X FROM \$1 t WHERE t.G==1 AND K>1")
+            @test collect(_taqlcmd(q, dir)[:X][:]) == xs(replace(q, "\$1" => "t"))
+        end
+    end
+end
