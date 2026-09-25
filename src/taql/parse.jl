@@ -60,6 +60,12 @@ function _taqllite_tokenize(s::AbstractString)
             val = join(cs[i+1:j-1])
             push!(toks, TQLToken(:str, join(cs[i:j]), val))
             i = j + 1
+        elseif c == '0' && i + 2 <= n && (cs[i+1] == 'x' || cs[i+1] == 'X') && isxdigit(cs[i+2])
+            # hex integer literal `0x1F` (real TaQL accepts it; Phase 244)
+            j = i + 2
+            while j <= n && isxdigit(cs[j]); j += 1; end
+            push!(toks, TQLToken(:num, join(cs[i:j-1]), parse(Int, join(cs[i+2:j-1]); base=16)))
+            i = j
         elseif isdigit(c) || (c == '.' && _isdigit_at(cs, i + 1, n))
             j = i
             sawdot = false
@@ -300,8 +306,11 @@ const _TQL_CMPOPS = Dict{String,Function}(
 # (truncating, matching TaQL DIVIDETRUNC); `**` is handled separately in
 # `_parse_power!` (-> `_tql_pow`, not this dict -- casacore's `**` and
 # `pow()` are the same runtime `powFUNC`/std::pow, Phase 184).
+# `+` is string concatenation on two strings (real TaQL; Phase 244), else numeric `+`
+_tql_add(a, b) = a + b
+_tql_add(a::AbstractString, b::AbstractString) = string(a, b)
 const _TQL_ARITHOPS = Dict{String,Function}(
-    "+" => (+), "-" => (-), "*" => (*), "/" => (/), "%" => rem, "//" => div)
+    "+" => _tql_add, "-" => (-), "*" => (*), "/" => (/), "%" => rem, "//" => div)
 
 # operator tokens this subset deliberately rejects, with a clear message
 const _TQL_REJECTED_OPS = Dict{String,String}()
@@ -583,6 +592,9 @@ function _parse_atom_base!(p::TQLParser)
         up = uppercase(t.text)
         up == "TRUE" && return TQLLit(true)
         up == "FALSE" && return TQLLit(false)
+        # `T` / `F` bool literals (real TaQL; Phase 244) -- unlike real TaQL,
+        # a column literally named `T` / `F` wins here.
+        (t.text == "T" || t.text == "F") && !(t.text in p.validnames) && return TQLLit(t.text == "T")
         # `end` -- only meaningful inside an array subscript; it errors at
         # evaluation if used anywhere else.
         up == "END" && !(t.text in p.validnames) && return TQLEnd()

@@ -9048,3 +9048,15 @@ ranges are errors (as in real TaQL); `[:hi]` stays unsupported (real TaQL
 rejects it too). New `TQLRangeSet` element + `_tql_in`, used by both the
 row (`_tqleval`) and group (`_geval`) evaluators. New testset with a
 real-TaQL cross-check of nine forms.
+
+### Phase 244 — `T`/`F` bool literals, string `+`, hex integer literals
+
+A 60-form batch of literal / string-operation WHERE expressions against
+real TaQL agreed except three forms real TaQL accepts and TaQL-lite
+rejected: `T` / `F` boolean literals (`G = T`, `A > 2 AND T`),
+`+` as string concatenation (`S + 'x' = 'abcx'`), and `0x..` hex integers
+(`A > 0x3`). All three now work and are cross-checked live. Documented
+divergences: a column literally named `T`/`F` wins over the literal
+(real TaQL lets the literal win); real TaQL *rejects* a bare `WHERE F`,
+`FALSE` and `5.`, which stay permissive here; the `5L` integer suffix is
+not supported. New testset (real-TaQL cross-check of eight forms).
