@@ -9287,3 +9287,13 @@ Complex → `NaN+NaN·im`, Bool → `false`, String → `"none"` — reproduced 
 TaQL rejects `AND` and comma joins, as does this), and the right key must be
 unique.
 
+### Phase 260 — more `taql()` JOIN forms: chained, `rowid()`, duplicate keys
+
+Live-probed against real TaQL (20 forms, all match): **chained joins**
+(`… JOIN $2 b ON a.K == b.K JOIN $3 c ON b.N == c.N`, each matched against the
+joined table so far), an **index lookup** `ON a.K == b.rowid()` (the left value is
+the 0-based right row), `a.rowid()` / `b.rowid()` as columns (0-based source row;
+sentinel when unmatched), `=` as well as `==`, and a **duplicate right key now
+matches its first row** (was an error). Divergence: real TaQL returns `NaN` for
+the reversed index form `ON b.rowid() == a.K`; here it is the same lookup.
+

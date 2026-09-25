@@ -497,28 +497,63 @@ function _taql_sentinel(c::AbstractVector)
     throw(ArgumentError("taql: JOIN of a column of type $T is not supported"))
 end
 
+# `FROM $1 a JOIN $2 b ON <cond> [JOIN $3 c ON <cond> ...]`, <cond> = `x.p == y.q`
+# (`=` / `IN` too, either order); `q` may be `rowid()` (an INDEX lookup: the other
+# side's value is the 0-based right row).  A duplicate right key matches its FIRST
+# row (real TaQL).  Chained joins match against the joined table so far.  `a.rowid()`
+# / `b.rowid()` are the 0-based source row of each side (sentinel when unmatched).
+const _JOIN_SIDE = raw"(\w+)\.(\w+(?:\(\))?)"
 function _taql_join_from(target, body::AbstractString, others)
-    m = match(r"\bFROM\s+\$(\d+)\s+(?:AS\s+)?(\w+)\s+JOIN\s+\$(\d+)\s+(?:AS\s+)?(\w+)\s+ON\s+(\w+)\.(\w+)\s*(?:==|\bIN\b)\s*(\w+)\.(\w+)"i, body)
+    m = match(Regex("\\bFROM\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+JOIN\\b", "i"), body)
     m === nothing && return target, body
     tab(k) = (i = parse(Int, k);
               i == 1 ? (target isa AbstractTable ? target : readtable(_cmd_path(target))) :
               (i - 1 <= length(others) ? (o = others[i-1]; o isa AbstractTable ? o : readtable(_cmd_path(o))) :
                throw(ArgumentError("taql: no table \$$i (pass it as an extra argument)"))))
-    left, right = tab(m.captures[1]), tab(m.captures[3])
-    la, ra = String(m.captures[2]), String(m.captures[4])
-    (q1, c1, q2, c2) = (String(m.captures[5]), String(m.captures[6]), String(m.captures[7]), String(m.captures[8]))
-    if q1 == la && q2 == ra
-        lk, rk = c1, c2
-    elseif q1 == ra && q2 == la
-        lk, rk = c2, c1
-    else
-        throw(ArgumentError("taql: the JOIN condition must relate the two table aliases"))
+    left = tab(m.captures[1]); la = String(m.captures[2])
+    names = String[la * "." * n for n in columnnames(left)]
+    cols = AbstractVector[collect(column(left, n)[:]) for n in columnnames(left)]
+    push!(names, la * ".__rowid"); push!(cols, collect(0:nrow(left)-1))
+    pos = m.offset + length(m.match) - length("JOIN")       # start of the first JOIN
+    jre = Regex("^JOIN\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+ON\\s+" * _JOIN_SIDE *
+                "\\s*(?:==|=|\\bIN\\b)\\s*" * _JOIN_SIDE * "\\s*", "i")
+    rest = body[pos:end]
+    while (jm = match(jre, rest)) !== nothing
+        right = tab(jm.captures[1]); ra = String(jm.captures[2])
+        (q1, c1, q2, c2) = (String(jm.captures[3]), String(jm.captures[4]), String(jm.captures[5]), String(jm.captures[6]))
+        if q1 == ra && q2 != ra
+            (rc, oq, oc) = (c1, q2, c2)
+        elseif q2 == ra && q1 != ra
+            (rc, oq, oc) = (c2, q1, c1)
+        else
+            throw(ArgumentError("taql: the JOIN condition must relate the new alias \"$ra\" to an earlier one"))
+        end
+        oc == "rowid()" && throw(ArgumentError("taql: rowid() is only supported on the joined (right) side of ON"))
+        lidx = findfirst(==(oq * "." * oc), names)
+        lidx === nothing && throw(ArgumentError("taql: unknown column \"$oq.$oc\" in the JOIN condition"))
+        lk = cols[lidx]; nr = nrow(right)
+        if rc == "rowid()"
+            mr = Int[(ismissing(v) ? 0 : (0 <= v < nr ? Int(v) + 1 : 0)) for v in lk]
+        else
+            rcol = collect(column(right, rc)[:])
+            first = Dict{Any,Int}()
+            for (i, v) in enumerate(rcol); haskey(first, v) || (first[v] = i); end
+            mr = Int[get(first, v, 0) for v in lk]
+        end
+        for n in columnnames(right)
+            rcx = collect(column(right, n)[:])
+            T = eltype(rcx)
+            push!(names, ra * "." * n)
+            push!(cols, any(iszero, mr) ? _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) :
+                                         T[rcx[r] for r in mr])
+        end
+        push!(names, ra * ".__rowid")
+        push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])
+        rest = rest[length(jm.match)+1:end]
     end
-    lcols = [n => la * "." * n for n in columnnames(left)]   # join pairs are src => out
-    rcols = [n => ra * "." * n for n in columnnames(right)]
-    j = join(left, right; on = lk => rk, leftcols = lcols, rightcols = rcols, unmatched = :missing)
-    joined = GroupedTable(copy(j.names), AbstractVector[_taql_sentinel(c) for c in j.cols])
-    body = body[1:m.offset-1] * "FROM __join" * body[m.offset+length(m.match):end]
+    joined = GroupedTable(Symbol.(names), cols)
+    body = body[1:m.offset-1] * "FROM __join " * rest
+    body = replace(body, r"\b(\w+)\.rowid\(\)" => s"\1.__rowid")
     return joined, body
 end
 

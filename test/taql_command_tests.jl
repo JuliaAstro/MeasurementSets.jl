@@ -1103,3 +1103,47 @@ end
         end
     end
 end
+
+# Phase 260: more JOIN forms (live-probed vs real TaQL, 20 forms): chained joins
+# (`JOIN $2 b ON .. JOIN $3 c ON b.N == c.N`, matched against the joined table so
+# far), an INDEX lookup `ON a.K == b.rowid()` (the left value is the 0-based right
+# row), `a.rowid()` / `b.rowid()` as columns, `=` as well as `==`, and a duplicate
+# right key matching its FIRST row (was an error).  Divergence: real TaQL returns
+# NaN for the reversed index form `ON b.rowid() == a.K`; here it is the same lookup.
+@testset "taql SELECT ... JOIN: chained, rowid(), duplicate keys (Phase 260)" begin
+    d1 = joinpath(mktempdir(), "a"); d2 = joinpath(mktempdir(), "b"); d3 = joinpath(mktempdir(), "c")
+    write_table(d1, "A", Pair{String,Any}["K" => Int32[1, 2, 3, 4, 5, 2], "V" => [10.0, 20, 30, 40, 50, 60], "Z" => Int32[0, 1, 2, 0, 1, 2]]; nrow=6)
+    write_table(d2, "B", Pair{String,Any}["K" => Int32[2, 3, 5, 9], "N" => ["two", "three", "five", "nine"], "W" => [0.2, 0.3, 0.5, 0.9]]; nrow=4)
+    write_table(d3, "C", Pair{String,Any}["N" => ["two", "five", "zzz"], "Q" => Int32[100, 200, 300]]; nrow=3)
+    t1, t2, t3 = readtable(d1), readtable(d2), readtable(d3)
+    xy(q) = (r = taql(t1, q, t2, t3); (collect(column(r, "X")[:]), collect(column(r, "Y")[:])))
+    big = typemax(Int64)
+    @test xy("SELECT a.V AS X, c.Q AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K JOIN \$3 c ON b.N == c.N")[2] == [big, 100, big, big, 200, 100]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K JOIN \$3 c ON b.N == c.N")[2] == ["none", "two", "three", "none", "five", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == b.rowid()")[2] == ["three", "five", "nine", "none", "none", "five"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.rowid()")[2] == ["two", "three", "five", "two", "three", "five"]
+    @test xy("SELECT a.V AS X, a.V AS Y FROM \$1 a JOIN \$2 b ON a.K == b.rowid() WHERE b.N == 'five'") == ([20.0, 60.0], [20.0, 60.0])
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K = b.K")[2] == ["none", "two", "three", "none", "five", "two"]
+    @test xy("SELECT a.V AS X, b.N AS Y FROM \$1 AS a JOIN \$2 AS b ON a.K == b.K WHERE b.N != 'none'")[2] == ["two", "three", "five", "two"]
+    @test xy("SELECT a.V AS X, upper(b.N) AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K")[2] == ["NONE", "TWO", "THREE", "NONE", "FIVE", "TWO"]
+    g = taql(t1, "SELECT b.N AS X, gsum(a.V) AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K GROUP BY b.N", t2)
+    @test sort(collect(column(g, "X")[:])) == ["five", "none", "three", "two"] && sum(column(g, "Y")[:]) == 210
+    # self-join, duplicate right key -> the FIRST matching row; a./b.rowid()
+    s(q) = (r = taql(t1, q); (collect(column(r, "X")[:]), collect(column(r, "Y")[:])))
+    @test s("SELECT a.V AS X, b.V AS Y FROM \$1 a JOIN \$1 b ON a.K == b.K")[2] == [10.0, 20, 30, 40, 50, 20]
+    @test s("SELECT a.V AS X, b.rowid() AS Y FROM \$1 a JOIN \$1 b ON a.K == b.K")[2] == [0, 1, 2, 3, 4, 1]
+    @test s("SELECT a.rowid() AS X, b.V AS Y FROM \$1 a JOIN \$1 b ON a.Z == b.rowid()") == ([0, 1, 2, 3, 4, 5], [10.0, 20, 30, 10, 20, 30])
+    @test_throws ArgumentError xy("SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == a.Z")
+    if _HAVE_TAQL
+        for q in ("SELECT a.V AS X, c.Q AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K JOIN \$3 c ON b.N == c.N",
+                  "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K == b.rowid()", "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.rowid()",
+                  "SELECT a.V AS X, b.N AS Y FROM \$1 a JOIN \$2 b ON a.K = b.K", "SELECT a.V AS X, b.N AS Y FROM \$1 AS a JOIN \$2 AS b ON a.K == b.K WHERE b.N != 'none'",
+                  "SELECT a.V AS X, upper(b.N) AS Y FROM \$1 a JOIN \$2 b ON a.K == b.K",
+                  "SELECT a.V AS X, b.V AS Y FROM \$1 a JOIN \$1 b ON a.K == b.K", "SELECT a.V AS X, b.rowid() AS Y FROM \$1 a JOIN \$1 b ON a.K == b.K",
+                  "SELECT a.rowid() AS X, b.V AS Y FROM \$1 a JOIN \$1 b ON a.Z == b.rowid()")
+            ps = occursin("\$3", q) ? (d1, d2, d3) : occursin("\$2", q) ? (d1, d2) : (d1,)
+            r = _taqlcmd(q, ps...); m = taql(t1, q, t2, t3)
+            @test isequal(collect(r[:X][:]), collect(column(m, "X")[:])) && isequal(collect(r[:Y][:]), collect(column(m, "Y")[:]))
+        end
+    end
+end
