@@ -4312,3 +4312,54 @@ end
         end
     end
 end
+
+# Phase 252: the group functions `growid()`, `gaggr(x)` / `gstack(x)` and
+# `ghist(x, nbins, lo, hi)` (Phase 26's remaining non-goals), live-probed against
+# real GROUP BY (33 forms, all match): `growid()` is the group's 0-BASED row ids;
+# `gaggr`/`gstack` collect the group's values (scalars -> a vector, arrays
+# stacked along a NEW LAST axis); `ghist` returns `nbins + 2` integer counts --
+# underflow (`x < lo`), `nbins` equal left-closed bins, overflow (`x >= hi`).
+@testset "TaQL-lite — growid / gaggr / gstack / ghist group functions (Phase 252)" begin
+    dir = joinpath(mktempdir(), "t")
+    K = Int32[1, 2, 3, 1, 2, 3, 1, 2]
+    X = Float64[0.5, 3.5, 7.0, 1.5, 4.0, 9.5, 2.5, 6.0]
+    I = Int32[3, 1, 4, 1, 5, 9, 2, 6]
+    Vv = [Float64.(1:3) .* i for i in 1:8]
+    write_table(dir, "T", Pair{String,Any}["K" => K, "X" => X, "I" => I, "V" => Vv,
+                "S" => ["a", "b", "c", "d", "e", "f", "g", "h"]]; nrow=8, tsm=[["V"]])
+    t = readtable(dir)
+    gb(e; kw...) = (g = groupby(t, "K"; select=["K" => "K", "X" => e], kw...);
+                    Dict(zip(collect(g.K), collect(g.X))))
+
+    @test gb("growid()") == Dict(1 => [0, 3, 6], 2 => [1, 4, 7], 3 => [2, 5])
+    @test gb("gaggr(X)") == Dict(1 => [0.5, 1.5, 2.5], 2 => [3.5, 4.0, 6.0], 3 => [7.0, 9.5])
+    @test gb("gaggr(I)")[3] == [4, 9] && gb("gaggr(S)")[1] == ["a", "d", "g"]
+    a = gb("gaggr(V)")
+    @test size(a[1]) == (3, 3) && a[1] == hcat(Vv[1], Vv[4], Vv[7]) && a[3] == hcat(Vv[3], Vv[6])
+    @test gb("gstack(V)") == a && gb("gstack(X)") == gb("gaggr(X)")
+    @test gb("ghist(X, 5, 0.0, 10.0)") == Dict(1 => [0, 2, 1, 0, 0, 0, 0], 2 => [0, 0, 1, 1, 1, 0, 0], 3 => [0, 0, 0, 0, 1, 1, 0])
+    @test gb("ghistogram(I, 5, 0, 10)")[1] == [0, 1, 2, 0, 0, 0, 0]
+    @test gb("ghist(X, 5, 2.0, 8.0)")[1] == [2, 1, 0, 0, 0, 0, 0]        # underflow bin
+    @test gb("ghist(X, 5, 2.0, 8.0)")[3] == [0, 0, 0, 0, 0, 1, 1]        # 7.0 in bin 5, 9.5 overflow
+    @test all(length.(values(gb("ghist(X, 4, 0.0, 8.0)"))) .== 6)          # nbins + 2
+    @test gb("ghist(X, 1, 0.0, 10.0)")[1] == [0, 3, 0]
+    @test gb("ghist(X, 5, 0.0, 10.0)"; where="X > 2") == Dict(1 => [0, 0, 1, 0, 0, 0, 0], 2 => [0, 0, 1, 1, 1, 0, 0], 3 => [0, 0, 0, 0, 1, 1, 0])
+    @test gb("growid()"; where="X > 2") == Dict(1 => [6], 2 => [1, 4, 7], 3 => [2, 5])     # original 0-based rows
+    @test gb("sum(gaggr(X))")[2] ≈ 13.5 && gb("nelements(growid())")[3] == 2 && gb("growid()[1]")[3] == 2
+    @test gb("count(growid())") == Dict(1 => 3, 2 => 3, 3 => 2)
+    for bad in ("growid(X)", "ghist(X, 5)", "ghist(X, 5, 0.0, 10.0, 1)", "ghist(X, 0, 0.0, 10.0)", "ghist(X, 5, 10.0, 0.0)")
+        @test_throws ArgumentError gb(bad)
+    end
+
+    if _HAVE_TAQL
+        cref(e, tail="GROUP BY K") = (r = _taqlcmd("SELECT K, $e AS X FROM \$1 $tail", dir);
+                                      Dict(zip(collect(r[:K][:]), collect(r[:X][:]))))
+        for (e, tail, w) in [("growid()", "GROUP BY K", nothing), ("gaggr(X)", "GROUP BY K", nothing), ("gaggr(V)", "GROUP BY K", nothing),
+                             ("ghist(X, 5, 0.0, 10.0)", "GROUP BY K", nothing), ("ghist(I, 4, 0, 8)", "GROUP BY K", nothing),
+                             ("ghist(X, 5, 2.0, 8.0)", "GROUP BY K", nothing), ("growid()", "WHERE X > 2 GROUP BY K", "X > 2"),
+                             ("gaggr(X)", "WHERE I > 1 GROUP BY K", "I > 1")]
+            r = cref(e, tail); m = w === nothing ? gb(e) : gb(e; where=w)
+            @test keys(r) == keys(m) && all(k -> collect(r[k]) == collect(m[k]), keys(r))
+        end
+    end
+end

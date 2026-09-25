@@ -9174,3 +9174,17 @@ equal-sized → shape `(n, rest…)`; other first-axes unsupported),
 (a table-level test resolved against the table's columns). Still not
 implemented: `iskeyword`, `regex`/`pattern`/`sqlpattern`. New testset with an
 18-form real-TaQL cross-check.
+
+### Phase 252 — group functions `growid`, `gaggr`/`gstack`, `ghist`
+
+The group functions Phase 26 listed as non-goals, live-probed against real
+`GROUP BY` (33 forms, all match): `growid()` — the group's **0-based** row
+ids (original table rows, also under `WHERE`); `gaggr(x)` / `gstack(x)` —
+collect the group's values (scalars → a vector; arrays are stacked along a
+**new last axis**, all the same shape); `ghist(x, nbins, lo, hi)` (alias
+`ghistogram`) — `nbins + 2` integer counts: an underflow bin (`x < lo`),
+`nbins` equal left-closed bins, an overflow bin (`x >= hi`); `nbins`/`lo`/`hi`
+must be numeric literals. They compose with the scalar/array functions
+(`sum(gaggr(X))`, `nelements(growid())`, `growid()[1]`). Still not
+implemented: `iskeyword`, `regex` / `pattern` / `sqlpattern`. New testset with
+an 8-form real cross-check.

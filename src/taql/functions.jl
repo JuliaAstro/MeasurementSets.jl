@@ -1487,6 +1487,36 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
     throw(ArgumentError("TaQL-lite: meas.$fn is not supported in \"$src\""))
 end
 
+# ---- Phase 251b/252: group functions `growid`, `gaggr`/`gstack`, `ghist` ----
+# (live-probed vs real GROUP BY.) `growid()` = the group's ROW IDS, 0-based,
+# as an Int vector; `gaggr(x)`/`gstack(x)` collect the group's values into an
+# array (scalars -> a vector; arrays are stacked along a NEW LAST axis, all
+# same shape); `ghist(x, nbins, lo, hi)` (alias `ghistogram`) -> `nbins + 2`
+# integer counts: an underflow bin (`x < lo`), `nbins` equal left-closed bins,
+# and an overflow bin (`x >= hi`).
+function _tql_gaggr(vals)
+    isempty(vals) && return vals
+    if all(v -> v isa AbstractArray, vals)
+        allequal(size.(vals)) || throw(ArgumentError(
+            "TaQL-lite: gaggr/gstack needs the group's arrays to share one shape"))
+        return stack(vals)
+    end
+    return identity.(collect(vals))
+end
+function _tql_ghist(vals, nb::Int, lo::Float64, hi::Float64)
+    counts = zeros(Int, nb + 2)
+    w = (hi - lo) / nb
+    for x in vals
+        if x < lo
+            counts[1] += 1
+        else
+            b = floor(Int, (x - lo) / w) + 1
+            counts[b > nb ? nb + 2 : b + 1] += 1
+        end
+    end
+    return counts
+end
+
 function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     n = length(args)
     if startswith(name, "mscal.")
@@ -1586,6 +1616,21 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
             "TaQL-lite: countall() takes no arguments in \"$src\""))
         n in 0:1 || throw(ArgumentError("TaQL-lite: gcount() takes 0 or 1 arguments in \"$src\""))
         return TQLAggr(length, n == 0 ? nothing : args[1], :scalar)
+    end
+    if name == "growid"
+        n == 0 || throw(ArgumentError("TaQL-lite: growid() takes no arguments in \"$src\""))
+        return TQLAggr(g -> [i - 1 for i in g], nothing, :scalar)
+    end
+    if name in ("gaggr", "gstack")
+        n == 1 || throw(ArgumentError("TaQL-lite: $name(x) takes 1 argument in \"$src\""))
+        return TQLAggr(_tql_gaggr, args[1], :scalar)
+    end
+    if name in ("ghist", "ghistogram")
+        (n == 4 && all(a -> a isa TQLLit && a.value isa Real, args[2:4])) || throw(ArgumentError(
+            "TaQL-lite: $name(x, nbins, lo, hi) needs numeric-literal nbins/lo/hi in \"$src\""))
+        nb = Int(args[2].value); lo = Float64(args[3].value); hi = Float64(args[4].value)
+        (nb >= 1 && hi > lo) || throw(ArgumentError("TaQL-lite: $name needs nbins >= 1 and hi > lo in \"$src\""))
+        return TQLAggr(v -> _tql_ghist(v, nb, lo, hi), args[1], :scalar)
     end
     if name == "gfractile"
         # casacore's `gfractile(col, frac)` (`gfractileFUNC`,
