@@ -9098,11 +9098,45 @@ table — real TaQL vs `taql()` — and every column compared (46 forms clean,
 then 46 edge forms, then 18 coercion probes). Real gaps found and
 fixed: writing a floating value into an **integer column** errored
 (`UPDATE t SET A = B`, `SET A = A / 2`, `INSERT … VALUES (2.9)`); real
-TaQL truncates toward zero, saturates at the type's limits (`1e12` and
-`Inf` → `typemax`), and maps `NaN` to 0 — now matched for both `UPDATE`
-and `INSERT`. And `INSERT INTO t [(cols)] SELECT … FROM <name|'path'>`:
+TaQL truncates toward zero — now matched for both `UPDATE` and `INSERT`;
+out-of-range values saturate at the type's limits and `NaN` → 0 by *our*
+convention (real casacore's cast there is undefined behaviour that differs
+by architecture — ARM64 saturates, x86-64 gives `typemin` — so only
+in-range conversions are cross-checked live; found when CI on x86-64
+failed the original cross-check). And `INSERT INTO t [(cols)] SELECT … FROM <name|'path'>`:
 a target column list was rejected, and a bare `FROM name` (the target
 itself, real TaQL's `INSERT INTO t SELECT … FROM t`) was unsupported.
 Deliberately not copied: real TaQL's adjacent-literal `'it''s'` → `its`
 and `VALUES (A)` → default, and it rejects `Bool`↔numeric writes that we
 allow. New testset (cross-checks 13 forms against twin tables).
+
+### Phase 248 — `mscal.baseline` bare `<N`/`>N` are lengths; `spw` `^step`
+
+115 `mscal.baseline` / `field` / `spw` / `uvdist` selection specs compared
+row-for-row against real `derivedmscal` on the sample MS (real casacore
+*throws* on an empty selection where TaQL-lite returns 0 rows, so those
+were compared as "real errors ⇔ ours empty"; every `uvdist` form errors in
+this build's real casacore, so those were not comparable). Everything
+agreed except two forms: (1) a bare `<N` / `>N` / `<=N` / `>=N` in
+`mscal.baseline` with no `&` and no unit is a **baseline length in metres**
+(`>3000` ≡ `>3000m`, `>3` matches every baseline) — we treated it as an
+antenna-id comparison (a unit-less `a~b` stays an antenna-id range); (2)
+`spw('0:^2')`, a channel stride with no range, errored. Both fixed. New
+testset with a 13-spec real cross-check.
+
+### Phase 249 — real-casacore value-first `meas.*` calling forms
+
+A 98-form probe of the `meas.*` TaQL functions against real casacore's
+`meas.*` UDFs found them essentially incomparable at first — real uses a
+different, **value-first** convention (`meas.b1950([ra,dec] [, 'SRC' [,
+epoch [, pos]]])`, `meas.doppler('TO', value [, 'FROM'])`, `meas.last(epoch,
+pos)`), while Phase 97's puts the source frame first with scalar lon/lat.
+Both are now accepted (real's first argument is an array expression, so the
+two can't collide). Behaviour matches real casacore where compared:
+longitudes in (−π, π], `meas.last` returned as seconds of the sidereal day,
+epoch/position needed when the *source* frame (e.g. `'AZEL'` → J2000) needs
+them, and an extra unused position argument tolerated. Epochs are plain MJD
+days and positions plain metres or an observatory name (real also takes
+`60454d` / `[x m, …]` quantities — real TaQL's `d`/`h` units have a
+time/angle duality we don't reproduce). Not supported: the `SUPERGAL`
+frame. New testset.

@@ -843,8 +843,8 @@ end
 # Phase 247: 110 UPDATE / DELETE / INSERT forms applied to twin copies of a
 # table (real TaQL vs `taql()`), every column compared. Found + fixed:
 # writing a FLOAT into an INTEGER column errored (real TaQL truncates toward
-# zero, saturates at the type's limits -- `1e12` -> typemax, `Inf` ->
-# typemax -- and maps NaN to 0), for both UPDATE ... SET and INSERT; and
+# zero; out-of-range values saturate and NaN -> 0 by OUR convention -- real
+# casacore's cast there is architecture-dependent UB, so not cross-checked), for both UPDATE ... SET and INSERT; and
 # `INSERT INTO t [(cols)] SELECT ... FROM <name|'path'>` -- a column list
 # was rejected and a bare `FROM name` (the target itself) unsupported.
 # (Not copied: real TaQL's adjacent-literal `'it''s'` -> "its" and its
@@ -888,10 +888,14 @@ end
     d = mk(); @test_throws ArgumentError taql(d, "INSERT INTO t (A) SELECT A,B FROM t")
 
     if _HAVE_TAQL
-        for cmd in ("UPDATE \$1 SET A = B", "UPDATE \$1 SET A = B * -1", "UPDATE \$1 SET A = B * 1e12",
-                    "UPDATE \$1 SET A = 0.0/0", "UPDATE \$1 SET A = 1.0/0", "UPDATE \$1 SET A = B, B = A",
+        # Only IN-RANGE conversions are cross-checked: casacore's out-of-range /
+        # NaN / Inf float->int cast is C++ undefined behaviour that differs by
+        # architecture (ARM64 saturates piecewise; x86-64 gives typemin for all of
+        # them -- CI caught this), so our saturating/NaN->0 convention is checked
+        # above against fixed expectations instead, not against a live oracle.
+        for cmd in ("UPDATE \$1 SET A = B", "UPDATE \$1 SET A = B * -1", "UPDATE \$1 SET A = B, B = A",
                     "UPDATE \$1 SET A = A / 2 WHERE A > 4", "INSERT INTO \$1 (A) VALUES (2.9),(-1.5)",
-                    "INSERT INTO \$1 SET A = 7.9", "INSERT INTO \$1 (A) VALUES (1e12)",
+                    "INSERT INTO \$1 SET A = 7.9",
                     "INSERT INTO \$1 SELECT A,B,S,G FROM \$1 WHERE A > 4",
                     "INSERT INTO \$1 (A,B) SELECT A,B FROM \$1 WHERE A < 4", "INSERT INTO \$1 SELECT * FROM \$1")
             dr = mk(); dm = mk()
