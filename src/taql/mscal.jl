@@ -1183,7 +1183,8 @@ end
 # one `&`-joined (or bare) baseline-pair term -- no leading `!`, no `;`
 # (both handled by `_mssel_baseline_pred`, below).
 function _mssel_baseline_term_pred(spec::AbstractString, n2i::AbstractDict, allants;
-                                   names::Union{Nothing,Vector{String}} = nothing)
+                                   names::Union{Nothing,Vector{String}} = nothing,
+                                   crossonly::Bool = true)
     if _mssel_is_blregexlist(spec)
         names === nothing && throw(ArgumentError(
             "mscal.baseline: a regex baseline-pair list (\"$spec\") needs antenna " *
@@ -1208,7 +1209,11 @@ function _mssel_baseline_term_pred(spec::AbstractString, n2i::AbstractDict, alla
         return (a1, a2) -> a1 != a2 && ((a1 in SL && a2 in SR) || (a1 in SR && a2 in SL))
     else
         S = _mssel_idset(spec, allants, n2i)
-        return (a1, a2) -> a1 in S || a2 in S
+        # a bare antenna list selects CROSS-correlations touching it only (live-verified with
+        # autocorrelation rows: `'15'` drops (15,15)); a leading `!` then negates THAT, so a
+        # negated list keeps every autocorrelation, including the listed antennas' own.
+        # (`mscal.feed` passes `crossonly = false`: FEED1 == FEED2 is the normal case there)
+        return crossonly ? (a1, a2) -> a1 != a2 && (a1 in S || a2 in S) : (a1, a2) -> a1 in S || a2 in S
     end
 end
 
@@ -1245,7 +1250,8 @@ end
 # every spec tested — the "same as the first term alone" appearance was
 # coincidental algebra, not term-dropping).
 function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants;
-                              names::Union{Nothing,Vector{String}} = nothing)
+                              names::Union{Nothing,Vector{String}} = nothing,
+                              crossonly::Bool = true)
     spec = strip(spec)
     if occursin(';', spec)
         terms = [t for t in strip.(split(spec, ';')) if !isempty(t)]
@@ -1254,7 +1260,7 @@ function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants;
         for t in terms
             tneg = startswith(t, "!")
             tbody = tneg ? strip(t[2:end]) : t
-            raw = _mssel_baseline_term_pred(tbody, n2i, allants; names)
+            raw = _mssel_baseline_term_pred(tbody, n2i, allants; names, crossonly)
             cond = tneg ? ((a1, a2) -> !raw(a1, a2)) : raw
             acc = acc === nothing ? cond :
                   tneg ? _mssel_and2(acc, cond) : _mssel_or2(acc, cond)
@@ -1263,7 +1269,7 @@ function _mssel_baseline_pred(spec::AbstractString, n2i::AbstractDict, allants;
     end
     neg = startswith(spec, "!")
     body = neg ? strip(spec[2:end]) : spec
-    pred = _mssel_baseline_term_pred(body, n2i, allants; names)
+    pred = _mssel_baseline_term_pred(body, n2i, allants; names, crossonly)
     return neg ? (a1, a2) -> !pred(a1, a2) : pred
 end
 
@@ -1365,7 +1371,7 @@ function _mssel_one(t::AbstractTable, fn::AbstractString, spec::AbstractString,
         f1 = Int.(column(t, "FEED1")[:])
         f2 = "FEED2" in cn ? Int.(column(t, "FEED2")[:]) : f1
         maxf = max(maximum(f1; init = -1), maximum(f2; init = -1))
-        pred = _mssel_baseline_pred(spec, Dict{String,Vector{Int}}(), 0:maxf)
+        pred = _mssel_baseline_pred(spec, Dict{String,Vector{Int}}(), 0:maxf; crossonly = false)
         return Bool[pred(f1[i], f2[i]) for i in 1:n]
     elseif fn == "baseline"
         _need("ANTENNA1")

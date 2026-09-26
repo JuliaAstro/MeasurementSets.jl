@@ -1880,3 +1880,42 @@ end
         end
     end
 end
+
+# Phase 279: a random-spec fuzz of `mscal.baseline` against real derivedmscal on a randomised
+# copy of the sample MS found that the sample's rows never have ANTENNA1 == ANTENNA2, so
+# autocorrelation handling was untested: a bare antenna list (`'15'`, `'ea1*'`, `'1~10'`, ...)
+# selects CROSS-correlations touching the set only, and a leading `!` negates that, so a negated
+# list keeps every autocorrelation (including the listed antennas' own).  `&&` / `&&&` /
+# `&` already agreed.  (700 random specs incl. those forms: no other divergence.)
+@testset "mscal.baseline with autocorrelation rows (Phase 279)" begin
+    if isdir(SAMPLE_MS)
+        d = joinpath(mktempdir(), "n.ms"); n = 300
+        copyms(SAMPLE_MS, d; rows=1:n)
+        rng = MersenneTwister(279)
+        edit(d) do e
+            e["TIME"][:] = 5.0e9 .+ Float64.(1:n)
+            e["ANTENNA1"][:] = Int32.(rand(rng, 0:25, n)); e["ANTENNA2"][:] = Int32.(rand(rng, 0:25, n))
+        end
+        t = readtable(d)
+        a1 = column(t, "ANTENNA1")[:]; a2 = column(t, "ANTENNA2")[:]
+        @test any(a1 .== a2)
+        sel(spec) = Int.(column(query(t, "mscal.baseline('$spec')"), "TIME")[:] .- 5.0e9)
+        auto(rows) = [i for i in rows if a1[i] == a2[i]]
+        r = sel("15")
+        @test isempty(auto(r)) && all(i -> a1[i] == 15 || a2[i] == 15, r)
+        @test all(i -> a1[i] != a2[i], sel("ea1*"))
+        neg = sel("!ea20")                                  # ea20 is antenna id 18 in this MS
+        @test all(i -> a1[i] == a2[i] || (a1[i] != 18 && a2[i] != 18), neg) && (18 in a1[neg][a1[neg] .== a2[neg]] || !any(i -> a1[i] == 18 && a2[i] == 18, 1:n))
+        @test sort(union(sel("15"), sel("!15"))) == collect(1:n)   # complements
+        # `&&` keeps autocorrelations, `&` drops them, `&&&` keeps only them
+        @test all(i -> a1[i] != a2[i], sel("3~9&3~9")) && any(i -> a1[i] == a2[i], sel("3~9&&3~9")) && all(i -> a1[i] == a2[i], sel("3~9&&&"))
+        if _HAVE_TAQL
+            for spec in ("15", "ea09", "ea1*", "1~10", "8~19,2~17", "!ea20", "!ea01", "3~9&3~9", "3~9&&3~9", "3~9&&&", "0&5;7&8", ">500m", "<800m")
+                ex = "mscal.baseline('$spec')"
+                ours = sort(Float64.(column(query(t, ex), "TIME")[:]))
+                real = (rt = _taqlcmd("SELECT FROM \$1 WHERE $ex", d); size(rt, 1) == 0 ? Float64[] : sort(Float64.(collect(rt[:TIME][:]))))
+                @test ours == real
+            end
+        end
+    end
+end

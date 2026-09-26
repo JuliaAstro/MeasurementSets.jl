@@ -9599,3 +9599,17 @@ compared after a `DELETE`; (2) `F` is a reserved word (`False`) in real TaQL, so
 cannot be referenced there (ours lets a column of that name win). Also `-0.0 % 4` is `-0.0` in
 real TaQL, `0.0` here (signed zeros compared equal). A seeded 6-seed guard is in
 `test/taql_fuzz_tests.jl`.
+
+### Phase 279 — `mscal.baseline`: autocorrelation rows (found by a random-spec fuzz vs real derivedmscal)
+
+A random-spec fuzz of `mscal.baseline` / `field` / `spw` / `uvdist` against real derivedmscal, on a
+randomised copy of the sample MS (the sample's own rows never have `ANTENNA1 == ANTENNA2`, so
+autocorrelations had never been exercised), found one real divergence: **a bare antenna list
+(`'15'`, `'ea1*'`, `'1~10'`, `'8~19,2~17'`, `'<9'`, …) selects cross-correlations touching the set
+only**, and a leading `!` negates that, so a negated list keeps every autocorrelation — including
+the listed antennas' own. We included the listed antennas' autocorrelations in the positive form
+(and dropped them in the negated one). `&` (cross only), `&&` (both) and `&&&` (auto only) already
+agreed. `mscal.feed` keeps the old rule (there `FEED1 == FEED2` is the normal case). 700 random
+specs afterwards: no mismatch. Also learned: real casacore's grammars are *stricter* than ours —
+`mscal.field('!0')`, a `!` after a comma or `&` in a baseline spec, and `&<9` are parse errors in
+real and accepted here (a benign extension, like `>=`). Regression test: `test/taql_mscal_tests.jl`.
