@@ -9466,3 +9466,18 @@ no-op): `UVW` whole-column 20.5 vs 20.5 ms, `TIME` 0.83 vs 0.89 ms, `DATA` per-c
 scalar columns, on both sides) is larger than any difference. The checks stay; the read paths
 are as fast as before and, against casacore C++, unchanged (`TIME` 0.12×, `UVW` 0.45×,
 `DATA` 0.93–0.99×).
+
+### Phase 270 — strings and casacore-edited tables (a sweep that found no bug)
+
+Probed against real casacore and kept as regression tests (`test/robustness_tests.jl`, no
+source change):
+
+- **Non-ASCII, long and empty strings** — `héllo`, `日本語`, an emoji, `""`, embedded newline /
+  tab, a 5,000-character and a 160,000-byte string — round-trip through every string layout
+  (scalar, fixed and variable arrays; StandardStMan and IncrementalStMan; both byte orders) and
+  read identically in casacore; so do UTF-8 column names, table keywords, nested-record keys and
+  the readme. (An embedded NUL is truncated by Casacore.jl's own C-string conversion; ours keeps it.)
+- **Tables fragmented by real casacore** — SSM and ISM tables that casacore built by inserting,
+  updating and deleting thousands of rows (bucket splits, free lists, ISM run breaks), and tiled
+  tables that grew by `INSERT` and hold hypercubes of several shapes — read identically in both
+  readers and survive our own `edit` (remove / add / overwrite rows), which casacore then reads back.
