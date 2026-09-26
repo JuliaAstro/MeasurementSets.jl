@@ -9586,3 +9586,16 @@ patterns with `{a,b}`, string functions) and 600 numeric expressions by computed
 round's apparent mismatches were the generator's — an unparenthesised `NOT S == ''`, which real
 TaQL rejects because `NOT` binds tighter than `==`, and real TaQL erroring on an empty result).
 Kept as a seeded 250-expression guard in `test/taql_fuzz_tests.jl`.
+
+### Phase 278 — TaQL-lite write commands: random UPDATE / DELETE / INSERT sequences vs real TaQL (no divergence in TaQL-lite)
+
+Random command sequences (`UPDATE ... SET col = expr [WHERE]`, `SET FA[k] = expr`, `DELETE`,
+`INSERT ... VALUES`) applied to twin tables — ours through `taql`, real through `tableCommand` —
+with every column compared after each command: 80 seeds × 12 commands, no divergence. Two things
+the fuzz turned up that are *not* ours: (1) **real casacore drops set Bool bits when it deletes
+rows from a bit-packed Bool column** (`INSERT ... T` then a later `DELETE` reads `F`; reproduced on
+a table casacore created itself and read identically by Casacore.jl), so the Bool column is not
+compared after a `DELETE`; (2) `F` is a reserved word (`False`) in real TaQL, so a column named `F`
+cannot be referenced there (ours lets a column of that name win). Also `-0.0 % 4` is `-0.0` in
+real TaQL, `0.0` here (signed zeros compared equal). A seeded 6-seed guard is in
+`test/taql_fuzz_tests.jl`.

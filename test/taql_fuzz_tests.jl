@@ -60,3 +60,59 @@ using Random
         isempty(badvals) || println("value mismatches: ", badvals)
     end
 end
+
+# Phase 278: random UPDATE / DELETE / INSERT command sequences applied to twin tables -- ours
+# (`taql`) and real TaQL -- with every column compared after each command.  80 seeds found no
+# divergence in TaQL-lite.  Not compared: the Bool column after a DELETE (real casacore drops set
+# bits when it deletes rows from a bit-packed Bool column -- reproduced on a table casacore created
+# itself, so an upstream bug), the array column on inserted rows (undefined), and a column named
+# `F` (a `False` literal in real TaQL); signed zeros compare equal (`-0.0 % 4` is `-0.0` in real TaQL).
+@testset "TaQL-lite write commands vs real TaQL: random sequences (Phase 278)" begin
+    if _HAVE_TAQL
+        num(r, dep) = dep <= 0 ? rand(r, ("I", "D", "ID", string(rand(r, 0:5)), string(round(rand(r) * 4; digits=1)))) : begin
+            k = rand(r, 1:9); a = num(r, dep - 1); b = num(r, dep - 1)
+            k <= 2 ? "($a + $b)" : k == 3 ? "($a - $b)" : k <= 5 ? "($a * $b)" : k == 6 ? "abs($a)" : k == 7 ? "($a % 4)" : k == 8 ? "floor($a)" : "($a / 3)"
+        end
+        function boo(r, dep)
+            k = rand(r, 1:(dep <= 0 ? 5 : 8))
+            k == 1 && return "B"; k == 2 && return "S $(rand(r, ("==", "!="))) '$(rand(r, ("ab", "b", "")))'"
+            k == 3 && return "S LIKE '$(rand(r, ("a%", "%b", "%")))'"; k == 4 && return "I IN [$(join(rand(r, -6:6, 3), ","))]"
+            (k == 5 || dep <= 0) && return "$(num(r, 1)) $(rand(r, ("<", ">", "==", "!=", "<=", ">="))) $(num(r, 1))"
+            k <= 6 ? "($(boo(r, dep - 1)) AND $(boo(r, dep - 1)))" : k == 7 ? "($(boo(r, dep - 1)) OR $(boo(r, dep - 1)))" : "NOT ($(boo(r, dep - 1)))"
+        end
+        function gencmd(r)
+            k = rand(r, 1:10)
+            if k <= 4
+                col = rand(r, ("I", "D", "S", "B", "I", "D"))
+                rhs = col == "S" ? rand(r, ("'x'", "S", "(S + 'y')", "upper(S)", "'k' + string(I)", "substr(S, 0, 1)")) : col == "B" ? boo(r, 1) : num(r, rand(r, 0:2))
+                "UPDATE \$1 SET $col = $rhs" * (rand(r) < 0.8 ? " WHERE " * boo(r, rand(r, 0:2)) : "")
+            elseif k <= 6; "UPDATE \$1 SET FA[$(rand(r, 1:3))] = $(num(r, 1)) WHERE $(boo(r, 1))"
+            elseif k <= 8; "DELETE FROM \$1 WHERE $(boo(r, rand(r, 0:2)))"
+            else "INSERT INTO \$1 (ID, I, D, S, B) VALUES ($(100 + rand(r, 0:900)), $(rand(r, -5:5)), $(round(randn(r) * 3; digits=1)), '$(rand(r, ("ab", "b", "z", "")))', $(rand(r, ("T", "F"))))" end
+        end
+        snap(d) = (t = readtable(d); Dict(c => collect(column(t, c; precision=:full)[:]) for c in ("I", "D", "S", "B", "FA", "ID")))
+        same(a, b) = length(a) == length(b) && all(i -> a[i] isa AbstractArray ? a[i] == b[i] : (isequal(a[i], b[i]) || (a[i] isa Real && isapprox(a[i], b[i]; rtol=1e-9))), eachindex(a))
+        bad = String[]
+        for seed in 1:6
+            r = MersenneTwister(seed); N = 10; r0 = MersenneTwister(seed + 1000); deleted = false
+            cols = Pair{String,Any}["ID" => Int32.(1:N), "I" => Int32.(rand(r0, -6:6, N)), "D" => round.(randn(r0, N) .* 3; digits=1),
+                "S" => rand(r0, ["ab", "abc", "b", ""], N), "B" => rand(r0, Bool, N), "FA" => [Float64[i, 2i, 3i] for i in 1:N]]
+            da = joinpath(mktempdir(), "ours"); db = joinpath(mktempdir(), "real")
+            write_table(da, "T", cols; nrow=N); write_table(db, "T", cols; nrow=N)
+            for _ in 1:10
+                cmd = gencmd(r); startswith(cmd, "DELETE") && (deleted = true)
+                ea = try taql(da, replace(cmd, "\$1" => "t")); nothing catch e; :err end
+                eb = try _taqlcmd(cmd, db); nothing catch e; :err end
+                (ea === nothing) == (eb === nothing) || (push!(bad, "error mismatch: $cmd"); break)
+                ea === nothing || continue
+                sa, sb = snap(da), snap(db)
+                keepa = [i for i in eachindex(sa["ID"]) if sa["ID"][i] <= 10]; keepb = [i for i in eachindex(sb["ID"]) if sb["ID"][i] <= 10]
+                keepa == keepb && length(sa["ID"]) == length(sb["ID"]) || (push!(bad, "rows differ after: $cmd"); break)
+                ok = all(c -> (c == "B" && deleted) || (c == "FA" ? same(sa[c][keepa], sb[c][keepb]) : same(sa[c], sb[c])), keys(sa))
+                ok || (push!(bad, "values differ after: $cmd"); break)
+            end
+        end
+        @test isempty(bad)
+        isempty(bad) || println(bad)
+    end
+end
