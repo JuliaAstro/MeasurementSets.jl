@@ -2,7 +2,11 @@
 
 # element CasaType a Julia value implies
 _casatype_of(::Type{Bool}) = TpBool
+_casatype_of(::Type{UInt8}) = TpUChar
+_casatype_of(::Type{Int16}) = TpShort
+_casatype_of(::Type{UInt16}) = TpUShort
 _casatype_of(::Type{Int32}) = TpInt
+_casatype_of(::Type{UInt32}) = TpUInt
 _casatype_of(::Type{Int64}) = TpInt64
 _casatype_of(::Type{Float16}) = TpFloat        # narrowed columns write back as Float32
 _casatype_of(::Type{BFloat16}) = TpFloat

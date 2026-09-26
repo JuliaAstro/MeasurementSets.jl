@@ -197,11 +197,18 @@ _dims(c::ColumnDesc) = error("column \"$(c.name)\": not a fixed-shape column")
 #   :direct  fixed-shape array laid out inline
 #   :indarr  variable-shape non-string array -> Int64 offset into `table.f<seq>i`
 #   :indstr  variable-shape string array     -> 12-byte string-bucket ref
-# a fixed-shape STRING array is INDIRECT in casacore -- the column has option FixedShape
-# but not Direct (live-checked on a TaQL-created `S S [SHAPE=[2]]`); each cell is one
-# 12-byte ref to a string-bucket blob holding just the elements (no shape header, the
-# shape being fixed).  Phase 264 -- this used to crash the writer and error the reader.
-_ssmkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : (c.type == TpString ? :indstr : :direct)
+# A fixed-shape array is DIRECT (stored inline in the row) only when the column's option
+# carries `Direct` (and never for strings); casacore's default for `[SHAPE=[3]]` is
+# FixedShape WITHOUT Direct, i.e. INDIRECT (`SSMIndColumn` / `SSMIndStringColumn`; live-
+# checked).  An indirect fixed-shape STRING array cell is one 12-byte ref to a
+# string-bucket blob of just the elements (no shape header).  Phases 264/265: this used
+# to treat every fixed-shape array as direct -- a writer crash for strings and garbage
+# for a casacore-created fixed-shape numeric / Bool column.
+function _ssmkind(c::ColumnDesc{<:Dims})
+    isempty(c.shape) && return :scalar
+    (c.option & COLOPT_DIRECT) != 0 && c.type != TpString && return :direct
+    return c.type == TpString ? :indstr : :indarr
+end
 _ssmkind(c::ColumnDesc) = c.type == TpString ? :indstr : :indarr
 
 _nrelem(c::ColumnDesc) = (s = _dims(c); isempty(s) ? 1 : prod(s))

@@ -9349,3 +9349,24 @@ functions) already matched. Real TaQL rejects `NOT K>2` (`NOT` binds tighter tha
   open: a constant *expression* inside an `IN [...]` list (`S IN ['a'+'bc']`). (A column
   named `T` collides with the `T` bool literal in real TaQL, which errors on it.)
 
+### Phase 265 — column type × shape × manager matrix (a real read bug)
+
+Writing a matrix — 12 element types × {scalar, fixed 1-D / 2-D, variable} × {Standard,
+Incremental, Tiled*StMan}, in both directions against real casacore — found:
+
+- **Reading a casacore-created fixed-shape array column was garbage** in
+  StandardStMan / IncrementalStMan. A fixed-shape numeric or Bool array created by casacore
+  (`[SHAPE=[3]]`) has option `FixedShape` but *not* `Direct`, so it is stored **indirect**
+  (an offset into `table.f<n>i`); we read every fixed-shape array as direct (inline),
+  returning offsets as data. Now a fixed-shape array is direct only when the column's
+  `Direct` option says so (our own writer always sets it for numeric arrays), otherwise it
+  is read through the array file (strings: the Phase 264 string blob).
+- `write_table` could not write `UInt8` (uChar), `Int16` (Short), `UInt16` (uShort) or
+  `UInt32` (uInt) columns — added. (`Int8` / casacore `Char` is not a table column type.)
+- A fixed-shape `String` array bound to IncrementalStMan crashed the writer — now goes
+  through the array file.
+
+After the fixes every combination round-trips in both directions (casacore-created → ours
+and ours → casacore; Casacore.jl cannot read a variable-shape tiled column, so those are
+ours-only). New `test/type_matrix_tests.jl`.
+

@@ -89,7 +89,14 @@ end
 #   :scalar  fixed-width scalar (incl. variable-length scalar string)
 #   :direct  fixed-shape array laid out inline
 #   :ind     variable-shape array -> Int64 offset into `table.f<seq>i`
-_ismkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : :direct
+# a fixed-shape array is DIRECT only with the column's `Direct` option (never for
+# strings); otherwise -- casacore's default for `[SHAPE=[3]]` -- it goes through the array
+# file like a variable-shape one (Phases 264/265)
+function _ismkind(c::ColumnDesc{<:Dims})
+    isempty(c.shape) && return :scalar
+    (c.option & COLOPT_DIRECT) != 0 && c.type != TpString && return :direct
+    return :ind
+end
 _ismkind(c::ColumnDesc) = :ind
 
 function Base.open(::Type{IncrementalStMan}, t::Table, dm::DataManagerInfo)

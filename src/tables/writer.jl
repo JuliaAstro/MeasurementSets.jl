@@ -34,7 +34,7 @@ const STORAGEOPT_CODE = Dict{Symbol,Int32}(
 
 # fixed-width (8-char) casacore type id used in ColumnDesc class names
 const _TYPEID = Dict{CasaType,String}(
-    TpBool => "Bool    ", TpUChar => "uChar   ", TpShort => "Short   ",
+    TpBool => "Bool    ", TpUChar => "uChar   ", TpShort => "Short   ", TpUShort => "uShort  ",
     TpInt => "Int     ", TpUInt => "uInt    ", TpInt64 => "Int64   ",
     TpFloat => "float   ", TpDouble => "double  ",
     TpComplex => "Complex ", TpDComplex => "DComplex", TpString => "String  ",
