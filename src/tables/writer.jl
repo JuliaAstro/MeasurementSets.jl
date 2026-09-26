@@ -235,11 +235,12 @@ end
 
 function table_dat_bytes(td::TableDesc, nrow::Integer, dms::Vector{DMWrite},
                          varndim::Dict{String,Int}=Dict{String,Int}();
-                         storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+                         storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
+                         endian::Symbol=:little)
     w = AipsWriter(; endian=:big)         # table.dat is always canonical
     putstart(w, "Table", V_TABLE)
     wr_u32(w, nrow)
-    wr_u32(w, SMFILE_LITTLE_ENDIAN)       # SM files are little-endian
+    wr_u32(w, endian === :big ? 0 : SMFILE_LITTLE_ENDIAN)   # byte order of the SM files
     wr_string(w, "PlainTable")
     write_tabledesc(w, td, varndim)
     write_columnset(w, td.columns, dms, nrow; storage, blocksize)
@@ -327,12 +328,13 @@ managers in `dms` have already written their own `table.f<seq>*` files.
 function write_table_files(dir::AbstractString, td::TableDesc, nrow::Integer,
                            dms::Vector{DMWrite}; type="", subtype="", readme="",
                            varndim::Dict{String,Int}=Dict{String,Int}(),
-                           storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+                           storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
+                           endian::Symbol=:little)
     mkpath(dir)
     withlock(dir, :write; create=true) do lk
         old = read_syncinfo(lk)
         _atomic_write(joinpath(dir, "table.dat"),
-                     table_dat_bytes(td, nrow, dms, varndim; storage, blocksize))
+                     table_dat_bytes(td, nrow, dms, varndim; storage, blocksize, endian))
         write_tableinfo(dir; type, subtype, readme)
         write_syncinfo(lk, nrow; modifycounter = (old.present ? old.modifycounter : 0) + 1)
     end

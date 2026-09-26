@@ -100,7 +100,7 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
     end
     cls = arr ? _classname(c.type, true) : _classname(c.type, false)
     opt = (arr && c.shape isa Dims && !isempty(c.shape)) ?
-          (c.option | (c.type == TpString ? Int32(0) : COLOPT_DIRECT) | COLOPT_FIXEDSHAPE) : Int32(0)
+          ((c.type == TpString ? c.option & ~COLOPT_DIRECT : c.option | COLOPT_DIRECT) | COLOPT_FIXEDSHAPE) : Int32(0)   # strings are written indirect, whatever the source did
     mgr = kind === :ism ? "IncrementalStMan" : "StandardStMan"
     return ColumnDesc(c.name, c.comment, mgr, mgr,
         c.type, cls, c.shape, opt, c.maxlength, c.keywords, c.default, c.sequ)
@@ -503,7 +503,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
 
         td = TableDesc(isempty(tablename) ? "" : String(tablename), "2.0", "",
                        public, private, out)
-        write_table_files(dir, td, Int(nrow), dms; type, subtype, readme, varndim, storage, blocksize)
+        write_table_files(dir, td, Int(nrow), dms; type, subtype, readme, varndim, storage, blocksize, endian)
         return dir
     catch
         _dir_preexisted || rm(dir; recursive=true, force=true)

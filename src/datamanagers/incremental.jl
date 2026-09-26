@@ -94,7 +94,7 @@ end
 # file like a variable-shape one (Phases 264/265)
 function _ismkind(c::ColumnDesc{<:Dims})
     isempty(c.shape) && return :scalar
-    (c.option & COLOPT_DIRECT) != 0 && c.type != TpString && return :direct
+    (c.option & COLOPT_DIRECT) != 0 && return :direct   # (our own writer never sets it for strings)
     return :ind
 end
 _ismkind(c::ColumnDesc) = :ind
@@ -242,9 +242,16 @@ function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
                     for k in 0:nrelem-1]
         return reshape(bits, dims...)
     elseif c.type == TpString
-        isempty(dims) || error("ISM string arrays not supported yet")
         total = Int(_u32(ism, dataoff))                       # counts the length word
-        return String(ism.data[dataoff + ISM_UINT + 1 : dataoff + total])
+        isempty(dims) && return String(ism.data[dataoff + ISM_UINT + 1 : dataoff + total])
+        # a direct string array (casacore, option Direct|FixedShape): [total][len, chars] per element
+        out = Vector{String}(undef, nrelem)
+        p = dataoff + ISM_UINT
+        for k in 1:nrelem
+            len = Int(_u32(ism, p)); p += ISM_UINT
+            out[k] = String(ism.data[p + 1 : p + len]); p += len
+        end
+        return reshape(out, dims...)
     else
         T = juliatype(c.type)
         big = ism.endian === :big
@@ -377,6 +384,13 @@ function _ism_encode!(buf::Vector{UInt8}, c::ColumnDesc, kind::Symbol, v,
             vv[k+1] && (packed[(k >> 3) + 1] |= (0x01 << (k & 7)))
         end
         append!(buf, packed)
+    elseif c.type == TpString && kind === :direct         # casacore's direct string array
+        vv = vec(v)
+        _append_val!(buf, UInt32(ISM_UINT + sum(ISM_UINT + ncodeunits(x) for x in vv; init=0)), endian)
+        for x in vv
+            _append_val!(buf, UInt32(ncodeunits(x)), endian)
+            append!(buf, codeunits(x))
+        end
     elseif c.type == TpString
         s = codeunits(String(v))
         _append_val!(buf, UInt32(ISM_UINT + length(s)), endian)   # length word counts itself

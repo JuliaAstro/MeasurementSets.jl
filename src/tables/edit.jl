@@ -260,11 +260,12 @@ function _default_cell(c::ColumnDesc, t::EditTable)
     J = juliatype(c.type)
     if c.shape isa Dims
         isempty(c.shape) && return c.type == TpString ? "" : zero(J)
-        return zeros(J, c.shape)
+        return c.type == TpString ? fill("", c.shape) : zeros(J, c.shape)
     end
     if t.reader.rows > 0                              # VariableShape/Dims: last row's shape
         try
-            return zeros(J, size(column(t.reader, c.name)[t.reader.rows]))
+            sz = size(column(t.reader, c.name)[t.reader.rows])
+            return c.type == TpString ? fill("", sz) : zeros(J, sz)
         catch
         end
     end
@@ -679,7 +680,7 @@ function _flush_fast(t::EditTable)
         td = TableDesc(rd.desc.name, rd.desc.version, rd.desc.comment,
                        rd.desc.public, rd.desc.private, rd.desc.columns)
         write_table_files(dir, td, newrows, dms; type=rd.type, subtype=rd.subtype,
-                          readme=rd.readme, varndim)
+                          readme=rd.readme, varndim, endian=rd.endian)
     end
 end
 
@@ -842,7 +843,7 @@ function _flush_regen(t::EditTable)
     td = TableDesc(rd.desc.name, rd.desc.version, rd.desc.comment,
                    rd.desc.public, rd.desc.private, outdescs)
     write_table_files(dir, td, newrows, dms; type=rd.type, subtype=rd.subtype,
-                      readme=rd.readme, varndim)
+                      readme=rd.readme, varndim, endian=rd.endian)
 
     live = Set(keys(groups))
     for m in rd.managers

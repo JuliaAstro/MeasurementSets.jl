@@ -9432,3 +9432,27 @@ Round-tripping table / column keywords (every value type, arrays, nested records
 Table keywords, column keywords (units, `MEASINFO`, hypercube sets), column comments and
 options, `table.info`, and the data-manager layout of a copy of a casacore-written table now
 compare equal to the original as casacore sees them. New `test/keywords_tests.jl`.
+
+### Phase 268 — byte order, and a memory-safety hole in the raw byte loads
+
+Writing and reading big-endian tables (casacore's `endianformat='big'`) across every element
+type × {scalar, fixed, variable} × manager, in both directions, found:
+
+- **`write_table(...; endian = :big)` produced an unreadable table.** The storage-manager
+  files were big-endian but `table.dat` always said "little-endian" — so neither our reader nor
+  casacore could open it. `edit` of a big-endian table did the same on every rewrite (it kept
+  the file byte order but flipped the flag). `table.dat` now carries the real byte order (both
+  writers).
+- **Reading a casacore ISM table with a `Direct` fixed-shape `String` array crashed the whole
+  process (SIGBUS).** casacore stores that as `[uInt total][uInt len, chars]…` inline in the
+  bucket; we assumed a string array in ISM is always indirect, took inline bytes for a file
+  offset, and the raw-pointer load read outside the array. The reader now decodes the inline
+  layout (and the writer can produce it), and — the real hole — **every raw byte load
+  (`_ld`, `_rd_run!`, `_rd_bits!`) now checks its range** and raises a `BoundsError`, so a
+  corrupt file or a layout we misread is an exception, not a crash.
+- `addrows!` on a fixed-shape `String` array column failed (`zero(String)`); a rewritten
+  string-array column no longer inherits a `Direct` option it is not written with.
+
+Big-endian SSM / ISM / TiledShape / TiledColumn tables from casacore read identically to their
+little-endian twins, and our big-endian writes read back in casacore. New
+`test/endian_tests.jl`.
