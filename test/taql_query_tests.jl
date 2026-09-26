@@ -4519,3 +4519,30 @@ end
         end
     end
 end
+
+# Phase 263: numeric-expression probe vs real TaQL (~130 forms, value AND result
+# type).  Fixed: `complex(re, im)` was missing; `C ** 2` / `pow(C, 2)` on a Complex
+# was a MethodError (Phase 184's Real-only `_tql_pow` -- a regression); `real` /
+# `imag` / `conj` of an Int and `median` / `fractile` return a Double in real TaQL
+# (they kept the Int); scalar `fractile(x, frac)` was missing.
+@testset "TaQL-lite — complex(), complex pow, Double results, fractile (Phase 263)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["C" => ComplexF64[1+2im, -3+0.5im, 0+0im, 2-4im], "R" => [1.5, -2.0, 0.0, 4.0], "K" => Int32[1, 2, 3, 4]]; nrow=4)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    @test ev("complex(R, K)") == ComplexF64[1.5+1im, -2+2im, 0+3im, 4+4im] && ev("complex(R, 1.0)")[2] == -2 + 1im
+    @test ev("complex(1, 2)") == fill(1.0 + 2im, 4) && eltype(ev("complex(R, K)")) <: Complex
+    @test ev("C ** 2") ≈ ComplexF64[-3+4im, (-3+0.5im)^2, 0, (2-4im)^2] && ev("pow(C, 2)") ≈ ev("C ** 2") && ev("C ** 0.5")[4] ≈ sqrt(2-4im)
+    for e in ("real(K)", "imag(K)", "conj(K)", "median(K)", "fractile(K, 0.5)")
+        @test eltype(ev(e)) <: AbstractFloat
+    end
+    @test ev("real(K)") == [1.0, 2, 3, 4] && ev("imag(K)") == zeros(4) && ev("fractile(K, 0.5)") == [1.0, 2, 3, 4]
+    @test ev("median(K)") == [1.0, 2, 3, 4]
+    @test eltype(ev("real(C)")) <: AbstractFloat && ev("conj(C)")[1] == 1 - 2im
+    if _HAVE_TAQL
+        for e in ("complex(R, K)", "complex(R, 1.0)", "complex(1, 2)", "C ** 2", "pow(C, 2)", "real(K)", "imag(K)", "conj(K)", "median(K)", "fractile(K, 0.5)")
+            r = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:]); m = ev(e)
+            @test r ≈ m && (eltype(r) <: AbstractFloat) == (eltype(m) <: AbstractFloat)
+        end
+    end
+end

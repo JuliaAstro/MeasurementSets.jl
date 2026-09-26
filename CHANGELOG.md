@@ -9319,3 +9319,15 @@ change at the default size). The same benchmark (and a tile-size one for `DATA` 
 `FLAG`) found no read benefit from larger buckets or tiles, so the writer defaults
 are unchanged. New regression test.
 
+### Phase 263 — TaQL-lite complex functions and result types
+
+A ~130-form numeric-expression probe against real TaQL (checking values *and*
+result types) found: `complex(re, im)` missing; `C ** 2` / `pow(C, 2)` on a Complex
+a `MethodError` (a Phase 184 regression — its Real-only `_tql_pow`); `real` /
+`imag` / `conj` of an Int and `median` / `fractile` returning an Int where real
+TaQL returns a Double; and scalar `fractile(x, frac)` missing. All fixed; every
+other probed form (arithmetic, integer division / modulo, bit ops, comparisons,
+reductions, complex `abs`/`arg`/`norm`/`exp`/`log`/trig, array complex
+functions) already matched. Real TaQL rejects `NOT K>2` (`NOT` binds tighter than
+`>`), accepted here.
+

@@ -507,7 +507,7 @@ function _tql_median(v)
     n = length(s)
     n == 0 && throw(ArgumentError("TaQL-lite: median of an empty array"))
     n2 = (n - 1) ÷ 2 + 1                       # 1-based lower-middle order statistic
-    (iseven(n) && n <= 100) ? (s[n2] + s[n2+1]) / 2 : s[n2]
+    float((iseven(n) && n <= 100) ? (s[n2] + s[n2+1]) / 2 : s[n2])    # real TaQL: always a Double
 end
 
 # casacore's GENERIC `fractile()` (`.tcc:1138-1161`) -- what `gmedian()`
@@ -520,7 +520,7 @@ end
 # casacore, not `2.5`.
 _tql_fractile(v, frac::Real) = (s = sort!(vec(collect(v))); n = length(s);
     n == 0 ? throw(ArgumentError("TaQL-lite: fractile of an empty array")) :
-    s[Int(floor((n - 1) * frac + 0.01)) + 1])
+    float(s[Int(floor((n - 1) * frac + 0.01)) + 1]))
 _tql_median_lo(v) = _tql_fractile(v, 0.5)
 
 # casacore's `round()` (`roundFUNC`, `ExprFuncNode.cc:737-742`) is
@@ -548,6 +548,9 @@ _tql_round(x::Real) = x < 0 ? ceil(x - 0.5) : floor(x + 0.5)
 # guard.
 _tql_pow(x::Real, y::Real) = (xf = float(x); yf = float(y);
     xf < 0 && !isinteger(yf) ? NaN : xf^yf)
+# a Complex base and/or exponent: plain Julia `^` (Phase 263 -- the Real-only method above
+# had made `C ** 2` a MethodError; real TaQL computes std::pow on the complex value)
+_tql_pow(x::Number, y::Number) = x^y
 
 # The exact same "raw C++ std:: call, no domain guard, returns NaN"
 # shape as `pow` above -- found by sweeping every other unary math
@@ -943,9 +946,9 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "sign" => (_ew(_tql_sign), 1:1), "floor" => (_ew(floor), 1:1), "ceil" => (_ew(ceil), 1:1),
     "round" => (_ew(_tql_round), 1:1), "int" => (_ew(_tql_int), 1:1),
     "integer" => (_ew(_tql_int), 1:1),
-    "real" => (_ew(real), 1:1), "imag" => (_ew(imag), 1:1),
+    "real" => (_ew(x -> real(float(x))), 1:1), "imag" => (_ew(x -> imag(float(x))), 1:1),   # Int -> Double, like real TaQL
     "arg" => (_ew(angle), 1:1), "phase" => (_ew(angle), 1:1),
-    "conj" => (_ew(conj), 1:1), "norm" => (_ew(abs2), 1:1),
+    "conj" => (_ew(x -> conj(float(x))), 1:1), "norm" => (_ew(abs2), 1:1),
     "isnan" => (_ew(isnan), 1:1), "isinf" => (_ew(isinf), 1:1),
     "isfinite" => (_ew(_tql_isfinite), 1:1),
     # `nonfinite`/`isnonfinite` are a MeasurementSets-only extension
@@ -957,6 +960,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # (AND then negated -> OR) already gives.
     "nonfinite" => (_ew(!isfinite), 1:1), "isnonfinite" => (_ew(!isfinite), 1:1),
     # --- binary elementwise ---
+    "complex" => (_ew2((r, i) -> complex(float(r), float(i))), 2:2),
     "pow" => (_ew2(_tql_pow), 2:2), "atan2" => (_ew2((y, x) -> atan(y, x)), 2:2),
     "fmod" => (_ew2(rem), 2:2),
     # --- array-cell reductions ---
@@ -981,6 +985,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "sumsqr" => (_tql_sumsqr, 1:1), "sumsquare" => (_tql_sumsqr, 1:1),
     "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
     "median" => (_red(_tql_median), 1:1),
+    "fractile" => ((x, fr) -> _tql_fractile(x isa AbstractArray ? x : (x,), fr), 2:2),
     "variance" => (_red(x -> Statistics.var(x; corrected=false)), 1:1),
     "stddev" => (_red(x -> Statistics.std(x; corrected=false)), 1:1),
     "rms" => (_tql_rms, 1:1), "avdev" => (_tql_avdev, 1:1),
