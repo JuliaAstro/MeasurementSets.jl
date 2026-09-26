@@ -134,3 +134,143 @@ tb.close()
         @test column(A2, "TIME")[:] == column(S, "TIME")[:] .+ 1.0
     end
 end
+
+@testset "sync counters and a casacore process that has the table open (Phase 273)" begin
+    # our blob's counters move like casacore's: table counter only on a structure change
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => [1, 2, 3], "B" => [1.0, 2.0, 3.0]]; nrow=3)
+    s0 = MSv2.read_syncinfo(d)
+    edit(d) do e; e["A"][1] = 9; end
+    s1 = MSv2.read_syncinfo(d)
+    @test s1.tablecounter == s0.tablecounter && all(s1.dmcounters .> s0.dmcounters) && s1.modifycounter > s0.modifycounter
+    edit(d) do e; MSv2.addcolumn!(e, "C", [1.0, 2.0, 3.0]); end
+    s2 = MSv2.read_syncinfo(d)
+    @test s2.tablecounter > s1.tablecounter && s2.nrow == 3
+
+    if isfile(_MV_CASA)
+        dir = joinpath(mktempdir(), "lk.ms")
+        create_ms(dir; nrow=20, nchan=4, ncorr=2, nant=4)
+        watcher = """
+import sys, time, os
+from casatools import table
+p = sys.argv[1]
+tb = table(); tb.open(p, nomodify=False, lockoptions={'option': 'user'})
+tb.lock(False); a = tb.nrows(); tb.unlock()
+open(p + '_ready', 'w').write('1')
+while not os.path.exists(p + '_done'): time.sleep(0.1)
+tb.lock(False); n = tb.nrows(); tb.unlock(); tb.close()
+t2 = table(); t2.open(p); t = t2.getcol('TIME')[0]; t2.close()
+print(a, n, t)
+"""
+        out = Ref("")
+        task = @async out[] = read(pipeline(`$_MV_CASA -c $watcher $dir`; stderr=devnull), String)
+        timedwait(() -> isfile(dir * "_ready"), 60.0)
+        edit(dir) do e; e["TIME"][1] = 777.0; MSv2.addrows!(e, 1); end   # while casacore has it open
+        write(dir * "_done", "1")
+        wait(task)
+        # it re-syncs the new row count without error (the short-form blob made it throw), and
+        # a fresh open sees our new cell value
+        @test strip(out[]) == "20 21 777.0"
+    end
+end
+
+# Phase 274: our edits of tables that real casacore (casatools) last modified.  A differential
+# fuzz -- random `putcell` / `addrows` / `removerows` applied alternately by us and by casacore,
+# checked against a plain Julia model after every step -- found that `edit` of a table casacore had
+# last touched could corrupt it: a regenerated StandardStMan file carries OUR bucket geometry, but
+# `edit` only rewrote table.dat (whose SSM block holds the per-column offsets within a bucket)
+# when rows were added, so after casacore's `removerows` (which leaves its own geometry in
+# table.dat) an edit of ANY column of that instance left every string of the instance unreadable.
+using Random
+_mv_copy(d) = (p = d * "_c" * string(rand(UInt16)); cp(d, p); p)
+
+@testset "editing a table casacore last modified (Phase 274)" begin
+    if isfile(_MV_CASA)
+        tbpy(d, body) = read(pipeline(`$_MV_CASA -c $("import sys, numpy\nfrom casatools import table\ntb = table(); tb.open(sys.argv[1], nomodify=False)\n" * body * "\ntb.close()") $d`; stderr=devnull), String)
+        # 1. the minimal case: one SSM instance holding a string and a number
+        for (rem, what) in (([0, 4], :I), ([0], :S), ([7], :I), ([2], :both))
+            d = joinpath(mktempdir(), "t")
+            write_table(d, "T", Pair{String,Any}["I" => Int32.(1:8), "S" => ["s$i" for i in 1:8]]; nrow=8)
+            tbpy(d, "tb.removerows($rem)")
+            keep = [i for i in 1:8 if !((i - 1) in rem)]
+            I = Int32.(keep); S = ["s$i" for i in keep]
+            edit(d) do e
+                if what in (:I, :both); e["I"][2] = Int32(99); I[2] = 99; end
+                if what in (:S, :both); e["S"][2] = "new string"; S[2] = "new string"; end
+            end
+            t = readtable(d)
+            @test column(t, "I")[:] == I && column(t, "S")[:] == S
+            if _HAVE_CASACORE
+                cc = CCT.Table(_mv_copy(d))
+                @test collect(cc[:I][:]) == I && collect(cc[:S][:]) == S
+            end
+        end
+        # 2. alternating random edits by us and by casacore against a model, all storage kinds
+        lit(v::Bool) = v ? "True" : "False"
+        lit(v::Integer) = string(Int(v))
+        lit(v::AbstractFloat) = repr(Float64(v))
+        lit(v::AbstractString) = repr(String(v))
+        lit(v::AbstractVector) = "numpy.array($(repr(Float64.(v))), dtype='$(eltype(v) == Float32 ? "float32" : "float64")')"
+        rng = MersenneTwister(274)
+        gens = Dict("I" => () -> Int32(rand(rng, -999:999)), "D" => () -> rand(rng) * 100,
+                    "S" => () -> "s" * "x"^rand(rng, 0:30) * string(rand(rng, 1:99)),
+                    "SI" => () -> "i" * "y"^rand(rng, 0:20), "B" => () -> rand(rng, Bool),
+                    "V" => () -> Float32.(rand(rng, rand(rng, 1:5))), "VI" => () -> rand(rng, rand(rng, 1:4)))
+        names = ["I", "D", "S", "SI", "B", "V", "VI"]
+        model = Dict(c => Any[gens[c]() for _ in 1:8] for c in names)
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}[c => identity.(copy(model[c])) for c in names]; nrow=8, ism=Set(["D", "SI", "VI"]))
+        for r in 1:10
+            n = length(model["I"]); ours = isodd(r)
+            op = (:set, :add, :rem, :set, :add)[mod1(r, 5)]
+            if op === :set
+                rows = unique(rand(rng, 1:n, 2)); cols = names[rand(rng, Bool, length(names))]
+                vals = Dict((c, i) => gens[c]() for c in cols for i in rows)
+                for ((c, i), v) in vals; model[c][i] = v; end
+                ours ? edit(d) do e; for ((c, i), v) in vals; e[c][i] = v; end; end :
+                       tbpy(d, join(["tb.putcell('$c', $(i - 1), $(lit(v)))" for ((c, i), v) in vals], "\n"))
+            elseif op === :add
+                k = rand(rng, 1:3); new = Dict(c => Any[gens[c]() for _ in 1:k] for c in names)
+                for c in names; append!(model[c], new[c]); end
+                ours ? edit(d) do e; MSv2.addrows!(e, k); for c in names, j in 1:k; e[c][n + j] = new[c][j]; end; end :
+                       tbpy(d, "tb.addrows($k)\n" * join(["tb.putcell('$c', $(n + j - 1), $(lit(new[c][j])))" for c in names for j in 1:k], "\n"))
+            else
+                rows = sort(unique(rand(rng, 1:n, 2)))
+                for c in names; deleteat!(model[c], rows); end
+                ours ? edit(d) do e; MSv2.removerows!(e, rows); end : tbpy(d, "tb.removerows($(rows .- 1))")
+            end
+            t = readtable(d); nn = length(model["I"])
+            @test MSv2.nrow(t) == nn
+            got = Dict(c => column(t, c; precision=:full)[:] for c in names)
+            @test all(c -> all(i -> got[c][i] == model[c][i], 1:nn), names)
+            if _HAVE_CASACORE
+                cc = CCT.Table(_mv_copy(d))
+                @test all(c -> all(i -> (model[c][i] isa AbstractVector ? vec(collect(cc[Symbol(c)][i])) == model[c][i] : cc[Symbol(c)][i] == model[c][i]), 1:nn), names)
+            end
+        end
+    end
+end
+
+# Phase 275: structural edits (add / remove / rename columns) alternating between casacore and us,
+# both byte orders -- a sweep that found no bug (16 random seeds); kept as one deterministic run.
+@testset "structural edits alternating with casacore (Phase 275)" begin
+    if isfile(_MV_CASA)
+        tbpy(d, body) = read(pipeline(`$_MV_CASA -c $("import sys, numpy\nfrom casatools import table\ntb = table(); tb.open(sys.argv[1], nomodify=False)\n" * body * "\ntb.close()") $d`; stderr=devnull), String)
+        for endian in (:little, :big)
+            d = joinpath(mktempdir(), "t")
+            write_table(d, "T", Pair{String,Any}["I" => Int32.(1:5), "S" => ["s$i" for i in 1:5], "V" => [Float32.(1:(i % 3 + 1)) for i in 1:5]]; nrow=5, endian)
+            tbpy(d, "dd = tb.getcoldesc('I')\ntb.addcols({'NI': dd})\ntb.putcol('NI', numpy.arange(10, 15, dtype='int32'))")
+            edit(d) do e; MSv2.addcolumn!(e, "NS", ["n$i" for i in 1:5]); MSv2.removecolumn!(e, "I"); end
+            tbpy(d, "tb.renamecol('S', 'S2')\ntb.removecols(['V'])")
+            edit(d) do e; e["NI"][3] = Int32(99); e["S2"][2] = "changed"; end
+            t = readtable(d)
+            @test Set(MSv2.columnnames(t)) == Set(["NI", "NS", "S2"])
+            @test column(t, "NI")[:] == Int32[10, 11, 99, 13, 14] && column(t, "NS")[:] == ["n$i" for i in 1:5]
+            @test column(t, "S2")[:] == ["s1", "changed", "s3", "s4", "s5"]
+            if _HAVE_CASACORE
+                cc = CCT.Table(_mv_copy(d))
+                @test collect(cc[:NI][:]) == Int32[10, 11, 99, 13, 14] && collect(cc[:S2][:]) == column(t, "S2")[:]
+            end
+        end
+    end
+end

@@ -9518,3 +9518,53 @@ kept as regression tests in `test/msvalid_tests.jl` (no source change):
   the original; `ms.range`, `ms.msselect` and `tb.getcol` work on ours;
 - `tb.putcol` (`DATA`, `FLAG`, `TIME`) and `putcell` write straight into our tiled and
   IncrementalStMan files and we read the new values.
+
+### Phase 273 — locking against a live casacore process
+
+Running our `edit` while a real casacore process (CASA's `table` tool) holds or has open the same
+table — using signal files to order the two — found:
+
+- **Our `edit` waits for a casacore lock and then sees its data.** A `tb.lock(True)` +
+  `putcell` + `unlock` in casatools, with our `edit` started meanwhile: ours blocks until the
+  unlock, then reads casacore's flushed value and edits on top of it (no lost update).
+- **The sync counters now move the way casacore's do.** Phase 271's full-form blob reused the
+  modify counter for the table and data-manager change counters, which can coincide with a small
+  counter casacore remembered (then it would see "unchanged"). They are now the previous blob's
+  counters + 1, and the *table* counter moves only when the table's structure changed (a column
+  added or dropped) — a data change bumps just the per-manager counters, exactly like casacore's own
+  writers.
+- **Known limitation (documented, not changed):** a casacore process that already has the table
+  open re-syncs new rows / row counts after its next lock, but keeps reading the OLD cell values
+  of a rewritten column until it reopens the table — our writers replace storage-manager files
+  atomically (a new inode; that protects our own mmap readers and lock-free readers), and casacore
+  keeps its open file handles. A real casacore writer, by contrast, patches in place and is seen
+  immediately by an open casacore reader.
+
+### Phase 274 — our edits of tables real casacore last modified: a differential fuzz found `edit` corrupting them
+
+Sweeps of `casatasks` workflows on our MSs (clearcal, flagdata clip, statwt, concat, virtualconcat,
+`mstransform` incl. multi-MS partitions, calibrater `addcorr`/`addmodel`), `tb.addrows` /
+`removerows` / `addcols` / `removecols` / `renamecol` on our tables, and wide (300 columns), tall
+(2 million rows) and heavy-cell ((1000, 1000) Float64) tables in both directions all found nothing
+(real virtualconcat and MMS outputs — genuine ConcatTables — read identically to their parts;
+casacore refuses removing rows of a tiled table or dropping an ISM column, our tables and its own
+alike). A **differential fuzz** — random `putcell` / `addrows` / `removerows` applied alternately by
+us and by casatools, compared with a Julia model after every step — found a real bug:
+
+- **`edit` of a table casacore had last modified could corrupt it.** A regenerated StandardStMan
+  file carries *our* bucket geometry, but the `table.dat` block that describes it (the per-column
+  offsets within a bucket) was only rewritten when rows were added. After casacore's `removerows`
+  (its own geometry stays in `table.dat`) an edit of *any* column of a shared StandardStMan
+  instance left every string of that instance unreadable — a `BoundsError` in our reader, and
+  casacore itself misread the file too. `edit` now rewrites `table.dat` whenever a regenerated
+  block differs from the one on disk. (For tables we wrote ourselves an unchanged row count gives an
+  identical block, which is why nothing before saw it.) Regression test: casatools removes rows
+  then we edit, plus a deterministic ours/casacore ping-pong of `putcell`/`addrows`/`removerows` over
+  every storage kind (`test/msvalid_tests.jl`).
+
+### Phase 275 — structural edits alternating with casacore (sweep, no bug found)
+
+Phase 274's differential fuzz extended with column operations: random `addcolumn!` / `removecolumn!`
+by us and `addcols` / `removecols` / `renamecol` by casatools, mixed with cell / row edits, on
+little- and big-endian tables (16 seeds × 16 rounds, checked against a Julia model and against
+Casacore.jl after every step): all clean. Kept as one deterministic run in `test/msvalid_tests.jl`.

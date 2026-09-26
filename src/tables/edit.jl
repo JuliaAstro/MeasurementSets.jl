@@ -624,7 +624,8 @@ function Base.flush(t::EditTable)
             nc, nd = _flush_regen(t)
         end
         write_syncinfo(lk, newrows; modifycounter = (old.present ? old.modifycounter : 0) + 1,
-                       ncolumn=nc, ndm=nd)
+                       ncolumn=nc, ndm=nd,
+                       tablechanged = !isempty(t.addcols) || !isempty(t.dropcols))
     finally
         _release_edit_lock!(t)
     end
@@ -665,7 +666,13 @@ function _flush_fast(t::EditTable)
         end
     end
 
-    if added > 0
+    # A regenerated SSM/ISM file carries OUR bucket geometry, and the table.dat block
+    # (column offsets within a bucket) must describe that file.  For a table we wrote
+    # ourselves an unchanged row count gives an identical block, but a table another
+    # writer (real casacore) last touched has its own geometry, so a block that differs
+    # from the one on disk forces the table.dat rewrite too, not only added rows.
+    stale = any(m -> haskey(blocks, m.sequ) && blocks[m.sequ] != m.header, rd.managers)
+    if added > 0 || stale
         # bucket geometry (rows-per-bucket) shifts with the row count, so the
         # regenerated SSM/ISM table.dat blocks (column offsets) must be
         # rewritten -- a full but cheap table.dat rebuild.

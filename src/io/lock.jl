@@ -461,7 +461,7 @@ function read_syncinfo(lk::TableLock)
         seek(lk.io, 0)
         return _read_syncinfo_bytes(read(lk.io))
     catch
-        return (; nrow = nothing, modifycounter = Int64(-1), present = false)
+        return (; nrow = nothing, modifycounter = Int64(-1), present = false, tablecounter = Int64(0), dmcounters = Int64[])
     end
 end
 read_syncinfo(path::AbstractString) = _read_syncinfo_bytes(_maybe_read(_lockfile_path(path)))
@@ -470,7 +470,7 @@ _lockfile_path(p) = endswith(String(p), "table.lock") ? String(p) : joinpath(Str
 _maybe_read(p) = isfile(p) ? read(p) : UInt8[]
 
 function _read_syncinfo_bytes(buf::Vector{UInt8})
-    none = (; nrow = nothing, modifycounter = Int64(-1), present = false)
+    none = (; nrow = nothing, modifycounter = Int64(-1), present = false, tablecounter = Int64(0), dmcounters = Int64[])
     length(buf) >= LOCK_SIZEREQID + 4 || return none
     bloblen = Int(ntoh(reinterpret(UInt32, buf[LOCK_SIZEREQID+1 : LOCK_SIZEREQID+4])[1]))
     (bloblen > 0 && length(buf) >= LOCK_SIZEREQID + 4 + bloblen) || return none
@@ -478,21 +478,26 @@ function _read_syncinfo_bytes(buf::Vector{UInt8})
         a = AipsIO(buf[LOCK_SIZEREQID+5 : LOCK_SIZEREQID+4+bloblen]; endian = :big)
         v = getstart(a, "sync")
         nrow = v >= SYNC_V2 ? Int(read_scalar(a, UInt64)) : Int(read_u32(a))
-        read_i32(a)                                   # nrcolumn (ignored)
+        ncol = read_i32(a)                            # nrcolumn (-1: short form)
         mc = read_u32(a)
-        return (; nrow, modifycounter = Int64(mc), present = true)
+        tc = 0; dm = Int64[]
+        if ncol >= 0                                  # full form: table + per-manager counters
+            tc = Int(read_u32(a))
+            dm = Int64.(read_block(a, UInt32))
+        end
+        return (; nrow, modifycounter = Int64(mc), present = true, tablecounter = Int64(tc), dmcounters = dm)
     catch
         return none
     end
 end
 
 """
-    write_syncinfo(lk, nrow; modifycounter, ncolumn = -1, ndm = 0)
+    write_syncinfo(lk, nrow; modifycounter, ncolumn = -1, ndm = 0, tablechanged = true)
 
 Write the `TableSyncData` blob into `table.lock`, preserving the request-id
 region, then `fsync`.  With `ncolumn >= 0` it is the full form casacore's
 `TableSyncData::write` produces -- `nrcolumn`, the table change counter and one
-data-manager change counter per manager (all set to `modifycounter`, so every
+data-manager change counter per manager (each the previous blob's counter + 1, so every
 write reads as "table and all managers changed" -> full resync).  The short
 form (`ncolumn = -1`) is NOT safe for a casacore that locks the table: its
 `TableSyncData::read` returns without setting `nrcolumn` in that case and
@@ -500,7 +505,7 @@ form (`ncolumn = -1`) is NOT safe for a casacore that locks the table: its
 "another process changed the number of columns" (Phase 271).
 """
 function write_syncinfo(lk::TableLock, nrow::Integer; modifycounter::Integer,
-                        ncolumn::Integer=-1, ndm::Integer=0)
+                        ncolumn::Integer=-1, ndm::Integer=0, tablechanged::Bool=true)
     (lk.noop || lk.io === nothing || !lk.writable) && return
     try
         w = AipsWriter(; endian = :big)
@@ -509,8 +514,19 @@ function write_syncinfo(lk::TableLock, nrow::Integer; modifycounter::Integer,
         wr_i32(w, Int32(ncolumn))                     # nrcolumn (-1: short form)
         wr_u32(w, UInt32(modifycounter))
         if ncolumn >= 0
-            wr_u32(w, UInt32(modifycounter))          # table change counter
-            wr_block(w, fill(UInt32(modifycounter), ndm))   # one per data manager
+            # casacore decides "table / data manager changed" by comparing these counters with
+            # the ones it remembered from the last blob it read or wrote, so ours must differ
+            # from those: bump the previous blob's counters (as casacore itself does) instead
+            # of reusing `modifycounter`, which can coincide with a small remembered counter.
+            # The TABLE counter moves only when the table's structure changed (`tablechanged`);
+            # a plain data change bumps just the per-manager counters, as casacore's own
+            # writers do.  NOTE: a casacore process that already has the table open keeps its
+            # open storage-manager file handles, and our writers replace those files atomically
+            # (new inode), so it sees new rows / row counts after locking but must REOPEN the
+            # table to see changed cell values (Phase 273).
+            old = read_syncinfo(lk)
+            wr_u32(w, UInt32(old.tablecounter + (tablechanged || !old.present ? 1 : 0)))
+            wr_block(w, UInt32[UInt32((i <= length(old.dmcounters) ? old.dmcounters[i] : 0) + 1) for i in 1:ndm])
         end
         putend(w)
         blob = bytes(w)
