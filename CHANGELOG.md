@@ -9576,3 +9576,13 @@ TiledShapeStMan plus an ISM and an SSM column, random `putcell` / `addrows` by e
 byte orders (12 seeds × 14 rounds, casacore side read back through casatools since Casacore.jl
 cannot read variable-shape tiled columns): all clean. Kept as one deterministic run in
 `test/msvalid_tests.jl`.
+
+### Phase 277 — TaQL-lite random-expression differential fuzz vs real TaQL (no divergence found)
+
+A generator of random expressions compared with real `tableCommand`: 2700 WHERE clauses by matched
+row set (arithmetic, comparisons, `AND`/`OR`/`NOT`, `LIKE`/`ILIKE`, `IN`, `BETWEEN`, `~` glob
+patterns with `{a,b}`, string functions) and 600 numeric expressions by computed value (rounding,
+`%`, `//`, `**`, `pow`, `iif`, `min`/`max`, trig, `exp`, `fmod`, `int`): zero mismatches (the first
+round's apparent mismatches were the generator's — an unparenthesised `NOT S == ''`, which real
+TaQL rejects because `NOT` binds tighter than `==`, and real TaQL erroring on an empty result).
+Kept as a seeded 250-expression guard in `test/taql_fuzz_tests.jl`.
