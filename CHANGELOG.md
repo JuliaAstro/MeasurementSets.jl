@@ -9568,3 +9568,11 @@ Phase 274's differential fuzz extended with column operations: random `addcolumn
 by us and `addcols` / `removecols` / `renamecol` by casatools, mixed with cell / row edits, on
 little- and big-endian tables (16 seeds × 16 rounds, checked against a Julia model and against
 Casacore.jl after every step): all clean. Kept as one deterministic run in `test/msvalid_tests.jl`.
+
+### Phase 276 — shared tiled hypercube edited by casacore and us (fuzz sweep, no bug found)
+
+The ours ↔ casatools fuzz on a MAIN-like table: `DATA` / `FLAG` / `WEIGHT_SPECTRUM` in one
+TiledShapeStMan plus an ISM and an SSM column, random `putcell` / `addrows` by either side, both
+byte orders (12 seeds × 14 rounds, casacore side read back through casatools since Casacore.jl
+cannot read variable-shape tiled columns): all clean. Kept as one deterministic run in
+`test/msvalid_tests.jl`.
