@@ -9481,3 +9481,27 @@ source change):
   updating and deleting thousands of rows (bucket splits, free lists, ISM run breaks), and tiled
   tables that grew by `INSERT` and hold hypercubes of several shapes — read identically in both
   readers and survive our own `edit` (remove / add / overwrite rows), which casacore then reads back.
+
+### Phase 271 — a MeasurementSet we write is a valid MS to real casacore
+
+Building a reference MS with CASA's simulator (`casatools.simulator`) and opening ours with its
+`ms` tool found two reasons casacore rejected or choked on our tables:
+
+- **`create_ms` output was "not a valid MS".** None of its columns carried the `QuantumUnits`
+  and `MEASINFO` keywords casacore's `MSTableImpl` requires (`TIME` epoch/UTC, `UVW` uvw/ITRF,
+  the `*_DIR` / `POINTING` directions J2000, antenna / feed positions ITRF, the spectral-window
+  frequencies with their `MEAS_FREQ_REF` variable reference and code table, and the unit of every
+  other standard column). They are now stamped from the schema, and every column we write that
+  the simulator-made MS also has carries identical units and measure frames (cross-checked in the
+  tests). `casatools.ms` opens it and `getdata` returns the right shapes.
+- **Any casacore that LOCKS one of our tables threw "another process changed the number of
+  columns".** The sync blob we wrote into `table.lock` used the short form (`nrcolumn = -1`);
+  casacore's `TableSyncData::read` leaves `nrcolumn` unset for it, and `PlainTable::lock` then
+  compares that garbage with the column count. The `ms` tool's `getdata` and `tb.lock` both
+  hit it (Phase 13 only checked that the table *opens*). The blob is now the full form
+  `TableSyncData::write` produces: the real column count, a table change counter and one
+  data-manager change counter per manager (all set to the modify counter, i.e. "everything
+  changed" — a full resync), for `write_table` and after every `edit`.
+
+Interleaving casatools writes (`putcol`, `addrows`) and our `edit` on the same table now works in
+both directions. New `test/msvalid_tests.jl`.

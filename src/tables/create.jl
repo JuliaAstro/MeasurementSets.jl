@@ -1091,6 +1091,36 @@ end
 # this package writes, matching casacore's own default (empty list).
 _flag_category_kw() = _set_kw(Record(), "CATEGORY", TpArrayString, String[])
 
+# The measure kind / reference frame casacore's `MSTableImpl` declares for the standard MS
+# columns that hold a measure (the `MEASINFO` keyword; the unit list has one entry per
+# component).  A `MeasurementSet` opened by casacore refuses a table whose columns lack these
+# and their `QuantumUnits` ("table is not a valid MS") -- Phase 271.
+const _MS_FREQ_TABREF = (tabtypes = ["REST", "LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO", "LGROUP", "CMB", "Undefined"],
+                         tabcodes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 64])
+const _MS_MEASINFO = Dict{Tuple{String,String},NamedTuple}(
+    ("ANTENNA", "POSITION")   => (; kind=:position, ref="ITRF", units=["m", "m", "m"]),
+    ("ANTENNA", "OFFSET")     => (; kind=:position, ref="ITRF", units=["m", "m", "m"]),
+    ("FEED", "POSITION")      => (; kind=:position, ref="ITRF", units=["m", "m", "m"]),
+    ("FEED", "BEAM_OFFSET")   => (; kind=:direction, ref="J2000", units=["rad", "rad"]),
+    ("FEED", "TIME")          => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("FIELD", "DELAY_DIR")     => (; kind=:direction, ref="J2000", units=["rad", "rad"]),
+    ("FIELD", "PHASE_DIR")     => (; kind=:direction, ref="J2000", units=["rad", "rad"]),
+    ("FIELD", "REFERENCE_DIR") => (; kind=:direction, ref="J2000", units=["rad", "rad"]),
+    ("FIELD", "TIME")          => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("FLAG_CMD", "TIME")       => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("HISTORY", "TIME")        => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("MAIN", "TIME")           => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("MAIN", "TIME_CENTROID")  => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("MAIN", "UVW")            => (; kind=:uvw, ref="ITRF", units=["m", "m", "m"]),
+    ("OBSERVATION", "TIME_RANGE")   => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("OBSERVATION", "RELEASE_DATE") => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("POINTING", "DIRECTION")   => (; kind=:direction, ref="J2000", units=["rad", "rad"]),
+    ("POINTING", "TARGET")      => (; kind=:direction, ref="J2000", units=["rad", "rad"]),
+    ("POINTING", "TIME")        => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("POINTING", "TIME_ORIGIN") => (; kind=:epoch, ref="UTC", units=["s"]),
+    ("SPECTRAL_WINDOW", "CHAN_FREQ")    => (; kind=:frequency, varrefcol="MEAS_FREQ_REF", _MS_FREQ_TABREF..., units=["Hz"]),
+    ("SPECTRAL_WINDOW", "REF_FREQUENCY") => (; kind=:frequency, varrefcol="MEAS_FREQ_REF", _MS_FREQ_TABREF..., units=["Hz"]))
+
 # build (descs, data) for one standard table
 function _synth_table(tbl, nrows, nchan, ncorr, nrec)
     std = SCHEMAVER2[tbl]
@@ -1103,7 +1133,11 @@ function _synth_table(tbl, nrows, nchan, ncorr, nrec)
                 sc.shape isa VariableDims ? VariableDims() :
                 VariableShape()
         kw = sc.name == "FLAG_CATEGORY" ? _flag_category_kw() : Record()
-        push!(descs, _mkdesc(sc.name, sc.type, shape; keywords = kw))
+        d = _mkdesc(sc.name, sc.type, shape; keywords = kw)
+        spec = get(_MS_MEASINFO, (tbl, sc.name), nothing)
+        d = spec !== nothing ? _stamp_measinfo(d, spec) :
+            isempty(sc.unit) ? d : _stamp_quantum_units(d, [sc.unit])
+        push!(descs, d)
         push!(data, vals)
     end
     descs, data

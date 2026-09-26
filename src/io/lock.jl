@@ -487,20 +487,31 @@ function _read_syncinfo_bytes(buf::Vector{UInt8})
 end
 
 """
-    write_syncinfo(lk, nrow; modifycounter)
+    write_syncinfo(lk, nrow; modifycounter, ncolumn = -1, ndm = 0)
 
-Write the short-form `TableSyncData` blob (`nrcolumn = -1`, which casacore
-reads as "table + all data managers changed" -> full resync) into
-`table.lock`, preserving the request-id region, then `fsync`.
+Write the `TableSyncData` blob into `table.lock`, preserving the request-id
+region, then `fsync`.  With `ncolumn >= 0` it is the full form casacore's
+`TableSyncData::write` produces -- `nrcolumn`, the table change counter and one
+data-manager change counter per manager (all set to `modifycounter`, so every
+write reads as "table and all managers changed" -> full resync).  The short
+form (`ncolumn = -1`) is NOT safe for a casacore that locks the table: its
+`TableSyncData::read` returns without setting `nrcolumn` in that case and
+`PlainTable::lock` then compares the garbage against the column count and throws
+"another process changed the number of columns" (Phase 271).
 """
-function write_syncinfo(lk::TableLock, nrow::Integer; modifycounter::Integer)
+function write_syncinfo(lk::TableLock, nrow::Integer; modifycounter::Integer,
+                        ncolumn::Integer=-1, ndm::Integer=0)
     (lk.noop || lk.io === nothing || !lk.writable) && return
     try
         w = AipsWriter(; endian = :big)
         putstart(w, "sync", nrow > typemax(UInt32) ? SYNC_V2 : SYNC_V1)
         nrow > typemax(UInt32) ? wr_u64(w, nrow) : wr_u32(w, UInt32(nrow))
-        wr_i32(w, Int32(-1))                          # nrcolumn = -1
+        wr_i32(w, Int32(ncolumn))                     # nrcolumn (-1: short form)
         wr_u32(w, UInt32(modifycounter))
+        if ncolumn >= 0
+            wr_u32(w, UInt32(modifycounter))          # table change counter
+            wr_block(w, fill(UInt32(modifycounter), ndm))   # one per data manager
+        end
         putend(w)
         blob = bytes(w)
 

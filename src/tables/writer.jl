@@ -336,6 +336,7 @@ function write_table_files(dir::AbstractString, td::TableDesc, nrow::Integer,
         _atomic_write(joinpath(dir, "table.dat"),
                      table_dat_bytes(td, nrow, dms, varndim; storage, blocksize, endian))
         write_tableinfo(dir; type, subtype, readme)
-        write_syncinfo(lk, nrow; modifycounter = (old.present ? old.modifycounter : 0) + 1)
+        write_syncinfo(lk, nrow; modifycounter = (old.present ? old.modifycounter : 0) + 1,
+                       ncolumn=length(td.columns), ndm=length(dms))
     end
 end
