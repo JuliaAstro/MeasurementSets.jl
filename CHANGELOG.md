@@ -9539,3 +9539,25 @@ table — using signal files to order the two — found:
   atomically (a new inode; that protects our own mmap readers and lock-free readers), and casacore
   keeps its open file handles. A real casacore writer, by contrast, patches in place and is seen
   immediately by an open casacore reader.
+
+### Phase 274 — our edits of tables real casacore last modified: a differential fuzz found `edit` corrupting them
+
+Sweeps of `casatasks` workflows on our MSs (clearcal, flagdata clip, statwt, concat, virtualconcat,
+`mstransform` incl. multi-MS partitions, calibrater `addcorr`/`addmodel`), `tb.addrows` /
+`removerows` / `addcols` / `removecols` / `renamecol` on our tables, and wide (300 columns), tall
+(2 million rows) and heavy-cell ((1000, 1000) Float64) tables in both directions all found nothing
+(real virtualconcat and MMS outputs — genuine ConcatTables — read identically to their parts;
+casacore refuses removing rows of a tiled table or dropping an ISM column, our tables and its own
+alike). A **differential fuzz** — random `putcell` / `addrows` / `removerows` applied alternately by
+us and by casatools, compared with a Julia model after every step — found a real bug:
+
+- **`edit` of a table casacore had last modified could corrupt it.** A regenerated StandardStMan
+  file carries *our* bucket geometry, but the `table.dat` block that describes it (the per-column
+  offsets within a bucket) was only rewritten when rows were added. After casacore's `removerows`
+  (its own geometry stays in `table.dat`) an edit of *any* column of a shared StandardStMan
+  instance left every string of that instance unreadable — a `BoundsError` in our reader, and
+  casacore itself misread the file too. `edit` now rewrites `table.dat` whenever a regenerated
+  block differs from the one on disk. (For tables we wrote ourselves an unchanged row count gives an
+  identical block, which is why nothing before saw it.) Regression test: casatools removes rows
+  then we edit, plus a deterministic ours/casacore ping-pong of `putcell`/`addrows`/`removerows` over
+  every storage kind (`test/msvalid_tests.jl`).
