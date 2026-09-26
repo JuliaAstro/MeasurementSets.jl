@@ -2,7 +2,11 @@
 
 # element CasaType a Julia value implies
 _casatype_of(::Type{Bool}) = TpBool
+_casatype_of(::Type{UInt8}) = TpUChar
+_casatype_of(::Type{Int16}) = TpShort
+_casatype_of(::Type{UInt16}) = TpUShort
 _casatype_of(::Type{Int32}) = TpInt
+_casatype_of(::Type{UInt32}) = TpUInt
 _casatype_of(::Type{Int64}) = TpInt64
 _casatype_of(::Type{Float16}) = TpFloat        # narrowed columns write back as Float32
 _casatype_of(::Type{BFloat16}) = TpFloat
@@ -63,7 +67,7 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
     end
     cls = arr ? _classname(c.type, true) : _classname(c.type, false)
     opt = (arr && c.shape isa Dims && !isempty(c.shape)) ?
-          (c.option | COLOPT_DIRECT | COLOPT_FIXEDSHAPE) : Int32(0)
+          (c.option | (c.type == TpString ? Int32(0) : COLOPT_DIRECT) | COLOPT_FIXEDSHAPE) : Int32(0)
     mgr = kind === :ism ? "IncrementalStMan" : "StandardStMan"
     return ColumnDesc(c.name, c.comment, mgr, mgr,
         c.type, cls, c.shape, opt, c.maxlength, c.keywords, c.default, c.sequ)

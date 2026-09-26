@@ -35,6 +35,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
     include("indirect_tests.jl")
     include("ism_writer_tests.jl")
     include("tsm_multicol_tests.jl")
+    include("type_matrix_tests.jl")
     include("reftable_tests.jl")
     include("engine_tests.jl")
     include("edit_tests.jl")

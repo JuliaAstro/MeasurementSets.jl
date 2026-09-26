@@ -4519,3 +4519,65 @@ end
         end
     end
 end
+
+# Phase 263: numeric-expression probe vs real TaQL (~130 forms, value AND result
+# type).  Fixed: `complex(re, im)` was missing; `C ** 2` / `pow(C, 2)` on a Complex
+# was a MethodError (Phase 184's Real-only `_tql_pow` -- a regression); `real` /
+# `imag` / `conj` of an Int and `median` / `fractile` return a Double in real TaQL
+# (they kept the Int); scalar `fractile(x, frac)` was missing.
+@testset "TaQL-lite — complex(), complex pow, Double results, fractile (Phase 263)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["C" => ComplexF64[1+2im, -3+0.5im, 0+0im, 2-4im], "R" => [1.5, -2.0, 0.0, 4.0], "K" => Int32[1, 2, 3, 4]]; nrow=4)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    @test ev("complex(R, K)") == ComplexF64[1.5+1im, -2+2im, 0+3im, 4+4im] && ev("complex(R, 1.0)")[2] == -2 + 1im
+    @test ev("complex(1, 2)") == fill(1.0 + 2im, 4) && eltype(ev("complex(R, K)")) <: Complex
+    @test ev("C ** 2") ≈ ComplexF64[-3+4im, (-3+0.5im)^2, 0, (2-4im)^2] && ev("pow(C, 2)") ≈ ev("C ** 2") && ev("C ** 0.5")[4] ≈ sqrt(2-4im)
+    for e in ("real(K)", "imag(K)", "conj(K)", "median(K)", "fractile(K, 0.5)")
+        @test eltype(ev(e)) <: AbstractFloat
+    end
+    @test ev("real(K)") == [1.0, 2, 3, 4] && ev("imag(K)") == zeros(4) && ev("fractile(K, 0.5)") == [1.0, 2, 3, 4]
+    @test ev("median(K)") == [1.0, 2, 3, 4]
+    @test eltype(ev("real(C)")) <: AbstractFloat && ev("conj(C)")[1] == 1 - 2im
+    if _HAVE_TAQL
+        for e in ("complex(R, K)", "complex(R, 1.0)", "complex(1, 2)", "C ** 2", "pow(C, 2)", "real(K)", "imag(K)", "conj(K)", "median(K)", "fractile(K, 0.5)")
+            r = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:]); m = ev(e)
+            @test r ≈ m && (eltype(r) <: AbstractFloat) == (eltype(m) <: AbstractFloat)
+        end
+    end
+end
+
+# Phase 264: string-expression probe vs real TaQL (~90 forms).  Fixed: string
+# functions (`upper`/`lower`/`capitalize`/`trim`/`ltrim`/`rtrim`/`substr`/`replace`/
+# `sreverse`/`strlength`/`string`) and `IN [...]` now map over the elements of a
+# string ARRAY cell (real TaQL is elementwise; they were MethodErrors / one scalar);
+# `bool('...')` follows real TaQL's string rule (false for "", "0", "f", "false", "n",
+# "no" -- trimmed, case-insensitive; true otherwise; was always true).  (A column
+# named `T` collides with the `T` bool literal in real TaQL, which errors on it.)
+@testset "TaQL-lite — string-array functions, bool(string) (Phase 264)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["S" => ["Hello World", "  pad  ", "abc", "x_y.z"], "K" => Int32[1, 2, 3, 4],
+                "SA" => [["u", "v"], ["w", "x"], ["y", "z"], ["p", "q"]]]; nrow=4)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    @test ev("upper(SA)") == [["U", "V"], ["W", "X"], ["Y", "Z"], ["P", "Q"]] && ev("lower(upper(SA))") == [["u", "v"], ["w", "x"], ["y", "z"], ["p", "q"]]
+    @test ev("capitalize(SA)")[1] == ["U", "V"] && ev("sreverse(SA)")[2] == ["w", "x"] && ev("trim(SA)")[3] == ["y", "z"]
+    @test ev("substr(SA, 0, 1)")[4] == ["p", "q"] && ev("replace(SA, 'u', 'Z')")[1] == ["Z", "v"]
+    @test ev("strlength(SA)") == [[1, 1] for _ in 1:4] && ev("string(SA)")[1] == ["u", "v"]
+    @test ev("SA IN ['u', 'q']") == [[true, false], [false, false], [false, false], [false, true]] && ev("SA == 'v'")[1] == [false, true]
+    @test ev("upper(S)") == ["HELLO WORLD", "  PAD  ", "ABC", "X_Y.Z"] && ev("strlength(S)") == [11, 7, 3, 5]      # scalars unchanged
+    @test ev("trim(S)")[2] == "pad" && eltype(ev("trim(S)")) === String
+    for (s, want) in ("" => false, "0" => false, "f" => false, "F" => false, "false" => false, "False" => false, "FALSE" => false, "n" => false, "N" => false,
+                      "no" => false, "No" => false, "False " => false, " false" => false, "T" => true, "t" => true, "true" => true, "1" => true, "2" => true, "-1" => true,
+                      "yes" => true, "y" => true, "on" => true, "off" => true, "abc" => true, "0.0" => true, "00" => true, "fals" => true, "nope" => true, "true " => true)
+        @test MSv2._tql_bool(s) === want
+    end
+    @test ev("bool('false')") == fill(false, 4) && ev("bool('')") == fill(false, 4) && ev("bool('T')") == fill(true, 4) && ev("bool(K - 1)") == [false, true, true, true]
+    if _HAVE_TAQL
+        for e in ("upper(SA)", "lower(SA)", "capitalize(SA)", "trim(SA)", "substr(SA, 0, 1)", "replace(SA, 'u', 'Z')", "strlength(SA)", "SA IN ['u']",
+                  "bool('false')", "bool('False')", "bool('no')", "bool('0')", "bool('')", "bool('off')", "bool('abc')", "bool('0.0')", "bool('T')")
+            r = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:]); m = ev(e)
+            @test all(i -> collect(r[i]) == collect(m[i]), eachindex(r))
+        end
+    end
+end

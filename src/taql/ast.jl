@@ -111,6 +111,7 @@ function _tql_in_range(x, r::TQLRangeSet)
     k = (x - r.lo) / r.step
     return abs(k - round(k)) <= 1e-9 * max(1.0, abs(k))
 end
+_tql_in(x::AbstractArray, vals) = map(e -> _tql_in(e, vals), x)      # elementwise over an array cell (Phase 264)
 _tql_in(x, vals) = any(v -> v isa TQLRangeSet, vals) ?
     (ismissing(x) ? missing : any(v -> v isa TQLRangeSet ? _tql_in_range(x, v) : x == v, vals)) :
     x in vals

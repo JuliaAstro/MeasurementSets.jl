@@ -9308,3 +9308,65 @@ ranges, `BETWEEN`, `%`, `rownr()`, `DISTINCT`, multi-key `ORDER BY`, …). Real
 TaQL rejects `ORDER BY gsum(K)` and `NOT G==3` (`NOT` binds tighter than `==`
 there); both are accepted here.
 
+### Phase 262 — ISM per-cell lookup is a binary search
+
+A bucket-size benchmark (scratch build, 600 000 rows) showed `getcell` on a
+fast-changing IncrementalStMan column degrading with bucket size (`A1`: 26 ms →
+3 429 ms for 50 000 random cells from the default to a 64 MiB bucket) — the entry
+lookup inside a bucket scanned the sorted row-number list linearly. It is now a
+binary search: flat at ~27 ms for every bucket size (124× faster at 64 MiB; no
+change at the default size). The same benchmark (and a tile-size one for `DATA` /
+`FLAG`) found no read benefit from larger buckets or tiles, so the writer defaults
+are unchanged. New regression test.
+
+### Phase 263 — TaQL-lite complex functions and result types
+
+A ~130-form numeric-expression probe against real TaQL (checking values *and*
+result types) found: `complex(re, im)` missing; `C ** 2` / `pow(C, 2)` on a Complex
+a `MethodError` (a Phase 184 regression — its Real-only `_tql_pow`); `real` /
+`imag` / `conj` of an Int and `median` / `fractile` returning an Int where real
+TaQL returns a Double; and scalar `fractile(x, frac)` missing. All fixed; every
+other probed form (arithmetic, integer division / modulo, bit ops, comparisons,
+reductions, complex `abs`/`arg`/`norm`/`exp`/`log`/trig, array complex
+functions) already matched. Real TaQL rejects `NOT K>2` (`NOT` binds tighter than
+`>`), accepted here.
+
+### Phase 264 — fixed-shape string arrays; TaQL-lite string arrays and `bool(string)`
+
+- **Storage bug:** a *fixed-shape string array column* (`S S [SHAPE=[2]]`) crashed
+  `write_table` (a `BoundsError` — the column was declared *Direct*) and a
+  casacore-written one could not be read ("string arrays not yet supported").
+  Casacore stores it *indirect* (option `FixedShape`, not `Direct`): each cell is one
+  12-byte ref to a string-bucket blob of just the elements, no shape header. Both
+  directions now work, verified against real casacore (written by casacore → read
+  here, and written here → read by casacore).
+- **TaQL-lite:** a ~90-form string/date probe against real TaQL found the string
+  functions (`upper` / `lower` / `capitalize` / `trim` / `ltrim` / `rtrim` / `substr`
+  / `replace` / `sreverse` / `strlength` / `string`) and `IN [...]` need to be
+  elementwise over a string *array* cell (they failed or collapsed to one scalar), and
+  `bool('...')` must follow real TaQL's string rule (false for `""`, `"0"`, `"f"`,
+  `"false"`, `"n"`, `"no"`, trimmed and case-insensitive; it was always true). Still
+  open: a constant *expression* inside an `IN [...]` list (`S IN ['a'+'bc']`). (A column
+  named `T` collides with the `T` bool literal in real TaQL, which errors on it.)
+
+### Phase 265 — column type × shape × manager matrix (a real read bug)
+
+Writing a matrix — 12 element types × {scalar, fixed 1-D / 2-D, variable} × {Standard,
+Incremental, Tiled*StMan}, in both directions against real casacore — found:
+
+- **Reading a casacore-created fixed-shape array column was garbage** in
+  StandardStMan / IncrementalStMan. A fixed-shape numeric or Bool array created by casacore
+  (`[SHAPE=[3]]`) has option `FixedShape` but *not* `Direct`, so it is stored **indirect**
+  (an offset into `table.f<n>i`); we read every fixed-shape array as direct (inline),
+  returning offsets as data. Now a fixed-shape array is direct only when the column's
+  `Direct` option says so (our own writer always sets it for numeric arrays), otherwise it
+  is read through the array file (strings: the Phase 264 string blob).
+- `write_table` could not write `UInt8` (uChar), `Int16` (Short), `UInt16` (uShort) or
+  `UInt32` (uInt) columns — added. (`Int8` / casacore `Char` is not a table column type.)
+- A fixed-shape `String` array bound to IncrementalStMan crashed the writer — now goes
+  through the array file.
+
+After the fixes every combination round-trips in both directions (casacore-created → ours
+and ours → casacore; Casacore.jl cannot read a variable-shape tiled column, so those are
+ours-only). New `test/type_matrix_tests.jl`.
+

@@ -377,3 +377,21 @@ end
     @test a < 1.5 * n * sizeof(Float64)
     @test getcolumn(r, "A") == A
 end
+
+# Phase 262: the ISM per-cell lookup binary-searches a bucket's row-number list (it
+# scanned it linearly, so a fast-changing column in a LARGE bucket cost O(entries)
+# per cell -- 68 µs/cell at a 64 MiB bucket, 124× slower than now).  Correctness
+# over every row of a column that changes on (almost) every row, so each bucket
+# holds thousands of index entries.
+@testset "ISM getcell — binary-searched entry lookup (Phase 262)" begin
+    n = 30_000
+    rng = MSv2.Random.MersenneTwister(7)
+    fast = Int32.(rand(rng, 0:25, n)); slow = cumsum(rand(rng, n) .< 0.001) .* 1.0
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["F" => fast, "S" => slow, "X" => Int32.(1:n)]; nrow=n, ism=["F", "S"])
+    t = readtable(dir)
+    cf, cs = column(t, "F"), column(t, "S")
+    @test all(i -> cf[i] == fast[i], 1:n)
+    @test all(i -> cs[i] == slow[i], 1:n)
+    @test cf[:] == fast && cs[:] == slow
+end

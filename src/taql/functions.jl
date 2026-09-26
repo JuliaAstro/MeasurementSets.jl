@@ -12,6 +12,8 @@ import Printf
 # unary / binary elementwise (map over an array cell, apply directly to
 # a scalar) -- share the `_bcast` helper used by the arithmetic evaluator
 _ew(f) = x -> _bcast(f, x)
+# a string function applied to each element of a string ARRAY cell (real TaQL: elementwise)
+_sew(f) = (x, args...) -> x isa AbstractArray ? map(e -> f(e, args...), x) : f(x, args...)
 _ew2(f) = (x, y) -> _bcast(f, x, y)
 # reduction: a scalar arg is wrapped in a 1-tuple so `f` still applies
 _red(f) = x -> f(x isa TQLMArray ? _mvalid(x) : x isa AbstractArray ? x : (x,))
@@ -97,9 +99,9 @@ _tql_gsumsqr(v) = sum(x -> x^2, v)
 # `strip` happens to agree with casacore's narrower 4-char set for
 # every plain-ASCII case) but is narrowed here too, for exact fidelity
 # rather than an accidental agreement.
-_tql_trim(s::AbstractString) = strip(c -> c == ' ' || c == '\t' || c == '\n' || c == '\r', s)
-_tql_ltrim(s::AbstractString) = lstrip(c -> c == ' ' || c == '\t', s)
-_tql_rtrim(s::AbstractString) = rstrip(c -> c == ' ' || c == '\t', s)
+_tql_trim(s::AbstractString) = String(strip(c -> c == ' ' || c == '\t' || c == '\n' || c == '\r', s))
+_tql_ltrim(s::AbstractString) = String(lstrip(c -> c == ' ' || c == '\t', s))
+_tql_rtrim(s::AbstractString) = String(rstrip(c -> c == ' ' || c == '\t', s))
 
 # `capitalize()`/`reversestring()`/`sreverse()` (`capitalizeFUNC`/
 # `sreverseFUNC`, `ExprFuncNode.cc:988-998`, via `String::capitalize()`/
@@ -507,7 +509,7 @@ function _tql_median(v)
     n = length(s)
     n == 0 && throw(ArgumentError("TaQL-lite: median of an empty array"))
     n2 = (n - 1) ÷ 2 + 1                       # 1-based lower-middle order statistic
-    (iseven(n) && n <= 100) ? (s[n2] + s[n2+1]) / 2 : s[n2]
+    float((iseven(n) && n <= 100) ? (s[n2] + s[n2+1]) / 2 : s[n2])    # real TaQL: always a Double
 end
 
 # casacore's GENERIC `fractile()` (`.tcc:1138-1161`) -- what `gmedian()`
@@ -520,7 +522,7 @@ end
 # casacore, not `2.5`.
 _tql_fractile(v, frac::Real) = (s = sort!(vec(collect(v))); n = length(s);
     n == 0 ? throw(ArgumentError("TaQL-lite: fractile of an empty array")) :
-    s[Int(floor((n - 1) * frac + 0.01)) + 1])
+    float(s[Int(floor((n - 1) * frac + 0.01)) + 1]))
 _tql_median_lo(v) = _tql_fractile(v, 0.5)
 
 # casacore's `round()` (`roundFUNC`, `ExprFuncNode.cc:737-742`) is
@@ -548,6 +550,9 @@ _tql_round(x::Real) = x < 0 ? ceil(x - 0.5) : floor(x + 0.5)
 # guard.
 _tql_pow(x::Real, y::Real) = (xf = float(x); yf = float(y);
     xf < 0 && !isinteger(yf) ? NaN : xf^yf)
+# a Complex base and/or exponent: plain Julia `^` (Phase 263 -- the Real-only method above
+# had made `C ** 2` a MethodError; real TaQL computes std::pow on the complex value)
+_tql_pow(x::Number, y::Number) = x^y
 
 # The exact same "raw C++ std:: call, no domain guard, returns NaN"
 # shape as `pow` above -- found by sweeping every other unary math
@@ -803,7 +808,10 @@ end
 # `replace(s, pat, rep)`: literal (not regex) replace-all; empty pattern = no-op.
 _tql_replace(s::AbstractString, pat::AbstractString, rep::AbstractString) =
     isempty(pat) ? String(s) : replace(String(s), pat => rep)
-_tql_bool(x) = x isa AbstractArray ? x .!= 0 : x != 0
+# a STRING is false for "", "0", "f", "false", "n", "no" (trimmed, case-insensitive), true
+# otherwise (real TaQL, live-probed on ~50 strings); a number is `!= 0`
+_tql_bool(x::AbstractString) = !(lowercase(strip(x)) in ("", "0", "f", "false", "n", "no"))
+_tql_bool(x) = x isa AbstractArray ? map(_tql_bool, x) : x != 0
 
 # ---- Phase 250: axis-collapse array functions (`sums(arr, axes...)`, ...) ----
 # Real TaQL (live-probed): the "s"-suffixed reductions collapse the given
@@ -943,9 +951,9 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "sign" => (_ew(_tql_sign), 1:1), "floor" => (_ew(floor), 1:1), "ceil" => (_ew(ceil), 1:1),
     "round" => (_ew(_tql_round), 1:1), "int" => (_ew(_tql_int), 1:1),
     "integer" => (_ew(_tql_int), 1:1),
-    "real" => (_ew(real), 1:1), "imag" => (_ew(imag), 1:1),
+    "real" => (_ew(x -> real(float(x))), 1:1), "imag" => (_ew(x -> imag(float(x))), 1:1),   # Int -> Double, like real TaQL
     "arg" => (_ew(angle), 1:1), "phase" => (_ew(angle), 1:1),
-    "conj" => (_ew(conj), 1:1), "norm" => (_ew(abs2), 1:1),
+    "conj" => (_ew(x -> conj(float(x))), 1:1), "norm" => (_ew(abs2), 1:1),
     "isnan" => (_ew(isnan), 1:1), "isinf" => (_ew(isinf), 1:1),
     "isfinite" => (_ew(_tql_isfinite), 1:1),
     # `nonfinite`/`isnonfinite` are a MeasurementSets-only extension
@@ -957,6 +965,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # (AND then negated -> OR) already gives.
     "nonfinite" => (_ew(!isfinite), 1:1), "isnonfinite" => (_ew(!isfinite), 1:1),
     # --- binary elementwise ---
+    "complex" => (_ew2((r, i) -> complex(float(r), float(i))), 2:2),
     "pow" => (_ew2(_tql_pow), 2:2), "atan2" => (_ew2((y, x) -> atan(y, x)), 2:2),
     "fmod" => (_ew2(rem), 2:2),
     # --- array-cell reductions ---
@@ -981,6 +990,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "sumsqr" => (_tql_sumsqr, 1:1), "sumsquare" => (_tql_sumsqr, 1:1),
     "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
     "median" => (_red(_tql_median), 1:1),
+    "fractile" => ((x, fr) -> _tql_fractile(x isa AbstractArray ? x : (x,), fr), 2:2),
     "variance" => (_red(x -> Statistics.var(x; corrected=false)), 1:1),
     "stddev" => (_red(x -> Statistics.std(x; corrected=false)), 1:1),
     "rms" => (_tql_rms, 1:1), "avdev" => (_tql_avdev, 1:1),
@@ -1036,21 +1046,21 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "replacemasked" => (_tql_replacemasked, 2:2),
     "replaceunmasked" => (_tql_replaceunmasked, 2:2),
     # --- string ---
-    "strlength" => (length, 1:1), "len" => (length, 1:1),
+    "strlength" => (_sew(length), 1:1), "len" => (_sew(length), 1:1),
     "regex" => (s -> _tql_pattern(:regex, s), 1:1),
     "pattern" => (s -> _tql_pattern(:pattern, s), 1:1),
     "sqlpattern" => (s -> _tql_pattern(:sqlpattern, s), 1:1),
-    "upcase" => (uppercase, 1:1), "upper" => (uppercase, 1:1), "toupper" => (uppercase, 1:1),
-    "to_upper" => (uppercase, 1:1),
-    "downcase" => (lowercase, 1:1), "lower" => (lowercase, 1:1), "tolower" => (lowercase, 1:1),
-    "to_lower" => (lowercase, 1:1),
-    "capitalize" => (_tql_capitalize, 1:1),
-    "string" => (_tql_str, 1:2), "str" => (_tql_str, 1:2),
-    "substr" => (_tql_substr, 2:3), "substring" => (_tql_substr, 2:3),
-    "replace" => (_tql_replace, 3:3),
+    "upcase" => (_sew(uppercase), 1:1), "upper" => (_sew(uppercase), 1:1), "toupper" => (_sew(uppercase), 1:1),
+    "to_upper" => (_sew(uppercase), 1:1),
+    "downcase" => (_sew(lowercase), 1:1), "lower" => (_sew(lowercase), 1:1), "tolower" => (_sew(lowercase), 1:1),
+    "to_lower" => (_sew(lowercase), 1:1),
+    "capitalize" => (_sew(_tql_capitalize), 1:1),
+    "string" => (_sew(_tql_str), 1:2), "str" => (_sew(_tql_str), 1:2),
+    "substr" => (_sew(_tql_substr), 2:3), "substring" => (_sew(_tql_substr), 2:3),
+    "replace" => (_sew(_tql_replace), 3:3),
     "bool" => (_tql_bool, 1:1), "boolean" => (_tql_bool, 1:1),
-    "reversestring" => (reverse, 1:1), "sreverse" => (reverse, 1:1),
-    "trim" => (_tql_trim, 1:1), "ltrim" => (_tql_ltrim, 1:1), "rtrim" => (_tql_rtrim, 1:1),
+    "reversestring" => (_sew(reverse), 1:1), "sreverse" => (_sew(reverse), 1:1),
+    "trim" => (_sew(_tql_trim), 1:1), "ltrim" => (_sew(_tql_ltrim), 1:1), "rtrim" => (_sew(_tql_rtrim), 1:1),
     # --- misc ---
     "iif" => (_tql_iif, 3:3),
     # --- date/time (MJD-Float days) + angle strings (Phase 69) ---
@@ -1109,7 +1119,7 @@ const _pop_std = v -> Statistics.std(v; corrected=false)
 const _ntrue = v -> count(identity, v)
 const _nfalse = v -> count(!, v)
 const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
-    "gcount" => (length, :scalar),
+    "gcount" => (_sew(length), :scalar),
     "gsum" => (sum, :scalar), "gproduct" => (prod, :scalar),
     "gmean" => (Statistics.mean, :scalar), "gavg" => (Statistics.mean, :scalar),
     "gmedian" => (_tql_median_lo, :scalar),
