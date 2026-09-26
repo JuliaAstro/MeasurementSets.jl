@@ -9370,3 +9370,42 @@ After the fixes every combination round-trips in both directions (casacore-creat
 and ours → casacore; Casacore.jl cannot read a variable-shape tiled column, so those are
 ours-only). New `test/type_matrix_tests.jl`.
 
+
+### Phase 266 — empty and undefined: zero-row tables, never-written cells, empty selections
+
+Probing zero-row tables and never-written cells — casacore-created → ours, ours → casacore,
+and a real casacore adding a row to a table of ours — found a family of bugs:
+
+- **`copyms(ms, dst; rows = 1:0)` / `copytable` of an empty `query` crashed** (`BoundsError`
+  in the tiled writers, `eltype(storeddata[1])` for a virtual engine, "rowsPerBlock must be
+  positive" for Dysco). Every manager now writes a zero-row table the way casacore does
+  (header + dummy cube, no data): TiledShape/Column/CellStMan, all the virtual engines
+  (including the stored / scale / offset companions), `storage = :multifile`. A Dysco file
+  has no zero-row form, so an empty selection copies that column as a plain one. A copied
+  empty sample MS validates, opens in casacore, and can be grown again by `edit`.
+- **A real casacore bus-errored adding a row to a zero-row `IncrementalStMan` table of
+  ours.** casacore's reader assumes every column has an entry at bucket-relative row 0
+  (the Phase 161 invariant); our zero-row bucket had none. It now holds casacore's default
+  value there — byte-identical to a casacore-written file except the cache-size word.
+- **`VariableShape` now carries its number of axes** (`VariableShape(ndim)`; `0` = unknown,
+  `VariableShape()` still works). A zero-row column has no cell to read its ndim from, and a
+  tiled hypercube needs it (its header says ndim + 1) — it used to be forgotten and
+  rewritten as `2`, which casacore rejected ("mismatch in nrdim") after e.g.
+  `removerows!` of every row. `write_table` infers it from the element type
+  (`Vector{Matrix{T}}[]`); a `TiledColumnStMan` needs a declared fixed shape, so an empty
+  one from data alone is a clear error. An empty column of element type `Any` (a
+  zero-row `groupby` result) now says so instead of blaming Unitful.
+- **A never-written cell of a variable-shape tiled column read as an error; casacore reads an
+  empty array.** So a column of them — `FLAG_CATEGORY` and `WEIGHT_SPECTRUM` in the real ALMA
+  MS, "defined but never written" — was unreadable (and dropped by `copyms`). It now reads as
+  `(0, 0, 0)` / `(0, 0)` empties like casacore, in `getcell`, `getcolumn` and
+  TiledCellStMan. Our tiled writers write an empty (zero-extent) cell as an undefined one —
+  a gap in the row map on the dummy cube — so it round-trips.
+- **`edit` defining an undefined tiled cell, or changing a cell's shape, errored** ("no
+  stored cube to write into") because it took the in-place byte-patch path; it now falls
+  back to the regenerating path (a same-shape edit still patches in place). Appended cells of
+  a variable-shape column with nothing to copy a shape from keep the column's ndim.
+
+New `test/empty_undefined_tests.jl` (zero-row casacore tables, empty copies of every
+manager/engine, growing from empty by our `edit` and by a real casacore `INSERT` for 112
+type × shape × manager combinations, the zero-row ISM file, undefined tiled cells).

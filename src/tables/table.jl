@@ -20,8 +20,14 @@ end
 # --- column description --------------------------------------------
 
 "An array column with a fixed number of axes but a per-row-variable cell shape
-(casacore ndim > 0 with no declared shape, e.g. `DATA`, `FLAG_CATEGORY`)."
-struct VariableShape end
+(casacore ndim > 0 with no declared shape, e.g. `DATA`, `FLAG_CATEGORY`).
+`ndim` is that number of axes when known (a column read from disk always
+knows it) and `0` when not (`VariableShape()`, e.g. one inferred from data --
+which cannot know it for a zero-row column)."
+struct VariableShape
+    ndim::Int
+end
+VariableShape() = VariableShape(0)
 
 "An array column whose dimensionality itself varies per row
 (casacore ndim == -1, e.g. `ASSOC_SPW_ID`)."
@@ -110,7 +116,7 @@ _cellshape(isarray::Bool, nrdim::Int, fixed::Dims)::CellShape =
     !isarray            ? () :
     !isempty(fixed)     ? fixed :
     nrdim == -1         ? VariableDims() :
-                          VariableShape()
+                          VariableShape(max(nrdim, 0))
 
 # --- table description --------------------------------------------
 
@@ -317,7 +323,7 @@ function columndesc(t::ConcatTable, name::AbstractString)
     if c0.shape isa Dims && !isempty(c0.shape) &&
        any(columndesc(p, name).shape != c0.shape for p in @view t.parts[2:end])
         return ColumnDesc(c0.name, c0.comment, c0.manager, c0.group, c0.type,
-                          c0.classname, VariableShape(),
+                          c0.classname, VariableShape(length(c0.shape)),
                           c0.option & ~COLOPT_FIXEDSHAPE, c0.maxlength,
                           c0.keywords, c0.default, c0.sequ)
     end

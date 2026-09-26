@@ -137,9 +137,14 @@ function _write_columndesc(w::AipsWriter, c::ColumnDesc, varndim::Dict{String,In
     end
 end
 
+# number of axes of a column's cells when the description knows it (0 = it does not)
+_cell_ndim(c::ColumnDesc) = c.shape isa Dims ? length(c.shape) :
+                            c.shape isa VariableShape ? c.shape.ndim : 0
+
 _nrdim(c::ColumnDesc) = c.shape isa Dims ? length(c.shape) :
                         c.shape isa VariableDims ? -1 :
-                        2                                   # VariableShape: any >0
+                        c.shape.ndim > 0 ? c.shape.ndim :
+                        2                                   # VariableShape, unknown ndim: any >0
 
 function _write_valtype(w::AipsWriter, t::CasaType, default)
     if t == TpString

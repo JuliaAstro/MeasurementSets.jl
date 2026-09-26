@@ -18,6 +18,10 @@ _casatype_of(::Type{ComplexF32}) = TpComplex
 _casatype_of(::Type{ComplexF64}) = TpDComplex
 _casatype_of(::Type{<:AbstractString}) = TpString
 _casatype_of(::Type{T}) where {T<:AbstractArray} = _casatype_of(eltype(T))
+_casatype_of(::Type{Any}) = error(
+    "write_table: cannot store a column of element type Any -- a column with no " *
+    "rows (or of mixed types) has no element type to write; give it a concrete one " *
+    "(e.g. `Float64[]`)")
 _casatype_of(::Type{T}) where {T} = error(
     "write_table: cannot store a column of element type $T. A Unitful " *
     "quantity column needs `import Unitful, UnitfulAngles, UnitfulAstro`; " *
@@ -27,6 +31,10 @@ _casatype_of(::Type{T}) where {T} = error(
 # infer a CellShape from a column of values
 function _infer_shape(vals)
     eltype(vals) <: AbstractArray || return ()
+    if isempty(vals)                     # no cells to look at: the element type may still know its ndim
+        n = try ndims(eltype(vals)) catch; 0 end
+        return VariableShape(n)
+    end
     shapes = unique(size.(vals))
     length(shapes) == 1 || return VariableShape()
     s = shapes[1]
@@ -303,12 +311,16 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
 
             typestr = _engine_typestr(kind, vdesc.type, stored_type)
             descs[vi] = ColumnDesc(vname, vdesc.comment, typestr, vname, vdesc.type,
-                _classname(vdesc.type, true), VariableShape(), Int32(0), UInt32(0),
+                _classname(vdesc.type, true), VariableShape(max(_cell_ndim(vdesc), 0)), Int32(0), UInt32(0),
                 _merge_kw(vdesc.keywords, kw), nothing, nothing)
             push!(engine_seq, (vi, typestr))
 
-            st_ct = _stored_casatype(eltype(storeddata[1]))
-            push!(descs, _mkdesc(storedname, st_ct, VariableShape(); keywords=stored_kw))
+            st_ct = _stored_casatype(_eng_stored_eltype(kind, stored_type))   # not from the data: zero rows have none
+            # zero rows: the stored column's ndim (the virtual one, +1 for
+            # ScaledComplexData's leading re/im axis) can only come from the description
+            vnd = _cell_ndim(vdesc) + (kind isa ScaledComplex ? 1 : 0)
+            push!(descs, _mkdesc(storedname, st_ct, VariableShape(isempty(storeddata) ? max(vnd, 0) : 0);
+                                 keywords=stored_kw))
             push!(data, storeddata)
             if get(spec, :stored, :tsm) === :tsm
                 push!(tsmg, String[storedname])
@@ -386,8 +398,12 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         # true per-row cell dimensionality for every variable-shape column
         for i in 1:length(descs)
             d = descs[i]
-            (d.shape isa VariableShape && !isempty(data[i])) || continue
-            varndim[d.name] = ndims(data[i][1])
+            d.shape isa VariableShape || continue
+            if !isempty(data[i])
+                varndim[d.name] = ndims(data[i][1])
+            elseif d.shape.ndim > 0            # zero rows: only the description knows
+                varndim[d.name] = d.shape.ndim
+            end
         end
 
         # The per-DM-writer section: wrapped so a container-eligible writer's
@@ -679,7 +695,9 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
             push!(get!(() -> String[], tiled, sc.sequ), outname)
             tiledkind[sc.sequ] = dm
         elseif dm == "DyscoStMan"
-            push!(get!(() -> String[], dysco, sc.sequ), outname)
+            # A zero-row Dysco file cannot exist (its block geometry is set by the
+            # first rows written), so an empty selection copies as a plain column.
+            isempty(rows) || push!(get!(() -> String[], dysco, sc.sequ), outname)
         elseif dm in ("IncrementalStMan", "ISM")
             push!(ism, outname)
         end
@@ -690,7 +708,14 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
     _rows(nm) = data[findfirst(d -> d.name == nm, descs)]
     tsmg = Vector{String}[]; tcmg = Vector{String}[]; tcellg = Vector{String}[]
     for (sequ, names) in sort(collect(tiled); by = first)
-        uniform = all(length(unique(size.(_rows(nm)))) == 1 for nm in names)
+        # zero rows have no cells to compare: uniform iff the column declares a
+        # fixed cell shape (what a TiledColumnStMan needs)
+        uniform = all(names) do nm
+            r = _rows(nm)
+            isempty(r) ? (d = descs[findfirst(d -> d.name == nm, descs)];
+                          d.shape isa Dims && !isempty(d.shape)) :
+                         length(unique(size.(r))) == 1
+        end
         if tiledkind[sequ] == "TiledColumnStMan" && uniform
             push!(tcmg, names)
         elseif tiledkind[sequ] == "TiledCellStMan"

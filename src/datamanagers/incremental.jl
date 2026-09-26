@@ -401,6 +401,15 @@ function _ism_fixedsize(c::ColumnDesc, kind::Symbol)
     return ISM_INDEX_ENTRY + valbytes
 end
 
+# the value a fresh, never-written cell of this column has (what casacore stores
+# at row 0 of a zero-row table): 0 / false / "" / zeros of the fixed shape / no array
+function _ism_default(c::ColumnDesc, kind::Symbol)
+    T = juliatype(c.type)
+    kind === :scalar && return T === String ? "" : T === Bool ? false : zero(T)
+    kind === :direct && return zeros(T, c.shape...)
+    return T[]                                              # :ind -- undefined array
+end
+
 """
     write_incrementalstman(dir, sequ, cols, coldata, nrow, endian) -> Vector{UInt8}
 
@@ -434,6 +443,15 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
         for i in 1:ncol
             haveprev = false
             prev = nothing
+            if nrow == 0
+                # casacore's reader assumes every column has an entry at
+                # bucket-relative row 0 (`ISMBucket::getInterval` decrements an
+                # unsigned index past it), even in a zero-row table: a real casacore
+                # that then adds a row to this file bus-errors.  Real casacore
+                # writes the column's default value there.
+                push!(entries[i], (0, length(databuf)))
+                _ism_encode!(databuf, cols[i], kinds[i], _ism_default(cols[i], kinds[i]), endian, afw)
+            end
             for lr in 0:(r1 - r0 - 1)
                 v = coldata[i][r0 + lr + 1]
                 if !haveprev || !isequal(v, prev)
