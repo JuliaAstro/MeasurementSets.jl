@@ -42,6 +42,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
     include("lock_tests.jl")
     include("dysco_tests.jl")
     include("empty_undefined_tests.jl")
+    include("keywords_tests.jl")
     include("container_tests.jl")
     include("taql_query_tests.jl")
     include("taql_command_tests.jl")

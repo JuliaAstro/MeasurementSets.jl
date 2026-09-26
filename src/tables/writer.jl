@@ -70,7 +70,15 @@ function _write_aipsarray(w::AipsWriter, a::AbstractArray)
     wr_i32(w, ndims(a))
     for s in size(a); wr_u32(w, s); end
     wr_u32(w, length(a))
-    for x in a; wr_element(w, x); end
+    if eltype(a) === Bool                   # bits, LSB first (casacore Conversion::boolToBit)
+        packed = zeros(UInt8, cld(length(a), 8))
+        for (i, x) in enumerate(a)
+            x && (packed[(i - 1) >> 3 + 1] |= UInt8(1) << ((i - 1) & 7))
+        end
+        write(w.io, packed)
+    else
+        for x in a; wr_element(w, x); end
+    end
     putend(w)
 end
 
@@ -296,7 +304,7 @@ function write_tableinfo(dir::AbstractString; type="", subtype="", readme="")
         println(io, "Type = ", type)
         println(io, "SubType = ", subtype)
         println(io)
-        isempty(readme) || print(io, readme)
+        isempty(readme) || println(io, readme)     # casacore ends the readme with a newline
     end
 end
 

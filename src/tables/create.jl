@@ -28,6 +28,31 @@ _casatype_of(::Type{T}) where {T} = error(
     "a Measure column (MEpoch / MDirection / …) is stored automatically — " *
     "check the column actually holds those.")
 
+# a table-keyword value -> (casacore type, stored value): scalars, arrays of every
+# numeric type / Bool / String, and (nested) records from a `Record` or a Dict
+const _KW_ARRAY_TYPE = Dict{DataType,CasaType}(
+    Bool => TpArrayBool, UInt8 => TpArrayUChar, Int16 => TpArrayShort, UInt16 => TpArrayUShort,
+    Int32 => TpArrayInt, UInt32 => TpArrayUInt, Int64 => TpArrayInt64, Float32 => TpArrayFloat,
+    Float64 => TpArrayDouble, ComplexF32 => TpArrayComplex, ComplexF64 => TpArrayDComplex)
+function _kw_value(v)
+    v isa Record && return (TpRecord, v)
+    if v isa AbstractDict
+        r = Record()
+        for (k, x) in v
+            t, y = _kw_value(x)
+            r = _set_kw(r, String(k), t, y)
+        end
+        return (TpRecord, r)
+    end
+    v isa AbstractArray{<:AbstractString} && return (TpArrayString, String.(v))
+    if v isa AbstractArray
+        t = get(_KW_ARRAY_TYPE, eltype(v), nothing)
+        t === nothing && error("write_table: keyword arrays of $(eltype(v)) are not supported")
+        return (t, Array(v))
+    end
+    return (_casatype_of(typeof(v)), v)
+end
+
 # infer a CellShape from a column of values
 function _infer_shape(vals)
     eltype(vals) <: AbstractArray || return ()
@@ -592,10 +617,8 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
 
     public = Record()
     for (k, v) in keywords
-        ct = v isa AbstractArray{<:AbstractString} ? TpArrayString :
-             v isa AbstractArray ? error("write_table: numeric-array table keywords are not supported") :
-             _casatype_of(typeof(v))
-        public = _set_kw(public, String(k), ct, v)
+        ct, val = _kw_value(v)
+        public = _set_kw(public, String(k), ct, val)
     end
 
     _write_table_core(dir, descs, data; nrow, endian, tsm, tcm, tcell,

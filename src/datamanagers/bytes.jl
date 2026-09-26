@@ -79,3 +79,11 @@ end
     end
     return dest
 end
+
+
+# What casacore reads for a variable-shape array cell that was never written: an empty
+# array with the column's number of axes (1 when the description does not know).
+function _empty_cell(c::ColumnDesc)
+    nd = c.shape isa VariableShape ? max(c.shape.ndim, 1) : 1
+    return Array{c.type == TpString ? String : juliatype(c.type)}(undef, ntuple(_ -> 0, nd))
+end

@@ -9409,3 +9409,26 @@ and a real casacore adding a row to a table of ours — found a family of bugs:
 New `test/empty_undefined_tests.jl` (zero-row casacore tables, empty copies of every
 manager/engine, growing from empty by our `edit` and by a real casacore `INSERT` for 112
 type × shape × manager combinations, the zero-row ISM file, undefined tiled cells).
+
+### Phase 267 — keyword sets and table info against real casacore
+
+Round-tripping table / column keywords (every value type, arrays, nested records) and
+`table.info` through CASA's `casatools` in both directions found:
+
+- **Bool array keywords were wrong in both directions.** casacore bit-packs a Bool array in
+  AipsIO (LSB first, `ceil(n/8)` bytes); we read and wrote one byte per element. A
+  casacore-written Bool array keyword read as garbage, and one of ours (e.g. from `copytable`
+  of such a table) made casacore refuse the whole table (`AipsIO::getend: part of object not
+  read`). Fixed in the AipsIO array reader and the record writer.
+- **`write_table(...; keywords)` could not write numeric-array or nested-record keywords**
+  (`copyms` always could). It now takes arrays of every numeric type / `Bool` / `String`, and
+  nested `Dict`s / `Record`s.
+- **An undefined variable-shape SSM / ISM cell read as a 1-D empty** whatever the column's
+  ndim; it is now an empty array with the column's number of axes (as in Phase 266's tiled
+  case), so a `Matrix` column's undefined cell is `(0, 0)`.
+- **`table.info`'s readme lost its trailing newline** through a copy (casacore ends the readme
+  with a newline; we did not write it).
+
+Table keywords, column keywords (units, `MEASINFO`, hypercube sets), column comments and
+options, `table.info`, and the data-manager layout of a copy of a casacore-written table now
+compare equal to the original as casacore sees them. New `test/keywords_tests.jl`.

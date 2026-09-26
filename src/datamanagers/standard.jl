@@ -271,10 +271,10 @@ function getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Integer, :
 
     if kind === :indarr
         foff = Int(_i64(ssm, off + inbucket * SSM_INDARR_REF))
-        foff == 0 && return juliatype(c.type)[]      # shape not defined for this row
+        foff == 0 && return _empty_cell(c)           # shape not defined for this row
         return af_read(_arrayfile!(ssm), c.type, foff)
     elseif kind === :indstr
-        return _read_string_array(ssm, off + inbucket * SSM_STRING_REF; fixed = c.shape isa Dims ? c.shape : nothing)
+        return _read_string_array(ssm, off + inbucket * SSM_STRING_REF, c; fixed = c.shape isa Dims ? c.shape : nothing)
     end
 
     dims = _dims(c)
@@ -336,10 +336,10 @@ _read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int) =
 # (bucketNr, offset, totalLength) triple as a scalar string; the blob in the
 # string bucket is  [ndim:uInt][dim:Int x ndim][filled:uInt]  then, per
 # element (column-major),  [len:uInt][len bytes].  All ints big-endian.
-function _read_string_array(ssm::StandardStMan, cell::Int; fixed=nothing)
+function _read_string_array(ssm::StandardStMan, cell::Int, c::ColumnDesc; fixed=nothing)
     total = Int(_i32(ssm, cell + 2 * SSM_INT))        # 3rd Int32 = blob length
     if total <= 0                                     # shape not defined for this row
-        return fixed === nothing ? String[] : fill("", fixed...)
+        return fixed === nothing ? _empty_cell(c) : fill("", fixed...)
     end
     bkt = Int(_i32(ssm, cell))
     off = Int(_i32(ssm, cell + SSM_INT))
@@ -422,7 +422,7 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
             base = bucketptr(ssm, bkt) + ssm.offset[ssmcol]
             for row in firstrow:lastrow
                 foff = Int(_i64(ssm, base + (row - firstrow) * SSM_INDARR_REF))
-                v = foff == 0 ? juliatype(c.type)[] : af_read(_arrayfile!(ssm), c.type, foff)
+                v = foff == 0 ? _empty_cell(c) : af_read(_arrayfile!(ssm), c.type, foff)
                 out[row] = astype === nothing ? v : astype.(v)
             end
         end
@@ -439,7 +439,7 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
         _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
             base = bucketptr(ssm, bkt) + ssm.offset[ssmcol]
             for row in firstrow:lastrow
-                out[row] = _read_string_array(ssm, base + (row - firstrow) * SSM_STRING_REF; fixed = c.shape isa Dims ? c.shape : nothing)
+                out[row] = _read_string_array(ssm, base + (row - firstrow) * SSM_STRING_REF, c; fixed = c.shape isa Dims ? c.shape : nothing)
             end
         end
         return identity.(out)

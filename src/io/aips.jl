@@ -150,7 +150,12 @@ function read_array(a::AipsIO, ::Type{T}) where {T}
     end
     shape = Tuple(Int(read_u32(a)) for _ in 1:ndim)::Dims
     nwritten = Int(read_u32(a))
-    data = T[read_element(a, T) for _ in 1:nwritten]
+    data = if T === Bool                    # casacore stores Bool arrays as bits, LSB first
+        packed = read(a.io, cld(nwritten, 8))
+        Bool[(packed[(i - 1) >> 3 + 1] >> ((i - 1) & 7)) & 0x01 != 0 for i in 1:nwritten]
+    else
+        T[read_element(a, T) for _ in 1:nwritten]
+    end
     getend(a)
     return shape, data
 end

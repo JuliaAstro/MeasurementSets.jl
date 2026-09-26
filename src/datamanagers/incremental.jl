@@ -229,7 +229,7 @@ end
 function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
     if _ismkind(c) === :ind
         foff = Int(_ism_i64(ism, dataoff))
-        foff == 0 && return juliatype(c.type)[]      # shape not defined for this row
+        foff == 0 && return _empty_cell(c)           # shape not defined for this row
         return af_read(_arrayfile!(ism), c.type, foff)
     end
 
