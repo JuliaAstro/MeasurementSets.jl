@@ -1177,3 +1177,34 @@ end
         end
     end
 end
+
+# Phase 264: a FIXED-SHAPE string array column (`S S [SHAPE=[2]]`).  Casacore stores
+# it INDIRECT (option FixedShape, not Direct): each cell is one 12-byte ref to a
+# string-bucket blob of just the elements.  `write_table` used to crash with a
+# BoundsError on such a column (it declared it Direct) and the reader errored on a
+# casacore-written one ("string arrays not yet supported").
+@testset "fixed-shape string array columns — read + write (Phase 264)" begin
+    cols = ["uniform" => [["u", "v"], ["w", "x"], ["y", "z"], ["p", "q"]],
+            "with-empty" => [["u", ""], ["w", "x"], ["", "z"], ["p", "q"]],
+            "long" => [["a" ^ 50, "b"], ["c", "d" ^ 300], ["e", "f"], ["g", "h"]],
+            "matrix" => [["a" "b"; "c" "d"] for _ in 1:4]]
+    for (nm, col) in cols
+        dir = joinpath(mktempdir(), "t")
+        write_table(dir, "T", Pair{String,Any}["X" => col, "K" => Int32.(1:4)]; nrow=4)
+        r = readtable(dir); d = columndesc(r, "X")
+        @test d.shape isa Dims && d.shape == size(col[1]) && d.option == MSv2.COLOPT_FIXEDSHAPE     # FixedShape, NOT Direct
+        @test column(r, "X")[:] == col && column(r, "X")[3] == col[3]
+        if _HAVE_CASACORE
+            ct = CCT.Table(dir)
+            got = ct[:X]
+            arr = got[ntuple(_ -> Colon(), ndims(got))...]
+            @test [collect(selectdim(arr, ndims(arr), i)) for i in 1:4] == col
+        end
+    end
+    if _HAVE_TAQL
+        dir = joinpath(mktempdir(), "t")
+        _taql_create("CREATE TABLE $dir [S S [SHAPE=[2]], K I4] LIMIT 3")
+        _taqlcmd("UPDATE \$1 SET S=['u','v'], K=7", dir)
+        @test column(readtable(dir), "S")[:] == [["u", "v"] for _ in 1:3]     # casacore-written -> ours
+    end
+end

@@ -4546,3 +4546,38 @@ end
         end
     end
 end
+
+# Phase 264: string-expression probe vs real TaQL (~90 forms).  Fixed: string
+# functions (`upper`/`lower`/`capitalize`/`trim`/`ltrim`/`rtrim`/`substr`/`replace`/
+# `sreverse`/`strlength`/`string`) and `IN [...]` now map over the elements of a
+# string ARRAY cell (real TaQL is elementwise; they were MethodErrors / one scalar);
+# `bool('...')` follows real TaQL's string rule (false for "", "0", "f", "false", "n",
+# "no" -- trimmed, case-insensitive; true otherwise; was always true).  (A column
+# named `T` collides with the `T` bool literal in real TaQL, which errors on it.)
+@testset "TaQL-lite — string-array functions, bool(string) (Phase 264)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["S" => ["Hello World", "  pad  ", "abc", "x_y.z"], "K" => Int32[1, 2, 3, 4],
+                "SA" => [["u", "v"], ["w", "x"], ["y", "z"], ["p", "q"]]]; nrow=4)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    @test ev("upper(SA)") == [["U", "V"], ["W", "X"], ["Y", "Z"], ["P", "Q"]] && ev("lower(upper(SA))") == [["u", "v"], ["w", "x"], ["y", "z"], ["p", "q"]]
+    @test ev("capitalize(SA)")[1] == ["U", "V"] && ev("sreverse(SA)")[2] == ["w", "x"] && ev("trim(SA)")[3] == ["y", "z"]
+    @test ev("substr(SA, 0, 1)")[4] == ["p", "q"] && ev("replace(SA, 'u', 'Z')")[1] == ["Z", "v"]
+    @test ev("strlength(SA)") == [[1, 1] for _ in 1:4] && ev("string(SA)")[1] == ["u", "v"]
+    @test ev("SA IN ['u', 'q']") == [[true, false], [false, false], [false, false], [false, true]] && ev("SA == 'v'")[1] == [false, true]
+    @test ev("upper(S)") == ["HELLO WORLD", "  PAD  ", "ABC", "X_Y.Z"] && ev("strlength(S)") == [11, 7, 3, 5]      # scalars unchanged
+    @test ev("trim(S)")[2] == "pad" && eltype(ev("trim(S)")) === String
+    for (s, want) in ("" => false, "0" => false, "f" => false, "F" => false, "false" => false, "False" => false, "FALSE" => false, "n" => false, "N" => false,
+                      "no" => false, "No" => false, "False " => false, " false" => false, "T" => true, "t" => true, "true" => true, "1" => true, "2" => true, "-1" => true,
+                      "yes" => true, "y" => true, "on" => true, "off" => true, "abc" => true, "0.0" => true, "00" => true, "fals" => true, "nope" => true, "true " => true)
+        @test MSv2._tql_bool(s) === want
+    end
+    @test ev("bool('false')") == fill(false, 4) && ev("bool('')") == fill(false, 4) && ev("bool('T')") == fill(true, 4) && ev("bool(K - 1)") == [false, true, true, true]
+    if _HAVE_TAQL
+        for e in ("upper(SA)", "lower(SA)", "capitalize(SA)", "trim(SA)", "substr(SA, 0, 1)", "replace(SA, 'u', 'Z')", "strlength(SA)", "SA IN ['u']",
+                  "bool('false')", "bool('False')", "bool('no')", "bool('0')", "bool('')", "bool('off')", "bool('abc')", "bool('0.0')", "bool('T')")
+            r = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:]); m = ev(e)
+            @test all(i -> collect(r[i]) == collect(m[i]), eachindex(r))
+        end
+    end
+end

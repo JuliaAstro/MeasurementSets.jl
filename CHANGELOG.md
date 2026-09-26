@@ -9331,3 +9331,21 @@ reductions, complex `abs`/`arg`/`norm`/`exp`/`log`/trig, array complex
 functions) already matched. Real TaQL rejects `NOT K>2` (`NOT` binds tighter than
 `>`), accepted here.
 
+### Phase 264 — fixed-shape string arrays; TaQL-lite string arrays and `bool(string)`
+
+- **Storage bug:** a *fixed-shape string array column* (`S S [SHAPE=[2]]`) crashed
+  `write_table` (a `BoundsError` — the column was declared *Direct*) and a
+  casacore-written one could not be read ("string arrays not yet supported").
+  Casacore stores it *indirect* (option `FixedShape`, not `Direct`): each cell is one
+  12-byte ref to a string-bucket blob of just the elements, no shape header. Both
+  directions now work, verified against real casacore (written by casacore → read
+  here, and written here → read by casacore).
+- **TaQL-lite:** a ~90-form string/date probe against real TaQL found the string
+  functions (`upper` / `lower` / `capitalize` / `trim` / `ltrim` / `rtrim` / `substr`
+  / `replace` / `sreverse` / `strlength` / `string`) and `IN [...]` need to be
+  elementwise over a string *array* cell (they failed or collapsed to one scalar), and
+  `bool('...')` must follow real TaQL's string rule (false for `""`, `"0"`, `"f"`,
+  `"false"`, `"n"`, `"no"`, trimmed and case-insensitive; it was always true). Still
+  open: a constant *expression* inside an `IN [...]` list (`S IN ['a'+'bc']`). (A column
+  named `T` collides with the `T` bool literal in real TaQL, which errors on it.)
+

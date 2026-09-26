@@ -197,7 +197,11 @@ _dims(c::ColumnDesc) = error("column \"$(c.name)\": not a fixed-shape column")
 #   :direct  fixed-shape array laid out inline
 #   :indarr  variable-shape non-string array -> Int64 offset into `table.f<seq>i`
 #   :indstr  variable-shape string array     -> 12-byte string-bucket ref
-_ssmkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : :direct
+# a fixed-shape STRING array is INDIRECT in casacore -- the column has option FixedShape
+# but not Direct (live-checked on a TaQL-created `S S [SHAPE=[2]]`); each cell is one
+# 12-byte ref to a string-bucket blob holding just the elements (no shape header, the
+# shape being fixed).  Phase 264 -- this used to crash the writer and error the reader.
+_ssmkind(c::ColumnDesc{<:Dims}) = isempty(c.shape) ? :scalar : (c.type == TpString ? :indstr : :direct)
 _ssmkind(c::ColumnDesc) = c.type == TpString ? :indstr : :indarr
 
 _nrelem(c::ColumnDesc) = (s = _dims(c); isempty(s) ? 1 : prod(s))
@@ -263,7 +267,7 @@ function getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, row::Integer, :
         foff == 0 && return juliatype(c.type)[]      # shape not defined for this row
         return af_read(_arrayfile!(ssm), c.type, foff)
     elseif kind === :indstr
-        return _read_string_array(ssm, off + inbucket * SSM_STRING_REF)
+        return _read_string_array(ssm, off + inbucket * SSM_STRING_REF; fixed = c.shape isa Dims ? c.shape : nothing)
     end
 
     dims = _dims(c)
@@ -325,13 +329,24 @@ _read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int) =
 # (bucketNr, offset, totalLength) triple as a scalar string; the blob in the
 # string bucket is  [ndim:uInt][dim:Int x ndim][filled:uInt]  then, per
 # element (column-major),  [len:uInt][len bytes].  All ints big-endian.
-function _read_string_array(ssm::StandardStMan, cell::Int)
+function _read_string_array(ssm::StandardStMan, cell::Int; fixed=nothing)
     total = Int(_i32(ssm, cell + 2 * SSM_INT))        # 3rd Int32 = blob length
-    total <= 0 && return String[]                     # shape not defined for this row
+    if total <= 0                                     # shape not defined for this row
+        return fixed === nothing ? String[] : fill("", fixed...)
+    end
     bkt = Int(_i32(ssm, cell))
     off = Int(_i32(ssm, cell + SSM_INT))
     blob = _read_string_bytes(ssm, bkt, off, total)
     be32(p) = ntoh(reinterpret(Int32, @view blob[p+1:p+SSM_INT])[1])
+    if fixed !== nothing                              # fixed shape: elements only
+        n = prod(fixed; init=1); p = 0
+        out = Vector{String}(undef, n)
+        for k in 1:n
+            len = Int(be32(p)); p += SSM_INT
+            out[k] = String(@view blob[p+1:p+len]); p += len
+        end
+        return reshape(out, fixed...)
+    end
     ndim = Int(be32(0))
     dims = ntuple(k -> Int(be32(SSM_INT * k)), ndim)  # dims right after ndim
     filled = Int(be32(SSM_INT * (ndim + 1)))          # then the "filled" flag
@@ -351,13 +366,15 @@ end
 
 # Build the string-bucket blob for one indirect string-array cell (inverse
 # of `_read_string_array`).  All header ints big-endian.
-function _string_array_blob(arr)
+function _string_array_blob(arr; header::Bool=true)
     out = IOBuffer()
     be(x) = write(out, hton(x))
     shp = size(arr)
-    be(UInt32(length(shp)))
-    for d in shp; be(Int32(d)); end
-    be(UInt32(1))                                     # "filled" flag
+    if header                                         # variable shape: ndim, dims, filled flag
+        be(UInt32(length(shp)))
+        for d in shp; be(Int32(d)); end
+        be(UInt32(1))
+    end
     for s in vec(arr)
         b = codeunits(String(s))
         be(UInt32(length(b)))
@@ -415,7 +432,7 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
         _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
             base = bucketptr(ssm, bkt) + ssm.offset[ssmcol]
             for row in firstrow:lastrow
-                out[row] = _read_string_array(ssm, base + (row - firstrow) * SSM_STRING_REF)
+                out[row] = _read_string_array(ssm, base + (row - firstrow) * SSM_STRING_REF; fixed = c.shape isa Dims ? c.shape : nothing)
             end
         end
         return identity.(out)
@@ -554,7 +571,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     for i in 1:ncol
         (kinds[i] === :scalar && cols[i].type == TpString) || kinds[i] === :indstr || continue
         for r in 1:nrow
-            s = kinds[i] === :indstr ? _string_array_blob(coldata[i][r]) :
+            s = kinds[i] === :indstr ? _string_array_blob(coldata[i][r]; header = !(cols[i].shape isa Dims)) :
                                        codeunits(String(coldata[i][r]))
             if length(s) <= SSM_STRING_INLINE_MAX && kinds[i] !== :indstr
                 push!(strref[i], (0, 0, length(s)))

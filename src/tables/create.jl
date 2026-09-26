@@ -63,7 +63,7 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
     end
     cls = arr ? _classname(c.type, true) : _classname(c.type, false)
     opt = (arr && c.shape isa Dims && !isempty(c.shape)) ?
-          (c.option | COLOPT_DIRECT | COLOPT_FIXEDSHAPE) : Int32(0)
+          (c.option | (c.type == TpString ? Int32(0) : COLOPT_DIRECT) | COLOPT_FIXEDSHAPE) : Int32(0)
     mgr = kind === :ism ? "IncrementalStMan" : "StandardStMan"
     return ColumnDesc(c.name, c.comment, mgr, mgr,
         c.type, cls, c.shape, opt, c.maxlength, c.keywords, c.default, c.sequ)
