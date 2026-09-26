@@ -624,7 +624,8 @@ function Base.flush(t::EditTable)
             nc, nd = _flush_regen(t)
         end
         write_syncinfo(lk, newrows; modifycounter = (old.present ? old.modifycounter : 0) + 1,
-                       ncolumn=nc, ndm=nd)
+                       ncolumn=nc, ndm=nd,
+                       tablechanged = !isempty(t.addcols) || !isempty(t.dropcols))
     finally
         _release_edit_lock!(t)
     end

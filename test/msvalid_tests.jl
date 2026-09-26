@@ -134,3 +134,42 @@ tb.close()
         @test column(A2, "TIME")[:] == column(S, "TIME")[:] .+ 1.0
     end
 end
+
+@testset "sync counters and a casacore process that has the table open (Phase 273)" begin
+    # our blob's counters move like casacore's: table counter only on a structure change
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => [1, 2, 3], "B" => [1.0, 2.0, 3.0]]; nrow=3)
+    s0 = MSv2.read_syncinfo(d)
+    edit(d) do e; e["A"][1] = 9; end
+    s1 = MSv2.read_syncinfo(d)
+    @test s1.tablecounter == s0.tablecounter && all(s1.dmcounters .> s0.dmcounters) && s1.modifycounter > s0.modifycounter
+    edit(d) do e; MSv2.addcolumn!(e, "C", [1.0, 2.0, 3.0]); end
+    s2 = MSv2.read_syncinfo(d)
+    @test s2.tablecounter > s1.tablecounter && s2.nrow == 3
+
+    if isfile(_MV_CASA)
+        dir = joinpath(mktempdir(), "lk.ms")
+        create_ms(dir; nrow=20, nchan=4, ncorr=2, nant=4)
+        watcher = """
+import sys, time, os
+from casatools import table
+p = sys.argv[1]
+tb = table(); tb.open(p, nomodify=False, lockoptions={'option': 'user'})
+tb.lock(False); a = tb.nrows(); tb.unlock()
+open(p + '_ready', 'w').write('1')
+while not os.path.exists(p + '_done'): time.sleep(0.1)
+tb.lock(False); n = tb.nrows(); tb.unlock(); tb.close()
+t2 = table(); t2.open(p); t = t2.getcol('TIME')[0]; t2.close()
+print(a, n, t)
+"""
+        out = Ref("")
+        task = @async out[] = read(pipeline(`$_MV_CASA -c $watcher $dir`; stderr=devnull), String)
+        timedwait(() -> isfile(dir * "_ready"), 60.0)
+        edit(dir) do e; e["TIME"][1] = 777.0; MSv2.addrows!(e, 1); end   # while casacore has it open
+        write(dir * "_done", "1")
+        wait(task)
+        # it re-syncs the new row count without error (the short-form blob made it throw), and
+        # a fresh open sees our new cell value
+        @test strip(out[]) == "20 21 777.0"
+    end
+end

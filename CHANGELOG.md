@@ -9518,3 +9518,24 @@ kept as regression tests in `test/msvalid_tests.jl` (no source change):
   the original; `ms.range`, `ms.msselect` and `tb.getcol` work on ours;
 - `tb.putcol` (`DATA`, `FLAG`, `TIME`) and `putcell` write straight into our tiled and
   IncrementalStMan files and we read the new values.
+
+### Phase 273 — locking against a live casacore process
+
+Running our `edit` while a real casacore process (CASA's `table` tool) holds or has open the same
+table — using signal files to order the two — found:
+
+- **Our `edit` waits for a casacore lock and then sees its data.** A `tb.lock(True)` +
+  `putcell` + `unlock` in casatools, with our `edit` started meanwhile: ours blocks until the
+  unlock, then reads casacore's flushed value and edits on top of it (no lost update).
+- **The sync counters now move the way casacore's do.** Phase 271's full-form blob reused the
+  modify counter for the table and data-manager change counters, which can coincide with a small
+  counter casacore remembered (then it would see "unchanged"). They are now the previous blob's
+  counters + 1, and the *table* counter moves only when the table's structure changed (a column
+  added or dropped) — a data change bumps just the per-manager counters, exactly like casacore's own
+  writers.
+- **Known limitation (documented, not changed):** a casacore process that already has the table
+  open re-syncs new rows / row counts after its next lock, but keeps reading the OLD cell values
+  of a rewritten column until it reopens the table — our writers replace storage-manager files
+  atomically (a new inode; that protects our own mmap readers and lock-free readers), and casacore
+  keeps its open file handles. A real casacore writer, by contrast, patches in place and is seen
+  immediately by an open casacore reader.
