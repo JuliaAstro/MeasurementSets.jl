@@ -188,21 +188,14 @@ end
     inst.cubes[2] = MSv2.TSMCube((), (), nothing, 0)   # simulate addRow64-before-setShape
 
     cdesc = columndesc(r, "C")
-    @test_throws ErrorException MSv2.getcell(inst, 1, cdesc, 2, 1)
-    @test_throws ErrorException MSv2.getcolumn(inst, 1, cdesc, 3, 1)
+    # Phase 266: real casacore hands back an EMPTY array (with the column's ndim)
+    # for such a cell, not an error -- live-verified against Casacore.jl
+    @test size(MSv2.getcell(inst, 1, cdesc, 2, 1)) == (0, 0)
+    got = MSv2.getcolumn(inst, 1, cdesc, 3, 1)
+    @test size.(got) == [(2, 2), (0, 0), (2, 4)]
     # the other (defined) rows are unaffected by the one undefined row
     @test MSv2.getcell(inst, 1, cdesc, 1, 1) == C[1]
     @test MSv2.getcell(inst, 1, cdesc, 3, 1) == C[3]
-    # and the same error message either way, matching `getcell`'s
-    try
-        MSv2.getcolumn(inst, 1, cdesc, 3, 1)
-    catch e
-        try
-            MSv2.getcell(inst, 1, cdesc, 2, 1)
-        catch e2
-            @test sprint(showerror, e) == sprint(showerror, e2)
-        end
-    end
 end
 
 # Phase 211 (src/datamanagers sweep): `tsm_setcell!`'s `:cell`-kind branch
@@ -395,9 +388,12 @@ end
     cdesc = columndesc(r, "D")
     @test MSv2.getcell(inst, 1, cdesc, 1, 1) == D[1]
     @test MSv2.getcell(inst, 1, cdesc, 3, 1) == D[3]
-    @test_throws ErrorException MSv2.getcell(inst, 1, cdesc, 4, 1)
-    @test_throws ErrorException MSv2.getcolumn(inst, 1, cdesc, 5, 1)
-    @test_throws ErrorException MSv2.getcolumn(inst, 1, cdesc, 5, 1; astype=Float16)
+    # Phase 266: an undefined cell reads as an empty array (as in real casacore)
+    @test size(MSv2.getcell(inst, 1, cdesc, 4, 1)) == (0, 0)
+    @test size.(MSv2.getcolumn(inst, 1, cdesc, 5, 1)) == [(2, 3), (2, 3), (2, 3), (0, 0), (0, 0)]
+    nar = MSv2.getcolumn(inst, 1, cdesc, 5, 1; astype=Float16)
+    @test size.(nar) == size.(MSv2.getcolumn(inst, 1, cdesc, 5, 1))
+    @test eltype(nar[4]) === Float16
 end
 
 # Phase 213: `getcolumn`'s astype-narrowed per-cell fallback (used when the

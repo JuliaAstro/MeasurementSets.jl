@@ -260,15 +260,18 @@ function _default_cell(c::ColumnDesc, t::EditTable)
     J = juliatype(c.type)
     if c.shape isa Dims
         isempty(c.shape) && return c.type == TpString ? "" : zero(J)
-        return zeros(J, c.shape)
+        return c.type == TpString ? fill("", c.shape) : zeros(J, c.shape)
     end
     if t.reader.rows > 0                              # VariableShape/Dims: last row's shape
         try
-            return zeros(J, size(column(t.reader, c.name)[t.reader.rows]))
+            sz = size(column(t.reader, c.name)[t.reader.rows])
+            return c.type == TpString ? fill("", sz) : zeros(J, sz)
         catch
         end
     end
-    return c.type == TpString ? String[] : J[]
+    # nothing to copy a shape from: an empty cell with the column's number of axes
+    nd = c.shape isa VariableShape ? max(c.shape.ndim, 1) : 1
+    return Array{c.type == TpString ? String : J}(undef, ntuple(_ -> 0, nd))
 end
 
 # --- materialisation --------------------------------------------
@@ -575,6 +578,35 @@ function _dysco_touched(t::EditTable)
     return false
 end
 
+# The in-place tiled fast path only patches bytes of cells that already exist with the
+# edited value's shape (and grows one real hypercube).  An edit that DEFINES an undefined
+# cell, changes a cell's shape, or grows a table whose tiled column has no single real
+# hypercube (e.g. a zero-row one) needs the regenerating path instead.
+function _tiled_fast_ok(t::EditTable)
+    rd = t.reader
+    grew = length(t.rowmap) > rd.rows
+    for m in rd.managers
+        inst = _dm_instance(rd, m.sequ)
+        kind = _dmkind(inst)
+        kind in _TILED_KINDS || continue
+        real = count(!isnull, inst.cubes)
+        if grew && inst.kind === :shape
+            real == 1 && length(inst.row) == 1 && inst.row[1] == rd.rows || return false
+        end
+        for c in rd.desc.columns
+            c.sequ == m.sequ || continue
+            for (row, plane) in get(t.tsmedit, c.name, Dict{Int,Any}())
+                rr = t.rowmap[row]
+                cube = rr > 0 ? first(_cube_for_row(inst, rr)) :
+                       inst.cubes[findfirst(!isnull, inst.cubes)]       # appended row: the one cube
+                isnull(cube) && return false
+                (kind === :tcell ? cube.cubeshape : cube.cubeshape[1:end-1]) == size(plane) || return false
+            end
+        end
+    end
+    return true
+end
+
 function Base.flush(t::EditTable)
     t.flushed && return t
     newrows = length(t.rowmap)
@@ -585,7 +617,8 @@ function Base.flush(t::EditTable)
         if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
            !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
            !(grew && _has_engine(t)) && !_engine_touched(t) &&  # engines re-encode on regen
-           !(grew && _has_dysco(t)) && !_dysco_touched(t)  # Dysco always re-encodes on regen
+           !(grew && _has_dysco(t)) && !_dysco_touched(t) &&  # Dysco always re-encodes on regen
+           _tiled_fast_ok(t)
             _flush_fast(t)
         else
             _flush_regen(t)
@@ -647,7 +680,7 @@ function _flush_fast(t::EditTable)
         td = TableDesc(rd.desc.name, rd.desc.version, rd.desc.comment,
                        rd.desc.public, rd.desc.private, rd.desc.columns)
         write_table_files(dir, td, newrows, dms; type=rd.type, subtype=rd.subtype,
-                          readme=rd.readme, varndim)
+                          readme=rd.readme, varndim, endian=rd.endian)
     end
 end
 
@@ -735,8 +768,8 @@ function _flush_regen(t::EditTable)
             push!(engine_regen_sequ, seqof[scalename], seqof[offsetname])
         end
         engine_desc[c.name] = ColumnDesc(c.name, c.comment, c.manager, c.group,
-            c.type, c.classname, VariableShape(), c.option, c.maxlength,
-            _merge_kw(c.keywords, kw), c.default, c.sequ)
+            c.type, c.classname, VariableShape(c.shape isa VariableShape ? c.shape.ndim : 0),
+            c.option, c.maxlength, _merge_kw(c.keywords, kw), c.default, c.sequ)
     end
 
     varndim = Dict{String,Int}()
@@ -810,7 +843,7 @@ function _flush_regen(t::EditTable)
     td = TableDesc(rd.desc.name, rd.desc.version, rd.desc.comment,
                    rd.desc.public, rd.desc.private, outdescs)
     write_table_files(dir, td, newrows, dms; type=rd.type, subtype=rd.subtype,
-                      readme=rd.readme, varndim)
+                      readme=rd.readme, varndim, endian=rd.endian)
 
     live = Set(keys(groups))
     for m in rd.managers

@@ -22,7 +22,15 @@ _hostconv(z::Complex, big::Bool) = Complex(_hostconv(real(z), big), _hostconv(im
 # specific output element type (e.g. a narrowing `astype` conversion, or
 # storing into an `Any`-eltype array-of-arrays entry) still `convert`/store
 # the result themselves -- this primitive only ever returns a genuine `T`.
+# These loads go through raw pointers, so a bad offset (a corrupt file, or a layout we
+# misread) would read outside the array and crash the whole process (Phase 268: a casacore
+# ISM string array did exactly that) -- every entry point checks its byte range first.
+@noinline _oob(bytes, lo, hi) = throw(BoundsError(bytes, lo:hi))
+@inline _chk(bytes, off::Int, nbytes::Int) =
+    (off >= 0 && nbytes >= 0 && off + nbytes <= length(bytes)) || _oob(bytes, off + 1, off + nbytes)
+
 @inline function _ld(::Type{T}, bytes::AbstractVector{UInt8}, off::Int, big::Bool) where {T}
+    _chk(bytes, off, sizeof(T))
     GC.@preserve bytes begin
         p = Ptr{T}(pointer(bytes) + off)
         return _hostconv(unsafe_load(p), big)
@@ -35,6 +43,7 @@ end
 @inline function _rd_run!(dest::AbstractVector, doff::Int, ::Type{T},
                           bytes::AbstractVector{UInt8}, b::Int, n::Int, big::Bool) where {T}
     D = eltype(dest)
+    _chk(bytes, b, n * sizeof(T))
     GC.@preserve bytes begin
         p = Ptr{T}(pointer(bytes) + b)
         @inbounds for k in 1:n
@@ -58,6 +67,7 @@ end
 @inline function _rd_bits!(dest::AbstractVector{Bool}, doff::Int,
                            bytes::AbstractVector{UInt8}, base::Int, bitoff::Int, n::Int)
     n == 0 && return dest
+    _chk(bytes, base, (bitoff + n + 7) >> 3)
     GC.@preserve bytes begin
         p = pointer(bytes) + base
         bytei = bitoff >> 3
@@ -78,4 +88,12 @@ end
         end
     end
     return dest
+end
+
+
+# What casacore reads for a variable-shape array cell that was never written: an empty
+# array with the column's number of axes (1 when the description does not know).
+function _empty_cell(c::ColumnDesc)
+    nd = c.shape isa VariableShape ? max(c.shape.ndim, 1) : 1
+    return Array{c.type == TpString ? String : juliatype(c.type)}(undef, ntuple(_ -> 0, nd))
 end

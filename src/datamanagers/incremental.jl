@@ -94,7 +94,7 @@ end
 # file like a variable-shape one (Phases 264/265)
 function _ismkind(c::ColumnDesc{<:Dims})
     isempty(c.shape) && return :scalar
-    (c.option & COLOPT_DIRECT) != 0 && c.type != TpString && return :direct
+    (c.option & COLOPT_DIRECT) != 0 && return :direct   # (our own writer never sets it for strings)
     return :ind
 end
 _ismkind(c::ColumnDesc) = :ind
@@ -229,7 +229,7 @@ end
 function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
     if _ismkind(c) === :ind
         foff = Int(_ism_i64(ism, dataoff))
-        foff == 0 && return juliatype(c.type)[]      # shape not defined for this row
+        foff == 0 && return _empty_cell(c)           # shape not defined for this row
         return af_read(_arrayfile!(ism), c.type, foff)
     end
 
@@ -242,9 +242,16 @@ function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
                     for k in 0:nrelem-1]
         return reshape(bits, dims...)
     elseif c.type == TpString
-        isempty(dims) || error("ISM string arrays not supported yet")
         total = Int(_u32(ism, dataoff))                       # counts the length word
-        return String(ism.data[dataoff + ISM_UINT + 1 : dataoff + total])
+        isempty(dims) && return String(ism.data[dataoff + ISM_UINT + 1 : dataoff + total])
+        # a direct string array (casacore, option Direct|FixedShape): [total][len, chars] per element
+        out = Vector{String}(undef, nrelem)
+        p = dataoff + ISM_UINT
+        for k in 1:nrelem
+            len = Int(_u32(ism, p)); p += ISM_UINT
+            out[k] = String(ism.data[p + 1 : p + len]); p += len
+        end
+        return reshape(out, dims...)
     else
         T = juliatype(c.type)
         big = ism.endian === :big
@@ -377,6 +384,13 @@ function _ism_encode!(buf::Vector{UInt8}, c::ColumnDesc, kind::Symbol, v,
             vv[k+1] && (packed[(k >> 3) + 1] |= (0x01 << (k & 7)))
         end
         append!(buf, packed)
+    elseif c.type == TpString && kind === :direct         # casacore's direct string array
+        vv = vec(v)
+        _append_val!(buf, UInt32(ISM_UINT + sum(ISM_UINT + ncodeunits(x) for x in vv; init=0)), endian)
+        for x in vv
+            _append_val!(buf, UInt32(ncodeunits(x)), endian)
+            append!(buf, codeunits(x))
+        end
     elseif c.type == TpString
         s = codeunits(String(v))
         _append_val!(buf, UInt32(ISM_UINT + length(s)), endian)   # length word counts itself
@@ -399,6 +413,15 @@ function _ism_fixedsize(c::ColumnDesc, kind::Symbol)
                c.type == TpBool ? cld(nrelem(), 8) :
                sizeof(juliatype(c.type)) * nrelem()
     return ISM_INDEX_ENTRY + valbytes
+end
+
+# the value a fresh, never-written cell of this column has (what casacore stores
+# at row 0 of a zero-row table): 0 / false / "" / zeros of the fixed shape / no array
+function _ism_default(c::ColumnDesc, kind::Symbol)
+    T = juliatype(c.type)
+    kind === :scalar && return T === String ? "" : T === Bool ? false : zero(T)
+    kind === :direct && return zeros(T, c.shape...)
+    return T[]                                              # :ind -- undefined array
 end
 
 """
@@ -434,6 +457,15 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
         for i in 1:ncol
             haveprev = false
             prev = nothing
+            if nrow == 0
+                # casacore's reader assumes every column has an entry at
+                # bucket-relative row 0 (`ISMBucket::getInterval` decrements an
+                # unsigned index past it), even in a zero-row table: a real casacore
+                # that then adds a row to this file bus-errors.  Real casacore
+                # writes the column's default value there.
+                push!(entries[i], (0, length(databuf)))
+                _ism_encode!(databuf, cols[i], kinds[i], _ism_default(cols[i], kinds[i]), endian, afw)
+            end
             for lr in 0:(r1 - r0 - 1)
                 v = coldata[i][r0 + lr + 1]
                 if !haveprev || !isequal(v, prev)

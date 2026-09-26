@@ -371,10 +371,16 @@ data-manager's `getcell` method shares this signature).
 """
 function getcell(tsm::TiledStMan, colidx::Int, ::ColumnDesc, row::Integer, ::Integer)
     cube, p = _cube_for_row(tsm, row)
-    isnull(cube) && error("row $row of this column has no stored data " *
-                          "(the tiled cell is undefined)")
+    isnull(cube) && return _undefined_cell(tsm, colidx)
     p === nothing && return read_cube_whole(tsm, colidx, cube)
     return read_plane(tsm, cube, p - 1, colidx)
+end
+
+# What casacore hands back for a cell that was never written (a variable-shape
+# array column): an empty array with the column's number of axes.
+function _undefined_cell(tsm::TiledStMan, colidx::Int; astype::Union{Nothing,Type}=nothing)
+    T = astype === nothing ? juliatype(tsm.types[colidx]) : astype
+    return zeros(T, ntuple(_ -> 0, tsm.kind === :cell ? tsm.dims : tsm.dims - 1))
 end
 
 "Whether every row of this tiled column is an undefined (unwritten) cell."
@@ -457,22 +463,22 @@ come back with that element type instead of the column's native one.
 """
 function getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Integer, ::Integer;
                    astype::Union{Nothing,Type}=nothing)
+    if nrow == 0                                      # nothing to read, nothing undefined
+        Tout = astype === nothing ? juliatype(c.type) : astype
+        return Array{Tout,tsm.kind === :cell ? tsm.dims : tsm.dims - 1}[]
+    end
     if tsm.kind === :cell
         # A per-row cube can genuinely be undefined -- real casacore's own
         # `TiledCellStMan::addRow64` creates a null `TSMCube` (empty
         # cubeshape, no file) for any row added before its cell shape is
-        # ever `setShape`'d (TiledCellStMan.cc:178-200). `getcell` already
-        # raises a clear error for that row; this bulk path used to skip
-        # the same check and crash with a raw, unhelpful
-        # `MethodError: no method matching _tsmbytes(..., ::Nothing)`
-        # instead -- live-reproduced by hand-inserting a null cube (Phase
-        # 213).
-        return [isnull(tsm.cubes[r]) ?
-                error("row $r of this column has no stored data (the tiled cell is undefined)") :
+        # ever `setShape`'d (TiledCellStMan.cc:178-200), and casacore reads
+        # such a cell as an empty array (Phase 266; before that `getcell`
+        # raised an error and this bulk path crashed with a raw `MethodError`
+        # in `_tsmbytes` -- Phase 213).
+        return [isnull(tsm.cubes[r]) ? _undefined_cell(tsm, colidx; astype) :
                 read_cube_whole(tsm, colidx, tsm.cubes[r]; astype) for r in 1:nrow]
     end
-    alldefined_none(tsm) &&
-        error("column has no stored data (all tiled cells are undefined)")
+    alldefined_none(tsm) && return [_undefined_cell(tsm, colidx; astype) for _ in 1:nrow]
 
     real = findall(!isnull, tsm.cubes)
     if length(real) == 1
@@ -604,6 +610,19 @@ function _pack_planes!(buf::Vector{UInt8}, tilebase::Int, within::Int, planelen:
     end
 end
 
+# a cell with a zero extent (an empty array) stands for an undefined cell
+_undefined_shape(s) = any(==(0), s)
+
+# Cell dimensionality of a tiled group with zero rows -- nothing in the data to
+# read it from, so it comes from the first column's description.
+function _empty_cell_ndim(cols)
+    c = first(cols)
+    n = _cell_ndim(c)
+    n > 0 || error("tiled column $(c.name): cannot write a zero-row hypercube " *
+                   "column whose cell dimensionality is unknown")
+    return n
+end
+
 # --- TiledShapeStMan ------------------------------------------
 
 """
@@ -628,15 +647,21 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int,
         end
         rowshape[r] = s
     end
-    shapes = unique(rowshape)                         # first-seen order
-    nrdim = length(shapes[1]) + 1
-    all(length(s) + 1 == nrdim for s in shapes) ||
-        error("TiledShapeStMan group: mixed cell dimensionality $(shapes)")
+    # A cell with a zero extent is an UNDEFINED cell (that is how a reader hands
+    # one back -- see `getcell`): it gets no cube, like in casacore, where such a
+    # row maps to the dummy cube 0.
+    shapes = unique(filter(!_undefined_shape, rowshape))   # first-seen order
+    # Zero rows: no cube at all (real casacore writes just the header, one
+    # dummy cube, an empty row map) and the cell dimensionality can only come
+    # from the column description.
+    nrdim = nrow > 0 ? length(rowshape[1]) + 1 : _empty_cell_ndim(cols) + 1
+    all(length(s) + 1 == nrdim for s in rowshape) ||
+        error("TiledShapeStMan group: mixed cell dimensionality $(unique(rowshape))")
 
     files = _TSMFileSpec[_TSMFileSpec(false, 0, 0)]   # slot 0: null placeholder
     cubes = _TSMCubeSpec[_TSMCubeSpec((), (), -1, 0)] # cube 0: undefined-cells dummy
     rowmap = Int[]; cubemap = Int[]; posmap = Int[]
-    deftile = ntuple(_ -> 0, nrdim)
+    deftile = ntuple(_ -> 1, nrdim)
 
     for (si, s) in enumerate(shapes)
         rows_s = findall(==(s), rowshape)            # ascending 1-based row indices
@@ -672,6 +697,22 @@ function write_tiledshapestman(dir::AbstractString, sequ::Int,
         end
     end
 
+    # undefined rows between (and before) the defined ones: explicit intervals on the
+    # dummy cube 0; rows after the last defined one need none (implicitly undefined)
+    lastdef = findlast(!_undefined_shape, rowshape)
+    if lastdef !== nothing
+        r = 1
+        while r <= lastdef
+            if _undefined_shape(rowshape[r])
+                while r < lastdef && _undefined_shape(rowshape[r+1])
+                    r += 1
+                end
+                push!(rowmap, r - 1); push!(cubemap, 0); push!(posmap, 0)
+            end
+            r += 1
+        end
+    end
+
     perm = sortperm(rowmap)                          # rowMap must be ascending
     rowmap, cubemap, posmap = rowmap[perm], cubemap[perm], posmap[perm]
 
@@ -694,7 +735,15 @@ function write_tiledcolumnstman(dir::AbstractString, sequ::Int,
                                 nrow::Int, endian::Symbol)
     ncol = length(cols)
     types = CasaType[c.type for c in cols]
-    s = nrow > 0 ? size(coldata[1][1]) : ()
+    s = if nrow > 0
+        size(coldata[1][1])
+    else                                              # zero rows: the description's fixed shape
+        c1 = first(cols)
+        c1.shape isa Dims && !isempty(c1.shape) ||
+            error("TiledColumnStMan column $(c1.name): a zero-row column needs a " *
+                  "fixed cell shape (declared by its description)")
+        c1.shape
+    end
     for k in 1:ncol, r in 1:nrow
         size(coldata[k][r]) == s || error("TiledColumnStMan group: non-uniform cell " *
             "shape (column $(cols[k].name) row $r: $(size(coldata[k][r])) ≠ $s)")
@@ -750,14 +799,19 @@ function write_tiledcellstman(dir::AbstractString, sequ::Int,
         end
         rowshape[r] = sh
     end
-    nrdim = nrow > 0 ? length(rowshape[1]) : 1
+    nrdim = nrow > 0 ? length(rowshape[1]) : _empty_cell_ndim(cols)
     all(length(sh) == nrdim for sh in rowshape) ||
         error("TiledCellStMan group: mixed cell dimensionality")
-    deftile = nrow > 0 ? rowshape[1] : ntuple(_ -> 1, nrdim)
+    defined = filter(!_undefined_shape, rowshape)
+    deftile = isempty(defined) ? ntuple(_ -> 1, nrdim) : defined[1]
 
     buf = UInt8[]
     cubes = _TSMCubeSpec[]
     for r in 1:nrow
+        if _undefined_shape(rowshape[r])              # undefined cell: a null cube, no data
+            push!(cubes, _TSMCubeSpec((), (), -1, 0))
+            continue
+        end
         cell = Dims(rowshape[r])
         tile = ntuple(d -> min(deftile[d], cell[d]), nrdim)
         bbytes, offs = _tile_layout(types, tile)

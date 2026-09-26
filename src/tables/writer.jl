@@ -70,7 +70,15 @@ function _write_aipsarray(w::AipsWriter, a::AbstractArray)
     wr_i32(w, ndims(a))
     for s in size(a); wr_u32(w, s); end
     wr_u32(w, length(a))
-    for x in a; wr_element(w, x); end
+    if eltype(a) === Bool                   # bits, LSB first (casacore Conversion::boolToBit)
+        packed = zeros(UInt8, cld(length(a), 8))
+        for (i, x) in enumerate(a)
+            x && (packed[(i - 1) >> 3 + 1] |= UInt8(1) << ((i - 1) & 7))
+        end
+        write(w.io, packed)
+    else
+        for x in a; wr_element(w, x); end
+    end
     putend(w)
 end
 
@@ -137,9 +145,14 @@ function _write_columndesc(w::AipsWriter, c::ColumnDesc, varndim::Dict{String,In
     end
 end
 
+# number of axes of a column's cells when the description knows it (0 = it does not)
+_cell_ndim(c::ColumnDesc) = c.shape isa Dims ? length(c.shape) :
+                            c.shape isa VariableShape ? c.shape.ndim : 0
+
 _nrdim(c::ColumnDesc) = c.shape isa Dims ? length(c.shape) :
                         c.shape isa VariableDims ? -1 :
-                        2                                   # VariableShape: any >0
+                        c.shape.ndim > 0 ? c.shape.ndim :
+                        2                                   # VariableShape, unknown ndim: any >0
 
 function _write_valtype(w::AipsWriter, t::CasaType, default)
     if t == TpString
@@ -222,11 +235,12 @@ end
 
 function table_dat_bytes(td::TableDesc, nrow::Integer, dms::Vector{DMWrite},
                          varndim::Dict{String,Int}=Dict{String,Int}();
-                         storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+                         storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
+                         endian::Symbol=:little)
     w = AipsWriter(; endian=:big)         # table.dat is always canonical
     putstart(w, "Table", V_TABLE)
     wr_u32(w, nrow)
-    wr_u32(w, SMFILE_LITTLE_ENDIAN)       # SM files are little-endian
+    wr_u32(w, endian === :big ? 0 : SMFILE_LITTLE_ENDIAN)   # byte order of the SM files
     wr_string(w, "PlainTable")
     write_tabledesc(w, td, varndim)
     write_columnset(w, td.columns, dms, nrow; storage, blocksize)
@@ -291,7 +305,7 @@ function write_tableinfo(dir::AbstractString; type="", subtype="", readme="")
         println(io, "Type = ", type)
         println(io, "SubType = ", subtype)
         println(io)
-        isempty(readme) || print(io, readme)
+        isempty(readme) || println(io, readme)     # casacore ends the readme with a newline
     end
 end
 
@@ -314,12 +328,13 @@ managers in `dms` have already written their own `table.f<seq>*` files.
 function write_table_files(dir::AbstractString, td::TableDesc, nrow::Integer,
                            dms::Vector{DMWrite}; type="", subtype="", readme="",
                            varndim::Dict{String,Int}=Dict{String,Int}(),
-                           storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+                           storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
+                           endian::Symbol=:little)
     mkpath(dir)
     withlock(dir, :write; create=true) do lk
         old = read_syncinfo(lk)
         _atomic_write(joinpath(dir, "table.dat"),
-                     table_dat_bytes(td, nrow, dms, varndim; storage, blocksize))
+                     table_dat_bytes(td, nrow, dms, varndim; storage, blocksize, endian))
         write_tableinfo(dir; type, subtype, readme)
         write_syncinfo(lk, nrow; modifycounter = (old.present ? old.modifycounter : 0) + 1)
     end
