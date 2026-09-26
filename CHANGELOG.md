@@ -9456,3 +9456,13 @@ type × {scalar, fixed, variable} × manager, in both directions, found:
 Big-endian SSM / ISM / TiledShape / TiledColumn tables from casacore read identically to their
 little-endian twins, and our big-endian writes read back in casacore. New
 `test/endian_tests.jl`.
+
+### Phase 269 — cost of the Phase 268 bounds checks (investigation, no code change)
+
+`_ld` / `_rd_run!` / `_rd_bits!` gained a range check in Phase 268. A/B on the real 9.8M-row
+ALMA MS (the C++-comparison survey, two runs each with the check on and with `_chk` made a
+no-op): `UVW` whole-column 20.5 vs 20.5 ms, `TIME` 0.83 vs 0.89 ms, `DATA` per-cell (50K rows)
+54 vs 54 ms, `FLAG` per-cell 45–50 vs 46–50 ms — run-to-run noise (several ms on the tiny
+scalar columns, on both sides) is larger than any difference. The checks stay; the read paths
+are as fast as before and, against casacore C++, unchanged (`TIME` 0.12×, `UVW` 0.45×,
+`DATA` 0.93–0.99×).
