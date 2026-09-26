@@ -200,12 +200,18 @@ end
 
 @inline function _ism_value_offset_of(ism::IncrementalStMan, rowp::Int, nr::Int, database::Int,
                                       ::Type{RT}, big::Bool, relrow::Int) where {RT}
+    # last stored entry with row number <= relrow (row numbers ascend): binary
+    # search -- a linear scan made a fast-changing column in a large bucket
+    # O(entries) per cell (Phase 262).  Entry 1 when none qualifies.
     best = 1
-    p = rowp
-    @inbounds for j in 1:nr
-        Int(_ld(RT, ism.data, p, big)) > relrow && break
-        best = j
-        p += sizeof(RT)
+    lo = 1; hi = nr
+    @inbounds while lo <= hi
+        mid = (lo + hi) >> 1
+        if Int(_ld(RT, ism.data, rowp + (mid - 1) * sizeof(RT), big)) <= relrow
+            best = mid; lo = mid + 1
+        else
+            hi = mid - 1
+        end
     end
     off = Int(_u32(ism, rowp + nr * sizeof(RT) + (best - 1) * ISM_UINT))
     return database + off

@@ -9308,3 +9308,14 @@ ranges, `BETWEEN`, `%`, `rownr()`, `DISTINCT`, multi-key `ORDER BY`, …). Real
 TaQL rejects `ORDER BY gsum(K)` and `NOT G==3` (`NOT` binds tighter than `==`
 there); both are accepted here.
 
+### Phase 262 — ISM per-cell lookup is a binary search
+
+A bucket-size benchmark (scratch build, 600 000 rows) showed `getcell` on a
+fast-changing IncrementalStMan column degrading with bucket size (`A1`: 26 ms →
+3 429 ms for 50 000 random cells from the default to a 64 MiB bucket) — the entry
+lookup inside a bucket scanned the sorted row-number list linearly. It is now a
+binary search: flat at ~27 ms for every bucket size (124× faster at 64 MiB; no
+change at the default size). The same benchmark (and a tile-size one for `DATA` /
+`FLAG`) found no read benefit from larger buckets or tiles, so the writer defaults
+are unchanged. New regression test.
+
