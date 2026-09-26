@@ -9505,3 +9505,16 @@ Building a reference MS with CASA's simulator (`casatools.simulator`) and openin
 
 Interleaving casatools writes (`putcol`, `addrows`) and our `edit` on the same table now works in
 both directions. New `test/msvalid_tests.jl`.
+
+### Phase 272 — real casacore tools operating on our MS (a sweep that found no bug)
+
+With Phase 271's valid MS, CASA's own tools now run on ours, and we read what they write —
+kept as regression tests in `test/msvalid_tests.jl` (no source change):
+
+- every column of every table of a `casatools.simulator`-written MS (MAIN, 13 subtables incl.
+  `SOURCE`, measures and all) reads identically in ours and in Casacore.jl;
+- `ms.split` reads a `copyms` of the sample and writes a new MS (tiled `DATA` / `FLAG`, ISM
+  scalars, every subtable): ours reads it back, it validates clean, and every MAIN column equals
+  the original; `ms.range`, `ms.msselect` and `tb.getcol` work on ours;
+- `tb.putcol` (`DATA`, `FLAG`, `TIME`) and `putcell` write straight into our tiled and
+  IncrementalStMan files and we read the new values.

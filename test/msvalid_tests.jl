@@ -99,3 +99,38 @@ print('compared', n)
         @info "casatools python not found; skipping the casacore MS cross-check" _MV_CASA
     end
 end
+
+@testset "casatools operates on our MS and we read what it writes (Phase 272)" begin
+    if isfile(_MV_CASA) && isdir(SAMPLE_MS)
+        py(script, args...) = read(pipeline(`$_MV_CASA -c $script $args`; stderr=devnull), String)
+        d = mktempdir()
+        copyms(SAMPLE_MS, joinpath(d, "c.ms"); rows=1:300)
+        # `ms.split` reads our MS and writes a new one (tiled DATA / FLAG, ISM scalars, all subtables)
+        @test strip(py("""
+import sys
+from casatools import ms
+m = ms(); m.open(sys.argv[1] + '/c.ms')
+print(m.split(outputms=sys.argv[1] + '/split.ms', whichcol='DATA', spw='0', field=''))
+m.close()
+""", d)) == "True"
+        A = readtable(joinpath(d, "c.ms")); S = readtable(joinpath(d, "split.ms"))
+        @test MSv2.nrow(S) == 300 && isempty(MSv2.validate(MeasurementSet(joinpath(d, "split.ms"))))
+        for c in ("DATA", "FLAG", "UVW", "TIME", "ANTENNA1", "WEIGHT", "SIGMA", "EXPOSURE")
+            @test column(A, c)[:] == column(S, c)[:]
+        end
+        # `tb.putcol` / `putcell` write into our storage managers; we read the result
+        py("""
+import sys
+from casatools import table
+tb = table(); tb.open(sys.argv[1] + '/c.ms', nomodify=False)
+dd = tb.getcol('DATA'); tb.putcol('DATA', dd * 2); tb.putcol('FLAG', ~tb.getcol('FLAG'))
+tb.putcol('TIME', tb.getcol('TIME') + 1.0); tb.putcell('DATA', 7, dd[:, :, 7] * 0 + 5)
+tb.close()
+""", d)
+        A2 = readtable(joinpath(d, "c.ms"))
+        D0 = column(S, "DATA")[:]; D1 = column(A2, "DATA")[:]
+        @test all(i -> i == 8 ? all(D1[i] .== 5) : D1[i] == 2 .* D0[i], 1:300)
+        @test all(i -> column(A2, "FLAG")[i] == .!column(S, "FLAG")[i], 1:300)
+        @test column(A2, "TIME")[:] == column(S, "TIME")[:] .+ 1.0
+    end
+end
