@@ -250,3 +250,27 @@ _mv_copy(d) = (p = d * "_c" * string(rand(UInt16)); cp(d, p); p)
         end
     end
 end
+
+# Phase 275: structural edits (add / remove / rename columns) alternating between casacore and us,
+# both byte orders -- a sweep that found no bug (16 random seeds); kept as one deterministic run.
+@testset "structural edits alternating with casacore (Phase 275)" begin
+    if isfile(_MV_CASA)
+        tbpy(d, body) = read(pipeline(`$_MV_CASA -c $("import sys, numpy\nfrom casatools import table\ntb = table(); tb.open(sys.argv[1], nomodify=False)\n" * body * "\ntb.close()") $d`; stderr=devnull), String)
+        for endian in (:little, :big)
+            d = joinpath(mktempdir(), "t")
+            write_table(d, "T", Pair{String,Any}["I" => Int32.(1:5), "S" => ["s$i" for i in 1:5], "V" => [Float32.(1:(i % 3 + 1)) for i in 1:5]]; nrow=5, endian)
+            tbpy(d, "dd = tb.getcoldesc('I')\ntb.addcols({'NI': dd})\ntb.putcol('NI', numpy.arange(10, 15, dtype='int32'))")
+            edit(d) do e; MSv2.addcolumn!(e, "NS", ["n$i" for i in 1:5]); MSv2.removecolumn!(e, "I"); end
+            tbpy(d, "tb.renamecol('S', 'S2')\ntb.removecols(['V'])")
+            edit(d) do e; e["NI"][3] = Int32(99); e["S2"][2] = "changed"; end
+            t = readtable(d)
+            @test Set(MSv2.columnnames(t)) == Set(["NI", "NS", "S2"])
+            @test column(t, "NI")[:] == Int32[10, 11, 99, 13, 14] && column(t, "NS")[:] == ["n$i" for i in 1:5]
+            @test column(t, "S2")[:] == ["s1", "changed", "s3", "s4", "s5"]
+            if _HAVE_CASACORE
+                cc = CCT.Table(_mv_copy(d))
+                @test collect(cc[:NI][:]) == Int32[10, 11, 99, 13, 14] && collect(cc[:S2][:]) == column(t, "S2")[:]
+            end
+        end
+    end
+end

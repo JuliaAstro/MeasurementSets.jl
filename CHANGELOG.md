@@ -9561,3 +9561,10 @@ us and by casatools, compared with a Julia model after every step — found a re
   identical block, which is why nothing before saw it.) Regression test: casatools removes rows
   then we edit, plus a deterministic ours/casacore ping-pong of `putcell`/`addrows`/`removerows` over
   every storage kind (`test/msvalid_tests.jl`).
+
+### Phase 275 — structural edits alternating with casacore (sweep, no bug found)
+
+Phase 274's differential fuzz extended with column operations: random `addcolumn!` / `removecolumn!`
+by us and `addcols` / `removecols` / `renamecol` by casatools, mixed with cell / row edits, on
+little- and big-endian tables (16 seeds × 16 rounds, checked against a Julia model and against
+Casacore.jl after every step): all clean. Kept as one deterministic run in `test/msvalid_tests.jl`.
