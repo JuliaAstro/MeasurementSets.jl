@@ -274,3 +274,28 @@ end
         end
     end
 end
+
+# Phase 276: a MAIN-like shared tiled hypercube (DATA / FLAG / WEIGHT_SPECTRUM in one
+# TiledShapeStMan) edited alternately by casacore and by us, both byte orders -- a fuzz sweep
+# (12 seeds) that found no bug; kept as one deterministic run.  The casacore side is read back
+# through casatools (Casacore.jl cannot read variable-shape tiled columns).
+@testset "shared tiled hypercube edited by casacore and us (Phase 276)" begin
+    if isfile(_MV_CASA)
+        py(d, body) = read(pipeline(`$_MV_CASA -c $("import sys, numpy\nfrom casatools import table\ntb = table(); tb.open(sys.argv[1], nomodify=False)\n" * body * "\ntb.close()") $d`; stderr=devnull), String)
+        for endian in (:little, :big)
+            d = joinpath(mktempdir(), "t")
+            cell(k) = ComplexF32.(reshape(1:8, 2, 4) .* k, 0.5f0 * k)
+            write_table(d, "T", Pair{String,Any}["DATA" => [cell(i) for i in 1:3], "FLAG" => [iseven.(reshape(1:8, 2, 4) .+ i) for i in 1:3],
+                "WS" => [Float32.(reshape(1:8, 2, 4)) .* i for i in 1:3], "A" => Int32.(1:3)]; nrow=3, endian, tsm=[["DATA", "FLAG", "WS"]])
+            py(d, "tb.addrows(1)\ntb.putcell('A', 3, 9)\ntb.putcell('WS', 3, numpy.arange(8, dtype='float32').reshape(4,2).T)\ntb.putcell('DATA', 3, (numpy.arange(8) + 2j).astype('complex64').reshape(4,2).T)\ntb.putcell('FLAG', 3, numpy.ones((2,4), dtype='bool'))")
+            edit(d) do e; e["WS"][2] = fill(7.0f0, 2, 4); e["FLAG"][1] = trues(2, 4); MSv2.addrows!(e, 1); e["DATA"][5] = cell(5); e["FLAG"][5] = falses(2, 4); e["WS"][5] = zeros(Float32, 2, 4); e["A"][5] = 5; end
+            py(d, "tb.putcell('WS', 3, numpy.full((2,4), 3, dtype='float32'))")
+            t = readtable(d)
+            @test column(t, "DATA"; precision=:full)[4] == ComplexF32.(reshape(0:7, 2, 4), 2) && column(t, "DATA"; precision=:full)[5] == cell(5)
+            @test column(t, "WS")[2] == fill(7.0f0, 2, 4) && column(t, "WS")[4] == fill(3.0f0, 2, 4) && column(t, "FLAG")[1] == trues(2, 4)
+            @test column(t, "A")[:] == Int32[1, 2, 3, 9, 5]
+            got = py(d, "print(numpy.ravel(tb.getcell('WS', 1), order='F').tolist(), tb.getcell('A', 3), bool(tb.getcell('FLAG', 0).all()), numpy.ravel(tb.getcell('WS', 3)).tolist()[:2])")
+            @test strip(got) == "[7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0] 9 True [3.0, 3.0]"
+        end
+    end
+end
