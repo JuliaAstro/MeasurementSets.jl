@@ -619,11 +619,12 @@ function Base.flush(t::EditTable)
            !(grew && _has_engine(t)) && !_engine_touched(t) &&  # engines re-encode on regen
            !(grew && _has_dysco(t)) && !_dysco_touched(t) &&  # Dysco always re-encodes on regen
            _tiled_fast_ok(t)
-            _flush_fast(t)
+            nc, nd = _flush_fast(t)
         else
-            _flush_regen(t)
+            nc, nd = _flush_regen(t)
         end
-        write_syncinfo(lk, newrows; modifycounter = (old.present ? old.modifycounter : 0) + 1)
+        write_syncinfo(lk, newrows; modifycounter = (old.present ? old.modifycounter : 0) + 1,
+                       ncolumn=nc, ndm=nd)
     finally
         _release_edit_lock!(t)
     end
@@ -682,6 +683,7 @@ function _flush_fast(t::EditTable)
         write_table_files(dir, td, newrows, dms; type=rd.type, subtype=rd.subtype,
                           readme=rd.readme, varndim, endian=rd.endian)
     end
+    return (length(rd.desc.columns), length(rd.managers))      # (columns, data managers) for the sync blob
 end
 
 _norm(c::ColumnDesc, kind::Symbol, sequ::Int) = _withsequ(_normalize_desc(c, kind), sequ)
@@ -853,6 +855,7 @@ function _flush_regen(t::EditTable)
              startswith(f, "table.f$(m.sequ)_")) && rm(joinpath(dir, f); force=true)
         end
     end
+    return (length(outdescs), length(dms))
 end
 
 Base.show(io::IO, t::EditTable) =

@@ -9456,3 +9456,65 @@ type × {scalar, fixed, variable} × manager, in both directions, found:
 Big-endian SSM / ISM / TiledShape / TiledColumn tables from casacore read identically to their
 little-endian twins, and our big-endian writes read back in casacore. New
 `test/endian_tests.jl`.
+
+### Phase 269 — cost of the Phase 268 bounds checks (investigation, no code change)
+
+`_ld` / `_rd_run!` / `_rd_bits!` gained a range check in Phase 268. A/B on the real 9.8M-row
+ALMA MS (the C++-comparison survey, two runs each with the check on and with `_chk` made a
+no-op): `UVW` whole-column 20.5 vs 20.5 ms, `TIME` 0.83 vs 0.89 ms, `DATA` per-cell (50K rows)
+54 vs 54 ms, `FLAG` per-cell 45–50 vs 46–50 ms — run-to-run noise (several ms on the tiny
+scalar columns, on both sides) is larger than any difference. The checks stay; the read paths
+are as fast as before and, against casacore C++, unchanged (`TIME` 0.12×, `UVW` 0.45×,
+`DATA` 0.93–0.99×).
+
+### Phase 270 — strings and casacore-edited tables (a sweep that found no bug)
+
+Probed against real casacore and kept as regression tests (`test/robustness_tests.jl`, no
+source change):
+
+- **Non-ASCII, long and empty strings** — `héllo`, `日本語`, an emoji, `""`, embedded newline /
+  tab, a 5,000-character and a 160,000-byte string — round-trip through every string layout
+  (scalar, fixed and variable arrays; StandardStMan and IncrementalStMan; both byte orders) and
+  read identically in casacore; so do UTF-8 column names, table keywords, nested-record keys and
+  the readme. (An embedded NUL is truncated by Casacore.jl's own C-string conversion; ours keeps it.)
+- **Tables fragmented by real casacore** — SSM and ISM tables that casacore built by inserting,
+  updating and deleting thousands of rows (bucket splits, free lists, ISM run breaks), and tiled
+  tables that grew by `INSERT` and hold hypercubes of several shapes — read identically in both
+  readers and survive our own `edit` (remove / add / overwrite rows), which casacore then reads back.
+
+### Phase 271 — a MeasurementSet we write is a valid MS to real casacore
+
+Building a reference MS with CASA's simulator (`casatools.simulator`) and opening ours with its
+`ms` tool found two reasons casacore rejected or choked on our tables:
+
+- **`create_ms` output was "not a valid MS".** None of its columns carried the `QuantumUnits`
+  and `MEASINFO` keywords casacore's `MSTableImpl` requires (`TIME` epoch/UTC, `UVW` uvw/ITRF,
+  the `*_DIR` / `POINTING` directions J2000, antenna / feed positions ITRF, the spectral-window
+  frequencies with their `MEAS_FREQ_REF` variable reference and code table, and the unit of every
+  other standard column). They are now stamped from the schema, and every column we write that
+  the simulator-made MS also has carries identical units and measure frames (cross-checked in the
+  tests). `casatools.ms` opens it and `getdata` returns the right shapes.
+- **Any casacore that LOCKS one of our tables threw "another process changed the number of
+  columns".** The sync blob we wrote into `table.lock` used the short form (`nrcolumn = -1`);
+  casacore's `TableSyncData::read` leaves `nrcolumn` unset for it, and `PlainTable::lock` then
+  compares that garbage with the column count. The `ms` tool's `getdata` and `tb.lock` both
+  hit it (Phase 13 only checked that the table *opens*). The blob is now the full form
+  `TableSyncData::write` produces: the real column count, a table change counter and one
+  data-manager change counter per manager (all set to the modify counter, i.e. "everything
+  changed" — a full resync), for `write_table` and after every `edit`.
+
+Interleaving casatools writes (`putcol`, `addrows`) and our `edit` on the same table now works in
+both directions. New `test/msvalid_tests.jl`.
+
+### Phase 272 — real casacore tools operating on our MS (a sweep that found no bug)
+
+With Phase 271's valid MS, CASA's own tools now run on ours, and we read what they write —
+kept as regression tests in `test/msvalid_tests.jl` (no source change):
+
+- every column of every table of a `casatools.simulator`-written MS (MAIN, 13 subtables incl.
+  `SOURCE`, measures and all) reads identically in ours and in Casacore.jl;
+- `ms.split` reads a `copyms` of the sample and writes a new MS (tiled `DATA` / `FLAG`, ISM
+  scalars, every subtable): ours reads it back, it validates clean, and every MAIN column equals
+  the original; `ms.range`, `ms.msselect` and `tb.getcol` work on ours;
+- `tb.putcol` (`DATA`, `FLAG`, `TIME`) and `putcell` write straight into our tiled and
+  IncrementalStMan files and we read the new values.
