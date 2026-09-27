@@ -9761,3 +9761,13 @@ Benign leniencies left (real errors, we accept): arithmetic on Bool operands, a 
 generator avoids it). The old Phase 108 assertions that baked in the scalar-width-on-every-axis rule were
 corrected. Kept as a seeded 150-expression guard in `test/taql_fuzz_tests.jl` plus a verified-forms
 testset in `test/taql_query_tests.jl`.
+
+### Phase 286 — TaQL-lite GROUP BY: array-cell aggregate arguments vs real TaQL
+
+Continuing Phase 285's array-expression sweep into the aggregate position: `gmean(mean(A))`,
+`gsum(sums(A,1)[2])`, `gvariance(min(A[A>0.0]) + D)`, and similar — a `g*` aggregate whose argument
+is itself an array-cell expression rather than a bare scalar column. 2000 random `SELECT K, g*(expr)
+AS X FROM t [WHERE …] GROUP BY K` queries across four seeds found **no divergence** from real TaQL
+beyond the already-known upstream `gmax`-of-an-all-negative-group bug (Phase 284) — the array
+expression engine and the group-reduction machinery compose correctly. Kept as a seeded 300-query
+guard in `test/taql_fuzz_tests.jl`.

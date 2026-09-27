@@ -248,3 +248,48 @@ end
         isempty(bad) || println(bad)
     end
 end
+
+# Phase 286: seeded random GROUP BY differential fuzz where the AGGREGATE ARGUMENT is itself an
+# array-cell expression (`gmean(mean(A))`, `gsum(sums(A,1)[2])`, `gvariance(min(A) + D)`, …) --
+# continuing the Phase 285 array-expression sweep into the aggregate position.  2000 queries
+# across 4 seeds found no divergence beyond the already-known upstream `gmax`-of-an-all-negative-
+# group bug (Phase 284, `gmax` excluded from the generator here since it's not our bug); this
+# keeps 300 as a regression guard.
+@testset "TaQL-lite GROUP BY over array-cell aggregate arguments vs real TaQL (Phase 286)" begin
+    if _HAVE_TAQL
+        N = 24; r0 = MersenneTwister(5)
+        d = joinpath(mktempdir(), "t")
+        mk() = [round.(randn(r0, 3, 4) .* 3; digits=1) for _ in 1:N]
+        write_table(d, "T", Pair{String,Any}["ID" => Int32.(1:N), "A" => mk(), "M" => [rand(r0, Bool, 3, 4) for _ in 1:N],
+            "K" => Int32.(rand(r0, 0:2, N)), "D" => round.(randn(r0, N) .* 2; digits=1)]; nrow=N)
+        t = readtable(d)
+        pick(r, xs) = xs[rand(r, 1:length(xs))]
+        scfns = ("sum", "mean", "min", "max", "median", "variance", "stddev", "rms", "avdev", "sumsqr")
+        # gmax excluded: real TaQL's running maximum starts at DBL_MIN, not our bug (Phase 284)
+        aggfns = ("gsum", "gmean", "gmin", "gvariance", "gstddev", "grms", "gmedian", "gfirst", "glast")
+        function argexpr(r)
+            c = rand(r, 1:5)
+            c == 1 && return "$(pick(r, scfns))(A)"
+            c == 2 && return "$(pick(r, scfns))(abs(A)[A > 0.0])"
+            c == 3 && return "D"
+            c == 4 && return "$(pick(r, scfns))(A) + D"
+            return "sums(A, $(rand(r, 1:2)))[$(rand(r, 1:2))]"
+        end
+        r = MersenneTwister(286); bad = String[]
+        for _ in 1:300
+            agg = pick(r, aggfns); arg = argexpr(r)
+            wh = rand(r) < 0.4 ? pick(r, ("D > 0.0", "K == 1", "sum(A) > 0")) : nothing
+            cmd = "SELECT K, $agg($arg) AS X FROM \$1" * (wh === nothing ? "" : " WHERE $wh") * " GROUP BY K"
+            g = MSv2.groupby(t, ["K"]; select = ["K" => :K, "X" => "$agg($arg)"], where = wh)
+            ours = Dict(g.K[i] => g.X[i] for i in 1:MSv2.nrow(g))
+            rt = _taqlcmd(cmd, d)
+            real = size(rt, 1) == 0 ? Dict() : Dict(collect(rt[:K][:])[i] => collect(rt[:X][:])[i] for i in 1:size(rt, 1))
+            ok = length(ours) == length(real) && all(k -> haskey(real, k) &&
+                (ours[k] == real[k] || (ours[k] isa Real && real[k] isa Real && isapprox(ours[k], real[k]; rtol=1e-6, atol=1e-8))),
+                keys(ours))
+            ok || push!(bad, cmd)
+        end
+        @test isempty(bad)
+        isempty(bad) || println(bad)
+    end
+end
