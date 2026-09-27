@@ -1431,3 +1431,78 @@ for (mjd, x, y, z, a, b, f, v) in [$cs]:
         end
     end
 end
+
+# Phase 298: `ext/SOFAExt.jl` sweep.  A fresh read + a coverage-instrumented
+# run (against `measures_tests.jl` + `taql_mscal_tests.jl`) found no new
+# bug -- one confirmed-dead branch removed (`_dir_to_icrs`'s own
+# `_is_body(A)` case: `_mconv(::MDirection,...)` already routes every
+# body-frame direction through `_body_dir_icrs` directly, before
+# `_dir_to_icrs` is ever called with one -- confirmed by grep, every call
+# site of `_dir_to_icrs`, including its own SUPERGAL/AZELSW/AZELSWGEO
+# recursion, only ever constructs a non-body `MDirection`), plus two
+# genuinely-reachable, previously-uncovered-but-correct paths closed with
+# permanent tests below: the 8 "$(nameof(X)) is not supported" fallback
+# errors (each family's final `error(...)`, reachable via a `MEASINFO`
+# frame name this package parses but doesn't convert -- `OtherRef{S}`),
+# and `_pole_dir`'s `R === ITRF` branch (a `MuvW` conversion whose
+# `frame.direction` -- the phase centre -- is itself stored in ITRF; rare
+# in practice since a real MS phase centre is always J2000-ish, but a
+# real, reachable state).  Both live-verified before being pinned: the
+# fallbacks give a clean, actionable error (not a crash); `_pole_dir`'s
+# ITRF branch was checked against an independent from-scratch computation
+# (0.0" separation) and a round trip through it.
+@testset "measures — SOFAExt unsupported-frame fallbacks (Phase 298)" begin
+    OR = MSv2.OtherRef{:XYZ}
+    fr = MeasFrame(direction = MDirection{J2000}(1.0, 0.5))
+    # epoch: unrecognised source / target scale
+    @test_throws ErrorException measconvert(MEpoch{OR}(58000.0), UTC)
+    @test_throws ErrorException measconvert(MEpoch{UTC}(58000.0), OR)
+    # direction: unrecognised source / target frame (a non-body `OtherRef`,
+    # so it falls all the way through `_dir_to_icrs`/`_icrs_to_dir` to the
+    # final `error(...)`, not the earlier body-direction branch)
+    @test_throws ErrorException measconvert(MDirection{OR}(0.1, 0.2), J2000)
+    @test_throws ErrorException measconvert(MDirection{J2000}(0.1, 0.2), OR)
+    # frequency / radial velocity: unrecognised source / target frame
+    # (needs `frame.direction` set, else the earlier `_n_hat` check fires first)
+    @test_throws ErrorException measconvert(MFrequency{OR}(1.4e9), LSRK; frame = fr)
+    @test_throws ErrorException measconvert(MFrequency{LSRK}(1.4e9), OR; frame = fr)
+    @test_throws ErrorException measconvert(MRadialVelocity{OR}(1e3), LSRK; frame = fr)
+    @test_throws ErrorException measconvert(MRadialVelocity{LSRK}(1e3), OR; frame = fr)
+    # each message names the real cause, not a bare MethodError/StackOverflow
+    try
+        measconvert(MDirection{OR}(0.1, 0.2), J2000)
+        @test false
+    catch err
+        @test occursin("direction frame", sprint(showerror, err))
+        @test occursin("OtherRef", sprint(showerror, err))
+    end
+end
+
+@testset "measures — uvw conversion with an ITRF phase centre (Phase 298)" begin
+    pos = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150)
+    ep = MEpoch{UTC}(60454.42255)
+    dir_itrf = MDirection{ITRF}(1.0, 0.4)
+    fr = MeasFrame(epoch = ep, position = pos, direction = dir_itrf)
+
+    u0 = MuvW{ITRF}(100.0, 200.0, 300.0)
+    # forward: ITRF -> GALACTIC needs `_pole_dir`'s `R === ITRF` branch to
+    # resolve the (ITRF-stored) phase centre into GALACTIC
+    u1 = measconvert(u0, GALACTIC; frame = fr)
+    @test u1 isa MuvW{GALACTIC}
+    # length-preserving (a pure rotation)
+    @test hypot(u1.u, u1.v, u1.w) ≈ hypot(u0.u, u0.v, u0.w) rtol = 1e-9
+    # backward: GALACTIC -> ITRF exercises the same branch from the other
+    # side (`_pole_dir(dir_itrf, GALACTIC, fr)` is now the "other" frame)
+    u2 = measconvert(u1, ITRF; frame = fr)
+    @test u2.u ≈ u0.u atol = 1e-6
+    @test u2.v ≈ u0.v atol = 1e-6
+    @test u2.w ≈ u0.w atol = 1e-6
+
+    # a third frame (AZEL, needs both epoch+position AND the ITRF-phase-
+    # centre resolution) round-trips too
+    u3 = measconvert(u0, AZEL; frame = fr)
+    u4 = measconvert(u3, ITRF; frame = fr)
+    @test u4.u ≈ u0.u atol = 1e-6
+    @test u4.v ≈ u0.v atol = 1e-6
+    @test u4.w ≈ u0.w atol = 1e-6
+end

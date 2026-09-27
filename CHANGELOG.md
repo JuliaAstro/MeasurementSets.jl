@@ -10075,3 +10075,34 @@ partially-uninitialised buffer.
 
 New tests in `test/container_tests.jl`: the live-reproduced malformed case now errors cleanly, and a
 regression check that an exactly-matching, well-formed file is completely unaffected.
+
+### Phase 298 — `ext/SOFAExt.jl` sweep: one confirmed-dead branch removed, two coverage gaps closed
+
+First dedicated fresh read of the whole reference-frame conversion extension in one pass — it had
+never had a single "sweep this file" phase of its own, only ~40 individual bug-fix phases spread across
+epoch/direction/frequency/radial-velocity/uvw/baseline/Earth-magnetic-field conversions since Phase 66.
+A full read plus a coverage-instrumented run (against `measures_tests.jl` + `taql_mscal_tests.jl` in a
+scratch environment) found no new live bug, but did turn up one genuinely dead branch and two
+real-but-previously-untested reachable paths.
+
+**Dead branch removed**: `_dir_to_icrs`'s own `_is_body(A) && return _body_dir_icrs(A, frame, false)`
+case. Confirmed via `grep` that every call site of `_dir_to_icrs` — its own recursive calls for
+`SUPERGAL`/`AZELSW`/`AZELSWGEO`, and the one external call inside `_mconv(::MDirection,...)` — only
+ever passes a non-body direction: `_mconv` already branches on `_is_body(A)` *before* ever calling
+`_dir_to_icrs`, routing every body-frame direction (`SUN`/`MOON`/planets) through `_body_dir_icrs`
+directly with the right `topo` flag for the target frame. This branch dated from before that `_mconv`
+restructuring (Phase 76) and had been unreachable ever since; removed with a comment recording why.
+
+**Two coverage gaps closed** (both live-verified correct before pinning with permanent tests, not
+assumed): (1) the 8 "`$(nameof(X)) is not supported`" fallback `error(...)`s at the end of each
+conversion family (epoch/direction/frequency/radial-velocity, source-side and target-side) — reachable
+whenever a `MEASINFO` names a frame this package parses but doesn't convert (`OtherRef{S}`); confirmed
+each one raises a clean, actionable error naming the real cause rather than crashing some other way
+(a `MethodError`, an infinite recursion, …). (2) `_pole_dir`'s `R === ITRF` branch (the phase-centre
+resolution inside a `MuvW` conversion, for the case where `frame.direction` is itself stored in `ITRF`
+— rare in practice since a real MS phase centre is always J2000-ish, but a real, reachable state);
+checked against an independent from-scratch computation (0.0″ separation) and a forward/backward round
+trip through a third frame before being pinned as a permanent black-box test via the public
+`measconvert`/`MuvW` API.
+
+New tests in `test/measures_tests.jl`.

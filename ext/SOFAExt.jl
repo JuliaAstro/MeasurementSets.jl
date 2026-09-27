@@ -361,9 +361,17 @@ function _itrs_to_cirs(v, uta, utb, tta, ttb, eop)
 end
 
 function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
+    # Phase 298: `_mconv(::MDirection,...)` (below) already routes every
+    # body-frame direction through `_body_dir_icrs` directly, *before*
+    # `_dir_to_icrs` is ever called with one -- confirmed by grep: every
+    # call site of this function (its own SUPERGAL/AZELSW/AZELSWGEO
+    # recursion, plus the one external call in `_mconv`, which only fires
+    # when `!_is_body(A)`) constructs a non-body `MDirection`. So a
+    # `_is_body(A) && return _body_dir_icrs(A, frame, false)` branch here
+    # would be dead code (removed -- it dated from before that `_mconv`
+    # restructuring in Phase 76).
     A === SUPERGAL && return _dir_to_icrs(MDirection{GALACTIC}(_gal_sg(m.lon, m.lat, true)...), frame)
     _is_icrsish(A) && return (m.lon, m.lat)
-    _is_body(A) && return _body_dir_icrs(A, frame, false)
     A === AZELSW && return _dir_to_icrs(MDirection{AZEL}(_azelsw_flip(m.lon), m.lat), frame)
     A === AZELSWGEO && return _dir_to_icrs(MDirection{AZELGEO}(_azelsw_flip(m.lon), m.lat), frame)
     if A === B1950
