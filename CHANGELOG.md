@@ -9723,3 +9723,70 @@ the test now probes real casacore's Stokes `I` first and skips the derivedmscal 
 data was also given a dominant Stokes `I` (co-polar terms) so the `PFtotal` / `PFlinear` ratios
 stay well-conditioned whatever the RNG stream. (Locally: the whole `taql_mscal_tests.jl` passes
 on Julia 1.10.12 and 1.13.)
+
+### Phase 285 — TaQL-lite array expressions: random queries vs real TaQL (ten divergences fixed)
+
+A seeded random generator of expressions over array cells (3×4 `Float64` / `Int` / `Bool` cells:
+arithmetic, comparisons, `AND` / `OR` / `NOT` / `iif` on arrays, the axis-collapse reductions
+`sums` … `fractiles`, `transpose` / `reversearray` / `resize`, the `running*` / `boxed*` windows,
+slices and masked arrays via `arr[boolexpr]` / `replacemasked`) compared value by value with real TaQL
+(`SELECT expr AS R`). Fixed:
+
+- **`AND` / `OR` of Bool arrays** raised "an AND/OR operand must evaluate to Bool" — a **Phase 229
+  regression** (the Bool/Missing-only validation forgot arrays). They combine elementwise again
+  (a scalar broadcasts; a masked operand keeps the unioned mask). `iif` takes an array condition
+  (elementwise); the `ifelse` `MethodError` is gone.
+- **Two array operands must have the same shape** (real TaQL: "array shapes mismatch"); we silently
+  broadcast (`A + sums(A,1)` "worked").
+- **`running*` / `boxed*` widths:** a *scalar* width applies to the **first axis only** (we applied it to
+  every axis — `boxedsum(A,2)` on a 3×4 cell is a 2×4 result, not 2×2); an array is **padded** to the rank
+  (running: 0, boxed: 1) or **truncated**; a boxed width ≤ 0 means the whole axis; a negative running
+  half-width is an error.
+- **Masked arrays** (`A[A>5]`, `marray`): `running*` / `boxed*` reduce the *unmasked* elements and return a
+  masked array (masked where the window / bin holds none, and at the `running*` edges); the axis-collapse
+  functions do the same (`sums(A[A>5],1)` masked where a column is fully masked; `anys` / `alls` /
+  `ntrues` / `nfalses` stay unmasked, `alls` over nothing is `false`); `transpose` / `reversearray` /
+  `resize` carry the mask (`resize` pads with unmasked zeros); `flatten` keeps only the unmasked
+  elements; integer / slice subscripts of a masked array select data and mask (an all-integer one gives
+  the bare element, otherwise the rank is kept) and a Bool subscript **replaces** the mask (it does not
+  combine).
+- **Fully masked scalar reductions are `0`** (real TaQL: `mean(A[A>0])` = 0.0, `stddev` = 0.0, `product` = 0.0, …;
+  we gave NaN / an error / `1` for `product`); `any` / `all` / `ntrue` keep their empty values; scalar
+  `fractile` of a masked array works.
+- **`resize(arr, shape)` takes exactly one integer-array shape** (`resize(A, 2, 2)` and `resize(A, 3)`
+  are errors in real TaQL; we accepted them).
+
+Benign leniencies left (real errors, we accept): arithmetic on Bool operands, a bare `:` slice (`A[:,1]`),
+`(expr)[i]` on a parenthesised expression. Real casacore **segfaults** on `iif` with a masked branch (the
+generator avoids it). The old Phase 108 assertions that baked in the scalar-width-on-every-axis rule were
+corrected. Kept as a seeded 150-expression guard in `test/taql_fuzz_tests.jl` plus a verified-forms
+testset in `test/taql_query_tests.jl`.
+
+### Phase 286 — TaQL-lite GROUP BY: array-cell aggregate arguments vs real TaQL
+
+Continuing Phase 285's array-expression sweep into the aggregate position: `gmean(mean(A))`,
+`gsum(sums(A,1)[2])`, `gvariance(min(A[A>0.0]) + D)`, and similar — a `g*` aggregate whose argument
+is itself an array-cell expression rather than a bare scalar column. 2000 random `SELECT K, g*(expr)
+AS X FROM t [WHERE …] GROUP BY K` queries across four seeds found **no divergence** from real TaQL
+beyond the already-known upstream `gmax`-of-an-all-negative-group bug (Phase 284) — the array
+expression engine and the group-reduction machinery compose correctly. Kept as a seeded 300-query
+guard in `test/taql_fuzz_tests.jl`.
+
+### Phase 287 — TaQL-lite UPDATE on array-cell columns vs real TaQL (two divergences fixed)
+
+Differential fuzz of `UPDATE ... SET` on array-cell columns (whole-array RHS, subscript slices,
+boolean masks, the masked `(D, M) = expr[cond]` pair form) against real TaQL, extending Phase 278's
+write-command fuzz and Phase 285's array-expression sweep. 1000 random queries found two real bugs:
+
+- **A scalar Bool subscript** (`FA[B]` where `B` is a per-row scalar Bool column, not an array) was
+  silently accepted as an integer index via Julia's own `Int(::Bool)` — `FA[false]` gave `FA[0]` (a
+  `BoundsError`), `FA[true]` gave the wrong element (`FA[1]`). Real TaQL requires a Bool subscript to
+  be shaped like the array ("… must be an array"); now a clear `ArgumentError`.
+- **`update!` skipped structural validation entirely when `WHERE` matched zero rows** — every SET
+  item is evaluated lazily, only against the matched rows, so a structurally invalid SET target/RHS
+  on an `UPDATE` with an empty match set silently "succeeded" with no error, while real TaQL
+  type-checks the whole SET list once, independent of how many rows actually match. Fixed by
+  validating every spec once against row 1 (into a throwaway copy, never persisted) whenever no row
+  is matched.
+
+Kept as a seeded 200-query guard in `test/taql_fuzz_tests.jl`.

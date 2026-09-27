@@ -720,11 +720,12 @@ end
     @test MSv2._boxed_sum(a, 2) == [3.0, 7.0, 5.0]
 
     A = Float64[1 2 3; 4 5 6; 7 8 9]
-    @test MSv2._boxed_avg(A, 2) == [3.0 4.5; 7.5 9.0]
+    @test MSv2._boxed_avg(A, [2, 2]) == [3.0 4.5; 7.5 9.0]
+    @test MSv2._boxed_avg(A, 2) == [2.5 3.5 4.5; 7.0 8.0 9.0]           # Phase 285: a scalar width is the FIRST axis only
     @test MSv2._boxed_avg(A, [1, 3]) == reshape([2.0, 5.0, 8.0], 3, 1)   # per-axis widths
-    @test MSv2._boxed_min(A, 3) == reshape([1.0], 1, 1)
-    @test MSv2._running_avg(A, 1)[2, 2] ≈ Statistics.mean(A)             # only the centre cell has a full 3x3 window
-    @test MSv2._running_avg(A, 1)[1, 1] == 0.0                          # every other cell is an edge -> 0
+    @test MSv2._boxed_min(A, [3, 3]) == reshape([1.0], 1, 1)
+    @test MSv2._running_avg(A, [1, 1])[2, 2] ≈ Statistics.mean(A)       # only the centre cell has a full 3x3 window
+    @test MSv2._running_avg(A, [1, 1])[1, 1] == 0.0                     # every other cell is an edge -> 0
 
     # variance/stddev/median agree with a direct Statistics call on the
     # same window, at an interior position; edges are 0
@@ -743,7 +744,10 @@ end
 
     # errors
     @test_throws ArgumentError MSv2._require_array(5.0)
-    @test_throws ArgumentError MSv2._tql_window_widths([1, 2], 3)   # wrong-length axis array
+    # Phase 285: a width array is padded (0 running / 1 boxed) or truncated to the rank
+    @test MSv2._tql_window_widths([1, 2], 3, 0) == [1, 2, 0] && MSv2._tql_window_widths([1, 2], 3, 1) == [1, 2, 1]
+    @test MSv2._tql_window_widths([1, 2, 3], 2, 0) == [1, 2] && MSv2._tql_window_widths(4, 3, 0) == [4, 0, 0]
+    @test_throws ArgumentError MSv2._running_avg(A, [-1, 0])           # negative half-width
 
     # parser + query string form
     p(s) = MSv2._taqllite_parse(s, Set(["V"]))
@@ -4579,5 +4583,100 @@ end
             r = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:]); m = ev(e)
             @test all(i -> collect(r[i]) == collect(m[i]), eachindex(r))
         end
+    end
+end
+
+# Phase 285: found by a random array-expression fuzz against real TaQL (see
+# taql_fuzz_tests.jl) -- every expected value below was live-verified.
+#  * `AND`/`OR` combine Bool ARRAYS elementwise (a Phase 229 regression), and `iif`
+#    takes an array condition; two array operands of different shape are an error.
+#  * a scalar `running*`/`boxed*` width applies to the FIRST axis only (an array is
+#    padded with 0 / 1 and truncated to the rank; a boxed width <= 0 = the whole axis).
+#  * masked arrays: `running*`/`boxed*`/axis-collapse reductions skip masked elements
+#    (an all-masked window/slice is masked with value 0); `masked[bool]` REPLACES the
+#    mask; integer/slice subscripts, `transpose`, `reversearray`, `resize` and
+#    `flatten` (unmasked elements only) carry it; a fully masked scalar reduction is 0.
+#  * `resize` takes ONE integer-array shape.
+@testset "TaQL-lite — array expressions vs real TaQL (Phase 285)" begin
+    dir = joinpath(mktempdir(), "t")
+    A = reshape(collect(1.0:12.0), 3, 4)
+    write_table(dir, "T", Pair{String,Any}["ID" => Int32[1], "A" => [A]]; nrow=1)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["R" => e]), "R")[:])[1]
+    # (expression, expected) -- values from real TaQL
+    forms = Pair{String,Any}[
+        "runningsum(A,1)" => [0.0 0 0 0; 6 15 24 33; 0 0 0 0],
+        "runningsum(A,[1])" => [0.0 0 0 0; 6 15 24 33; 0 0 0 0],
+        "runningsum(A,[1,0,0])" => [0.0 0 0 0; 6 15 24 33; 0 0 0 0],
+        "runningsum(A,[0,1])" => [0.0 12 21 0; 0 15 24 0; 0 18 27 0],
+        "boxedsum(A,2)" => [3.0 9 15 21; 3 6 9 12],
+        "boxedsum(A,[2])" => [3.0 9 15 21; 3 6 9 12],
+        "boxedsum(A,[2,2,1])" => [12.0 36; 9 21],
+        "boxedsum(A,[0,2])" => [21.0 57],
+        "boxedsum(A,0)" => [6.0 15 24 33],
+        "boxedsum(A,-1)" => [6.0 15 24 33],
+        "runningsum(A[A>5],[1,0])" => [0.0 0 0 0; 6 9 0 0; 0 0 0 0],
+        "arraymask(runningsum(A[A>5],[1,0]))" => Bool[1 1 1 1; 0 0 1 1; 1 1 1 1],
+        "boxedsum(A[A>5],[1,2])" => [5.0 0; 7 0; 3 0],
+        "arraymask(boxedsum(A[A>5],[1,2]))" => Bool[0 1; 0 1; 0 1],
+        "boxedmax(A[A>5],[3,2])" => [5.0 0],
+        "runningmedian(A[A>5],[0,1])" => [0.0 1 4 0; 0 2 5 0; 0 3 0 0],
+        "runningmean(A[A>5],[0,1])" => [0.0 2.5 4 0; 0 3.5 5 0; 0 3 0 0],
+        "iif(A > 4.0, A, -A)" => [-1.0 -4 7 10; -2 5 8 11; -3 6 9 12],
+        "iif(A > 4.0, 1.0, A)" => [1.0 4 1 1; 2 1 1 1; 3 1 1 1],
+        "(A > 4.0) AND (A < 9.0)" => Bool[0 0 1 0; 0 1 1 0; 0 1 0 0],
+        "(A > 8.0) OR (A < 3.0)" => Bool[1 0 0 1; 1 0 0 1; 0 0 1 1],
+        # fully masked scalar reductions are 0 (any/all/ntrue keep their empty values)
+        "sum(A[A>0])" => 0.0, "mean(A[A>0])" => 0.0, "min(A[A>0])" => 0.0, "max(A[A>0])" => 0.0,
+        "median(A[A>0])" => 0.0, "variance(A[A>0])" => 0.0, "stddev(A[A>0])" => 0.0,
+        "rms(A[A>0])" => 0.0, "avdev(A[A>0])" => 0.0, "sumsqr(A[A>0])" => 0.0,
+        "product(A[A>0])" => 0.0, "fractile(A[A>0],0.5)" => 0.0,
+        "any(A[A>0]>1)" => false, "all(A[A>0]>1)" => true, "ntrue(A[A>0]>1)" => 0,
+        "fractile(A[A>5],0.5)" => 3.0, "nelements(A[A>0])" => 12,
+        # axis collapse over a masked array
+        "sums(A[A>5],1)" => [6.0, 9, 0, 0], "arraymask(sums(A[A>5],1))" => Bool[0, 0, 1, 1],
+        "means(A[A>5],1)" => [2.0, 4.5, 0, 0], "mins(A[A>5],1)" => [1.0, 4, 0, 0],
+        "maxs(A[A>5],2)" => [4.0, 5, 3], "medians(A[A>5],1)" => [2.0, 4, 0, 0],
+        "variances(A[A>5],1)" => [2 / 3, 0.25, 0, 0], "products(A[A>5],1)" => [6.0, 20, 0, 0],
+        "sumsqrs(A[A>5],1)" => [14.0, 41, 0, 0], "fractiles(A[A>5],0.5,1)" => [2.0, 4, 0, 0],
+        "anys(A[A>5]>2,1)" => Bool[1, 1, 0, 0], "alls(A[A>5]>0,1)" => Bool[1, 1, 0, 0],
+        "ntrues(A[A>5]>0,1)" => [3, 2, 0, 0], "nfalses(A[A>5]>0,1)" => [0, 0, 0, 0],
+        # masked arrays through the shape functions / subscripts
+        "arraydata(transpose(A[A>5]))" => permutedims(A),
+        "arraymask(transpose(A[A>5]))" => permutedims(A .> 5),
+        "arraymask(reversearray(A[A>5],1))" => Bool[0 1 1 1; 0 0 1 1; 0 0 1 1],
+        "flatten(A[A>5])" => [1.0, 2, 3, 4, 5],
+        "resize(A,[5,5])" => [A zeros(3, 1); zeros(2, 5)],
+        "arraymask(resize(A[A>5],[4,5]))" => Bool[0 0 1 1 0; 0 0 1 1 0; 0 1 1 1 0; 0 0 0 0 0],
+        "resize(A,[3])" => [1.0, 2, 3],
+        "arraymask(A[A>5][A>2])" => A .> 2,
+        "arraymask(A[A>5][A>8])" => A .> 8,
+        "arraymask(A[A>8] + A[A<3])" => Bool[1 0 0 1; 1 0 0 1; 0 0 1 1],
+        "A[A>5][2,2]" => 5.0, "A[A>5][1:2,2:3]" => [4.0 7; 5 8],
+        "arraymask(A[A>5][1:2,2:3])" => Bool[0 1; 0 1],
+        "A[A>5][1:3,2]" => reshape([4.0, 5, 6], 3, 1), "arraymask(A[A>5][1:3,2])" => reshape(Bool[0, 0, 1], 3, 1),
+        "sum(A[A>5][1:3,2:3])" => 9.0,
+        "ntrue((A[A>5] > 0) AND (A < 100.0))" => 5, "ntrue(NOT (A[A>5] > 100))" => 5,
+        "ntrue((A[A>5] > 0) OR (A < 0.0))" => 5,
+    ]
+    for (e, want) in forms
+        got = ev(e)
+        @test got isa AbstractArray ? (size(got) == size(want) && got ≈ want) : (got == want || got ≈ want)
+    end
+    # errors: shape mismatch, resize's shape
+    for bad in ("A + sums(A,1)", "A > sums(A,1)", "A * transpose(A)", "resize(A,2,2)", "resize(A,3)")
+        @test_throws Exception ev(bad)
+    end
+    # the same forms against real TaQL
+    if _HAVE_TAQL
+        agree = String[]
+        for (e, _) in forms
+            real = try collect(_taqlcmd("SELECT $e AS R FROM \$1", dir)[:R][:])[1] catch; nothing end
+            real === nothing && (push!(agree, "real errored: " * e); continue)
+            got = ev(e)
+            (got isa AbstractArray ? (size(got) == size(real) && got ≈ real) : (got == real || got ≈ real)) || push!(agree, e)
+        end
+        @test isempty(agree)
+        isempty(agree) || println(agree)
     end
 end
