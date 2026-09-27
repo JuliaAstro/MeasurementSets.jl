@@ -267,6 +267,38 @@ end
     end
 end
 
+@testset "MeasurementSet — MMS keyword-subtable concatenation (Phase 288)" begin
+    # Before this fix, `subtable(ms, name)` for a `name in data.subtabnames`
+    # only ever returned the FIRST part's contribution: `break` inside a
+    # *combined* `for p in parts, (kw,pth) in subtables(p)` generator exits
+    # the whole loop in Julia, not just the inner one (unlike genuinely
+    # nested `for` blocks) -- so every later part's subtable was silently
+    # dropped instead of concatenated.
+    d = mktempdir()
+    p1 = joinpath(d, "p1"); p2 = joinpath(d, "p2"); p3 = joinpath(d, "p3")
+    create_ms(p1; nrow=4, nchan=2, ncorr=2, nant=3)
+    create_ms(p2; nrow=4, nchan=2, ncorr=2, nant=5)
+    create_ms(p3; nrow=4, nchan=2, ncorr=2, nant=2)
+    @test nrow(subtable(MeasurementSet(p1), "POINTING")) == 1   # 1 row/part
+
+    cdir = joinpath(d, "cc_mms")
+    write_concattable(cdir, [readtable(p1), readtable(p2), readtable(p3)];
+                      subtabnames=["POINTING"])
+    ms = MeasurementSet(cdir)
+    @test getfield(ms, :data) isa ConcatTable
+    @test getfield(ms, :data).subtabnames == ["POINTING"]
+
+    pt = subtable(ms, "POINTING")
+    @test pt isa ConcatTable
+    @test nrow(pt) == 3                              # one row from EACH part
+    @test pt === subtable(ms, "POINTING")             # cached, not rebuilt
+
+    # a keyword NOT in `subtabnames` still takes the ordinary (part[1]-only)
+    # path -- confirms the fix didn't change that unrelated branch.
+    @test "ANTENNA" ∉ getfield(ms, :data).subtabnames
+    @test nrow(subtable(ms, "ANTENNA")) == 3          # p1's nant, not 3+5+2
+end
+
 @testset "write_concattable — non-on-disk part errors clearly (Phase 167)" begin
     # Before this fix, an in-memory (never-persisted) RefTable part's
     # empty `.path` silently resolved via `abspath("") == pwd()` -- no

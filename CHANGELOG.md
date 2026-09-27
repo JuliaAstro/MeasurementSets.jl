@@ -9790,3 +9790,28 @@ write-command fuzz and Phase 285's array-expression sweep. 1000 random queries f
   is matched.
 
 Kept as a seeded 200-query guard in `test/taql_fuzz_tests.jl`.
+
+### Phase 288 — a real MMS bug: `MeasurementSet`'s keyword-subtable concatenation only ever saw the first part
+
+Swept two previously-unswept source files, `src/schema.jl` (the standard-schema `validate` machinery)
+and `src/measurementset.jl` (the high-level `MeasurementSet` API, including its MMS/`ConcatTable`
+subtable path). `validate`'s keyword-mismatch, missing-keyword, and missing-subtable branches were
+completely untested (only "missing column" / "wrong type" had coverage) — confirmed all three correct
+and closed the gap with permanent tests; `stdcolumns` also gained direct coverage.
+
+**The real find, in `subtable(ms::MeasurementSet, name)`'s MMS branch** (Phase 14's own "optional
+MMS fidelity" feature — reading a keyword subtable, such as `POINTING` or `SYSCAL`, that a
+`ConcatTable`'s `subtabnames` marks as *per-part* rather than shared, by concatenating every part's
+own copy instead of just `parts[1]`'s): the loop `for p in data.parts, (kw, pth) in subtables(p);
+kw == name && (push!(subs, readtable(pth)); break); end` used `break` inside a **combined**
+multi-generator `for` statement — live-verified this exits the *entire* loop in Julia, not just the
+inner generator the way `break` does inside genuinely nested `for` blocks. So the very first part
+whose subtable list happened to contain a match for `name` ended the whole search, and every later
+part's contribution to the concatenated subtable was silently dropped — an MMS opened via
+`MeasurementSet` and accessed through `ms.POINTING` (or any other `subtabnames` entry) only ever saw
+one constituent SubMS's rows, not the true union. Live-reproduced with a 3-part synthetic MMS
+(`write_concattable(...; subtabnames=["POINTING"])`) before fixing: `nrow(subtable(ms,"POINTING"))`
+gave `1` (only the first part) instead of the correct `3`. Fixed by switching to genuinely nested
+`for` loops, where `break` only exits the innermost one; re-verified the same fixture now gives `3`,
+and that the ordinary (non-`subtabnames`, `parts[1]`-only) ANTENNA path and the subtable cache are
+both unaffected. New permanent regression test in `test/reftable_tests.jl`.
