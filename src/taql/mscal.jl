@@ -803,7 +803,7 @@ function _stokes_setup(intypes::Vector{Int}, outtypes::Vector{Int}, rescale::Boo
     if haspseudo
         basei = _STOKES_BASE[(inf, :iquv)]
         for j in 1:nI, r in 1:4
-            iquvmat[r, j] = basei[r, _stokes_canon(intypes[j])]
+            iquvmat[r, j] = basei[r, _stokes_canon(intypes[j])] * _stokes_factor(intypes[j], rescale)
         end
     end
     for o in 1:nO

@@ -9636,3 +9636,23 @@ Phase 92 saw in the EarthMagneticMachine geometry and accepted.)
   baseline (a few arc-seconds of rotation) between our `uvwj2000()` and casacore's remains — its
   MBaseline route applies something we do not reproduce (not chased). The `delay()` ↔ `uvw_j2000()`
   w-component relation test therefore loosens to the aberration size (2e-4).
+
+### Phase 281 — TaQL-lite reads MAIN at full precision; `mscal.stokes` rescale for the pseudo magnitudes
+
+A random `mscal.stokes` fuzz (480 specs: `I`/`Q`/`U`/`V`/`IQUV`/`LIN`/`CIRC`/single correlations/the
+five pseudo types, ± `rescale`, on `DATA` / `FLAG` / `WEIGHT`) against real derivedmscal, on a copy
+of the sample MS with random data and both a circular and an edited-to-linear `POLARIZATION`
+`CORR_TYPE`, found two things:
+
+- **Query expressions computed from MAIN's visibility columns were ~1e-3 (relative) off real TaQL.**
+  `readtable` on a Measurement Set defaults MAIN's `Float32` / `ComplexF32` columns to half
+  precision (Phase 34), and the TaQL engine inherited that, so `mean(DATA)`, `abs(DATA[1,1]) > x`,
+  `mscal.stokes(DATA, ...)` and friends were evaluated on `ComplexF16` values. TaQL-lite now reads
+  its columns at **full precision** (`precision = :full`, as `edit` / `copyms` already do). The
+  half-precision default for `ms[:DATA]` / `column(t, "DATA")` is unchanged; per-cell reads stay
+  lazy, so the cost is decoding, not memory.
+- **`mscal.stokes(..., 'Ptotal' | 'Plinear', true)` was 2× real** — the pseudo types were built from
+  the unscaled I/Q/U/V; with `rescale` they use the rescaled ones (the angle / fraction types were
+  scale-invariant, which is why only the magnitudes showed it).
+
+After both: 480 random specs, no mismatch. Regression test in `test/taql_mscal_tests.jl`.

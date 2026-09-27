@@ -1952,3 +1952,44 @@ end
         @test maximum(i -> maximum(abs.(rem2pi.(Float64.(o[i]) .- Float64.(r[i]), RoundNearest))), 1:n) < 1e-5
     end
 end
+
+# Phase 281: a random `mscal.stokes` fuzz against real derivedmscal on a copy of the sample MS with
+# random DATA / FLAG / WEIGHT and both circular and (edited POLARIZATION) linear CORR_TYPE found:
+#  * TaQL-lite evaluated MAIN's visibility columns at the table's default HALF precision
+#    (`ComplexF16`, Phase 34), so every result computed from `DATA` was ~1e-3 relative off real
+#    TaQL (a boundary `abs(DATA[1,1]) > x` could flip).  Query expressions now read at full
+#    precision (`ms[:DATA]` still defaults to half);
+#  * with `rescale = true`, `Ptotal` / `Plinear` (magnitudes) were 2x real: the pseudo types were
+#    built from the unscaled I/Q/U/V.
+@testset "mscal.stokes vs real derivedmscal on random data, circular and linear (Phase 281)" begin
+    if isdir(SAMPLE_MS)
+        for lin in (false, true)
+            n = 12; d = joinpath(mktempdir(), "n.ms"); copyms(SAMPLE_MS, d; rows=1:n)
+            rng = MersenneTwister(lin ? 2 : 1)
+            data = [ComplexF32.(randn(rng, Float32, 4, 64), randn(rng, Float32, 4, 64)) for _ in 1:n]
+            edit(d) do e
+                e["DATA"][:] = data
+                e["FLAG"][:] = [rand(rng, 4, 64) .< 0.15 for _ in 1:n]
+                e["WEIGHT"][:] = [Float32.(rand(rng, 4) .* 3) for _ in 1:n]
+            end
+            lin && edit(joinpath(d, "POLARIZATION")) do e; e["CORR_TYPE"][1] = Int32[9, 10, 11, 12]; end
+            t = readtable(d)
+            # full-precision evaluation: the result of an expression on DATA is the float32 value
+            x = column(query(t, "rownumber() > 0"; select=["X" => "real(DATA[1,1])"]), "X")[:]
+            @test x == Float64.(real.(getindex.(data, 1, 1)))
+            # rescale: Ptotal / Plinear are magnitudes of the rescaled (halved) Stokes values
+            q = column(query(t, "rownumber() > 0"; select=["A" => "mscal.stokes(DATA, 'Ptotal', true)", "B" => "mscal.stokes(DATA, 'Ptotal')",
+                                                          "C" => "mscal.stokes(DATA, 'IQUV', true)", "D" => "mscal.stokes(DATA, 'IQUV')"]), "A")[:]
+            qb = column(query(t, "rownumber() > 0"; select=["B" => "mscal.stokes(DATA, 'Ptotal')"]), "B")[:]
+            @test all(i -> real.(q[i]) ≈ 0.5 .* real.(qb[i]), 1:n)
+            if _HAVE_TAQL
+                for ex in ("mscal.stokes(DATA, 'Ptotal', true)", "mscal.stokes(DATA, 'Plinear', true)", "mscal.stokes(DATA, 'Pangle')", "mscal.stokes(DATA, 'PFtotal')",
+                           "mscal.stokes(DATA, 'I,Q')", "mscal.stokes(DATA, 'I,V', true)")
+                    o = column(query(t, "rownumber() > 0"; select=["X" => ex]), "X")[:]
+                    r = collect(_taqlcmd("SELECT $ex AS X FROM \$1", d)[:X][:])
+                    @test all(i -> all(isapprox.(ComplexF64.(vec(o[i])), ComplexF64.(vec(r[i])); rtol=1e-4, atol=1e-5)), 1:n)
+                end
+            end
+        end
+    end
+end
