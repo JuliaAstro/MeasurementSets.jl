@@ -10010,3 +10010,38 @@ before delegating to `_write_table_core`, so its existing cleanup already covers
 
 New tests in `test/writer_tests.jl`, both live-reproduced failure modes plus a regression check that
 a valid call is unaffected.
+
+### Phase 296 — `ext/UnitfulExt.jl` sweep: a latent (currently unreachable) inconsistency fixed for consistency
+
+First dedicated fresh read of the Unitful weak-dependency extension — only ever touched piecemeal
+before by Phases 65 (creation), 70 (write path), 160 (a docs `@ref` fix), and 197 (whose real fixes
+landed in the core `src/tables/units.jl` file, not here). Several candidate leads investigated and
+confirmed correct: `PseudoUnits`' `klambda` `@unit` scale factor (`1000`) independently verified to
+tie back to `lambda`'s own dimensionless base exactly (`1 klambda == 1000 lambda`, not assumed from
+the macro call alone); `_ms_ustring`'s `m/s^2` compound-unit round-trip verified end to end through a
+real `write_table` → `readtable` → `columnunit` cycle (exercises the Phase-197 digit-implicit-exponent
+rule inside a compound, not just an atomic, unit string); `qcolumn`'s array-cell broadcasting
+(`vals .* u` over a `Vector{Array}`) confirmed to rely on an already-tested, working Unitful idiom, not
+a latent bug; the `UNITS_NO_JULIA_COUNTERPART` note-lookup in `_ms_uparse`'s error path confirmed to
+key correctly off the original (pre-normalisation) unit string for the `:unsupported`-kind entries that
+actually reach it.
+
+**Found and fixed (a real inconsistency, confirmed *unreachable* via its only current caller, fixed
+anyway for consistency)**: `_tql_write_strip(x::Quantity, u)` — the `update!` SET-RHS unit-stripping
+function — takes a `u` that can be `nothing` / a `Unitful.Units` / a `Tuple` of them (a genuinely
+mixed-unit column, per `columnunit`'s own documented return shape), but only guarded the `nothing`
+case; its two siblings in the same file, `_tql_unit_attach` and `qcolumn`, both already guard the
+`Tuple` case with a clear "column has a mixed unit" error. Traced (not reproduced as a live,
+user-visible bug) exactly why: `_tql_write_strip`'s only caller, `update!` (`src/taql/commands.jl`),
+always adds every SET *target* column to `_tql_cols`'s `needed` set unconditionally, and `_tql_cols`
+unit-attaches *every* column in `needed` via `_tql_unit_attach` the moment any spec anywhere uses a
+quantity literal — so a mixed-unit SET target is *already* caught by `_tql_unit_attach`'s own guard
+while columns are being loaded, before a single row's `_tql_write_strip` call ever runs. Live-verified
+this interception genuinely happens (a real mixed-unit column + `update!` with a quantity literal
+throws `_tql_unit_attach`'s message, never reaches `_tql_write_strip`'s missing branch). Added the
+matching guard anyway — cheap, matches its two siblings exactly, and removes a latent trap for a
+future caller or refactor that reaches this function some other way.
+
+New tests in `test/units_tests.jl`, including a direct pin of the new guard (bypassing `update!`'s own
+interception, since that's what currently makes it otherwise untestable end to end) plus the two
+independently-verified correct behaviours (`klambda` scaling, `m/s^2` round-trip).

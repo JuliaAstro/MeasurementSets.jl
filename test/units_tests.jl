@@ -174,6 +174,43 @@ end
     @test column(t3, "MASS")[:] == [1.0, 2.5, 4.0]
 end
 
+# Phase 296 sweep of ext/UnitfulExt.jl (first dedicated fresh read of this
+# file; only ever touched piecemeal before by 65/70/160/197, and 197's own
+# fixes landed in the core src/tables/units.jl file, not here).
+@testset "units — Phase 296 sweep findings" begin
+    ext = Base.get_extension(MSv2, :UnitfulExt)
+    up = ext._ms_uparse
+
+    # klambda's `@unit` scale factor (1000) ties back to `lambda`'s own
+    # dimensionless base correctly -- verified independently, not assumed
+    # from the macro call alone.
+    @test U.uconvert(up("lambda"), 1 * up("klambda")) == 1000 * up("lambda")
+    @test U.dimension(up("klambda")) == U.NoDims
+
+    # `m/s^2` (the one non-`m/s` compound `_MS_USTRING_KNOWN` carries)
+    # round-trips end to end, exercising the Phase-197 digit-implicit-
+    # exponent rule inside a compound (not just an atomic) unit string.
+    @test up("m/s2") == U.u"m/s^2"
+    @test MSv2._ms_ustring(U.u"m/s^2") == "m/s2"
+    dir = mktempdir()
+    tab = joinpath(dir, "MS2")
+    write_table(tab, "MS2", Pair{String,Any}["A" => [1.0, 2.0, 3.0] .* U.u"m/s^2"]; nrow = 3)
+    r = readtable(tab)
+    @test columndesc(r, "A").keywords["QuantumUnits"] == ["m/s2"]
+    @test columnunit(r, "A") == U.u"m/s^2"
+    @test column(r, "A")[:] == [1.0, 2.0, 3.0]
+
+    # `_tql_write_strip`'s `u isa Tuple` guard (added for consistency with
+    # its two siblings, `_tql_unit_attach`/`qcolumn`, both of which already
+    # had it) -- currently unreachable via `update!`'s own call site (see
+    # the function's own comment), pinned directly so a future refactor
+    # that DOES reach it some other way still gets a clear error.
+    mixed = (U.u"m", U.u"s")
+    @test_throws ErrorException MSv2._tql_write_strip(1.0 * U.u"m", mixed)
+    @test_throws ErrorException MSv2._tql_write_strip(1.0 * U.u"m", nothing)
+    @test MSv2._tql_write_strip(2.0 * U.u"km", U.u"m") == 2000.0   # unaffected
+end
+
 # Phase 292 finding: `columnunit`/`qcolumn`'s own "load Unitful" fallback
 # (`units.jl`'s varargs stubs, overridden by `UnitfulExt` once loaded) had
 # NEVER been exercised by any test -- this file's own `import Unitful,
