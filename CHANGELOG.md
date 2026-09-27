@@ -9877,3 +9877,23 @@ fail. Fixed to check for an empty path first and raise a clear, actionable error
 problem; `is_stale` itself is unaffected and still correctly detects the underlying parent's change.
 New test in `test/reftable_tests.jl`, including a regression check that a genuinely persisted
 `RefTable` still resyncs correctly.
+
+### Phase 292 — `src/tables/typeenum.jl` + `src/tables/units.jl` sweep: no new bug, one real coverage gap closed
+
+Fresh read + cross-check of the `CasaType` enum and its Julia-type mapping against real casacore
+source (`casa/Utilities/DataType.h`) — every one of the 31 enum ordinals (0-30) verified to match
+casacore's own declaration order exactly, and the `TpChar => Int8` read-side mapping confirmed
+consistent with the already-documented (Phase 265) write-side exclusion ("`Int8`/`Char` is not a real
+casacore table column type — casacore aborts"). The Phase 34-36 half-precision narrowing machinery
+(`_narrowtype`/`_narrows`/`_narrowvalue`) re-checked and confirmed correct. No bug.
+
+A coverage-instrumented pass then found a genuine, previously-completely-untested code path in
+`src/tables/units.jl`: `columnunit`/`qcolumn`'s own "load Unitful" fallback (the varargs stubs,
+overridden by `ext/UnitfulExt.jl` once loaded) had never been exercised by any test — `units_tests.jl`
+itself `import`s `Unitful`/`UnitfulAngles`/`UnitfulAstro` at its own top before a single `@test` runs,
+and once the extension loads for a Julia process it stays loaded, so the fallback genuinely cannot be
+reached in-process. Live-verified the fallback gives the correct, actionable error message via a
+fresh child process that never imports `Unitful` — the exact same shape of gap, and the exact same
+`lock_tests.jl` `_JULIA`/`_PROJ` cross-process fix, Phase 225 already used for the analogous
+`EarthOrientationExt` "SOFA loaded, EarthOrientation not loaded" fallback. New test in
+`test/units_tests.jl`.
