@@ -446,15 +446,25 @@ function _apply_index_chain!(cur, levels, ev, rhs)
     return cur
 end
 
+# a scalar Bool value here (as opposed to a length-1-axis Bool ARRAY, which
+# `_as_mask` intercepts before this is ever reached) is not a valid index --
+# real TaQL: "Second argument of a masked array must be an array" (SELECT) /
+# "A mask in an update must be an array" (UPDATE). Julia's own `Int(::Bool)`
+# would otherwise silently accept it as index 0/1 (Phase 287, live-verified:
+# `FA[B]` with `B` a per-row scalar column used to give `FA[0]`, a
+# `BoundsError`, for `B==false`, and the wrong element for `B==true`).
+_tql_toindex(v) = v isa Bool ? throw(ArgumentError(
+    "TaQL-lite: a Bool array subscript is a mask and must be an array, not a per-row scalar")) : Int(v)
+
 function _tql_axis(ax, arr, k::Int, ev)
     n = size(arr, k)
     # `end` inside this axis's subscript -> `n`; a negative resolved
     # index counts from the end (casacore Slicer: -1 == last).
-    e(x) = _tql_fromend(Int(ev(_subst_end(x, n))), n)
+    e(x) = _tql_fromend(_tql_toindex(ev(_subst_end(x, n))), n)
     ax isa NamedTuple || return e(ax)                             # scalar index
     lo = ax.lo === nothing ? 1 : e(ax.lo)
     hi = ax.hi === nothing ? n : e(ax.hi)
-    st = ax.step === nothing ? 1 : Int(ev(_subst_end(ax.step, n)))
+    st = ax.step === nothing ? 1 : _tql_toindex(ev(_subst_end(ax.step, n)))
     st > 0 || throw(ArgumentError("TaQL-lite: array subscript step must be positive"))
     return lo:st:hi
 end

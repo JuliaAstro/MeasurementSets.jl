@@ -134,10 +134,8 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
     colunit(c) = _qty ? columnunit(rd, c) : nothing
 
     rows = _where_rows(rd, where, cols)
-    isempty(rows) && return 0
     rows = _apply_orderby(rows, orderkeys, cols)
     limit === nothing || (rows = _apply_limit(rows, limit))
-    isempty(rows) && return 0
     limited = orderby !== nothing || limit !== nothing
     nr = nrow(rd)
 
@@ -148,6 +146,36 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
         for c in sliced
             fullcols[c] = column(rdf, c)
         end
+    end
+
+    if isempty(rows)
+        # Real TaQL type-checks the whole SET list once, independent of how
+        # many rows WHERE actually matches (Phase 287, live-verified: `UPDATE
+        # t SET FA[B] = x WHERE <condition matching nothing>` still errors --
+        # e.g. a scalar Bool used where an array mask is required for a
+        # subscript). Our own evaluation is lazily per matched row, so with
+        # none matched nothing was ever checked and the (no-op) update
+        # silently "succeeded". Emulate the static check, without a real
+        # type system, by running the exact per-row apply logic once against
+        # row 1 (if the table has one) into a throwaway copy -- for whatever
+        # error it raises, never persisted.
+        if nr >= 1
+            for (c, levels, a) in specs
+                u = colunit(c)
+                ev = x -> _tql_write_strip(_unwrap_marray(_tqleval(x, cols, 1)), u)
+                if levels === nothing
+                    ev(a)
+                else
+                    cur = copy(haskey(fullcols, c) ? fullcols[c][1] : cols[c][1])
+                    if length(levels) == 1 && _as_mask(levels[1], ev) === nothing
+                        _slice_assign!(cur, _tql_index_tuple(cur, levels[1], ev), ev(a))
+                    else
+                        _apply_index_chain!(cur, levels, ev, ev(a))
+                    end
+                end
+            end
+        end
+        return 0
     end
 
     # Phase 149: casacore's own `TableParseQuery::doUpdate` applies the

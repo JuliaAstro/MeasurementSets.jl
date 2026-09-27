@@ -9771,3 +9771,22 @@ AS X FROM t [WHERE …] GROUP BY K` queries across four seeds found **no diverge
 beyond the already-known upstream `gmax`-of-an-all-negative-group bug (Phase 284) — the array
 expression engine and the group-reduction machinery compose correctly. Kept as a seeded 300-query
 guard in `test/taql_fuzz_tests.jl`.
+
+### Phase 287 — TaQL-lite UPDATE on array-cell columns vs real TaQL (two divergences fixed)
+
+Differential fuzz of `UPDATE ... SET` on array-cell columns (whole-array RHS, subscript slices,
+boolean masks, the masked `(D, M) = expr[cond]` pair form) against real TaQL, extending Phase 278's
+write-command fuzz and Phase 285's array-expression sweep. 1000 random queries found two real bugs:
+
+- **A scalar Bool subscript** (`FA[B]` where `B` is a per-row scalar Bool column, not an array) was
+  silently accepted as an integer index via Julia's own `Int(::Bool)` — `FA[false]` gave `FA[0]` (a
+  `BoundsError`), `FA[true]` gave the wrong element (`FA[1]`). Real TaQL requires a Bool subscript to
+  be shaped like the array ("… must be an array"); now a clear `ArgumentError`.
+- **`update!` skipped structural validation entirely when `WHERE` matched zero rows** — every SET
+  item is evaluated lazily, only against the matched rows, so a structurally invalid SET target/RHS
+  on an `UPDATE` with an empty match set silently "succeeded" with no error, while real TaQL
+  type-checks the whole SET list once, independent of how many rows actually match. Fixed by
+  validating every spec once against row 1 (into a throwaway copy, never persisted) whenever no row
+  is matched.
+
+Kept as a seeded 200-query guard in `test/taql_fuzz_tests.jl`.

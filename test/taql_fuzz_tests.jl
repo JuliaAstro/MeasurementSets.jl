@@ -293,3 +293,70 @@ end
         isempty(bad) || println(bad)
     end
 end
+
+# Phase 287: seeded random differential fuzz of `UPDATE ... SET` on ARRAY-CELL columns (whole-
+# array RHS, subscript slices, boolean masks, the masked `(D, M) = expr[cond]` pair form) against
+# real TaQL, mirroring Phase 278's write-command fuzz but for array cells. 1000 queries across 5
+# seeds found two real bugs, both fixed:
+#  * a scalar Bool value used as an array subscript (`FA[B]` where `B` is a per-row scalar Bool
+#    column, not an array) silently misbehaved as an integer index via Julia's own `Int(::Bool)`
+#    (`FA[false]` -> `FA[0]`, a `BoundsError`; `FA[true]` -> the wrong element, `FA[1]`), where real
+#    TaQL requires a Bool subscript to be shaped like the array ("... must be an array"). Now a
+#    clear `ArgumentError`.
+#  * `update!` evaluated every SET item lazily, only against the WHERE-matched rows -- so a
+#    structurally invalid target/RHS (the bug above, or any other) on an `UPDATE` whose WHERE
+#    matches ZERO rows silently "succeeded" with no error, while real TaQL type-checks the whole
+#    SET list once, independent of how many rows match. Fixed by validating every spec once
+#    against row 1 (into a throwaway copy, never persisted) whenever no row is actually matched.
+# Kept as a seeded 200-query guard.
+@testset "TaQL-lite UPDATE on array-cell columns vs real TaQL: random sequences (Phase 287)" begin
+    if _HAVE_TAQL
+        num(r, dep) = dep <= 0 ? rand(r, ("I", "D", "ID", string(rand(r, 0:5)), string(round(rand(r) * 4; digits=1)))) : begin
+            k = rand(r, 1:9); a = num(r, dep - 1); b = num(r, dep - 1)
+            k <= 2 ? "($a + $b)" : k == 3 ? "($a - $b)" : k <= 5 ? "($a * $b)" : k == 6 ? "abs($a)" : k == 7 ? "($a % 4)" : k == 8 ? "floor($a)" : "($a / 3)"
+        end
+        function boo(r, dep)
+            k = rand(r, 1:(dep <= 0 ? 5 : 8))
+            k == 1 && return "B"; k == 2 && return "S $(rand(r, ("==", "!="))) '$(rand(r, ("ab", "b", "")))'"
+            k == 3 && return "I IN [$(join(rand(r, -6:6, 3), ","))]"; k == 4 && return "FA[$(rand(r, 1:3))] > $(num(r, 1))"
+            (k == 5 || dep <= 0) && return "$(num(r, 1)) $(rand(r, ("<", ">", "==", "!=", "<=", ">="))) $(num(r, 1))"
+            k <= 6 ? "($(boo(r, dep - 1)) AND $(boo(r, dep - 1)))" : k == 7 ? "($(boo(r, dep - 1)) OR $(boo(r, dep - 1)))" : "NOT ($(boo(r, dep - 1)))"
+        end
+        arrexpr(r, dep) = dep <= 0 ? rand(r, ("FA", "GA")) : begin
+            k = rand(r, 1:6); a = arrexpr(r, dep - 1)
+            k == 1 ? "($a * $(num(r, 0)))" : k == 2 ? "abs($a)" : k == 3 ? "($a + $(arrexpr(r, dep - 1)))" :
+                k == 4 ? "-$a" : k == 5 ? "iif($(boo(r, 0)), $a, $a)" : "reversearray($a)"
+        end
+        function gencmd(r)
+            k = rand(r, 1:5)
+            k == 1 && return "UPDATE \$1 SET FA = $(arrexpr(r, rand(r, 0:2)))" * (rand(r) < 0.7 ? " WHERE $(boo(r, rand(r, 0:1)))" : "")
+            k == 2 && return "UPDATE \$1 SET FA[$(rand(r, 1:3))] = $(num(r, 1))" * (rand(r) < 0.7 ? " WHERE $(boo(r, rand(r, 0:1)))" : "")
+            k == 3 && return "UPDATE \$1 SET FA[$(boo(r, 0))] = $(num(r, 1))" * (rand(r) < 0.7 ? " WHERE $(boo(r, rand(r, 0:1)))" : "")
+            k == 4 && return "UPDATE \$1 SET (FA, MA) = FA[$(boo(r, 0))]" * (rand(r) < 0.7 ? " WHERE $(boo(r, rand(r, 0:1)))" : "")
+            return "UPDATE \$1 SET FA = $(arrexpr(r, 1))[$(boo(r, 0))]" * (rand(r) < 0.7 ? " WHERE $(boo(r, rand(r, 0:1)))" : "")
+        end
+        snap(d) = (t = readtable(d); Dict(c => collect(column(t, c; precision=:full)[:]) for c in ("FA", "MA")))
+        same(a, b) = length(a) == length(b) && all(i -> size(a[i]) == size(b[i]) && all(isapprox.(a[i], b[i]; rtol=1e-6, atol=1e-9)), eachindex(a))
+        bad = String[]
+        for seed in 1:5, run in 1:40
+            r = MersenneTwister(seed * 10000 + run); N = 8; r0 = MersenneTwister(seed * 10000 + run + 500000)
+            cols = Pair{String,Any}["ID" => Int32.(1:N), "I" => Int32.(rand(r0, -6:6, N)), "D" => round.(randn(r0, N) .* 3; digits=1),
+                "S" => rand(r0, ["ab", "abc", "b", ""], N), "B" => rand(r0, Bool, N),
+                "FA" => [round.(randn(r0, 3) .* 3; digits=1) for _ in 1:N], "GA" => [round.(randn(r0, 3) .* 3; digits=1) for _ in 1:N],
+                "MA" => [zeros(3) for _ in 1:N]]
+            da = joinpath(mktempdir(), "ours"); db = joinpath(mktempdir(), "real")
+            write_table(da, "T", cols; nrow=N); write_table(db, "T", cols; nrow=N)
+            cmd = gencmd(r)
+            ea = try taql(da, replace(cmd, "\$1" => "t")); nothing catch e; :err end
+            eb = try _taqlcmd(cmd, db); nothing catch e; :err end
+            if (ea === nothing) != (eb === nothing)
+                push!(bad, "error mismatch: $cmd"); continue
+            end
+            ea === nothing || continue
+            sa, sb = snap(da), snap(db)
+            same(sa["FA"], sb["FA"]) && same(sa["MA"], sb["MA"]) || push!(bad, "values differ: $cmd")
+        end
+        @test isempty(bad)
+        isempty(bad) || println(bad)
+    end
+end
