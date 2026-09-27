@@ -66,6 +66,20 @@ end
 # epoch  (hub = TAI MJD)
 # ======================================================================
 
+# UTC MJD conventions.  An `MEpoch{UTC}` carries casacore's UTC MJD, in which every day is 86400 s
+# long (an MS `TIME` / 86400): the leap second is not represented.  SOFA's UTC "quasi-JD" instead
+# makes the fraction of a leap-second day count out of 86401 (or 86399) s, so on such a day the
+# two disagree by up to a second (a 6" error in a hour angle -- seen against casatools on
+# 2012-07-01).  Convert at the SOFA boundary.
+function _leap_delta(mjd::Float64)
+    day = floor(mjd)
+    y, m, d, _ = SOFA.jd2cal(MJD0, day)
+    y2, m2, d2, _ = SOFA.jd2cal(MJD0, day + 1)
+    SOFA.dat(y2, m2, d2, 0.0) - SOFA.dat(y, m, d, 0.0)      # +1 s on a day with a leap second
+end
+_utc_sofa(mjd::Float64) = (Δ = _leap_delta(mjd); Δ == 0 ? mjd : floor(mjd) + (mjd - floor(mjd)) * 86400 / (86400 + Δ))
+_utc_from_sofa(q::Float64) = (Δ = _leap_delta(q); Δ == 0 ? q : floor(q) + (q - floor(q)) * (86400 + Δ) / 86400)
+
 _total(nt) = nt.day + nt.fraction - MJD0     # (day, fraction) -> MJD
 
 # location args for dtdb, from a frame position (ITRF xyz, metres)
@@ -78,7 +92,7 @@ end
 function _to_tai(m::MEpoch{A}, frame::MeasFrame) where {A}
     A === TAI && return m.mjd
     if A === UTC
-        return _total(SOFA.utctai(MJD0, m.mjd))
+        return _total(SOFA.utctai(MJD0, _utc_sofa(m.mjd)))
     elseif A === TT
         return _total(SOFA.tttai(MJD0, m.mjd))
     elseif A === TDB
@@ -97,7 +111,7 @@ end
 function _from_tai(tai::Float64, ::Type{B}, frame::MeasFrame) where {B}
     B === TAI && return tai
     if B === UTC
-        return _total(SOFA.taiutc(MJD0, tai))
+        return _utc_from_sofa(_total(SOFA.taiutc(MJD0, tai)))
     elseif B === TT
         return _total(SOFA.taitt(MJD0, tai))
     elseif B === TDB
@@ -107,8 +121,8 @@ function _from_tai(tai::Float64, ::Type{B}, frame::MeasFrame) where {B}
         dtr = SOFA.dtdb(MJD0, ttmjd, ut, el, u, v)
         return _total(SOFA.tttdb(tt.day, tt.fraction, dtr))
     elseif B === UT1
-        utc = _total(SOFA.taiutc(MJD0, tai))
-        du = _eop(utc).dut1
+        utc = _total(SOFA.taiutc(MJD0, tai))                 # SOFA quasi-JD UTC
+        du = _eop(_utc_from_sofa(utc)).dut1
         return _total(SOFA.utcut1(MJD0, utc, du))
     end
     error("MeasurementSets: epoch scale $(nameof(B)) is not supported")
@@ -124,7 +138,7 @@ function _frame_scale_mjd(frame::MeasFrame, ::Type{S}) where {S}
     _from_tai(_to_tai(e, frame), S, frame)
 end
 _frame_tt(frame)  = (t = _frame_scale_mjd(frame, TT);  (MJD0, t))
-_frame_utc(frame) = (u = _frame_scale_mjd(frame, UTC); (MJD0, u))
+_frame_utc(frame) = (u = _frame_scale_mjd(frame, UTC); (MJD0, _utc_sofa(u)))     # SOFA quasi-JD
 _frame_ut1(frame) = (u = _frame_scale_mjd(frame, UT1); (MJD0, u))
 
 # `geodetic = true` -> ellipsoid-normal vertical (casacore AZELGEO);

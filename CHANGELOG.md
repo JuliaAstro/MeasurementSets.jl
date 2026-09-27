@@ -9656,3 +9656,70 @@ of the sample MS with random data and both a circular and an edited-to-linear `P
   scale-invariant, which is why only the magnitudes showed it).
 
 After both: 480 random specs, no mismatch. Regression test in `test/taql_mscal_tests.jl`.
+
+### Phase 282 — measures: UTC on a leap-second day (found by a random epoch/position/direction fuzz vs casatools)
+
+250 random (epoch 2000–2030, ITRF position anywhere, direction) cases converted J2000 → `B1950` /
+`GALACTIC` / `ECLIPTIC` / `SUPERGAL` / `APP` / `AZEL` / `AZELGEO` / `HADEC` / `ITRF` / `ICRS` and
+compared with casatools `me.measure`: everything agrees to ≲ 1″ (most far better) except **one
+case 6″ off — 2012-07-01, the day after the 2012-06-30 leap second** (0.45 s of hour angle), and a
+few 2–4″ cases in 2027+ (beyond the IERS data: casacore's table and EarthOrientation.jl's
+predictions differ; not ours).
+
+Cause: an `MEpoch{UTC}` carries casacore's UTC MJD (every day 86400 s long — an MS `TIME` / 86400;
+the leap second is not represented), but SOFA's UTC "quasi-JD" counts the *fraction* of a
+leap-second day out of 86401 s, so on such a day the two disagree by up to a second and the
+UT1 − UTC we derived ran away by 0.25 s per quarter-day (casacore: constant). The MJD is now
+converted to/from SOFA's convention at the SOFA boundary (`_utc_sofa` / `_utc_from_sofa`); on the
+leap day TAI − UTC is a constant 34 s (35 s after), UT1 − UTC continuous, and 300 random epochs
+(40 % on leap-second days) match casatools' TAI / TT / TDB / UT1 to ≲ 5e-4 s. Regression test in
+`test/measures_tests.jl`.
+
+### Phase 283 — random-frame conversions vs casatools: frequency / radial velocity / reverse direction routes (sweep, no bug found)
+
+Two more random fuzzes of `measconvert` against casatools `me.measure`:
+
+- **Frequency and radial velocity** between the velocity frames, 200 random epochs / ITRF positions /
+  source directions, 14 frame pairs: the constant-velocity hops (LSRK, BARY, LSRD, GALACTO, LGROUP,
+  CMB) agree to ≲ 1e-9 m/s; hops through the Earth's motion (TOPO, GEO) to < 0.9 m/s (3e-9 of c) —
+  the ephemeris floor, uncorrelated with the diurnal or orbital line-of-sight speed, the input
+  velocity, or the epoch (Phase 141 had already looked at it).
+- **Direction conversions from every frame** (`B1950`, `GALACTIC`, `ECLIPTIC`, `SUPERGAL`, `APP`,
+  `AZEL`, `AZELGEO`, `HADEC`, `ITRF`, `ICRS`) to `J2000` / `GALACTIC` / `AZEL` / `APP` (150 random
+  cases): all within 1.5″ (the EOP floor) — after the Phase 280 ITRF and Phase 282 leap-second fixes —
+  **except `B1950` → `AZEL` / `APP` (up to 5.5″)**. That one is casacore's: its *direct* `B1950` →
+  `APP` differs by the same 5″ from its own `B1950` → `J2000` → `APP` (checked in casatools), i.e. a
+  route inconsistency on their side; ours composes through ICRS. `JTRUE` / `JMEAN` / `BMEAN` are not
+  frames here.
+
+A fixed-seed 136-assertion guard is in `test/measures_tests.jl`.
+
+### Phase 284 — TaQL-lite GROUP BY: random queries vs real TaQL (one divergence: one-row sample variance)
+
+700 random `SELECT keys, g*(expr)… [WHERE] GROUP BY keys [HAVING]` queries (one or two key columns
+incl. String / Bool keys, one to three `g*` aggregates — `gcount` / `gsum` / `gmean` / `gmin` / `gmax` /
+`gvariance` / `gstddev` / `grms` / `gmedian` / `gsamplevariance` / `gsamplestddev` / `gfirst` /
+`glast` / `gproduct` — over random expressions, random `WHERE` / `HAVING`) compared with real TaQL by
+group key and value. One divergence: **the sample (n−1) variance / stddev of a one-row group is `0.0`
+in real TaQL** (Julia's `var` / `std` gave `NaN`) — `gsamplevariance` / `gsamplestddev` and the
+per-element `gsamplevariances` / `gsamplestddevs` now return `0.0` there. (The running / boxed
+sample variants keep their own behaviour: real TaQL *throws* on a window of fewer than two.)
+
+Not ours: real casacore's **`gmax` of an all-negative group returns `2.2e-308`** (its running
+maximum starts at `DBL_MIN`, the smallest *positive* double), so `gmax(D)` on such a group differs and
+`HAVING gmax(D) > 0` keeps groups that should be dropped — an upstream bug, not reproduced (the guard
+skips it). Kept as a seeded 60-query guard in `test/taql_fuzz_tests.jl`.
+
+### CI fix — Phase 281's real-casacore Stokes cross-check on Julia 1.10
+
+CI (Julia 1.10 only) failed the Phase 281 `mscal.stokes` cross-check against real derivedmscal:
+12 of its 16 assertions. Reproduced locally with Julia 1.10.12 (juliaup): real casacore prints
+`Error: no BLAS/LAPACK library loaded for cgetrf_()` / `invert of singular matrix attempted` and
+returns unconverted garbage — its StokesConverter inverts its conversion matrix with the LP64
+LAPACK symbol `cgetrf_`, which Julia 1.10's libblastrampoline does not forward (1.10 ships only the
+ILP64 `…64_` OpenBLAS; 1.12 / pre do), so casacore's *own* conversion is broken there. Not our bug:
+the test now probes real casacore's Stokes `I` first and skips the derivedmscal comparison (with an
+`@info`) when it disagrees, and on a real mismatch prints the expression and worst element. The
+data was also given a dominant Stokes `I` (co-polar terms) so the `PFtotal` / `PFlinear` ratios
+stay well-conditioned whatever the RNG stream. (Locally: the whole `taql_mscal_tests.jl` passes
+on Julia 1.10.12 and 1.13.)

@@ -1118,14 +1118,17 @@ const _pop_var = v -> Statistics.var(v; corrected=false)
 const _pop_std = v -> Statistics.std(v; corrected=false)
 const _ntrue = v -> count(identity, v)
 const _nfalse = v -> count(!, v)
+# sample (n-1) variance / stddev of a GROUP: a one-row group gives 0.0 in real TaQL (Julia: NaN)
+_samp_var(v) = length(v) < 2 ? 0.0 : Statistics.var(v)
+_samp_std(v) = length(v) < 2 ? 0.0 : Statistics.std(v)
 const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
     "gcount" => (_sew(length), :scalar),
     "gsum" => (sum, :scalar), "gproduct" => (prod, :scalar),
     "gmean" => (Statistics.mean, :scalar), "gavg" => (Statistics.mean, :scalar),
     "gmedian" => (_tql_median_lo, :scalar),
     "gmin" => (minimum, :scalar), "gmax" => (maximum, :scalar),
-    "gvariance" => (_pop_var, :scalar), "gsamplevariance" => (Statistics.var, :scalar),
-    "gstddev" => (_pop_std, :scalar), "gsamplestddev" => (Statistics.std, :scalar),
+    "gvariance" => (_pop_var, :scalar), "gsamplevariance" => (_samp_var, :scalar),
+    "gstddev" => (_pop_std, :scalar), "gsamplestddev" => (_samp_std, :scalar),
     "grms" => (v -> sqrt(sum(abs2, v) / length(v)), :scalar),
     "gany" => (any, :scalar), "gall" => (all, :scalar),
     "gntrue" => (_ntrue, :scalar), "gnfalse" => (_nfalse, :scalar),
@@ -1135,8 +1138,8 @@ const _TQL_AGGRS = Dict{String,Tuple{Base.Callable,Symbol}}(
     "gsums" => (sum, :perelem), "gproducts" => (prod, :perelem),
     "gsumsqrs" => (_tql_gsumsqr, :perelem), "gsumsquares" => (_tql_gsumsqr, :perelem),
     "gmeans" => (Statistics.mean, :perelem), "gavgs" => (Statistics.mean, :perelem),
-    "gvariances" => (_pop_var, :perelem), "gsamplevariances" => (Statistics.var, :perelem),
-    "gstddevs" => (_pop_std, :perelem), "gsamplestddevs" => (Statistics.std, :perelem),
+    "gvariances" => (_pop_var, :perelem), "gsamplevariances" => (_samp_var, :perelem),
+    "gstddevs" => (_pop_std, :perelem), "gsamplestddevs" => (_samp_std, :perelem),
     "grmss" => (v -> sqrt(sum(abs2, v) / length(v)), :perelem),
     "gmins" => (minimum, :perelem), "gmaxs" => (maximum, :perelem),
     "ganys" => (any, :perelem), "galls" => (all, :perelem),
