@@ -9897,3 +9897,43 @@ fresh child process that never imports `Unitful` — the exact same shape of gap
 `lock_tests.jl` `_JULIA`/`_PROJ` cross-process fix, Phase 225 already used for the analogous
 `EarthOrientationExt` "SOFA loaded, EarthOrientation not loaded" fallback. New test in
 `test/units_tests.jl`.
+
+### Phase 293 — `src/tables/refedit.jl` + `src/tables/concatedit.jl` sweep: two real bugs, both live-reproduced
+
+First dedicated fresh-read sweep of the `RefTable`/`ConcatTable` in-place-edit views (Phases
+125-130) — both files re-read in full and cross-checked against their own documented casacore
+provenance (`RefColumn::put`, `ConcatColumn::put`, `RefTable::addColumn`/`removeColumn`,
+`ConcatTable::addColumn`). Found two real bugs, both confirmed live before fixing.
+
+**Bug 1 — a missing `flush` method.** Neither `RefEditTable` nor `ConcatEditTable` had a
+`Base.flush` method at all — only the do-block form (`edit(f, rt)`/`edit(f, ct)`) ever committed
+anything, by duplicating the commit logic inline instead of calling a public `flush`. So the
+documented non-do-block idiom `t = edit(path); ...; flush(t)` — which works for a plain
+`EditTable` and is even implied by these two types' own docstrings — raised a raw `MethodError`
+for `t = edit(rt::RefTable)` / `t = edit(ct::ConcatTable)`. Live-reproduced: the write itself had
+already landed correctly (`t["COL"][i] = v` writes straight through to the parent/part), but there
+was no public way to commit it short of reaching into the private `t.parent`/`t.parts` fields —
+and since Phase 207 holds the write lock for the *whole* session (not just inside `flush`), hitting
+this `MethodError` left the table's lock stuck for the rest of the process with no way to release
+it. Fixed with `Base.flush(t::RefEditTable)` (delegates to `flush(t.parent)`, returns `t`) and
+`Base.flush(t::ConcatEditTable)` (flushes every part, returns `t`) — both idempotent, matching
+`Base.flush(::EditTable)`'s own convention; the do-block forms now call these instead of
+duplicating the logic inline.
+
+**Bug 2 — `ConcatEditTable.addcolumn!` mutated parts as it looped, not after validating all of
+them.** Both the no-data and with-data forms looped `for p in t.parts; addcolumn!(p, name; ...)`
+— so if `name` already existed on a *later* part but not an *earlier* one (a real possible MMS
+shape: one SPW's MAIN table already carries a column the others don't), the call correctly threw
+"column … already exists" from the later part's own `_check_new_col`, but the *earlier* part was
+left with a silently-committed pending add in its own `EditTable.addcols`. The error message
+implied nothing had happened; in fact a later, unrelated `flush` (even one reached via completely
+different code) would write a spurious, wrongly-sliced column to that one part only. Live-
+reproduced with a two-part `ConcatTable` where only part 2 already had column `"B"`: the failed
+`addcolumn!(ce, "B", ...)` left `ce.parts[1].addcols` non-empty, and a subsequent `flush` gave
+part 1 a `"B"` column with the wrong data while part 2's genuine `"B"` was untouched. Fixed by
+validating every part's `_check_new_col` (and `_check_kind`) up front, before mutating any of
+them — the same validate-before-mutate shape already established in Phases 199/202/204/205 for
+exactly this class of "throws late, having already mutated something" bug.
+
+New tests in `test/edit_tests.jl` for both, including the real-casacore cross-check confirming the
+untouched columns really are untouched on disk.

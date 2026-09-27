@@ -100,11 +100,32 @@ function edit(f::Function, rt::RefTable)
     t = edit(rt)
     try
         f(t)
-        flush(t.parent)
+        flush(t)
     catch
         _release_edit_lock!(t.parent)
         rethrow()
     end
+    return t
+end
+
+"""
+    flush(t::RefEditTable) -> t
+
+Commit every pending write to the parent table. The do-block form
+(`edit(f, rt::RefTable)`) calls this automatically once `f` returns —
+this is the counterpart for the non-do-block form (`t = edit(rt)`),
+exactly as `flush(t::EditTable)` is for `t = edit(path)`.
+
+**Found live (Phase 293):** before this method existed, `t = edit(rt)`
+followed by `flush(t)` raised a raw `MethodError` — the write itself
+had already landed correctly (`t["COL"][i] = v` writes straight through
+to the parent), but there was no public way to commit it short of
+reaching into the private `t.parent` field, and the write lock (held
+for the whole session since Phase 207) was left stuck on the table for
+the rest of the process.
+"""
+function Base.flush(t::RefEditTable)
+    flush(t.parent)
     return t
 end
 

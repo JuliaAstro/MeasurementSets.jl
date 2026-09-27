@@ -92,14 +92,33 @@ function edit(f::Function, ct::ConcatTable)
     t = edit(ct)
     try
         f(t)
-        for p in t.parts
-            flush(p)
-        end
+        flush(t)
     catch
         for p in t.parts
             _release_edit_lock!(p)
         end
         rethrow()
+    end
+    return t
+end
+
+"""
+    flush(t::ConcatEditTable) -> t
+
+Commit every pending write to every part. The do-block form
+(`edit(f, ct::ConcatTable)`) calls this automatically once `f`
+returns — this is the counterpart for the non-do-block form
+(`t = edit(ct)`), exactly as `flush(t::EditTable)` is for
+`t = edit(path)`.
+
+**Found live (Phase 293), the same gap as `RefEditTable`'s own
+`flush` (see its docstring):** before this method existed, `t =
+edit(ct)` followed by `flush(t)` raised a raw `MethodError`, leaving
+every part's write lock stuck for the rest of the process.
+"""
+function Base.flush(t::ConcatEditTable)
+    for p in t.parts
+        flush(p)
     end
     return t
 end
@@ -161,6 +180,17 @@ each part gets its own slice — each part independently infers its own
 column type/shape from that slice.
 """
 function addcolumn!(t::ConcatEditTable, name::AbstractString; kind::Symbol=:ssm)
+    _check_kind(kind)
+    # Phase 293: validate every part BEFORE mutating any of them — a naive
+    # per-part loop that adds as it goes leaves an EARLIER part with a
+    # silently-committed pending add when a LATER part's `_check_new_col`
+    # throws (e.g. one part already has this column and another doesn't,
+    # a real possible MMS shape), even though the raised error implies
+    # nothing happened. Found live: `addcolumn!` on a name present on
+    # part 2 but not part 1 threw "column ... already exists" yet still
+    # left part 1's `addcols` with the pending add, so a later `flush`
+    # silently added a spurious, wrongly-shaped column to part 1 only.
+    foreach(p -> _check_new_col(p, name), t.parts)
     for p in t.parts
         addcolumn!(p, name; kind)
     end
@@ -172,6 +202,8 @@ function addcolumn!(t::ConcatEditTable, name::AbstractString, data::AbstractVect
     n = t.offsets[end]
     length(data) == n ||
         error("addcolumn!: expected $n values (one per ConcatTable row), got $(length(data))")
+    _check_kind(kind)
+    foreach(p -> _check_new_col(p, name), t.parts)   # see the no-data method's comment
     for (i, p) in enumerate(t.parts)
         lo, hi = t.offsets[i] + 1, t.offsets[i + 1]
         addcolumn!(p, name, data[lo:hi]; kind, type, shape)
