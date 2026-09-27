@@ -10045,3 +10045,33 @@ future caller or refactor that reaches this function some other way.
 New tests in `test/units_tests.jl`, including a direct pin of the new guard (bypassing `update!`'s own
 interception, since that's what currently makes it otherwise untestable end to end) plus the two
 independently-verified correct behaviours (`klambda` scaling, `m/s^2` round-trip).
+
+### Phase 297 — `ext/HDF5Ext.jl` sweep: `container_read` could silently return uninitialised memory
+
+First dedicated fresh read of the MultiHDF5 (`table.mfh5`) weak-dependency extension — only ever
+implemented piecemeal before across Phases 20 (read), 21 (write), and 37 (the weak-dep split), never
+investigated on its own. Several details re-checked and confirmed correct or already-documented,
+non-new limitations: `_open_multihdf5`'s filter for an empty virtual-file name (a defensive
+placeholder-slot convention borrowed from `MultiFile`'s own format, structurally inert for MultiHDF5
+since a named HDF5 group can't correspond to an empty name anyway); the block-axis-order assumption in
+`container_read`/`_finalize_multihdf5` (`d[b, :]`, an already-documented, still-unverifiable-on-this-
+machine caveat — no HDF5-enabled real casacore build exists here, per Phases 20/21's own notes); the
+writer's "build every dataset directly at its final size in one write" approach (verified against
+casacore's own `doAddFile`/`extend`/`put` to be bit-for-bit equivalent from any reader's perspective).
+
+**Found and fixed a real bug**: `container_read` allocated `out = Vector{UInt8}(undef, fsize)` up
+front (`fsize` from the container's own header-attribute claim) and only explicitly assigned however
+many bytes its block-reading loop actually found in the dataset. If the dataset's real block count
+didn't cover the claimed `fsize` — a corrupted or truncated `table.mfh5`, or a genuine mismatch between
+this reader's block-axis-order assumption and however a real casacore build might someday write one
+(exactly the scenario the file's own "flip to `d[:, b]`" comment already anticipated) — the loop
+silently exhausted its blocks with `done < fsize`, and the function returned `out` with its *tail bytes
+still raw, uninitialised heap memory*, fed straight into whichever storage-manager reader opened that
+virtual file next. Live-reproduced with a hand-built file whose header claims 1000 bytes for a virtual
+file whose dataset genuinely has only 10: `container_read` returned a 1000-byte vector whose bytes
+11-1000 were real garbage, no error, no warning. Fixed by checking `done >= fsize` after the loop and
+raising a clear, actionable error naming the exact byte-count mismatch instead of ever returning a
+partially-uninitialised buffer.
+
+New tests in `test/container_tests.jl`: the live-reproduced malformed case now errors cleanly, and a
+regression check that an exactly-matching, well-formed file is completely unaffected.
