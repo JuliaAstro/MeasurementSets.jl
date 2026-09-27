@@ -979,48 +979,72 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
+    # Phase 295 fix: `_write_table_core`'s own Phase-226 cleanup only ever
+    # removes a directory IT created (`_dir_preexisted || rm(...)`) --
+    # correctly declines to touch `dir` here, since `write_ms` already
+    # `mkpath`'d it before writing a single subtable. But `write_ms` itself
+    # had no equivalent top-level cleanup: the per-subtable loop below
+    # tolerates a subtable failure (warn + skip, by design — a degraded
+    # copy is an accepted outcome there), but the final MAIN `_copy_table`
+    # call was NOT wrapped in anything at all, so a genuine MAIN write
+    # failure (or any other uncaught exception past this point) left a
+    # stray, partially-written MS directory (subtables present, no MAIN)
+    # sitting at `dir` with no cleanup and no indication to the caller --
+    # live-reproduced by forcing a hard error deep in `_write_table_core`
+    # with `dir` pre-existing (exactly `write_ms`'s own situation by the
+    # time MAIN is written): the directory survived the throw untouched.
+    # Since `write_ms`'s own `ispath(dir) && error(...)` guard above
+    # already guarantees `dir` did NOT exist when THIS call started,
+    # there's no "was it already there" ambiguity to preserve here (unlike
+    # `_write_table_core`'s own callers, which include `_copy_table_cols`
+    # writing into an ALREADY-created MS subdirectory) — any exception past
+    # this point means the whole `dir` this call created should go.
+    try
+        main = main0
+        mrows = rows === Colon() ? (1:nrow(main)) : rows
+        want(kw) = subtables === Colon() || kw in subtables
 
-    main = main0
-    mrows = rows === Colon() ? (1:nrow(main)) : rows
-    want(kw) = subtables === Colon() || kw in subtables
+        # write subtables, remember which ones succeeded
+        written = String[]
+        for (kw, path) in MeasurementSets.subtables(main)
+            want(kw) || continue
+            sub = try
+                subtable(ms, kw)
+            catch e
+                @warn "skipping subtable $kw" err=e; continue
+            end
+            try
+                srows = get(subtable_rows, kw, 1:nrow(sub))
+                srows === Colon() && (srows = 1:nrow(sub))
+                _copy_table(joinpath(dir, kw), sub, srows; storage, blocksize)
+                push!(written, kw)
+            catch e
+                @warn "skipping subtable $kw (unsupported source)" typeof(sub) err=e
+            end
+        end
 
-    # write subtables, remember which ones succeeded
-    written = String[]
-    for (kw, path) in MeasurementSets.subtables(main)
-        want(kw) || continue
-        sub = try
-            subtable(ms, kw)
-        catch e
-            @warn "skipping subtable $kw" err=e; continue
+        # MAIN public keywords: keep non-table entries, point table entries at
+        # the freshly written subtable dirs
+        src = keywords(main)
+        pub = Record()
+        for i in 1:length(src)
+            nm, v = src.names[i], src.values[i]
+            if v isa SubTable
+                nm in written || continue
+                push!(pub.names, nm); push!(pub.types, TpTable)
+                push!(pub.values, SubTable("././" * nm)); push!(pub.comments, src.comments[i])
+            else
+                push!(pub.names, nm); push!(pub.types, src.types[i])
+                push!(pub.values, v); push!(pub.comments, src.comments[i])
+            end
         end
-        try
-            srows = get(subtable_rows, kw, 1:nrow(sub))
-            srows === Colon() && (srows = 1:nrow(sub))
-            _copy_table(joinpath(dir, kw), sub, srows; storage, blocksize)
-            push!(written, kw)
-        catch e
-            @warn "skipping subtable $kw (unsupported source)" typeof(sub) err=e
-        end
+
+        _copy_table(dir, main, mrows; public=pub, storage, blocksize)
+        return dir
+    catch
+        rm(dir; recursive=true, force=true)
+        rethrow()
     end
-
-    # MAIN public keywords: keep non-table entries, point table entries at
-    # the freshly written subtable dirs
-    src = keywords(main)
-    pub = Record()
-    for i in 1:length(src)
-        nm, v = src.names[i], src.values[i]
-        if v isa SubTable
-            nm in written || continue
-            push!(pub.names, nm); push!(pub.types, TpTable)
-            push!(pub.values, SubTable("././" * nm)); push!(pub.comments, src.comments[i])
-        else
-            push!(pub.names, nm); push!(pub.types, src.types[i])
-            push!(pub.values, v); push!(pub.comments, src.comments[i])
-        end
-    end
-
-    _copy_table(dir, main, mrows; public=pub, storage, blocksize)
-    return dir
 end
 
 """
@@ -1163,46 +1187,62 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
+    # Phase 295 fix: the same gap as `write_ms` (see its own comment right
+    # above its matching `try`) -- `create_ms` writes 12 subtables THEN
+    # MAIN, each via its own `_write_table_core(joinpath(dir, tbl), ...)` /
+    # `_write_table_core(dir, ...)` call, none of which clean up `dir`
+    # itself on failure (each only ever cleans up the ONE subdirectory it
+    # was given, and only if IT created that subdirectory). A failure on
+    # any table after the first left every already-written subtable
+    # sitting under `dir` with no top-level cleanup. `create_ms`'s own
+    # `ispath(dir) && error(...)` guard above already guarantees `dir`
+    # didn't exist when this call started, so — like `write_ms` — any
+    # exception past this point means the whole thing this call created
+    # should go.
+    try
+        subrows = ["ANTENNA"=>nant, "DATA_DESCRIPTION"=>1, "FEED"=>nant,
+            "FIELD"=>1, "FLAG_CMD"=>1, "HISTORY"=>1, "OBSERVATION"=>1,
+            "POINTING"=>1, "POLARIZATION"=>1, "PROCESSOR"=>1,
+            "SPECTRAL_WINDOW"=>1, "STATE"=>1]
 
-    subrows = ["ANTENNA"=>nant, "DATA_DESCRIPTION"=>1, "FEED"=>nant,
-        "FIELD"=>1, "FLAG_CMD"=>1, "HISTORY"=>1, "OBSERVATION"=>1,
-        "POINTING"=>1, "POLARIZATION"=>1, "PROCESSOR"=>1,
-        "SPECTRAL_WINDOW"=>1, "STATE"=>1]
-
-    for (tbl, nr) in subrows
-        descs, data = _synth_table(tbl, nr, nchan, ncorr, nrec)
-        nr = Int(nr)
-        if tbl == "ANTENNA"
-            i = findfirst(c -> c.name == "NAME", descs)
-            i === nothing || (data[i] = ["ANT$(k-1)" for k in 1:nr])
+        for (tbl, nr) in subrows
+            descs, data = _synth_table(tbl, nr, nchan, ncorr, nrec)
+            nr = Int(nr)
+            if tbl == "ANTENNA"
+                i = findfirst(c -> c.name == "NAME", descs)
+                i === nothing || (data[i] = ["ANT$(k-1)" for k in 1:nr])
+            end
+            _write_table_core(joinpath(dir, tbl), descs, data; nrow=nr, endian=:little,
+                              storage, blocksize,
+                              tablename=tbl * "Desc", type=titlecase(replace(tbl, '_'=>' ')))
         end
-        _write_table_core(joinpath(dir, tbl), descs, data; nrow=nr, endian=:little,
-                          storage, blocksize,
-                          tablename=tbl * "Desc", type=titlecase(replace(tbl, '_'=>' ')))
-    end
 
-    # MAIN: DATA + FLAG + WEIGHT_SPECTRUM share one TiledShapeStMan hypercube
-    mdescs, mdata = _synth_table("MAIN", nrow, nchan, ncorr, nrec)
-    push!(mdescs, _mkdesc("DATA", TpComplex, VariableShape()))
-    push!(mdata, [zeros(ComplexF32, ncorr, nchan) for _ in 1:nrow])
-    push!(mdescs, _mkdesc("WEIGHT_SPECTRUM", TpFloat, VariableShape()))
-    push!(mdata, [zeros(Float32, ncorr, nchan) for _ in 1:nrow])
-    pub = Record()
-    push!(pub.names, "MS_VERSION"); push!(pub.types, TpFloat)
-    push!(pub.values, MS_VERSION); push!(pub.comments, "")
-    for (tbl, _) in subrows
-        push!(pub.names, tbl); push!(pub.types, TpTable)
-        push!(pub.values, SubTable("././" * tbl)); push!(pub.comments, "")
+        # MAIN: DATA + FLAG + WEIGHT_SPECTRUM share one TiledShapeStMan hypercube
+        mdescs, mdata = _synth_table("MAIN", nrow, nchan, ncorr, nrec)
+        push!(mdescs, _mkdesc("DATA", TpComplex, VariableShape()))
+        push!(mdata, [zeros(ComplexF32, ncorr, nchan) for _ in 1:nrow])
+        push!(mdescs, _mkdesc("WEIGHT_SPECTRUM", TpFloat, VariableShape()))
+        push!(mdata, [zeros(Float32, ncorr, nchan) for _ in 1:nrow])
+        pub = Record()
+        push!(pub.names, "MS_VERSION"); push!(pub.types, TpFloat)
+        push!(pub.values, MS_VERSION); push!(pub.comments, "")
+        for (tbl, _) in subrows
+            push!(pub.names, tbl); push!(pub.types, TpTable)
+            push!(pub.values, SubTable("././" * tbl)); push!(pub.comments, "")
+        end
+        # MAIN's scalar per-integration metadata goes through IncrementalStMan,
+        # as in a real MS
+        ismcols = Set(["TIME", "INTERVAL", "EXPOSURE", "TIME_CENTROID", "FEED1",
+            "FEED2", "FIELD_ID", "ARRAY_ID", "OBSERVATION_ID", "PROCESSOR_ID",
+            "SCAN_NUMBER", "STATE_ID"])
+        _write_table_core(dir, mdescs, mdata; nrow=nrow, endian=:little, public=pub,
+                          tsm=[["DATA", "FLAG", "WEIGHT_SPECTRUM"]],
+                          ism=intersect(ismcols, Set(c.name for c in mdescs)),
+                          storage, blocksize,
+                          tablename="MSDesc", type="Measurement Set")
+        return dir
+    catch
+        rm(dir; recursive=true, force=true)
+        rethrow()
     end
-    # MAIN's scalar per-integration metadata goes through IncrementalStMan,
-    # as in a real MS
-    ismcols = Set(["TIME", "INTERVAL", "EXPOSURE", "TIME_CENTROID", "FEED1",
-        "FEED2", "FIELD_ID", "ARRAY_ID", "OBSERVATION_ID", "PROCESSOR_ID",
-        "SCAN_NUMBER", "STATE_ID"])
-    _write_table_core(dir, mdescs, mdata; nrow=nrow, endian=:little, public=pub,
-                      tsm=[["DATA", "FLAG", "WEIGHT_SPECTRUM"]],
-                      ism=intersect(ismcols, Set(c.name for c in mdescs)),
-                      storage, blocksize,
-                      tablename="MSDesc", type="Measurement Set")
-    return dir
 end

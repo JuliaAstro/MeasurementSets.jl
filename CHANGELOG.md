@@ -9973,3 +9973,40 @@ behaviour (a double `removecolumn!` on a plain `EditTable` succeeds silently, wh
 own `removecolumn!` throws) and a remove-then-`addcolumn!` of the same name in one session (works
 correctly, a deliberate "replace a column" idiom) — both confirmed not to cause any real corruption
 or misleading state, left as-is.
+
+### Phase 295 — `src/tables/create.jl` sweep: `write_ms`/`create_ms` left a stray directory behind on a mid-write failure
+
+Full fresh read of the write path (`write_table`/`_write_table_core`, `copytable`/`_copy_table`/
+`_copy_table_cols`, `reference_copy`, `write_ms`/`copyms`, `create_ms`, the `_casatype_of`/
+`_normalize_desc`/`_infer_shape`/`_stamp_measinfo` helpers) — only ever touched piecemeal before by
+validation-focused phases (199, 202, 204, 205, the array-literal hazard in 210), never read start to
+finish in one pass.
+
+**Found and fixed**: `_write_table_core`'s own Phase-226 cleanup only ever removes a directory *it*
+created (`_dir_preexisted || rm(dir; ...)`) — correct for its own callers (`write_table`, `copytable`,
+`reference_copy`, none of which `mkpath` anything themselves before delegating to it). But `write_ms`
+and `create_ms` are different: both `mkpath(dir)` *themselves*, then make **several** subsequent
+`_write_table_core`/`_copy_table` calls into `dir` and its subdirectories (one per MS subtable, then
+MAIN, for `write_ms`; twelve subtables then MAIN, for `create_ms`). By the time either of those later
+calls reaches `_write_table_core`, `dir` already exists (they made it), so its own `_dir_preexisted`
+check correctly declines to remove it on failure — and neither `write_ms` nor `create_ms` had *any*
+top-level cleanup of their own. A genuine failure partway through (MAIN, for `write_ms`; any table
+after the first, for `create_ms`) left a stray, partially-written directory sitting at the caller's
+requested path, with no cleanup and no indication anything was left behind — the exact "claims to
+have failed but silently created state anyway" shape Phase 226 fixed for `_write_table_core` itself,
+never propagated up to its two top-level multi-table orchestrators.
+
+Live-reproduced for both: `create_ms(dir; nrow=-1)` (a public, deterministic failure partway through
+synthesising the standard subtables) left `dir` behind with several subtables already written;
+`write_ms(dst, ms)` after corrupting a source public keyword's *value* (leaving its declared type
+alone, so MAIN's own write — not a per-column read, which `_copy_table_cols` already tolerates with
+a warn-and-skip — hard-fails deep inside `write_table_files` → `write_record`) left `dst` behind with
+every subtable already written. Fixed by wrapping each function's whole body (after its own
+`ispath(dir) && error(...)` guard, which already establishes `dir` did not exist when the call
+started, so there's no "was it already there" case to preserve, unlike `_write_table_core`'s other
+callers) in a try/catch that unconditionally removes `dir` on any exception. `reference_copy`,
+`write_table`, and `copytable` were confirmed to need no change — none of them `mkpath` anything
+before delegating to `_write_table_core`, so its existing cleanup already covers them correctly.
+
+New tests in `test/writer_tests.jl`, both live-reproduced failure modes plus a regression check that
+a valid call is unaffected.

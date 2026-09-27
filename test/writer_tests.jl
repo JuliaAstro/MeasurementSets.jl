@@ -181,6 +181,55 @@ end
     @test column(readtable(dir5), "A")[:] == [1.0, 2.0]
 end
 
+# Phase 295 finding: Phase 226 fixed this exact "claims to have failed but
+# silently created state" shape inside `_write_table_core` itself -- but
+# `write_ms`/`create_ms`, the two multi-table orchestrators that ALSO
+# `mkpath(dir)` themselves before writing several tables into it, had no
+# top-level cleanup of their own. `_write_table_core`'s own cleanup only
+# ever removes a directory IT created (`_dir_preexisted || rm(...)`), and
+# by the time `write_ms`/`create_ms` call into it for a later table, `dir`
+# ALREADY exists (they made it) -- so that check correctly declines to
+# touch it, and nothing else ever did either. A genuine failure partway
+# through (MAIN, for `write_ms`; any table after the first, for
+# `create_ms`) left a stray, partially-written directory sitting at the
+# caller's requested path with no cleanup and no indication anything was
+# left behind -- live-reproduced for both. Fixed by wrapping each
+# function's whole body (after its own `ispath(dir) && error(...)` guard,
+# which already establishes `dir` did not exist beforehand) in a
+# try/catch that removes `dir` unconditionally on any exception.
+@testset "write_ms/create_ms: no stray directory on a mid-write failure (Phase 295)" begin
+    dir0 = mktempdir()
+    src = joinpath(dir0, "src.ms")
+    create_ms(src; nrow=5, nchan=2, ncorr=1, nant=2)
+    ms = MeasurementSet(src)
+
+    # write_ms: corrupt a public keyword's VALUE (leaving its declared
+    # TYPE alone) so MAIN's own write -- not a per-column read, which
+    # `_copy_table_cols` already tolerates with a warn+skip -- hard-fails
+    # deep inside `write_table_files` -> `write_record`.
+    main0 = getfield(ms, :data)
+    i = findfirst(==("MS_VERSION"), main0.desc.public.names)
+    main0.desc.public.values[i] = println     # nothing downstream can serialise a Function
+
+    dst = joinpath(dir0, "dst.ms")
+    @test_throws MethodError write_ms(dst, ms)
+    @test !ispath(dst)
+
+    # create_ms: an invalid nrow fails partway through synthesising the
+    # standard columns, after several subtables have already been written.
+    dst2 = joinpath(dir0, "bad.ms")
+    @test_throws Exception create_ms(dst2; nrow=-1)
+    @test !ispath(dst2)
+
+    # both are completely unaffected for a valid call
+    dst3 = joinpath(dir0, "ok.ms")
+    write_ms(dst3, MeasurementSet(src))
+    @test ispath(dst3) && nrow(readtable(dst3)) == 5
+    dst4 = joinpath(dir0, "ok2.ms")
+    create_ms(dst4; nrow=3, nchan=2, ncorr=1, nant=2)
+    @test ispath(dst4) && nrow(readtable(dst4)) == 3
+end
+
 @testset "copyms stamps a missing FLAG_CATEGORY CATEGORY keyword (Phase 147)" begin
     # `MeasurementSet`'s own C++ constructor (`MeasurementSet.cc:89-99`)
     # requires FLAG_CATEGORY to carry a `CATEGORY` keyword; real MSes
