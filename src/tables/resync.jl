@@ -59,6 +59,19 @@ _effective_precision(::GroupedTable) = nothing
 # stale parent's cached data managers are evicted.
 function resync(t::Union{RefTable,ConcatTable})
     is_stale(t) || return t
+    # An in-memory result (e.g. `query()`'s own RefTable, `path == ""` --
+    # Phase 22's design; a hand-built ConcatTable can be `path == ""` too,
+    # see test/edit_tests.jl) was never persisted, so there is nothing on
+    # disk for `readtable` to re-read. Before this check, resync silently
+    # went ahead and called `readtable("")`, which threw the confusing
+    # `ArgumentError: not a table directory: ` (an empty path after the
+    # colon, naming nothing) -- live-reproduced (Phase 291) -- AFTER
+    # already evicting the real parent's cache entries, a wasted side
+    # effect on a call that was always going to fail. Checked first now.
+    isempty(t.path) && throw(ArgumentError(
+        "resync: this $(nameof(typeof(t))) was never persisted (empty path) " *
+        "-- it has no on-disk copy of itself to re-read. resync its parent " *
+        "table directly, or persist it first (write_reftable/write_concattable)."))
     Base.@lock _REG_LOCK begin
         for p in (t isa RefTable ? (t.parent,) : t.parts)
             p isa Table && delete!(_DM_CACHE, p)

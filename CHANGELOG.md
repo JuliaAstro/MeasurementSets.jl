@@ -9855,3 +9855,25 @@ assigns the by-reference `recordType` there — for `ScalarKeywordSet`/`ArrayKey
 casacore's own `Int type;` local is genuinely **read uninitialized** (no assignment on that code path
 at all). There is no well-defined upstream value to match; our default is a deliberate, now-documented
 choice facing real casacore's own undefined behavior, not a divergence to chase.
+
+### Phase 291 — `resync` of an in-memory (unpersisted) `RefTable`/`ConcatTable` gave a confusing error
+
+Swept `src/tables/resync.jl` (the `is_stale`/`resync` coherent-re-read machinery — foundational to
+concurrent-access correctness, not the direct subject of the Phase 207-209 locking sweep, which
+focused on `io/lock.jl`). Also re-checked `src/datamanagers/datamanager.jl` (the DM name→type
+registries — confirmed no ambiguity between the pattern dict's five prefixes and the exact-name dict),
+`src/datamanagers/bytes.jl` (the shared low-level byte-reading primitives — confirmed the bit-unpack
+`n == 0` early-return already correctly guards the one out-of-bounds risk in that function, and the
+fixed-vs-undefined-shape fallback in `_empty_cell`'s callers is intentional), and `src/constants.jl`
+(the LSRK/LSRD/LGROUP/CMB velocity vectors independently cross-checked byte-for-byte against real
+casacore `measures/Measures/MeasTable.cc` source — exact matches). No further bug in any of those four.
+
+**Fixed**: `resync(t::Union{RefTable,ConcatTable})` for a stale but never-persisted `RefTable`/
+`ConcatTable` (e.g. `query()`'s own result, `path == ""` by Phase 22's design; a hand-built
+`ConcatTable` can be `path == ""` too) silently called `readtable("")`, which threw the confusing
+`ArgumentError: not a table directory: ` — live-reproduced. Worse, this happened *after* the parent's
+data-manager cache had already been evicted, a wasted side effect on a call that was always going to
+fail. Fixed to check for an empty path first and raise a clear, actionable error naming the actual
+problem; `is_stale` itself is unaffected and still correctly detects the underlying parent's change.
+New test in `test/reftable_tests.jl`, including a regression check that a genuinely persisted
+`RefTable` still resyncs correctly.

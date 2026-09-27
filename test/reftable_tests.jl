@@ -173,6 +173,38 @@ end
     @test resync(ct2) === ct2
 end
 
+@testset "resync — an in-memory (unpersisted) RefTable/ConcatTable errors clearly (Phase 291)" begin
+    # Before this fix, resync of a stale IN-MEMORY (path=="") RefTable/
+    # ConcatTable silently called readtable(""), throwing the confusing
+    # `ArgumentError: not a table directory: ` -- after already evicting
+    # the real parent's DM cache entries, a wasted side effect on a call
+    # guaranteed to fail.
+    d = mktempdir()
+    write_table(joinpath(d, "p"), "T", ["A" => collect(Int32, 1:3)]; nrow=3)
+    src = readtable(joinpath(d, "p"))
+
+    rt = query(src, "A > 1")           # in-memory RefTable, path == ""
+    @test rt.path == ""
+    @test !is_stale(rt)
+    edit(joinpath(d, "p")) do t; t["A"][:] = Int32[10, 20, 30]; end
+    @test is_stale(rt)                 # correctly detects the real parent's change
+    @test_throws ArgumentError resync(rt)
+
+    ct = ConcatTable("", MSv2.AbstractTable[readtable(joinpath(d, "p"))], [0, 3], String[], "", "", "")
+    @test !is_stale(ct)
+    edit(joinpath(d, "p")) do t; t["A"][:] = Int32[7, 8, 9]; end
+    @test is_stale(ct)
+    @test_throws ArgumentError resync(ct)
+
+    # regression: a genuinely persisted RefTable still resyncs fine
+    write_reftable(joinpath(d, "rt"), src, [2, 3])
+    prt = readtable(joinpath(d, "rt"))
+    edit(joinpath(d, "p")) do t; t["A"][:] = Int32[100, 200, 300]; end
+    @test is_stale(prt)
+    prt2 = resync(prt)
+    @test collect(column(prt2, "A")) == [200, 300]
+end
+
 @testset "RefTable / ConcatTable — edit is rejected" begin
     d = mktempdir()
     write_table(joinpath(d, "p0"), "T", ["A" => collect(Int32, 1:3)]; nrow=3)
