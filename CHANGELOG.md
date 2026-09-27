@@ -9790,3 +9790,90 @@ write-command fuzz and Phase 285's array-expression sweep. 1000 random queries f
   is matched.
 
 Kept as a seeded 200-query guard in `test/taql_fuzz_tests.jl`.
+
+### Phase 288 — a real MMS bug: `MeasurementSet`'s keyword-subtable concatenation only ever saw the first part
+
+Swept two previously-unswept source files, `src/schema.jl` (the standard-schema `validate` machinery)
+and `src/measurementset.jl` (the high-level `MeasurementSet` API, including its MMS/`ConcatTable`
+subtable path). `validate`'s keyword-mismatch, missing-keyword, and missing-subtable branches were
+completely untested (only "missing column" / "wrong type" had coverage) — confirmed all three correct
+and closed the gap with permanent tests; `stdcolumns` also gained direct coverage.
+
+**The real find, in `subtable(ms::MeasurementSet, name)`'s MMS branch** (Phase 14's own "optional
+MMS fidelity" feature — reading a keyword subtable, such as `POINTING` or `SYSCAL`, that a
+`ConcatTable`'s `subtabnames` marks as *per-part* rather than shared, by concatenating every part's
+own copy instead of just `parts[1]`'s): the loop `for p in data.parts, (kw, pth) in subtables(p);
+kw == name && (push!(subs, readtable(pth)); break); end` used `break` inside a **combined**
+multi-generator `for` statement — live-verified this exits the *entire* loop in Julia, not just the
+inner generator the way `break` does inside genuinely nested `for` blocks. So the very first part
+whose subtable list happened to contain a match for `name` ended the whole search, and every later
+part's contribution to the concatenated subtable was silently dropped — an MMS opened via
+`MeasurementSet` and accessed through `ms.POINTING` (or any other `subtabnames` entry) only ever saw
+one constituent SubMS's rows, not the true union. Live-reproduced with a 3-part synthetic MMS
+(`write_concattable(...; subtabnames=["POINTING"])`) before fixing: `nrow(subtable(ms,"POINTING"))`
+gave `1` (only the first part) instead of the correct `3`. Fixed by switching to genuinely nested
+`for` loops, where `break` only exits the innermost one; re-verified the same fixture now gives `3`,
+and that the ordinary (non-`subtabnames`, `parts[1]`-only) ANTENNA path and the subtable cache are
+both unaffected. New permanent regression test in `test/reftable_tests.jl`.
+
+### Phase 289 — `src/tables/interface.jl` sweep: a confusing raw error on an unknown row column
+
+Swept the Tables.jl integration layer (`src/tables/interface.jl`) — fully live-tested (no external
+oracle needed: correctness is against Julia's own `Tables.jl` contract) across every `AbstractTable`
+kind (`Table`, `RefTable`, `ConcatTable`, `GroupedTable`, `MeasurementSet`): schema resolution, column
+and row access by both name and index, whole-table iteration (incl. nested loops over the same table
+object — each `for r in t` builds its own fresh `Tables.rows(t)` state, confirmed independent), an
+empty (zero-row) table, and `Tables.columntable` round-tripping. All correct.
+
+**Fixed**: `Tables.getcolumn(row::CTDSRow, nm::Symbol)` for an unknown column name gave a raw,
+confusing `ArgumentError("invalid index: nothing of type Nothing")` — `findfirst` returning `nothing`
+fed straight into `p.cols[nothing]` with no check — instead of a clear message. `column(t, name)` /
+`columndesc(t, name)` already raise a plain `KeyError` for exactly this mistake; `Tables.getcolumn`
+on a *row* took a separate code path that never got the same guard. Fixed to raise the matching
+`KeyError`. New tests in `test/tables_tests.jl`, including row (not just column) access coverage for
+`RefTable` / `GroupedTable` / `ConcatTable`, which had none before this phase.
+
+### Phase 290 — `src/tables/record.jl` + `src/tables/writer.jl` sweep: no new bug, one real finding documented
+
+Fresh read + cross-check of the `Record`/`TableRecord`/keyword-set decoder (`record.jl`) and the
+`table.dat` metadata writer (`writer.jl`) against real casacore source
+(`tables/Tables/TableRecordRep.cc`, `casa/Containers/RecordRep.cc`). Every write/read pair checked
+(nested `TpRecord` fields, `SubTable` values, `_write_aipsarray`'s Bool bit-packing, the
+`storage=:multifile`/`:multihdf5` `ColumnSet` write branch, the dead `"ScalarRecord..."` classname
+branch mirroring a real casacore column kind this package has no construction path for) is either
+already solidly covered (`keywords_tests.jl`'s Phase 267 byte-exact `0x8D 0x05` Bool-array check +
+real-casacore cross-check; a direct live exercise of `storage=:multifile` confirmed its write path is
+genuinely covered elsewhere, just not in this phase's initial coverage subset) or confirmed genuinely
+unreachable through our own writer.
+
+**One real, previously-unexplained finding, documented rather than "fixed":** `read_keyset`'s
+old-style-format decoder (`ScalarKeywordSet`/`ArrayKeywordSet`, flagged since Phase 210 as untestable
+— no real fixture on this machine ever uses the pre-`TableRecord` format) leaves `rec.rectype` at its
+`Record()` default (`RECORD_VARIABLE`) for the Scalar/Array cases. Traced this against real casacore's
+own `TableRecordRep::getRecord` + `TableRecord::getRecord`: only the `TableKeywordSet` branch ever
+assigns the by-reference `recordType` there — for `ScalarKeywordSet`/`ArrayKeywordSet`, real
+casacore's own `Int type;` local is genuinely **read uninitialized** (no assignment on that code path
+at all). There is no well-defined upstream value to match; our default is a deliberate, now-documented
+choice facing real casacore's own undefined behavior, not a divergence to chase.
+
+### Phase 291 — `resync` of an in-memory (unpersisted) `RefTable`/`ConcatTable` gave a confusing error
+
+Swept `src/tables/resync.jl` (the `is_stale`/`resync` coherent-re-read machinery — foundational to
+concurrent-access correctness, not the direct subject of the Phase 207-209 locking sweep, which
+focused on `io/lock.jl`). Also re-checked `src/datamanagers/datamanager.jl` (the DM name→type
+registries — confirmed no ambiguity between the pattern dict's five prefixes and the exact-name dict),
+`src/datamanagers/bytes.jl` (the shared low-level byte-reading primitives — confirmed the bit-unpack
+`n == 0` early-return already correctly guards the one out-of-bounds risk in that function, and the
+fixed-vs-undefined-shape fallback in `_empty_cell`'s callers is intentional), and `src/constants.jl`
+(the LSRK/LSRD/LGROUP/CMB velocity vectors independently cross-checked byte-for-byte against real
+casacore `measures/Measures/MeasTable.cc` source — exact matches). No further bug in any of those four.
+
+**Fixed**: `resync(t::Union{RefTable,ConcatTable})` for a stale but never-persisted `RefTable`/
+`ConcatTable` (e.g. `query()`'s own result, `path == ""` by Phase 22's design; a hand-built
+`ConcatTable` can be `path == ""` too) silently called `readtable("")`, which threw the confusing
+`ArgumentError: not a table directory: ` — live-reproduced. Worse, this happened *after* the parent's
+data-manager cache had already been evicted, a wasted side effect on a call that was always going to
+fail. Fixed to check for an empty path first and raise a clear, actionable error naming the actual
+problem; `is_stale` itself is unaffected and still correctly detects the underlying parent's change.
+New test in `test/reftable_tests.jl`, including a regression check that a genuinely persisted
+`RefTable` still resyncs correctly.

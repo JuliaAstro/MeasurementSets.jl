@@ -106,6 +106,15 @@ function read_record(a::AipsIO)
         version = read_u32(a)
         kind = tp == "ScalarKeywordSet" ? 0 : tp == "ArrayKeywordSet" ? 1 : 2
         rec = read_keyset(a, version, kind)
+        # rec.rectype is left at its Record() default (RECORD_VARIABLE) for
+        # ScalarKeywordSet/ArrayKeywordSet -- confirmed against real
+        # casacore source (TableRecordRep::getRecord,
+        # tables/Tables/TableRecordRep.cc): only the TableKeywordSet branch
+        # ever assigns the (by-reference) recordType there; for these two,
+        # real casacore's own `Int type;` local is genuinely READ
+        # UNINITIALIZED (no assignment on that path at all) -- there is no
+        # well-defined upstream value to match. Our default is a deliberate,
+        # documented choice, not a divergence to chase (Phase 290).
         getend(a)
         return rec
     else

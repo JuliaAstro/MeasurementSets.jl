@@ -29,4 +29,32 @@
     issues = validate(bt; table="ANTENNA")
     @test any(contains("missing required column NAME"), issues)
     @test any(contains("type"), issues)
+
+    # keyword-value mismatch / missing-keyword / missing-subtable (Phase 288
+    # — a real, previously-untested-but-correct set of `validate` branches)
+    @test stdcolumns("MAIN") === stdtable("MAIN").columns
+
+    m = readtable(SAMPLE_MS)   # a fresh MAIN
+    _rebuild(desc) = MSv2.Table(m.path, m.type, m.subtype, m.readme, m.version,
+                                m.rows, m.endian, desc, m.managers, m.syncmod,
+                                m.lockpath, m.container, m.precision)
+    _drop_kw(pub, name) = (p = deepcopy(pub); i = findfirst(==(name), p.names);
+                           deleteat!(p.names, i); deleteat!(p.types, i);
+                           deleteat!(p.values, i); deleteat!(p.comments, i); p)
+
+    pub_wrong = deepcopy(m.desc.public)
+    pub_wrong.values[findfirst(==("MS_VERSION"), pub_wrong.names)] = 3.0f0
+    issues_kw = validate(_rebuild(MSv2.TableDesc(m.desc.name, m.desc.version,
+        m.desc.comment, pub_wrong, m.desc.private, m.desc.columns)); table="MAIN")
+    @test any(contains("keyword MS_VERSION = 3.0"), issues_kw)
+
+    issues_nokw = validate(_rebuild(MSv2.TableDesc(m.desc.name, m.desc.version,
+        m.desc.comment, _drop_kw(m.desc.public, "MS_VERSION"), m.desc.private,
+        m.desc.columns)); table="MAIN")
+    @test any(contains("missing required keyword MS_VERSION"), issues_nokw)
+
+    issues_nosub = validate(_rebuild(MSv2.TableDesc(m.desc.name, m.desc.version,
+        m.desc.comment, _drop_kw(m.desc.public, "ANTENNA"), m.desc.private,
+        m.desc.columns)); table="MAIN")
+    @test any(contains("missing required subtable ANTENNA"), issues_nosub)
 end

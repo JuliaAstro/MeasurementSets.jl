@@ -51,7 +51,9 @@ Tables.getcolumn(row::CTDSRow, i::Int) =
     getfield(row, :parent).cols[i][getfield(row, :i)]
 function Tables.getcolumn(row::CTDSRow, nm::Symbol)
     p = getfield(row, :parent)
-    p.cols[findfirst(==(nm), p.names)][getfield(row, :i)]
+    j = findfirst(==(nm), p.names)
+    j === nothing && throw(KeyError(nm))   # match column()/columndesc()'s own KeyError,
+    p.cols[j][getfield(row, :i)]           # not the confusing raw `getindex(_, nothing)`
 end
 
 # `for r in table`

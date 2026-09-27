@@ -43,8 +43,18 @@ function subtable(ms::MeasurementSet, name::String)
     # MMS: a keyword subtable listed in the ConcatTable is itself concatenated
     if data isa ConcatTable && name in data.subtabnames
         subs = AbstractTable[]
-        for p in data.parts, (kw, pth) in subtables(p)
-            kw == name && (push!(subs, readtable(pth)); break)
+        # NB: `break` inside a *combined* `for p in A, x in B` generator exits
+        # the WHOLE loop in Julia, not just the inner one (unlike separate
+        # nested `for` blocks) — a real bug here until Phase 288: it made
+        # this stop at the FIRST part with a match, silently dropping every
+        # later part's contribution instead of concatenating all of them.
+        for p in data.parts
+            for (kw, pth) in subtables(p)
+                if kw == name
+                    push!(subs, readtable(pth))
+                    break
+                end
+            end
         end
         isempty(subs) && throw(KeyError(name))
         off = zeros(Int, length(subs) + 1)
