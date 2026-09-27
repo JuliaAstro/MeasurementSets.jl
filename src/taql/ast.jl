@@ -173,7 +173,16 @@ end
 # there. `AND`/`OR` stay scalar (short-circuit); `NOT` broadcasts so
 # `NOT FLAG` / `V[!FLAG]` negate an array-cell mask elementwise.
 _bcast(f, x) = x isa AbstractArray ? f.(x) : f(x)
-_bcast(f, x, y) = (x isa AbstractArray || y isa AbstractArray) ? f.(x, y) : f(x, y)
+# two array operands must have the SAME shape (real TaQL: "ArrayMath function
+# +: array shapes mismatch" -- no implicit broadcasting; Phase 285)
+function _bcast(f, x, y)
+    if x isa AbstractArray && y isa AbstractArray
+        size(x) == size(y) || throw(ArgumentError(
+            "TaQL-lite: array operands have different shapes $(size(x)) and $(size(y))"))
+        return f.(x, y)
+    end
+    return (x isa AbstractArray || y isa AbstractArray) ? f.(x, y) : f(x, y)
+end
 
 # Materialise a (lazy) *scalar* column once, so a WHERE / group /
 # aggregate loop indexes a dense `Vector` per row rather than re-decoding
@@ -256,12 +265,26 @@ _tql_boolish(::Missing) = missing
 _tql_boolish(x) = throw(ArgumentError(
     "TaQL-lite: an AND/OR operand must evaluate to Bool, got $(typeof(x))"))
 
+# A Bool ARRAY operand (Phase 285, live-verified against real TaQL --
+# found by the array-expression fuzz; Phase 229's Bool/Missing-only
+# validation had regressed this): `AND`/`OR` combine elementwise, a
+# scalar operand broadcasting over the array.
+# a MASKED Bool operand keeps a (unioned) mask: `ntrue((A[A>5] > 0) AND X)`
+# counts only the unmasked elements (live-verified).
+_tql_mask_combine(f, a, b) = TQLMArray(f(_unwrap_marray(a), _unwrap_marray(b)),
+    a isa TQLMArray && b isa TQLMArray ? a.mask .| b.mask : copy((a isa TQLMArray ? a : b).mask))
+_tql_arrbool(f, a, b) = (a isa AbstractArray && b isa AbstractArray && size(a) != size(b)) ?
+    throw(ArgumentError("TaQL-lite: array operands have different shapes $(size(a)) and $(size(b))")) : broadcast(f, a, b)
 function _tql_and(a, b)
+    (a isa TQLMArray || b isa TQLMArray) && return _tql_mask_combine(_tql_and, a, b)
+    (a isa AbstractArray || b isa AbstractArray) && return _tql_arrbool(_tql_and, a, b)
     va, vb = _tql_boolish(a), _tql_boolish(b)
     return (va === false || vb === false) ? false :
            (va === true && vb === true) ? true : missing
 end
 function _tql_or(a, b)
+    (a isa TQLMArray || b isa TQLMArray) && return _tql_mask_combine(_tql_or, a, b)
+    (a isa AbstractArray || b isa AbstractArray) && return _tql_arrbool(_tql_or, a, b)
     va, vb = _tql_boolish(a), _tql_boolish(b)
     return (va === true || vb === true) ? true :
            (va === false && vb === false) ? false : missing
@@ -337,6 +360,20 @@ function _tql_do_index(arr, axes, ev)
     # condition is FALSE survive) -- a Phase 190-continuation fix; an
     # earlier phase had this backwards, negating the condition instead
     # of using it directly).
+    if arr isa TQLMArray
+        # indexing a MASKED array (Phase 285; live-verified): a Bool subscript
+        # REPLACES the mask (it does not combine with the existing one); an
+        # integer/slice subscript selects data and mask alike, an all-integer
+        # one giving the bare element and any other keeping the rank.
+        if length(axes) == 1
+            m = _as_mask(axes, ev)
+            m !== nothing && return TQLMArray(arr.data, BitArray(collect(m)))
+        end
+        idx = _tql_index_tuple(arr.data, axes, ev)
+        all(i -> i isa Integer, idx) && return arr.data[idx...]
+        rng = map(i -> i isa Integer ? (i:i) : i, idx)
+        return TQLMArray(arr.data[rng...], BitArray(arr.mask[rng...]))
+    end
     if length(axes) == 1
         m = _as_mask(axes, ev)
         m !== nothing && return TQLMArray(collect(arr), BitArray(collect(m)))

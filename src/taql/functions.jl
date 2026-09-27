@@ -16,7 +16,22 @@ _ew(f) = x -> _bcast(f, x)
 _sew(f) = (x, args...) -> x isa AbstractArray ? map(e -> f(e, args...), x) : f(x, args...)
 _ew2(f) = (x, y) -> _bcast(f, x, y)
 # reduction: a scalar arg is wrapped in a 1-tuple so `f` still applies
-_red(f) = x -> f(x isa TQLMArray ? _mvalid(x) : x isa AbstractArray ? x : (x,))
+# Reductions skip masked elements; over a FULLY masked array real TaQL (live-
+# verified, Phase 285) gives 0 -- `0.0` for the floating-point reductions
+# (`e0 = :float`), `zero(eltype)` for sum/product/min/max/sumsqr (`:elt`) --
+# not NaN / an error; the Bool counters (`any`/`all`/`ntrue`/`nfalse`) keep
+# their ordinary empty-set values (`e0 = :none`).
+function _red(f, e0::Symbol = :none)
+    x -> begin
+        if x isa TQLMArray
+            v = _mvalid(x)
+            (isempty(v) && e0 !== :none) && return e0 === :elt ? zero(eltype(x.data)) : 0.0
+            f(v)
+        else
+            f(x isa AbstractArray ? x : (x,))
+        end
+    end
+end
 
 # `min(x,y)`/`max(x,y)` (`minFUNC`/`maxFUNC`, `ExprFuncNode.cc:899-921`)
 # compare a COMPLEX pair by magnitude (`Complex`/`DComplex`'s own
@@ -34,7 +49,7 @@ function _tql_max2(a, b)
     return max(a, b)
 end
 
-_tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y))(x))
+_tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y), :float)(x))
 
 # `avdev()` (`arravdevFUNC`, `casa/Arrays/ArrayMath.tcc:1022-1043`):
 # the mean ABSOLUTE deviation from the mean, `mean(|xᵢ - mean(x)|)`
@@ -47,7 +62,7 @@ _tql_rms(x) = sqrt(_red(y -> sum(abs2, y) / length(y))(x))
 # checking the surrounding functions in `TableParseFunc.cc`'s name
 # table once one sibling turned out to be absent. Live-verified:
 # `avdev(1:8) == 2.0`, matching a hand computation exactly.
-_tql_avdev(x) = _red(y -> Statistics.mean(abs.(y .- Statistics.mean(y))))(x)
+_tql_avdev(x) = _red(y -> Statistics.mean(abs.(y .- Statistics.mean(y))), :float)(x)
 # `nelements()`/`count()` on a masked array is mask-AGNOSTIC in real
 # casacore -- live-verified: `nelements(A[A>3])` for an 8-element `A`
 # is `8`, not the unmasked count -- so this deliberately ignores
@@ -81,7 +96,7 @@ _tql_shape(x) = x isa TQLMArray ? collect(Int, size(x.data)) :
 # `boxedsumsqr(1:8,[2])[1] == 5.0`, `gsumsqr` of the group `[1,2]` is
 # `5.0`, and `sumsqr([1+1im, 2+0im]) == 4.0+2.0im ==
 # sum([1+1im,2+0im].^2)` (ordinary complex square, not magnitude).
-_tql_sumsqr(x) = _red(y -> sum(v -> v^2, y))(x)
+_tql_sumsqr(x) = _red(y -> sum(v -> v^2, y), :elt)(x)
 _tql_gsumsqr(v) = sum(x -> x^2, v)
 
 # casacore's `ltrim()`/`rtrim()` (`leadingWS`/`trailingWS` regexes,
@@ -452,23 +467,26 @@ end
 #       doesn't divide evenly -- confirmed against `boxedArrayMath`,
 #       `.tcc:1021-1053` -- no edge/fill concept here, unlike `running*`).
 #
-# `hwidth`/`bwidth` is a scalar (same width on every axis) or an array
-# literal (one width per axis, `ndims(arr)` elements). Masked-array
-# (`TQLMArray`) input is not supported -- pass `arraydata(...)` first.
-_require_array(x) = x isa AbstractArray ? x : throw(ArgumentError(
+# `hwidth`/`bwidth` is a per-axis array literal; a scalar means the FIRST axis
+# only (see `_tql_window_widths`). A masked-array input reduces only its
+# unmasked elements (see the `TQLMArray` methods below).
+_require_array(x) = (x isa AbstractArray || x isa TQLMArray) ? x : throw(ArgumentError(
     "TaQL-lite: running*/boxed* need an array-valued first argument"))
 
-function _tql_window_widths(w, nd::Int)
-    ws = w isa AbstractArray ? Int.(w) : fill(Int(w), nd)
-    length(ws) == nd || throw(ArgumentError(
-        "TaQL-lite: running*/boxed* window width must be a scalar or a " *
-        "$nd-element array (one per axis)"))
-    ws
+# Real TaQL (live-verified, Phase 285): the width is ALWAYS treated as a
+# per-axis array -- a scalar is a one-element array, so it applies to the
+# FIRST axis only; an array shorter than the array's rank is padded with
+# `pad` (0 half-width = no window for `running*`, 1 = unit bins for
+# `boxed*`) and a longer one is truncated.
+function _tql_window_widths(w, nd::Int, pad::Int)
+    ws = w isa AbstractArray ? Int.(vec(w)) : Int[Int(w)]
+    length(ws) >= nd ? ws[1:nd] : vcat(ws, fill(pad, nd - length(ws)))
 end
 
 function _running_reduce(f, T::Type, arr::AbstractArray, hw)
     nd = ndims(arr)
-    h = _tql_window_widths(hw, nd)
+    h = _tql_window_widths(hw, nd, 0)
+    any(<(0), h) && throw(ArgumentError("TaQL-lite: running* window half-width must be >= 0"))
     sz = size(arr)
     out = zeros(T, sz)                    # edges stay `zero(T)` (fillEdge=true)
     lo = ntuple(d -> h[d] + 1, nd)
@@ -483,8 +501,9 @@ end
 
 function _boxed_reduce(f, T::Type, arr::AbstractArray, bw)
     nd = ndims(arr)
-    b = _tql_window_widths(bw, nd)
     sz = size(arr)
+    b = _tql_window_widths(bw, nd, 1)
+    b = [b[d] <= 0 ? max(sz[d], 1) : b[d] for d in 1:nd]      # width <= 0 = the whole axis
     osz = ntuple(d -> cld(sz[d], b[d]), nd)
     out = Array{T}(undef, osz)
     for oidx in CartesianIndices(osz)
@@ -492,6 +511,45 @@ function _boxed_reduce(f, T::Type, arr::AbstractArray, bw)
         out[oidx] = f(vec(view(arr, rng...)))
     end
     out
+end
+
+_elt(a::TQLMArray) = eltype(a.data)
+_elt(a) = eltype(a)
+
+# A MASKED input (Phase 285, live-verified against real TaQL): the window /
+# bin reduces only the UNMASKED elements, and the result is itself a masked
+# array -- an element is masked when its window / bin holds no unmasked
+# element (for `running*` also every edge position), with `zero(T)` data.
+function _running_reduce(f, T::Type, m::TQLMArray, hw)
+    arr = m.data; nd = ndims(arr)
+    h = _tql_window_widths(hw, nd, 0)
+    any(<(0), h) && throw(ArgumentError("TaQL-lite: running* window half-width must be >= 0"))
+    sz = size(arr)
+    out = zeros(T, sz); omask = trues(sz)
+    lo = ntuple(d -> h[d] + 1, nd); hi = ntuple(d -> sz[d] - h[d], nd)
+    any(lo[d] > hi[d] for d in 1:nd) && return TQLMArray(out, omask)
+    for idx in CartesianIndices(ntuple(d -> lo[d]:hi[d], nd))
+        rng = ntuple(d -> (idx[d] - h[d]):(idx[d] + h[d]), nd)
+        v = vec(view(arr, rng...))[.!vec(view(m.mask, rng...))]
+        isempty(v) && continue
+        out[idx] = f(v); omask[idx] = false
+    end
+    TQLMArray(out, omask)
+end
+
+function _boxed_reduce(f, T::Type, m::TQLMArray, bw)
+    arr = m.data; nd = ndims(arr); sz = size(arr)
+    b = _tql_window_widths(bw, nd, 1)
+    b = [b[d] <= 0 ? max(sz[d], 1) : b[d] for d in 1:nd]
+    osz = ntuple(d -> cld(sz[d], b[d]), nd)
+    out = zeros(T, osz); omask = trues(osz)
+    for oidx in CartesianIndices(osz)
+        rng = ntuple(d -> ((oidx[d] - 1) * b[d] + 1):min(sz[d], oidx[d] * b[d]), nd)
+        v = vec(view(arr, rng...))[.!vec(view(m.mask, rng...))]
+        isempty(v) && continue
+        out[oidx] = f(v); omask[oidx] = false
+    end
+    TQLMArray(out, omask)
 end
 
 # casacore's plain `median()` (`arrmedianFUNC` -> `casa/Arrays/
@@ -658,13 +716,13 @@ _tql_nearabs(a, b, tol::Real) = abs(b - a) <= tol
 
 _running_avg(x, w) = (a = _require_array(x); _running_reduce(Statistics.mean, Float64, a, w))
 _running_med(x, w) = (a = _require_array(x); _running_reduce(_tql_median_lo, Float64, a, w))
-_running_min(x, w) = (a = _require_array(x); _running_reduce(minimum, eltype(a), a, w))
-_running_max(x, w) = (a = _require_array(x); _running_reduce(maximum, eltype(a), a, w))
+_running_min(x, w) = (a = _require_array(x); _running_reduce(minimum, _elt(a), a, w))
+_running_max(x, w) = (a = _require_array(x); _running_reduce(maximum, _elt(a), a, w))
 _running_var(x, w) = (a = _require_array(x);
                       _running_reduce(y -> Statistics.var(y; corrected = false), Float64, a, w))
 _running_std(x, w) = (a = _require_array(x);
                       _running_reduce(y -> Statistics.std(y; corrected = false), Float64, a, w))
-_running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, w))
+_running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, _elt(a), a, w))
 
 # `runningavdev`/`runningrms` (`runavdevFUNC`/`runrmsFUNC`,
 # `TableParseFunc.cc:429,437`) -- two more missing siblings found the
@@ -680,7 +738,7 @@ _running_sum(x, w) = (a = _require_array(x); _running_reduce(sum, eltype(a), a, 
 # computation over the same 5-element window exactly.
 _running_avdev(x, w) = (a = _require_array(x); _running_reduce(_tql_avdev, Float64, a, w))
 _running_rms(x, w) = (a = _require_array(x); _running_reduce(_tql_rms, Float64, a, w))
-_running_sumsqr(x, w) = (a = _require_array(x); _running_reduce(_tql_sumsqr, eltype(a), a, w))
+_running_sumsqr(x, w) = (a = _require_array(x); _running_reduce(_tql_sumsqr, _elt(a), a, w))
 
 # Phase 190 -- completing the `running*`/`boxed*` family: a full diff
 # of `TableParseFunc.cc`'s `funcName == "running..."`/`"boxed..."`
@@ -708,7 +766,7 @@ _running_sumsqr(x, w) = (a = _require_array(x); _running_reduce(_tql_sumsqr, elt
 # `_tql_fractile([1,2,3,4,5],0.5)` exactly), `runningany`/`runningall`/
 # `runningntrue`/`runningnfalse` on a `[T,T,F,T,T,F,T,T]` array all
 # match a hand count.
-_running_product(x, w) = (a = _require_array(x); _running_reduce(prod, eltype(a), a, w))
+_running_product(x, w) = (a = _require_array(x); _running_reduce(prod, _elt(a), a, w))
 _running_fractile(x, frac, w) = (a = _require_array(x);
     _running_reduce(y -> _tql_fractile(y, frac), Float64, a, w))
 _running_any(x, w) = (a = _require_array(x); _running_reduce(any, Bool, a, w))
@@ -749,17 +807,17 @@ _running_sstd(x, w) = (a = _require_array(x);
 
 _boxed_avg(x, w) = (a = _require_array(x); _boxed_reduce(Statistics.mean, Float64, a, w))
 _boxed_med(x, w) = (a = _require_array(x); _boxed_reduce(_tql_median_lo, Float64, a, w))
-_boxed_min(x, w) = (a = _require_array(x); _boxed_reduce(minimum, eltype(a), a, w))
-_boxed_max(x, w) = (a = _require_array(x); _boxed_reduce(maximum, eltype(a), a, w))
+_boxed_min(x, w) = (a = _require_array(x); _boxed_reduce(minimum, _elt(a), a, w))
+_boxed_max(x, w) = (a = _require_array(x); _boxed_reduce(maximum, _elt(a), a, w))
 _boxed_var(x, w) = (a = _require_array(x);
                     _boxed_reduce(y -> Statistics.var(y; corrected = false), Float64, a, w))
 _boxed_std(x, w) = (a = _require_array(x);
                     _boxed_reduce(y -> Statistics.std(y; corrected = false), Float64, a, w))
-_boxed_sum(x, w) = (a = _require_array(x); _boxed_reduce(sum, eltype(a), a, w))
+_boxed_sum(x, w) = (a = _require_array(x); _boxed_reduce(sum, _elt(a), a, w))
 _boxed_avdev(x, w) = (a = _require_array(x); _boxed_reduce(_tql_avdev, Float64, a, w))
 _boxed_rms(x, w) = (a = _require_array(x); _boxed_reduce(_tql_rms, Float64, a, w))
-_boxed_sumsqr(x, w) = (a = _require_array(x); _boxed_reduce(_tql_sumsqr, eltype(a), a, w))
-_boxed_product(x, w) = (a = _require_array(x); _boxed_reduce(prod, eltype(a), a, w))
+_boxed_sumsqr(x, w) = (a = _require_array(x); _boxed_reduce(_tql_sumsqr, _elt(a), a, w))
+_boxed_product(x, w) = (a = _require_array(x); _boxed_reduce(prod, _elt(a), a, w))
 _boxed_fractile(x, frac, w) = (a = _require_array(x);
     _boxed_reduce(y -> _tql_fractile(y, frac), Float64, a, w))
 _boxed_any(x, w) = (a = _require_array(x); _boxed_reduce(any, Bool, a, w))
@@ -780,6 +838,7 @@ _boxed_sstd(x, w) = (a = _require_array(x);
 # 3-valued-logic convention used throughout the rest of the WHERE/HAVING/
 # JOIN evaluation (`_tql_and`/`_tql_or`/`_tql_truthy`, `ast.jl`).
 _tql_iif(cond, a, b) = cond === missing ? missing : ifelse(cond, a, b)
+_tql_iif(cond::AbstractArray, a, b) = ifelse.(cond, a, b)      # elementwise (Phase 285)
 
 # name => (callable-over-arg-values, allowed arg count).  `min`/`max` and
 # `angdist` are arity-overloaded and handled in `_make_func`, not here.
@@ -821,8 +880,8 @@ _tql_bool(x) = x isa AbstractArray ? map(_tql_bool, x) : x != 0
 # remain); a full collapse gives a 1-element vector; axis 0 / negative /
 # duplicate / non-integer axes are errors. `variances`/`stddevs` are the
 # population forms (`sample*` for n-1); `medians`/`fractiles` never average.
-function _tql_axcollapse(f, x, axes...)
-    x isa AbstractArray || throw(ArgumentError(
+function _tql_axcollapse(f, x, axes...; emp = nothing)
+    (x isa AbstractArray || x isa TQLMArray) || throw(ArgumentError(
         "TaQL-lite: an axis-collapse function (`sums`, `means`, ...) needs an array cell"))
     ax = Int[]
     for a in axes
@@ -837,23 +896,40 @@ function _tql_axcollapse(f, x, axes...)
     isempty(ax) && throw(ArgumentError("TaQL-lite: an axis-collapse function needs at least one axis"))
     all(>=(1), ax) || throw(ArgumentError("TaQL-lite: axes are 1-based (got $(ax))"))
     allunique(ax) || throw(ArgumentError("TaQL-lite: duplicate axes in $(ax)"))
-    nd = ndims(x)
+    masked = x isa TQLMArray
+    xd = masked ? x.data : x
+    nd = ndims(xd)
     ax = sort!(filter(<=(nd), ax))
     isempty(ax) && return x
     keep = [d for d in 1:nd if !(d in ax)]
-    isempty(keep) && return [f(vec(x))]
-    P = permutedims(x, vcat(keep, ax))
-    ksz = size(P)[1:length(keep)]
-    r = reshape(P, prod(ksz), :)
-    out = [f(@view r[i, :]) for i in 1:size(r, 1)]
-    return reshape(out, ksz...)
+    perm = vcat(keep, ax)
+    ksz = isempty(keep) ? (1,) : size(xd)[keep]
+    P = reshape(permutedims(xd, perm), prod(ksz), :)
+    if !masked
+        isempty(keep) && return [f(vec(xd))]
+        return reshape([f(@view P[i, :]) for i in 1:size(P, 1)], ksz...)
+    end
+    # masked input: reduce the unmasked elements of each slice; a slice with
+    # none is masked with a zero value (`emp === nothing`) -- or, for the
+    # Bool counters, a fixed unmasked value `emp` (live-verified)
+    PM = reshape(permutedims(x.mask, perm), prod(ksz), :)
+    out = Any[]; om = Bool[]
+    for i in 1:size(P, 1)
+        v = P[i, :][.!PM[i, :]]
+        if isempty(v)
+            push!(out, emp === nothing ? zero(eltype(xd)) : emp); push!(om, emp === nothing)
+        else
+            push!(out, f(v)); push!(om, false)
+        end
+    end
+    return TQLMArray(reshape(identity.(out), ksz...), BitArray(reshape(om, ksz...)))
 end
 _tql_var0(v) = Statistics.var(v; corrected=false)
 _tql_std0(v) = Statistics.std(v; corrected=false)
 _tql_avdev1(v) = Statistics.mean(abs.(v .- Statistics.mean(v)))
 _tql_rms1(v) = sqrt(sum(abs2, v) / length(v))
 _tql_sumsqr1(v) = sum(y -> y^2, v)
-_tql_axfn(f) = (x, axes...) -> _tql_axcollapse(f, x, axes...)
+_tql_axfn(f; emp = nothing) = (x, axes...) -> _tql_axcollapse(f, x, axes...; emp)
 
 # ---- Phase 251: array-reshaping functions (live-probed vs real TaQL) ----
 # `transpose` reverses ALL axes; `reversearray(arr[, axes...])` reverses the
@@ -882,7 +958,12 @@ function _tql_intlist(args, who; min=0)
     all(>=(min), out) || throw(ArgumentError("TaQL-lite: `$who`: values must be >= $min (got $out)"))
     return out
 end
+# shape-changing functions apply to a masked array's data and mask alike
+# (Phase 285; live-verified): `f` is the plain-array version.
+_tql_maskwise(f, x::TQLMArray, args...) = TQLMArray(f(x.data, args...), BitArray(f(x.mask, args...)))
+_tql_transpose(x::TQLMArray) = _tql_maskwise(_tql_transpose, x)
 _tql_transpose(x) = (a = _tql_arr(x, "transpose"); ndims(a) <= 1 ? collect(a) : permutedims(a, ndims(a):-1:1))
+_tql_reversearray(x::TQLMArray, axes...) = _tql_maskwise(_tql_reversearray, x, axes...)
 function _tql_reversearray(x, axes...)
     a = _tql_arr(x, "reversearray")
     isempty(axes) && return collect(reverse(a; dims=Tuple(1:ndims(a))))
@@ -892,6 +973,8 @@ function _tql_reversearray(x, axes...)
     odd = [d for d in 1:ndims(a) if isodd(count(==(d), ax))]
     isempty(odd) ? collect(a) : collect(reverse(a; dims=Tuple(odd)))
 end
+# flattening a masked array keeps only its UNMASKED elements (live-verified)
+_tql_flatten(x::TQLMArray) = _mvalid(x)
 _tql_flatten(x) = vec(collect(_tql_arr(x, "flatten")))
 function _tql_array(v, shape...)
     # the shape is EITHER one array `[2,3]` OR several scalars `2, 3` (not mixed)
@@ -905,8 +988,14 @@ function _tql_array(v, shape...)
     (isempty(d) && n > 0) && throw(ArgumentError("TaQL-lite: `array`: cannot fill a shape from an empty array"))
     return reshape([d[mod1(i, length(d))] for i in 1:n], sh...)
 end
+# `resize(arr, [n1, n2, ...])`: the shape is exactly ONE integer array
+# (live-verified: `resize(A, 2, 2)` and `resize(A, 3)` are errors); a masked
+# input keeps its mask, the padding being unmasked zeros.
+_tql_resize(x::TQLMArray, shape...) = TQLMArray(_tql_resize(x.data, shape...), BitArray(_tql_resize(x.mask, shape...)))
 function _tql_resize(x, shape...)
     a = _tql_arr(x, "resize")
+    (length(shape) == 1 && shape[1] isa AbstractArray) || throw(ArgumentError(
+        "TaQL-lite: `resize(arr, shape)` takes the shape as one integer array"))
     sh = _tql_intlist(shape, "resize"; min=0)
     isempty(sh) && throw(ArgumentError("TaQL-lite: `resize(arr, shape)` needs a shape"))
     out = zeros(eltype(a), sh...)
@@ -926,7 +1015,7 @@ function _tql_diagonals(x, first=1)
     n = size(a, 1); rest = size(a)[3:end]
     return reshape([a[i, i, I] for I in CartesianIndices(rest) for i in 1:n], n, rest...)
 end
-_tql_nullarray(x) = similar(_tql_arr(x, "nullarray"), 0)
+_tql_nullarray(x) = similar(_tql_arr(x isa TQLMArray ? x.data : x, "nullarray"), 0)
 _tql_isdefined(x) = !(x isa AbstractArray && isempty(x))
 
 const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
@@ -969,7 +1058,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "pow" => (_ew2(_tql_pow), 2:2), "atan2" => (_ew2((y, x) -> atan(y, x)), 2:2),
     "fmod" => (_ew2(rem), 2:2),
     # --- array-cell reductions ---
-    "sum" => (_red(sum), 1:1), "product" => (_red(prod), 1:1),
+    "sum" => (_red(sum, :elt), 1:1), "product" => (_red(prod, :elt), 1:1),
     "sums" => (_tql_axfn(sum), 2:8), "products" => (_tql_axfn(prod), 2:8),
     "means" => (_tql_axfn(Statistics.mean), 2:8), "avgs" => (_tql_axfn(Statistics.mean), 2:8),
     "mins" => (_tql_axfn(minimum), 2:8), "maxs" => (_tql_axfn(maximum), 2:8),
@@ -978,8 +1067,8 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "samplevariances" => (_tql_axfn(Statistics.var), 2:8), "samplestddevs" => (_tql_axfn(Statistics.std), 2:8),
     "avdevs" => (_tql_axfn(_tql_avdev1), 2:8), "rmss" => (_tql_axfn(_tql_rms1), 2:8),
     "sumsqrs" => (_tql_axfn(_tql_sumsqr1), 2:8), "sumsquares" => (_tql_axfn(_tql_sumsqr1), 2:8),
-    "anys" => (_tql_axfn(any), 2:8), "alls" => (_tql_axfn(all), 2:8),
-    "ntrues" => (_tql_axfn(v -> count(identity, v)), 2:8), "nfalses" => (_tql_axfn(v -> count(!, v)), 2:8),
+    "anys" => (_tql_axfn(any; emp = false), 2:8), "alls" => (_tql_axfn(all; emp = false), 2:8),
+    "ntrues" => (_tql_axfn(v -> count(identity, v); emp = 0), 2:8), "nfalses" => (_tql_axfn(v -> count(!, v); emp = 0), 2:8),
     "fractiles" => ((x, fr, axes...) -> _tql_axcollapse(v -> _tql_fractile(v, fr), x, axes...), 3:9),
     "transpose" => (_tql_transpose, 1:1), "reversearray" => (_tql_reversearray, 1:8),
     "flatten" => (_tql_flatten, 1:1), "arrayflatten" => (_tql_flatten, 1:1),
@@ -988,11 +1077,11 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "nullarray" => (_tql_nullarray, 1:1), "isdefined" => (_tql_isdefined, 1:1),
     "isnull" => (x -> !_tql_isdefined(x), 1:1),
     "sumsqr" => (_tql_sumsqr, 1:1), "sumsquare" => (_tql_sumsqr, 1:1),
-    "mean" => (_red(Statistics.mean), 1:1), "avg" => (_red(Statistics.mean), 1:1),
-    "median" => (_red(_tql_median), 1:1),
-    "fractile" => ((x, fr) -> _tql_fractile(x isa AbstractArray ? x : (x,), fr), 2:2),
-    "variance" => (_red(x -> Statistics.var(x; corrected=false)), 1:1),
-    "stddev" => (_red(x -> Statistics.std(x; corrected=false)), 1:1),
+    "mean" => (_red(Statistics.mean, :float), 1:1), "avg" => (_red(Statistics.mean, :float), 1:1),
+    "median" => (_red(_tql_median, :float), 1:1),
+    "fractile" => ((x, fr) -> _red(v -> _tql_fractile(v, fr), :float)(x), 2:2),
+    "variance" => (_red(x -> Statistics.var(x; corrected=false), :float), 1:1),
+    "stddev" => (_red(x -> Statistics.std(x; corrected=false), :float), 1:1),
     "rms" => (_tql_rms, 1:1), "avdev" => (_tql_avdev, 1:1),
     "any" => (_red(any), 1:1), "all" => (_red(all), 1:1),
     "ntrue" => (_red(x -> count(identity, x)), 1:1),
@@ -1796,7 +1885,7 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
     elseif name == "min" || name == "max"
         n in 1:2 || throw(ArgumentError("TaQL-lite: $name() takes 1 or 2 arguments in \"$src\""))
         base = name == "min" ? _tql_min2 : _tql_max2
-        fn = n == 1 ? _red(x -> (name == "min" ? minimum : maximum)(x)) : _ew2(base)
+        fn = n == 1 ? _red(x -> (name == "min" ? minimum : maximum)(x), :elt) : _ew2(base)
         return TQLFunc(fn, args)
     elseif name in ("angdist", "angdistx", "angulardistance", "angulardistancex")
         n in (2, 4) || throw(ArgumentError(

@@ -155,3 +155,96 @@ end
         @test all(==(0.0), g.V) && all(==(0.0), g.S)
     end
 end
+
+# Phase 285: seeded random ARRAY-expression differential fuzz against real TaQL.  Random
+# expressions over 3x4 array cells (arithmetic, comparisons, AND/OR/NOT/iif on arrays, axis-
+# collapse reductions, transpose/reversearray/resize, running*/boxed* windows, slices, and
+# masked arrays via `arr[boolexpr]`/`replacemasked`) are compared by computed value.  A run of
+# ~5000 expressions found the Phase 285 divergences (Bool-array AND/OR, scalar window widths,
+# masked running*/boxed*/axis reductions, empty masked reductions, resize's shape argument,
+# array-shape mismatches); this keeps 150 as a regression guard.  (Real TaQL segfaults on an
+# `iif` with a masked branch, and rejects a bare `:` slice / Bool arithmetic, so the generator
+# avoids those.)
+@testset "TaQL-lite array expressions vs real TaQL: random queries (Phase 285)" begin
+    if _HAVE_TAQL
+        N = 5; r0 = MersenneTwister(3)
+        d = joinpath(mktempdir(), "t")
+        mk() = [round.(randn(r0, 3, 4) .* 3; digits=1) for _ in 1:N]
+        write_table(d, "T", Pair{String,Any}["ID" => Int32.(1:N), "A" => mk(), "B" => mk(),
+            "C" => [Int32.(rand(r0, -4:4, 3, 4)) for _ in 1:N], "M" => [rand(r0, Bool, 3, 4) for _ in 1:N],
+            "K" => Int32.(rand(r0, 1:3, N)), "D" => round.(randn(r0, N) .* 2; digits=1)]; nrow=N)
+        t = readtable(d)
+        pick(r, xs) = xs[rand(r, 1:length(xs))]
+        redfns = ("sums", "means", "mins", "maxs", "medians", "variances", "stddevs", "rmss", "avdevs", "sumsqrs", "products")
+        scfns = ("sum", "mean", "min", "max", "median", "variance", "stddev", "rms", "avdev", "sumsqr")
+        runfns = ("runningmean", "runningsum", "runningmedian", "runningmin", "runningmax", "runningavdev", "runningrms", "runningvariance")
+        boxfns = ("boxedmean", "boxedsum", "boxedmedian", "boxedmin", "boxedmax", "boxedvariance")
+        function gen(r, k, dep)
+            if k == :sc
+                dep <= 0 && return pick(r, ("D", string(rand(r, 1:3)), "K", "A[$(rand(r,1:3)),$(rand(r,1:4))]", "C[$(rand(r,1:3)),$(rand(r,-4:-1))]"))
+                c = rand(r, 1:9)
+                c == 1 && return "$(pick(r, scfns))($(gen(r, :s34, dep-1)))"
+                c == 2 && return "$(pick(r, scfns))($(gen(r, :v4, dep-1)))"
+                c == 3 && return "$(pick(r, ("ntrue", "nfalse")))($(gen(r, :b34, dep-1)))"
+                c == 4 && return "($(gen(r, :sc, dep-1)) $(pick(r, ("+", "-", "*"))) $(gen(r, :sc, dep-1)))"
+                c == 5 && return "$(pick(r, scfns))(abs($(gen(r, :s34, dep-1)))[$(pick(r, ("1:2,2", "2,1:3", "1:3,1", "1:2,2:3", "2:,:2")))])"
+                c == 6 && return "$(pick(r, scfns))(abs($(gen(r, :s34, dep-1)))[$(gen(r, :b34, dep-1))])"
+                c == 7 && return "$(pick(r, ("nelements", "ndim")))($(gen(r, pick(r, (:s34, :v4, :v3)), dep-1)))"
+                return "fractile($(gen(r, :s34, dep-1)), $(pick(r, ("0.5", "0.75"))))"
+            elseif k == :s34
+                dep <= 0 && return pick(r, ("A", "B", "C"))
+                c = rand(r, 1:11)
+                c == 1 && return "($(gen(r, :s34, dep-1)) $(pick(r, ("+", "-", "*"))) $(gen(r, :s34, dep-1)))"
+                c == 2 && return "($(gen(r, :s34, dep-1)) $(pick(r, ("+", "-", "*", "/"))) $(gen(r, :sc, dep-1)))"
+                c == 3 && return "abs($(gen(r, :s34, dep-1)))"
+                c == 4 && return "$(pick(r, runfns))($(gen(r, :s34, dep-1)), $(pick(r, ("1", "[1,0]", "[0,1]", "[1,1]", "[2,1]", "2"))))"
+                c == 5 && return "$(pick(r, boxfns))($(gen(r, :s34, dep-1)), $(pick(r, ("1", "2", "[1,2]", "[3,2]", "[2,3]", "[4,4]"))))"
+                c == 6 && return "reversearray($(gen(r, :s34, dep-1))$(pick(r, ("", ", 1", ", 2", ", 1, 2", ", 3"))))"
+                c == 7 && return "transpose($(gen(r, :s43, dep-1)))"
+                c == 8 && return "-$(gen(r, :s34, dep-1))"
+                c == 9 && return "resize($(gen(r, :s34, dep-1)), [3, 4])"
+                c == 10 && return "iif($(gen(r, :b34, dep-1)), $(gen(r, :s34, 0)), $(gen(r, :s34, 0)))"
+                return "replacemasked(abs($(gen(r, :s34, dep-1)))[$(gen(r, :b34, dep-1))], $(rand(r, 0:3)))"
+            elseif k == :s43
+                dep <= 0 && return "transpose(A)"
+                c = rand(r, 1:3)
+                c == 1 && return "transpose($(gen(r, :s34, dep-1)))"
+                c == 2 && return "reversearray($(gen(r, :s43, dep-1))$(pick(r, ("", ", 1", ", 2"))))"
+                return "($(gen(r, :s43, dep-1)) $(pick(r, ("+", "-"))) $(gen(r, :sc, dep-1)))"
+            elseif k == :v4 || k == :v3
+                ax = k == :v4 ? "1" : "2"
+                dep <= 0 && return "sums(A, $ax)"
+                c = rand(r, 1:4)
+                c == 1 && return "$(pick(r, redfns))($(gen(r, :s34, dep-1)), $ax)"
+                c == 2 && return "fractiles($(gen(r, :s34, dep-1)), $(pick(r, ("0.25", "0.5", "0.9"))), $ax)"
+                c == 3 && return "$(pick(r, ("ntrues", "nfalses")))($(gen(r, :b34, dep-1)), $ax)"
+                return "($(gen(r, k, dep-1)) $(pick(r, ("+", "*"))) $(gen(r, :sc, dep-1)))"
+            elseif k == :bsc
+                return "$(pick(r, ("any", "all")))($(gen(r, :b34, dep-1)))"
+            elseif k == :bv
+                return "$(pick(r, ("anys", "alls")))($(gen(r, :b34, dep-1)), $(rand(r, 1:2)))"
+            else # :b34
+                dep <= 0 && return pick(r, ("M", "(A > 0.0)", "(C < 1)"))
+                c = rand(r, 1:5)
+                c == 1 && return "($(gen(r, :s34, dep-1)) $(pick(r, ("<", ">", "<=", ">=", "==", "!="))) $(gen(r, :sc, dep-1)))"
+                c == 2 && return "($(gen(r, :s34, dep-1)) $(pick(r, ("<", ">"))) $(gen(r, :s34, dep-1)))"
+                c == 3 && return "(NOT $(gen(r, :b34, dep-1)))"
+                c == 4 && return "($(gen(r, :b34, dep-1)) $(pick(r, ("AND", "OR"))) $(gen(r, :b34, dep-1)))"
+                return "isnan(A)"
+            end
+        end
+        same(a, b) = a isa AbstractArray || b isa AbstractArray ?
+            (a isa AbstractArray && b isa AbstractArray && size(a) == size(b) && all(same.(a, b))) :
+            (a == b || (a isa Real && b isa Real && (isnan(a) && isnan(b) || isapprox(a, b; rtol=1e-6, atol=1e-8))))
+        r = MersenneTwister(285); bad = String[]
+        for _ in 1:150
+            ex = gen(r, pick(r, (:sc, :sc, :s34, :s34, :v4, :v3, :b34, :s43, :bsc, :bv)), rand(r, 1:3))
+            ours = try collect(column(query(t, "rownumber() > 0"; select = ["R" => ex]), "R")[:]) catch; nothing end
+            real = try collect(_taqlcmd("SELECT $ex AS R FROM \$1", d)[:R][:]) catch; nothing end
+            ours === nothing && real === nothing && continue            # both reject it
+            (ours === nothing || real === nothing || length(ours) != length(real) || !all(same.(ours, real))) && push!(bad, ex)
+        end
+        @test isempty(bad)
+        isempty(bad) || println(bad)
+    end
+end
