@@ -1307,3 +1307,25 @@ end
     @test abs(lon - racc.lon) < deg2rad(2 / 3600)
     @test abs(lat - racc.lat) < deg2rad(2 / 3600)
 end
+
+# Phase 282: a random epoch/position/direction fuzz of `measconvert` against casatools found a
+# 6" (0.45 s of hour angle) error on 2012-07-01 -- the day after the 2012-06-30 leap second.  An
+# `MEpoch{UTC}` is casacore's UTC MJD (every day 86400 s, MS TIME / 86400), but SOFA's UTC
+# quasi-JD counts the fraction of a leap-second day out of 86401 s, so the two disagree by up to a
+# second across such a day.  The MJD is now converted at the SOFA boundary.
+@testset "measures — UTC on a leap-second day (Phase 282)" begin
+    fr = MeasFrame()
+    # TAI - UTC is a constant 34 s throughout 2012-06-30 (MJD 56108) except in the leap second itself
+    for f in (0.0, 0.25, 0.5, 0.75, 0.999)
+        m = 56108.0 + f
+        tai = measconvert(MEpoch{UTC}(m), TAI; frame = fr)
+        @test (tai.mjd - m) * 86400 ≈ 34.0 atol = 1e-4
+        @test measconvert(tai, UTC; frame = fr).mjd ≈ m atol = 1e-9
+    end
+    @test (measconvert(MEpoch{UTC}(56109.25), TAI; frame = fr).mjd - 56109.25) * 86400 ≈ 35.0 atol = 1e-4
+    # UT1 - UTC is continuous through the day (with Earth-orientation data it is the tabulated dUT1)
+    if Base.get_extension(MSv2, :EarthOrientationExt) !== nothing
+        d = [(measconvert(MEpoch{UTC}(56108.0 + f), UT1; frame = fr).mjd - 56108.0 - f) * 86400 for f in (0.0, 0.25, 0.5, 0.75)]
+        @test maximum(d) - minimum(d) < 2e-3
+    end
+end

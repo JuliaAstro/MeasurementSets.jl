@@ -9656,3 +9656,21 @@ of the sample MS with random data and both a circular and an edited-to-linear `P
   scale-invariant, which is why only the magnitudes showed it).
 
 After both: 480 random specs, no mismatch. Regression test in `test/taql_mscal_tests.jl`.
+
+### Phase 282 — measures: UTC on a leap-second day (found by a random epoch/position/direction fuzz vs casatools)
+
+250 random (epoch 2000–2030, ITRF position anywhere, direction) cases converted J2000 → `B1950` /
+`GALACTIC` / `ECLIPTIC` / `SUPERGAL` / `APP` / `AZEL` / `AZELGEO` / `HADEC` / `ITRF` / `ICRS` and
+compared with casatools `me.measure`: everything agrees to ≲ 1″ (most far better) except **one
+case 6″ off — 2012-07-01, the day after the 2012-06-30 leap second** (0.45 s of hour angle), and a
+few 2–4″ cases in 2027+ (beyond the IERS data: casacore's table and EarthOrientation.jl's
+predictions differ; not ours).
+
+Cause: an `MEpoch{UTC}` carries casacore's UTC MJD (every day 86400 s long — an MS `TIME` / 86400;
+the leap second is not represented), but SOFA's UTC "quasi-JD" counts the *fraction* of a
+leap-second day out of 86401 s, so on such a day the two disagree by up to a second and the
+UT1 − UTC we derived ran away by 0.25 s per quarter-day (casacore: constant). The MJD is now
+converted to/from SOFA's convention at the SOFA boundary (`_utc_sofa` / `_utc_from_sofa`); on the
+leap day TAI − UTC is a constant 34 s (35 s after), UT1 − UTC continuous, and 300 random epochs
+(40 % on leap-second days) match casatools' TAI / TT / TDB / UT1 to ≲ 5e-4 s. Regression test in
+`test/measures_tests.jl`.
