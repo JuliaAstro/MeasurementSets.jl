@@ -9709,3 +9709,17 @@ Not ours: real casacore's **`gmax` of an all-negative group returns `2.2e-308`**
 maximum starts at `DBL_MIN`, the smallest *positive* double), so `gmax(D)` on such a group differs and
 `HAVING gmax(D) > 0` keeps groups that should be dropped — an upstream bug, not reproduced (the guard
 skips it). Kept as a seeded 60-query guard in `test/taql_fuzz_tests.jl`.
+
+### CI fix — Phase 281's real-casacore Stokes cross-check on Julia 1.10
+
+CI (Julia 1.10 only) failed the Phase 281 `mscal.stokes` cross-check against real derivedmscal:
+12 of its 16 assertions. Reproduced locally with Julia 1.10.12 (juliaup): real casacore prints
+`Error: no BLAS/LAPACK library loaded for cgetrf_()` / `invert of singular matrix attempted` and
+returns unconverted garbage — its StokesConverter inverts its conversion matrix with the LP64
+LAPACK symbol `cgetrf_`, which Julia 1.10's libblastrampoline does not forward (1.10 ships only the
+ILP64 `…64_` OpenBLAS; 1.12 / pre do), so casacore's *own* conversion is broken there. Not our bug:
+the test now probes real casacore's Stokes `I` first and skips the derivedmscal comparison (with an
+`@info`) when it disagrees, and on a real mismatch prints the expression and worst element. The
+data was also given a dominant Stokes `I` (co-polar terms) so the `PFtotal` / `PFlinear` ratios
+stay well-conditioned whatever the RNG stream. (Locally: the whole `taql_mscal_tests.jl` passes
+on Julia 1.10.12 and 1.13.)
