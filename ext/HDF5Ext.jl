@@ -45,6 +45,27 @@ function MS.container_read(c::MS.MultiHDF5Container, name::AbstractString)
         out[done+1:done+take] = blk[1:take]
         done += take
     end
+    # Phase 297 fix: `out` was `Vector{UInt8}(undef, fsize)` up front and
+    # only ever explicitly assigned `done` of its `fsize` bytes -- if the
+    # dataset's actual block count didn't cover the header's own claimed
+    # `fsize` (a corrupted/truncated file, or a genuine mismatch between
+    # our block-axis-order assumption and however a real casacore build
+    # actually writes one -- the "flip to `d[:, b]`" caveat right above is
+    # exactly this scenario), the loop above silently exhausted `1:nblk`
+    # with `done < fsize`, returning `out` with its TAIL bytes still raw,
+    # uninitialised heap memory -- live-reproduced with a hand-built file
+    # whose header claims 1000 bytes for a dataset that only has 10 real
+    # bytes of block data: `container_read` returned a 1000-byte vector
+    # whose bytes 11-1000 were genuine garbage, silently fed straight into
+    # whichever storage-manager reader opened that virtual file next.
+    # Fixed to raise a clear, actionable error instead of ever returning a
+    # partially-uninitialised buffer.
+    done >= fsize || error(
+        "MultiHDF5: \"$name\" in \"$(c.path)\" claims $fsize bytes but its " *
+        "\"FileData\" dataset only has $done bytes across $nblk block(s) -- " *
+        "the file is corrupted, truncated, or was written with a different " *
+        "axis convention than this reader assumes (see this function's own " *
+        "comment above)")
     return out
 end
 

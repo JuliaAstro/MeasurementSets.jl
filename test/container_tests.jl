@@ -232,6 +232,42 @@ end
     @test column(r2, "A")[:] == a0
 end
 
+# Phase 297: `container_read` allocated `Vector{UInt8}(undef, fsize)` up
+# front and only ever explicitly assigned the bytes its block loop actually
+# found -- if the dataset's real block count didn't cover the header's own
+# claimed `fsize` (a corrupted/truncated file), the loop silently exhausted
+# without filling the tail, and the function returned a buffer whose tail
+# bytes were genuine, uninitialised heap garbage instead of raising an
+# error. Live-reproduced with a hand-built file whose header claims far
+# more bytes than its dataset actually has blocks for. Fixed to raise a
+# clear, actionable error naming the mismatch instead.
+@testset "MultiHDF5 — container_read errors on a size/dataset mismatch (Phase 297)" begin
+    _build(dir, claimed_size) = begin
+        path = joinpath(dir, "table.mfh5")
+        HDF5.h5open(path, "w") do fid
+            g = HDF5.create_group(fid, "table.f0")
+            d = HDF5.create_dataset(g, "FileData", HDF5.datatype(UInt8), HDF5.dataspace((1, 10)))
+            d[:, :] = reshape(UInt8.(1:10), 1, 10)
+            hdr = HDF5.create_group(fid, "__MultiHDF5_Header__")
+            HDF5.attributes(hdr)["blockSize"] = Int64(10)
+            HDF5.attributes(hdr)["hdrCounter"] = Int64(1)
+            HDF5.attributes(hdr)["names"] = ["table.f0"]
+            HDF5.attributes(hdr)["sizes"] = Int64[claimed_size]
+        end
+        path
+    end
+
+    path1 = _build(mktempdir(), 1000)   # lies: only 10 real bytes exist
+    c = MSv2._open_multihdf5(path1)
+    @test_throws ErrorException MSv2.container_read(c, "table.f0")
+
+    # an exactly-matching size still reads correctly (regression check —
+    # confirms the fix didn't make the well-formed case stricter)
+    path2 = _build(mktempdir(), 10)
+    c2 = MSv2._open_multihdf5(path2)
+    @test MSv2.container_read(c2, "table.f0") == UInt8.(1:10)
+end
+
 @testset "no container — regression safety" begin
     dir = joinpath(mktempdir(), "plain.tab")
     write_table(dir, "T", ["A" => collect(1:5)]; nrow=5)

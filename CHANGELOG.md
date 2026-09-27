@@ -9973,3 +9973,105 @@ behaviour (a double `removecolumn!` on a plain `EditTable` succeeds silently, wh
 own `removecolumn!` throws) and a remove-then-`addcolumn!` of the same name in one session (works
 correctly, a deliberate "replace a column" idiom) — both confirmed not to cause any real corruption
 or misleading state, left as-is.
+
+### Phase 295 — `src/tables/create.jl` sweep: `write_ms`/`create_ms` left a stray directory behind on a mid-write failure
+
+Full fresh read of the write path (`write_table`/`_write_table_core`, `copytable`/`_copy_table`/
+`_copy_table_cols`, `reference_copy`, `write_ms`/`copyms`, `create_ms`, the `_casatype_of`/
+`_normalize_desc`/`_infer_shape`/`_stamp_measinfo` helpers) — only ever touched piecemeal before by
+validation-focused phases (199, 202, 204, 205, the array-literal hazard in 210), never read start to
+finish in one pass.
+
+**Found and fixed**: `_write_table_core`'s own Phase-226 cleanup only ever removes a directory *it*
+created (`_dir_preexisted || rm(dir; ...)`) — correct for its own callers (`write_table`, `copytable`,
+`reference_copy`, none of which `mkpath` anything themselves before delegating to it). But `write_ms`
+and `create_ms` are different: both `mkpath(dir)` *themselves*, then make **several** subsequent
+`_write_table_core`/`_copy_table` calls into `dir` and its subdirectories (one per MS subtable, then
+MAIN, for `write_ms`; twelve subtables then MAIN, for `create_ms`). By the time either of those later
+calls reaches `_write_table_core`, `dir` already exists (they made it), so its own `_dir_preexisted`
+check correctly declines to remove it on failure — and neither `write_ms` nor `create_ms` had *any*
+top-level cleanup of their own. A genuine failure partway through (MAIN, for `write_ms`; any table
+after the first, for `create_ms`) left a stray, partially-written directory sitting at the caller's
+requested path, with no cleanup and no indication anything was left behind — the exact "claims to
+have failed but silently created state anyway" shape Phase 226 fixed for `_write_table_core` itself,
+never propagated up to its two top-level multi-table orchestrators.
+
+Live-reproduced for both: `create_ms(dir; nrow=-1)` (a public, deterministic failure partway through
+synthesising the standard subtables) left `dir` behind with several subtables already written;
+`write_ms(dst, ms)` after corrupting a source public keyword's *value* (leaving its declared type
+alone, so MAIN's own write — not a per-column read, which `_copy_table_cols` already tolerates with
+a warn-and-skip — hard-fails deep inside `write_table_files` → `write_record`) left `dst` behind with
+every subtable already written. Fixed by wrapping each function's whole body (after its own
+`ispath(dir) && error(...)` guard, which already establishes `dir` did not exist when the call
+started, so there's no "was it already there" case to preserve, unlike `_write_table_core`'s other
+callers) in a try/catch that unconditionally removes `dir` on any exception. `reference_copy`,
+`write_table`, and `copytable` were confirmed to need no change — none of them `mkpath` anything
+before delegating to `_write_table_core`, so its existing cleanup already covers them correctly.
+
+New tests in `test/writer_tests.jl`, both live-reproduced failure modes plus a regression check that
+a valid call is unaffected.
+
+### Phase 296 — `ext/UnitfulExt.jl` sweep: a latent (currently unreachable) inconsistency fixed for consistency
+
+First dedicated fresh read of the Unitful weak-dependency extension — only ever touched piecemeal
+before by Phases 65 (creation), 70 (write path), 160 (a docs `@ref` fix), and 197 (whose real fixes
+landed in the core `src/tables/units.jl` file, not here). Several candidate leads investigated and
+confirmed correct: `PseudoUnits`' `klambda` `@unit` scale factor (`1000`) independently verified to
+tie back to `lambda`'s own dimensionless base exactly (`1 klambda == 1000 lambda`, not assumed from
+the macro call alone); `_ms_ustring`'s `m/s^2` compound-unit round-trip verified end to end through a
+real `write_table` → `readtable` → `columnunit` cycle (exercises the Phase-197 digit-implicit-exponent
+rule inside a compound, not just an atomic, unit string); `qcolumn`'s array-cell broadcasting
+(`vals .* u` over a `Vector{Array}`) confirmed to rely on an already-tested, working Unitful idiom, not
+a latent bug; the `UNITS_NO_JULIA_COUNTERPART` note-lookup in `_ms_uparse`'s error path confirmed to
+key correctly off the original (pre-normalisation) unit string for the `:unsupported`-kind entries that
+actually reach it.
+
+**Found and fixed (a real inconsistency, confirmed *unreachable* via its only current caller, fixed
+anyway for consistency)**: `_tql_write_strip(x::Quantity, u)` — the `update!` SET-RHS unit-stripping
+function — takes a `u` that can be `nothing` / a `Unitful.Units` / a `Tuple` of them (a genuinely
+mixed-unit column, per `columnunit`'s own documented return shape), but only guarded the `nothing`
+case; its two siblings in the same file, `_tql_unit_attach` and `qcolumn`, both already guard the
+`Tuple` case with a clear "column has a mixed unit" error. Traced (not reproduced as a live,
+user-visible bug) exactly why: `_tql_write_strip`'s only caller, `update!` (`src/taql/commands.jl`),
+always adds every SET *target* column to `_tql_cols`'s `needed` set unconditionally, and `_tql_cols`
+unit-attaches *every* column in `needed` via `_tql_unit_attach` the moment any spec anywhere uses a
+quantity literal — so a mixed-unit SET target is *already* caught by `_tql_unit_attach`'s own guard
+while columns are being loaded, before a single row's `_tql_write_strip` call ever runs. Live-verified
+this interception genuinely happens (a real mixed-unit column + `update!` with a quantity literal
+throws `_tql_unit_attach`'s message, never reaches `_tql_write_strip`'s missing branch). Added the
+matching guard anyway — cheap, matches its two siblings exactly, and removes a latent trap for a
+future caller or refactor that reaches this function some other way.
+
+New tests in `test/units_tests.jl`, including a direct pin of the new guard (bypassing `update!`'s own
+interception, since that's what currently makes it otherwise untestable end to end) plus the two
+independently-verified correct behaviours (`klambda` scaling, `m/s^2` round-trip).
+
+### Phase 297 — `ext/HDF5Ext.jl` sweep: `container_read` could silently return uninitialised memory
+
+First dedicated fresh read of the MultiHDF5 (`table.mfh5`) weak-dependency extension — only ever
+implemented piecemeal before across Phases 20 (read), 21 (write), and 37 (the weak-dep split), never
+investigated on its own. Several details re-checked and confirmed correct or already-documented,
+non-new limitations: `_open_multihdf5`'s filter for an empty virtual-file name (a defensive
+placeholder-slot convention borrowed from `MultiFile`'s own format, structurally inert for MultiHDF5
+since a named HDF5 group can't correspond to an empty name anyway); the block-axis-order assumption in
+`container_read`/`_finalize_multihdf5` (`d[b, :]`, an already-documented, still-unverifiable-on-this-
+machine caveat — no HDF5-enabled real casacore build exists here, per Phases 20/21's own notes); the
+writer's "build every dataset directly at its final size in one write" approach (verified against
+casacore's own `doAddFile`/`extend`/`put` to be bit-for-bit equivalent from any reader's perspective).
+
+**Found and fixed a real bug**: `container_read` allocated `out = Vector{UInt8}(undef, fsize)` up
+front (`fsize` from the container's own header-attribute claim) and only explicitly assigned however
+many bytes its block-reading loop actually found in the dataset. If the dataset's real block count
+didn't cover the claimed `fsize` — a corrupted or truncated `table.mfh5`, or a genuine mismatch between
+this reader's block-axis-order assumption and however a real casacore build might someday write one
+(exactly the scenario the file's own "flip to `d[:, b]`" comment already anticipated) — the loop
+silently exhausted its blocks with `done < fsize`, and the function returned `out` with its *tail bytes
+still raw, uninitialised heap memory*, fed straight into whichever storage-manager reader opened that
+virtual file next. Live-reproduced with a hand-built file whose header claims 1000 bytes for a virtual
+file whose dataset genuinely has only 10: `container_read` returned a 1000-byte vector whose bytes
+11-1000 were real garbage, no error, no warning. Fixed by checking `done >= fsize` after the loop and
+raising a clear, actionable error naming the exact byte-count mismatch instead of ever returning a
+partially-uninitialised buffer.
+
+New tests in `test/container_tests.jl`: the live-reproduced malformed case now errors cleanly, and a
+regression check that an exactly-matching, well-formed file is completely unaffected.

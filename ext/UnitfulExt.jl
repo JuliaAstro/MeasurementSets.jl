@@ -106,9 +106,31 @@ function MS._tql_result_strip(x::Unitful.AbstractQuantity)
 end
 
 # an `update!` SET RHS Quantity -> the target column's unit, stripped.
+#
+# Phase 296: `u` can be `nothing` / a `Unitful.Units` / a `Tuple` of them
+# (a genuinely mixed-unit column — see `columnunit`'s own docstring), and
+# this function's two siblings above (`_tql_unit_attach`, `qcolumn`) both
+# guard the `Tuple` case with a clear error; this one didn't, so `u isa
+# Tuple` fell through to `Unitful.uconvert(::Tuple, ::Quantity)`, a bare
+# `MethodError` naming neither the real cause nor the fix. Live-traced
+# (not live-*reproduced* as a user-visible bug): `_tql_write_strip`'s
+# only caller, `update!` (`src/taql/commands.jl`), always puts every SET
+# *target* column into `_tql_cols`'s `needed` set unconditionally
+# (`needed = Set(s[1] for s in specs)`), and `_tql_cols` unit-attaches
+# *every* column in `needed` via `_tql_unit_attach` the moment `_qty` is
+# globally true (any spec anywhere uses a quantity literal) — so a
+# mixed-unit SET target is *already* caught by `_tql_unit_attach`'s own
+# guard while `cols` is being built, before a single row's
+# `_tql_write_strip` call ever runs. Confirmed genuinely unreachable
+# today through `update!`'s only call site; added anyway for consistency
+# with its two siblings and so a future caller/refactor that reaches
+# this function some other way gets the same clear message instead of
+# silently regressing to the bare `MethodError`.
 MS._tql_write_strip(x::Unitful.AbstractQuantity, u) =
     u === nothing ?
         error("update!: SET expression yields $(x) but the target column has no unit") :
+    u isa Tuple ?
+        error("update!: SET expression yields $(x) but the target column has a mixed unit $u") :
         Unitful.ustrip(Unitful.uconvert(u, x))
 
 # --- write side: Unitful.Units -> a casacore QuantumUnits string (Phase 70) ---
