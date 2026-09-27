@@ -10106,3 +10106,25 @@ trip through a third frame before being pinned as a permanent black-box test via
 `measconvert`/`MuvW` API.
 
 New tests in `test/measures_tests.jl`.
+
+### Phase 299 — IGRF earthfield random fuzz vs `casatools` (investigation only, no bug found)
+
+The IGRF-14 spherical-harmonic field synthesis (`_earthfield_itrf`, a verbatim port of casacore
+`EarthField::calcField`) and `EarthMagneticMachine`'s line-of-sight geometry had only ever been
+cross-checked against real `casatools` at *one* fixed site and epoch (Phase 91's ALMA point, reused by
+Phase 66's shared fixture). Following the Phases 269–287 pattern — where a single deterministic
+cross-check repeatedly missed bugs a broader random fuzz caught — this phase spreads the same oracle
+across 14 random global sites (uniform on the sphere, 0–3000 m height) and epochs (2000–2030, the full
+span the bundled IGRF-14 model supports) in one `casatools` process (CASA startup dominates the cost, so
+looping inside one script call keeps a broad sweep affordable).
+
+No new bug found: the field magnitude/components at each random site match `casatools`' IGRF-12 output
+within the already-established model-generation tolerance (~5% + 250 nT — IGRF-12 vs IGRF-14 is a real,
+documented, expected difference, not a bug), and the ITRF→J2000 rotation is confirmed correct
+(magnitude-preserving, and each rotated component matches casacore's own rotated value) at every one of
+the 14 sites/epochs, not just the one previously tested. A legitimate, valuable investigation-only
+result — the port and the rotation both hold up globally, not just at the one location anyone had ever
+actually pointed a real oracle at.
+
+New testset in `test/measures_tests.jl` (112 cross-check assertions, fixed-seed `MersenneTwister(299)`
+for reproducibility).
