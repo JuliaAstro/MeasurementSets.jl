@@ -9674,3 +9674,22 @@ converted to/from SOFA's convention at the SOFA boundary (`_utc_sofa` / `_utc_fr
 leap day TAI − UTC is a constant 34 s (35 s after), UT1 − UTC continuous, and 300 random epochs
 (40 % on leap-second days) match casatools' TAI / TT / TDB / UT1 to ≲ 5e-4 s. Regression test in
 `test/measures_tests.jl`.
+
+### Phase 283 — random-frame conversions vs casatools: frequency / radial velocity / reverse direction routes (sweep, no bug found)
+
+Two more random fuzzes of `measconvert` against casatools `me.measure`:
+
+- **Frequency and radial velocity** between the velocity frames, 200 random epochs / ITRF positions /
+  source directions, 14 frame pairs: the constant-velocity hops (LSRK, BARY, LSRD, GALACTO, LGROUP,
+  CMB) agree to ≲ 1e-9 m/s; hops through the Earth's motion (TOPO, GEO) to < 0.9 m/s (3e-9 of c) —
+  the ephemeris floor, uncorrelated with the diurnal or orbital line-of-sight speed, the input
+  velocity, or the epoch (Phase 141 had already looked at it).
+- **Direction conversions from every frame** (`B1950`, `GALACTIC`, `ECLIPTIC`, `SUPERGAL`, `APP`,
+  `AZEL`, `AZELGEO`, `HADEC`, `ITRF`, `ICRS`) to `J2000` / `GALACTIC` / `AZEL` / `APP` (150 random
+  cases): all within 1.5″ (the EOP floor) — after the Phase 280 ITRF and Phase 282 leap-second fixes —
+  **except `B1950` → `AZEL` / `APP` (up to 5.5″)**. That one is casacore's: its *direct* `B1950` →
+  `APP` differs by the same 5″ from its own `B1950` → `J2000` → `APP` (checked in casatools), i.e. a
+  route inconsistency on their side; ours composes through ICRS. `JTRUE` / `JMEAN` / `BMEAN` are not
+  frames here.
+
+A fixed-seed 136-assertion guard is in `test/measures_tests.jl`.

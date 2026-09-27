@@ -1329,3 +1329,57 @@ end
         @test maximum(d) - minimum(d) < 2e-3
     end
 end
+
+# Phase 283: random-frame fuzzes of `measconvert` against casatools -- frequency and radial-velocity
+# conversions between the velocity frames (200 random epochs / positions / directions: the constant-
+# velocity hops LSRK/BARY/LSRD/GALACTO/LGROUP/CMB agree to 1e-9 m/s, the hops through the Earth's
+# motion (TOPO / GEO) to < 1 m/s = 3e-9 of c, the ephemeris floor), and direction conversions FROM
+# every frame (150 cases, 11 source frames x J2000 / GALACTIC / AZEL / APP): all within 1.5" of
+# casacore except B1950 -> AZEL / APP.  Those two differ by 5" from casacore's *own*
+# B1950 -> J2000 -> APP, i.e. casacore's direct route is internally inconsistent; ours composes.
+# Kept as a small fixed-seed guard.
+using Random
+@testset "measures — random-frame conversions vs casatools (Phase 283)" begin
+    if _HAVE_MEAS_CASA
+        rng = MersenneTwister(283)
+        cases = map(1:8) do _
+            lon = (rand(rng) - 0.5) * 2π; lat = asin(2rand(rng) - 1)
+            ff = 1 / 298.257223563; e2 = ff * (2 - ff); Rn = 6378137.0 / sqrt(1 - e2 * sin(lat)^2)
+            (mjd = 55000.0 + rand(rng) * 5000, pos = (Rn * cos(lat) * cos(lon), Rn * cos(lat) * sin(lon), Rn * (1 - e2) * sin(lat)),
+             a = rand(rng) * 2π, b = asin(2rand(rng) - 1), f = 1e9 + rand(rng) * 2e11, v = (rand(rng) - 0.5) * 4e5)
+        end
+        cs = join(["($(c.mjd), $(c.pos[1]), $(c.pos[2]), $(c.pos[3]), $(c.a), $(c.b), $(c.f), $(c.v))" for c in cases], ",")
+        py = """
+from casatools import measures, quanta
+me = measures(); qa = quanta()
+for (mjd, x, y, z, a, b, f, v) in [$cs]:
+    me.done()
+    me.doframe(me.epoch('utc', qa.quantity(mjd, 'd')))
+    me.doframe(me.position('itrf', qa.quantity(x, 'm'), qa.quantity(y, 'm'), qa.quantity(z, 'm')))
+    me.doframe(me.direction('j2000', qa.quantity(a, 'rad'), qa.quantity(b, 'rad')))
+    out = []
+    for t in ('geo', 'bary', 'lsrk', 'lsrd', 'galacto'):
+        out.append(repr(float(me.measure(me.frequency('topo', qa.quantity(f, 'Hz')), t)['m0']['value'])))
+        out.append(repr(float(me.measure(me.radialvelocity('topo', qa.quantity(v, 'm/s')), t)['m0']['value'])))
+    for s in ('galactic', 'ecliptic', 'azel', 'azelgeo', 'hadec', 'itrf', 'app'):
+        r = me.measure(me.direction(s, qa.quantity(a, 'rad'), qa.quantity(b, 'rad')), 'j2000')
+        out.append(repr(float(r['m0']['value']))); out.append(repr(float(r['m1']['value'])))
+    print(' '.join(out))
+"""
+        out = split(strip(read(pipeline(`$_MEAS_CASA -c $py`; stderr=devnull), String)), '\n')
+        fr_(c) = MeasFrame(epoch = MEpoch{UTC}(c.mjd), position = MPosition{ITRF}(c.pos...), direction = MDirection{J2000}(c.a, c.b))
+        vel = (GEO, BARY, LSRK, LSRD, GALACTO); dirs = (GALACTIC, ECLIPTIC, AZEL, AZELGEO, HADEC, ITRF, APP)
+        sepd(p, q) = acos(clamp(cos(p[2])*cos(q[2])*cos(p[1] - q[1]) + sin(p[2])*sin(q[2]), -1, 1))
+        for (i, c) in enumerate(cases)
+            r = parse.(Float64, split(out[i]))
+            for (k, T) in enumerate(vel)
+                @test abs(measconvert(MFrequency{TOPO}(c.f), T; frame = fr_(c)).hz - r[2k-1]) / c.f * 299792458 < 1.5     # m/s equivalent
+                @test abs(measconvert(MRadialVelocity{TOPO}(c.v), T; frame = fr_(c)).mps - r[2k]) < 1.5
+            end
+            for (k, S) in enumerate(dirs)
+                d = measconvert(MDirection{S}(c.a, c.b), J2000; frame = fr_(c))
+                @test sepd((d.lon, d.lat), (r[10 + 2k - 1], r[10 + 2k])) < 1.5 / 206264.806 * 2      # 3"
+            end
+        end
+    end
+end
