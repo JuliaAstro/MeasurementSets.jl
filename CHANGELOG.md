@@ -9815,3 +9815,20 @@ gave `1` (only the first part) instead of the correct `3`. Fixed by switching to
 `for` loops, where `break` only exits the innermost one; re-verified the same fixture now gives `3`,
 and that the ordinary (non-`subtabnames`, `parts[1]`-only) ANTENNA path and the subtable cache are
 both unaffected. New permanent regression test in `test/reftable_tests.jl`.
+
+### Phase 289 — `src/tables/interface.jl` sweep: a confusing raw error on an unknown row column
+
+Swept the Tables.jl integration layer (`src/tables/interface.jl`) — fully live-tested (no external
+oracle needed: correctness is against Julia's own `Tables.jl` contract) across every `AbstractTable`
+kind (`Table`, `RefTable`, `ConcatTable`, `GroupedTable`, `MeasurementSet`): schema resolution, column
+and row access by both name and index, whole-table iteration (incl. nested loops over the same table
+object — each `for r in t` builds its own fresh `Tables.rows(t)` state, confirmed independent), an
+empty (zero-row) table, and `Tables.columntable` round-tripping. All correct.
+
+**Fixed**: `Tables.getcolumn(row::CTDSRow, nm::Symbol)` for an unknown column name gave a raw,
+confusing `ArgumentError("invalid index: nothing of type Nothing")` — `findfirst` returning `nothing`
+fed straight into `p.cols[nothing]` with no check — instead of a clear message. `column(t, name)` /
+`columndesc(t, name)` already raise a plain `KeyError` for exactly this mistake; `Tables.getcolumn`
+on a *row* took a separate code path that never got the same guard. Fixed to raise the matching
+`KeyError`. New tests in `test/tables_tests.jl`, including row (not just column) access coverage for
+`RefTable` / `GroupedTable` / `ConcatTable`, which had none before this phase.
