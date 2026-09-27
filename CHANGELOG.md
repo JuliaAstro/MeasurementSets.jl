@@ -9937,3 +9937,39 @@ exactly this class of "throws late, having already mutated something" bug.
 
 New tests in `test/edit_tests.jl` for both, including the real-casacore cross-check confirming the
 untouched columns really are untouched on disk.
+
+### Phase 294 — `src/tables/edit.jl` sweep: a real bug in `addcolumn!`'s `type=` override
+
+Full fresh read of `EditTable`/`EditColumn` (only ever patched piecemeal before — Phase 201's
+`kind=` validation, Phase 207's locking, Phase 210's `removecolumn!` gap — never read start to
+finish in one pass). The engine/Dysco companion-column cleanup in `removecolumn!`, the row-map
+shift arithmetic in `removerows!`, the fast-vs-regen dispatch in `Base.flush`/`_tiled_fast_ok`, and
+the per-sequence-group writer dispatch in `_flush_regen` were all re-checked against their own
+documented invariants and confirmed correct — including a hand-verified cross-check that
+`removecolumn!`'s hardcoded 9-entry engine-companion-keyword list is exactly the full set
+`src/datamanagers/virtual.jl` can ever write (`_BaseMappedArrayEngine_Name` +
+`{ScaledArrayEngine,ScaledComplexData,CompressFloat,CompressComplex}_{Scale,Offset}Name`, the last
+shared by `CompressComplexSD`), not a stale subset.
+
+**Found and fixed**: `_addcol_desc` — the shared helper behind `addcolumn!(t, name, data; ...)` for
+both a plain `EditTable` and a `RefEditTable` (Phase 126) — only ran its `Measure`/`Unitful.Quantity`
+auto-flatten `if type === nothing`. So `addcolumn!(t, name, measure_or_quantity_data; type=SomeCasaType)`
+silently succeeded at *add* time with `vals` left as the raw, unflattened `Vector{MEpoch{...}}`/
+`Vector{Quantity}` — no validation, no error — and the failure only surfaced deep inside a *later*
+`flush` → `_flush_regen`/`_flush_fast` → `write_standardstman`/`write_incrementalstman`, as a bare
+`MethodError: no method matching Float64(::MEpoch{UTC})` that names none of the real cause. Live-
+reproduced before fixing. There was no legitimate use for the old guard either: `addcolumn!` has no
+`units=`/`measures=` kwarg of its own, so this auto-detection is the *only* way to get a
+MEASINFO/QuantumUnits keyword onto an added column at all — nobody could have been relying on
+`type=` suppressing it on purpose. Fixed by always running the flatten; `type=`/`shape=` now
+override the *result* of it (exactly as documented) instead of skipping it. A plain
+(non-`Measure`/`Quantity`) `data` + `type=` is unaffected (`_measure_column_spec`/
+`_quantity_column_spec` both return `nothing` for it, same as before) — verified live for both the
+fixed case and this regression case, through both `addcolumn!(::EditTable, ...)` and
+`addcolumn!(::RefEditTable, ...)` (which shares the same fix for free).
+
+New tests in `test/measures_tests.jl`. Also investigated a related permissive-but-harmless
+behaviour (a double `removecolumn!` on a plain `EditTable` succeeds silently, where `RefEditTable`'s
+own `removecolumn!` throws) and a remove-then-`addcolumn!` of the same name in one session (works
+correctly, a deliberate "replace a column" idiom) — both confirmed not to cause any real corruption
+or misleading state, left as-is.

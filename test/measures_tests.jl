@@ -533,6 +533,54 @@ end
     write_table(tab3, "WT", Pair{String,Any}["DOP" => [MDoppler{RADIO}(0.01i) for i in 1:3]];
                 nrow = 3)
     @test !haskey(columndesc(readtable(tab3), "DOP").keywords, "QuantumUnits")
+
+    # Phase 293 fix: `addcolumn!(t, name, data; type=...)` used to skip
+    # the Measure/Quantity auto-flatten ENTIRELY whenever `type` was
+    # given (the whole block was guarded `if type === nothing`) -- so
+    # `vals` stayed a raw `Vector{MEpoch{UTC}}`, `addcolumn!` itself
+    # raised no error at all, and the failure only surfaced deep inside
+    # a LATER `flush` as a bare `MethodError: no method matching
+    # Float64(::MEpoch{UTC})` from `write_standardstman`, naming none of
+    # the real cause. Live-reproduced before the fix. There is no
+    # legitimate use for the old behaviour -- `addcolumn!` has no
+    # `units=`/`measures=` kwarg, so this auto-detection is the ONLY way
+    # to get MEASINFO/QuantumUnits onto an added column at all -- so
+    # `type=`/`shape=` now override the RESULT of the flatten, not
+    # whether it happens.
+    tab4 = joinpath(dir, "TY")
+    write_table(tab4, "TY", Pair{String,Any}["K" => Int32[1, 2, 3]]; nrow = 3)
+    edit(tab4) do t
+        addcolumn!(t, "T2", [MEpoch{UTC}(58000.0 + i) for i in 1:3]; type = MSv2.TpDouble)
+    end
+    r4 = readtable(tab4)
+    @test measinfo(r4, "T2").kind === :epoch && measinfo(r4, "T2").fixedref == "UTC"
+    @test column(r4, "T2")[:] ≈ (58000.0 .+ (1:3)) .* MSv2.SEC_PER_DAY
+    @test measure(r4, "T2")[2].mjd ≈ 58002.0
+
+    # a plain (non-Measure/Quantity) `data` + `type=` is unaffected --
+    # `_measure_column_spec`/`_quantity_column_spec` both return
+    # `nothing` for it, exactly as before this fix.
+    edit(tab4) do t
+        addcolumn!(t, "P", Int32[10, 20, 30]; type = MSv2.TpFloat)
+    end
+    r5 = readtable(tab4)
+    @test eltype(column(r5, "P")) == Float32
+    @test column(r5, "P")[:] == Float32[10, 20, 30]
+    @test !haskey(columndesc(r5, "P").keywords, "QuantumUnits")
+
+    # the same fix, exercised through the shared `_addcol_desc` path a
+    # `RefEditTable` also uses (Phase 126) -- the view's own mapped rows
+    # get the flattened values, the parent's other rows the default.
+    tab5 = joinpath(dir, "RT")
+    write_table(tab5, "RT", Pair{String,Any}["K" => collect(Int32, 1:5)]; nrow = 5)
+    rt = query(readtable(tab5), "K > 2")
+    edit(rt) do rv
+        addcolumn!(rv, "T2", [MEpoch{UTC}(58000.0 + i) for i in 1:3]; type = MSv2.TpDouble)
+    end
+    r6 = readtable(tab5)
+    @test measinfo(r6, "T2").kind === :epoch
+    @test column(r6, "T2")[:][1:2] == [0.0, 0.0]
+    @test column(r6, "T2")[:][3:5] ≈ (58000.0 .+ (1:3)) .* MSv2.SEC_PER_DAY
 end
 
 # Phase 75: MBaseline / MuvW vector measures.
