@@ -607,6 +607,13 @@ end
     @test isempty(ce3.parts[1].addcols)
     @test_throws ArgumentError addcolumn!(ce3, "C"; kind=:bogus)
     @test isempty(ce3.parts[1].addcols)
+    flush(ce3)   # release ce3's write locks -- neither addcolumn! call above mutated anything,
+                 # so this is a no-op besides that; leaving it unflushed leaked the lock into
+                 # the process-global registry for the rest of the test run (caught live: it
+                 # poisoned lock_tests.jl's "registry starts empty" assertions later in the
+                 # same run -- ce4 below never actually deadlocked on it only because `tlock`
+                 # is a per-directory ReentrantLock and every edit() call here runs on the same
+                 # task, so ce4's own edit() reentered it instead of blocking).
 
     # a genuinely new name still succeeds on every part
     ce4 = edit(readtable(ccdir))
