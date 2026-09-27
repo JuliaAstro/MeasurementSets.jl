@@ -9613,3 +9613,26 @@ agreed. `mscal.feed` keeps the old rule (there `FEED1 == FEED2` is the normal ca
 specs afterwards: no mismatch. Also learned: real casacore's grammars are *stricter* than ours —
 `mscal.field('!0')`, a `!` after a comma or `&` in a baseline spec, and `&<9` are parse errors in
 real and accepted here (a benign extension, like `>=`). Regression test: `test/taql_mscal_tests.jl`.
+
+### Phase 280 — J2000 → ITRF direction: casacore's is the *apparent* place (found by comparing mscal value functions on varied rows)
+
+A value fuzz of the `mscal.*` functions against real derivedmscal on a randomised copy of the
+sample MS (TIME spread over a day, random antennas and fields — the sample's own rows are nearly
+one instant) showed `ha` / `hadec` / `azel` / `pa` / `last` agree to a few arc-seconds, but
+`mscal.itrf()` was a **constant ~17″ off** and `delay()` ~18× worse than it should be. casatools'
+`me.measure(dir, 'ITRF')` shows the same offset from us, so the divergence was the direction
+conversion itself: casacore's ITRF direction is the **apparent** place (annual aberration and
+light deflection) rotated to the terrestrial frame, whereas ours was the plain GCRS → ITRS
+rotation of the geometric direction. (It is the ~13″ "EOP / aberration model difference" that
+Phase 92 saw in the EarthMagneticMachine geometry and accepted.)
+
+- `MDirection` conversion to/from `ITRF` now goes through the apparent place (`atci13` /
+  `atic13` + Earth rotation angle and polar motion). Agreement with casatools: 8.5e-5 → 1.5e-6 rad;
+  `mscal.itrf()` 1e-4 → 4.5e-6 rad; `mscal.delay()` 2.2e-9 → 1.2e-10 s (all vs real derivedmscal).
+  Conversions of an ITRF direction into AZEL / HADEC / APP are consistent with that now too.
+- `MBaseline` / `MuvW` (and the phase centre used as the uvw pole) keep the **plain** rotation for
+  ITRF ↔ celestial frames: live-compared with `mscal.uvwj2000()`, the aberrated route is *further*
+  from casacore's baselines (1.1 m vs 0.66 m on ≤ 36 km baselines). A residual of ≲ 7e-5 of the
+  baseline (a few arc-seconds of rotation) between our `uvwj2000()` and casacore's remains — its
+  MBaseline route applies something we do not reproduce (not chased). The `delay()` ↔ `uvw_j2000()`
+  w-component relation test therefore loosens to the aberration size (2e-4).

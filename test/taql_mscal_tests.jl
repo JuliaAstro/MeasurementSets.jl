@@ -239,8 +239,10 @@ end
         # mscal.delay()'s w equivalent = dot(dir, ap1-ap2)/c (ANTENNA1-
         # ANTENNA2, matching the stored UVW's own convention); the fixed
         # uvw_j2000()'s w corresponds to ANTENNA2-ANTENNA1 -- so, up to
-        # the (small) J2000-vs-ITRF frame difference, uj[3] ≈ -c*delay.
-        @test column(q, "uj")[i][3] ≈ -MSv2.C_LIGHT * column(q, "d")[i] rtol = 1e-6
+        # the (small) J2000-vs-ITRF frame difference, uj[3] ≈ -c*delay.  (Phase 280: the
+        # `delay()` direction is now the APPARENT ITRF place, as in casacore, so the two
+        # differ by the annual aberration, up to ~1e-4 of the baseline.)
+        @test column(q, "uj")[i][3] ≈ -MSv2.C_LIGHT * column(q, "d")[i] rtol = 2e-4
     end
 end
 
@@ -1917,5 +1919,36 @@ end
                 @test ours == real
             end
         end
+    end
+end
+
+# Phase 280: mscal value functions against real derivedmscal on a randomised copy of the sample
+# MS (TIME spread over a day, random antennas / fields).  Found: our J2000 -> ITRF DIRECTION was
+# the plain GCRS -> ITRS rotation, ~17" (the annual aberration) from casacore, whose ITRF direction
+# is the apparent place rotated to the terrestrial frame -- it showed in `mscal.itrf()`, in
+# `delay()` (an antenna-baseline . direction product) and in every direction conversion to or from
+# ITRF (also seen as the ~13" residual noted in Phase 92).  Baselines (`MBaseline` / `MuvW`) keep
+# the plain rotation, which is closer to casacore's `uvwj2000`.
+@testset "mscal.itrf()/delay() vs real derivedmscal on varied rows (Phase 280)" begin
+    if isdir(SAMPLE_MS) && _HAVE_TAQL
+        d = joinpath(mktempdir(), "n.ms"); n = 80
+        copyms(SAMPLE_MS, d; rows=1:n)
+        t0 = column(readtable(d), "TIME")[1]; rng = MersenneTwister(280)
+        edit(d) do e
+            e["TIME"][:] = t0 .+ rand(rng, n) .* 86400
+            e["ANTENNA1"][:] = Int32.(rand(rng, 0:25, n)); e["ANTENNA2"][:] = Int32.(rand(rng, 0:25, n))
+            e["FIELD_ID"][:] = Int32.(rand(rng, 0:2, n))
+        end
+        t = readtable(d)
+        sel(ex) = (Vector(column(query(t, "rownumber() > 0"; select=["X" => ex]), "X")[:]),
+                   collect(_taqlcmd("SELECT $ex AS X FROM \$1", d)[:X][:]))
+        o, r = sel("mscal.itrf()")
+        @test maximum(i -> maximum(abs.(rem2pi.(Float64.(o[i]) .- Float64.(r[i]), RoundNearest))), 1:n) < 2e-5    # was ~1e-4
+        for f in ("mscal.delay()", "mscal.delay1()", "mscal.delay2()")
+            o, r = sel(f)
+            @test maximum(abs.(Float64.(o) .- Float64.(r))) < 5e-10                                          # was ~2e-9 s
+        end
+        o, r = sel("mscal.hadec1()")
+        @test maximum(i -> maximum(abs.(rem2pi.(Float64.(o[i]) .- Float64.(r[i]), RoundNearest))), 1:n) < 1e-5
     end
 end

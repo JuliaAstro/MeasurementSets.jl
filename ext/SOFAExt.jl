@@ -335,6 +335,17 @@ function _gal_sg(lon, lat, inverse::Bool)
     return (mod2pi(atan(w[2], w[1])), asin(clamp(w[3], -1.0, 1.0)))
 end
 
+# CIRS <-> ITRS: Earth rotation angle about z, then polar motion.
+_rz(θ) = SMatrix{3,3,Float64}(cos(θ), -sin(θ), 0.0, sin(θ), cos(θ), 0.0, 0.0, 0.0, 1.0)   # SOFA iauRz
+function _cirs_to_itrs(v, uta, utb, tta, ttb, eop)
+    pom = SOFA.pom00(eop.xp, eop.yp, SOFA.sp00(tta, ttb))
+    return pom * (_rz(SOFA.era00(uta, utb)) * v)
+end
+function _itrs_to_cirs(v, uta, utb, tta, ttb, eop)
+    pom = SOFA.pom00(eop.xp, eop.yp, SOFA.sp00(tta, ttb))
+    return _rz(SOFA.era00(uta, utb))' * (pom' * v)
+end
+
 function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
     A === SUPERGAL && return _dir_to_icrs(MDirection{GALACTIC}(_gal_sg(m.lon, m.lat, true)...), frame)
     _is_icrsish(A) && return (m.lon, m.lat)
@@ -370,10 +381,13 @@ function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
         uta, utb = _frame_ut1(frame)
         tta, ttb = _frame_tt(frame)
         eop = _frame_eop(frame)
-        rc2t = SOFA.c2t06a(tta, ttb, uta, utb, eop.xp, eop.yp)   # GCRS->ITRS
-        g = rc2t' * SVector(_dir_xyz(m))                         # ITRS -> GCRS
-        d = _xyz_dir(ICRS, g...)
-        return (d.lon, d.lat)
+        # ITRS -> CIRS (undo polar motion and Earth rotation), then the apparent CIRS place
+        # -> astrometric ICRS (undoing aberration and light deflection), see the forward
+        # direction below.
+        v = _itrs_to_cirs(SVector(_dir_xyz(m)), uta, utb, tta, ttb, eop)
+        ra = atan(v[2], v[1]); dec = asin(clamp(v[3], -1, 1))
+        r = SOFA.atic13(ra, dec, tta, ttb)
+        return (r.ra, r.dec)
     end
     error("MeasurementSets: direction frame $(nameof(A)) is not supported")
 end
@@ -414,9 +428,14 @@ function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) w
         uta, utb = _frame_ut1(frame)
         tta, ttb = _frame_tt(frame)
         eop = _frame_eop(frame)
-        rc2t = SOFA.c2t06a(tta, ttb, uta, utb, eop.xp, eop.yp)   # GCRS -> ITRS
-        g = rc2t * SVector(cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat))
-        return _xyz_dir(B, g...)
+        # Real casacore's ITRF direction is the APPARENT place rotated to the terrestrial
+        # frame (its J2000 -> ITRF chain goes through the apparent frame): the astrometric
+        # direction gets aberration and light deflection (`atci13`) before the Earth-rotation
+        # and polar-motion rotation.  A pure GCRS -> ITRS rotation (what this used to be) is
+        # ~20" off (the annual aberration) from casacore / casatools `me.measure(.., 'ITRF')`.
+        a = SOFA.atci13(lon, lat, 0.0, 0.0, 0.0, 0.0, tta, ttb)
+        v = _cirs_to_itrs(SVector(cos(a.dec)*cos(a.ra), cos(a.dec)*sin(a.ra), sin(a.dec)), uta, utb, tta, ttb, eop)
+        return _xyz_dir(B, v...)
     end
     error("MeasurementSets: direction frame $(nameof(B)) is not supported")
 end
@@ -608,6 +627,19 @@ end
 # baseline conversion is: convert the unit direction with the existing
 # `MDirection` code, then rescale by the original length.
 function MS._mconv(b::MBaseline{A}, ::Type{B}, frame::MeasFrame) where {A<:RefFrame,B<:RefFrame}
+    # A baseline is not a source direction: between ITRF and the celestial frames it takes the
+    # plain Earth-orientation rotation (no aberration), whichever celestial frame it goes on to
+    # (live-checked against derivedmscal `uvwj2000`: the aberrated direction route, which
+    # `MDirection{ITRF}` uses, is further from casacore's baselines).
+    if A === ITRF && B !== ITRF
+        v = _itrs_rot(SVector(b.x, b.y, b.z), frame, false)
+        bi = MBaseline{ICRS}(v[1], v[2], v[3])
+        return B === ICRS || B === J2000 ? MBaseline{B}(bi.x, bi.y, bi.z) : MS._mconv(bi, B, frame)
+    elseif B === ITRF && A !== ITRF
+        bi = A === ICRS || A === J2000 ? b : MS._mconv(b, ICRS, frame)
+        v = _itrs_rot(SVector(bi.x, bi.y, bi.z), frame, true)
+        return MBaseline{B}(v[1], v[2], v[3])
+    end
     r = hypot(b.x, b.y, b.z)
     r == 0 && return MBaseline{B}(0.0, 0.0, 0.0)
     d2 = MS.measconvert(_xyz_dir(A, b.x, b.y, b.z), B; frame)
@@ -636,13 +668,38 @@ end
 _topole(xyz, d::MDirection)   = _uvw_pole_R(d)' * SVector{3,Float64}(xyz)
 _frompole(xyz, d::MDirection) = _uvw_pole_R(d)  * SVector{3,Float64}(xyz)
 
+# The phase centre in the frame a uvw is converted to/from.  Between J2000/ICRS and ITRF this is
+# the same plain Earth-orientation rotation the baseline itself gets (see `_mconv(::MBaseline)`),
+# not the aberrated apparent-place route `MDirection{ITRF}` uses -- otherwise the w component
+# (baseline . direction, frame-invariant) would pick up the aberration difference.
+function _pole_dir(d::MDirection{R}, ::Type{T}, frame::MeasFrame) where {R<:RefFrame,T<:RefFrame}
+    R === T && return d
+    if R === ITRF
+        v = _itrs_rot(SVector(_dir_xyz(d)), frame, false)
+        di = _xyz_dir(ICRS, v[1], v[2], v[3])
+        return T === ICRS ? di : MS.measconvert(di, T; frame)
+    elseif T === ITRF
+        di = R === ICRS ? d : MS.measconvert(d, ICRS; frame)
+        v = _itrs_rot(SVector(_dir_xyz(di)), frame, true)
+        return _xyz_dir(ITRF, v[1], v[2], v[3])
+    end
+    return MS.measconvert(d, T; frame)
+end
+
+# plain GCRS <-> ITRS rotation (no aberration); `toitrs` = GCRS -> ITRS
+function _itrs_rot(v, frame::MeasFrame, toitrs::Bool)
+    uta, utb = _frame_ut1(frame); tta, ttb = _frame_tt(frame); eop = _frame_eop(frame)
+    rc2t = SOFA.c2t06a(tta, ttb, uta, utb, eop.xp, eop.yp)
+    return toitrs ? rc2t * v : rc2t' * v
+end
+
 function MS._mconv(u::MuvW{A}, ::Type{B}, frame::MeasFrame) where {A<:RefFrame,B<:RefFrame}
     frame.direction === nothing && error(
         "MeasurementSets: a uvw conversion needs `frame.direction` (the phase centre)")
-    dA = MS.measconvert(frame.direction, A; frame)
+    dA = _pole_dir(frame.direction, A, frame)
     plain = _topole((u.u, u.v, u.w), dA)                    # uvw -> plain baseline in A
     bB = MS._mconv(MBaseline{A}(plain...), B, frame)        # rotate A -> B
-    dB = MS.measconvert(frame.direction, B; frame)
+    dB = _pole_dir(frame.direction, B, frame)
     w = _frompole((bB.x, bB.y, bB.z), dB)                   # plain baseline -> uvw in B
     MuvW{B}(w...)
 end
