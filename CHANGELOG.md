@@ -9877,3 +9877,99 @@ fail. Fixed to check for an empty path first and raise a clear, actionable error
 problem; `is_stale` itself is unaffected and still correctly detects the underlying parent's change.
 New test in `test/reftable_tests.jl`, including a regression check that a genuinely persisted
 `RefTable` still resyncs correctly.
+
+### Phase 292 — `src/tables/typeenum.jl` + `src/tables/units.jl` sweep: no new bug, one real coverage gap closed
+
+Fresh read + cross-check of the `CasaType` enum and its Julia-type mapping against real casacore
+source (`casa/Utilities/DataType.h`) — every one of the 31 enum ordinals (0-30) verified to match
+casacore's own declaration order exactly, and the `TpChar => Int8` read-side mapping confirmed
+consistent with the already-documented (Phase 265) write-side exclusion ("`Int8`/`Char` is not a real
+casacore table column type — casacore aborts"). The Phase 34-36 half-precision narrowing machinery
+(`_narrowtype`/`_narrows`/`_narrowvalue`) re-checked and confirmed correct. No bug.
+
+A coverage-instrumented pass then found a genuine, previously-completely-untested code path in
+`src/tables/units.jl`: `columnunit`/`qcolumn`'s own "load Unitful" fallback (the varargs stubs,
+overridden by `ext/UnitfulExt.jl` once loaded) had never been exercised by any test — `units_tests.jl`
+itself `import`s `Unitful`/`UnitfulAngles`/`UnitfulAstro` at its own top before a single `@test` runs,
+and once the extension loads for a Julia process it stays loaded, so the fallback genuinely cannot be
+reached in-process. Live-verified the fallback gives the correct, actionable error message via a
+fresh child process that never imports `Unitful` — the exact same shape of gap, and the exact same
+`lock_tests.jl` `_JULIA`/`_PROJ` cross-process fix, Phase 225 already used for the analogous
+`EarthOrientationExt` "SOFA loaded, EarthOrientation not loaded" fallback. New test in
+`test/units_tests.jl`.
+
+### Phase 293 — `src/tables/refedit.jl` + `src/tables/concatedit.jl` sweep: two real bugs, both live-reproduced
+
+First dedicated fresh-read sweep of the `RefTable`/`ConcatTable` in-place-edit views (Phases
+125-130) — both files re-read in full and cross-checked against their own documented casacore
+provenance (`RefColumn::put`, `ConcatColumn::put`, `RefTable::addColumn`/`removeColumn`,
+`ConcatTable::addColumn`). Found two real bugs, both confirmed live before fixing.
+
+**Bug 1 — a missing `flush` method.** Neither `RefEditTable` nor `ConcatEditTable` had a
+`Base.flush` method at all — only the do-block form (`edit(f, rt)`/`edit(f, ct)`) ever committed
+anything, by duplicating the commit logic inline instead of calling a public `flush`. So the
+documented non-do-block idiom `t = edit(path); ...; flush(t)` — which works for a plain
+`EditTable` and is even implied by these two types' own docstrings — raised a raw `MethodError`
+for `t = edit(rt::RefTable)` / `t = edit(ct::ConcatTable)`. Live-reproduced: the write itself had
+already landed correctly (`t["COL"][i] = v` writes straight through to the parent/part), but there
+was no public way to commit it short of reaching into the private `t.parent`/`t.parts` fields —
+and since Phase 207 holds the write lock for the *whole* session (not just inside `flush`), hitting
+this `MethodError` left the table's lock stuck for the rest of the process with no way to release
+it. Fixed with `Base.flush(t::RefEditTable)` (delegates to `flush(t.parent)`, returns `t`) and
+`Base.flush(t::ConcatEditTable)` (flushes every part, returns `t`) — both idempotent, matching
+`Base.flush(::EditTable)`'s own convention; the do-block forms now call these instead of
+duplicating the logic inline.
+
+**Bug 2 — `ConcatEditTable.addcolumn!` mutated parts as it looped, not after validating all of
+them.** Both the no-data and with-data forms looped `for p in t.parts; addcolumn!(p, name; ...)`
+— so if `name` already existed on a *later* part but not an *earlier* one (a real possible MMS
+shape: one SPW's MAIN table already carries a column the others don't), the call correctly threw
+"column … already exists" from the later part's own `_check_new_col`, but the *earlier* part was
+left with a silently-committed pending add in its own `EditTable.addcols`. The error message
+implied nothing had happened; in fact a later, unrelated `flush` (even one reached via completely
+different code) would write a spurious, wrongly-sliced column to that one part only. Live-
+reproduced with a two-part `ConcatTable` where only part 2 already had column `"B"`: the failed
+`addcolumn!(ce, "B", ...)` left `ce.parts[1].addcols` non-empty, and a subsequent `flush` gave
+part 1 a `"B"` column with the wrong data while part 2's genuine `"B"` was untouched. Fixed by
+validating every part's `_check_new_col` (and `_check_kind`) up front, before mutating any of
+them — the same validate-before-mutate shape already established in Phases 199/202/204/205 for
+exactly this class of "throws late, having already mutated something" bug.
+
+New tests in `test/edit_tests.jl` for both, including the real-casacore cross-check confirming the
+untouched columns really are untouched on disk.
+
+### Phase 294 — `src/tables/edit.jl` sweep: a real bug in `addcolumn!`'s `type=` override
+
+Full fresh read of `EditTable`/`EditColumn` (only ever patched piecemeal before — Phase 201's
+`kind=` validation, Phase 207's locking, Phase 210's `removecolumn!` gap — never read start to
+finish in one pass). The engine/Dysco companion-column cleanup in `removecolumn!`, the row-map
+shift arithmetic in `removerows!`, the fast-vs-regen dispatch in `Base.flush`/`_tiled_fast_ok`, and
+the per-sequence-group writer dispatch in `_flush_regen` were all re-checked against their own
+documented invariants and confirmed correct — including a hand-verified cross-check that
+`removecolumn!`'s hardcoded 9-entry engine-companion-keyword list is exactly the full set
+`src/datamanagers/virtual.jl` can ever write (`_BaseMappedArrayEngine_Name` +
+`{ScaledArrayEngine,ScaledComplexData,CompressFloat,CompressComplex}_{Scale,Offset}Name`, the last
+shared by `CompressComplexSD`), not a stale subset.
+
+**Found and fixed**: `_addcol_desc` — the shared helper behind `addcolumn!(t, name, data; ...)` for
+both a plain `EditTable` and a `RefEditTable` (Phase 126) — only ran its `Measure`/`Unitful.Quantity`
+auto-flatten `if type === nothing`. So `addcolumn!(t, name, measure_or_quantity_data; type=SomeCasaType)`
+silently succeeded at *add* time with `vals` left as the raw, unflattened `Vector{MEpoch{...}}`/
+`Vector{Quantity}` — no validation, no error — and the failure only surfaced deep inside a *later*
+`flush` → `_flush_regen`/`_flush_fast` → `write_standardstman`/`write_incrementalstman`, as a bare
+`MethodError: no method matching Float64(::MEpoch{UTC})` that names none of the real cause. Live-
+reproduced before fixing. There was no legitimate use for the old guard either: `addcolumn!` has no
+`units=`/`measures=` kwarg of its own, so this auto-detection is the *only* way to get a
+MEASINFO/QuantumUnits keyword onto an added column at all — nobody could have been relying on
+`type=` suppressing it on purpose. Fixed by always running the flatten; `type=`/`shape=` now
+override the *result* of it (exactly as documented) instead of skipping it. A plain
+(non-`Measure`/`Quantity`) `data` + `type=` is unaffected (`_measure_column_spec`/
+`_quantity_column_spec` both return `nothing` for it, same as before) — verified live for both the
+fixed case and this regression case, through both `addcolumn!(::EditTable, ...)` and
+`addcolumn!(::RefEditTable, ...)` (which shares the same fix for free).
+
+New tests in `test/measures_tests.jl`. Also investigated a related permissive-but-harmless
+behaviour (a double `removecolumn!` on a plain `EditTable` succeeds silently, where `RefEditTable`'s
+own `removecolumn!` throws) and a remove-then-`addcolumn!` of the same name in one session (works
+correctly, a deliberate "replace a column" idiom) — both confirmed not to cause any real corruption
+or misleading state, left as-is.

@@ -521,6 +521,113 @@ end
     end
 end
 
+# Phase 293: `flush(t)` on the non-do-block form of `edit(rt::RefTable)`/
+# `edit(ct::ConcatTable)` -- found live: neither `RefEditTable` nor
+# `ConcatEditTable` had a `Base.flush` method at all (only the do-block
+# form, `edit(f, rt)`, committed anything), so `t = edit(rt); ...;
+# flush(t)` -- the exact idiom `t = edit(path); ...; flush(t)` already
+# supports for a plain `EditTable` -- raised a raw `MethodError`, leaving
+# the write lock (held for the whole session since Phase 207) stuck on
+# the table for the rest of the process with no way to release it short
+# of reaching into the private `t.parent`/`t.parts` fields.
+@testset "edit — flush() on the non-do-block RefEditTable/ConcatEditTable form (Phase 293)" begin
+    dir = joinpath(mktempdir(), "flush-ref.tab")
+    n = 5
+    write_table(dir, "T", ["K" => collect(Int32, 1:n), "V" => Float64.(1:n)]; nrow = n)
+
+    rt = query(readtable(dir), "K > 2")           # rows 3,4,5
+    rv = edit(rt)
+    rv["V"][1] = 300.0                            # -> parent row 3
+    r = flush(rv)
+    @test r === rv                                # flush returns what it was given, like EditTable
+    @test column(readtable(dir), "V")[:] == [1.0, 2.0, 300.0, 4.0, 5.0]
+    @test flush(rv) === rv                        # idempotent, doesn't error a second time
+
+    dir1 = joinpath(mktempdir(), "flush-c1.tab")
+    dir2 = joinpath(mktempdir(), "flush-c2.tab")
+    write_table(dir1, "T", ["K" => collect(Int32, 1:3), "V" => Float64.(1:3)]; nrow = 3)
+    write_table(dir2, "T", ["K" => collect(Int32, 4:6), "V" => Float64.(4:6)]; nrow = 3)
+    ccdir = joinpath(mktempdir(), "flush-cc.tab")
+    write_concattable(ccdir, [readtable(dir1), readtable(dir2)])
+
+    cv = edit(readtable(ccdir))
+    cv["V"][1] = 10.0                             # part 1
+    cv["V"][5] = 50.0                              # part 2
+    r2 = flush(cv)
+    @test r2 === cv
+    @test column(readtable(dir1), "V")[:] == [10.0, 2.0, 3.0]
+    @test column(readtable(dir2), "V")[:] == [4.0, 50.0, 6.0]
+    @test flush(cv) === cv                         # idempotent
+
+    if _HAVE_CASACORE
+        @test CCT.Table(dir)[:V][:] == [1.0, 2.0, 300.0, 4.0, 5.0]
+        @test CCT.Table(dir1)[:V][:] == [10.0, 2.0, 3.0]
+        @test CCT.Table(dir2)[:V][:] == [4.0, 50.0, 6.0]
+    end
+end
+
+# Phase 293: `addcolumn!(::ConcatEditTable, ...)` looped over parts and
+# mutated as it went -- found live: a name present on a LATER part but
+# not an EARLIER one made the call throw "column ... already exists"
+# (correctly, from the later part's own `_check_new_col`) but left the
+# EARLIER part with a silently-committed pending add in its own
+# `EditTable.addcols`, so a later `flush` -- even one the caller reaches
+# via a completely unrelated later edit -- wrote a spurious, wrongly-
+# sliced column to that one part only. Fixed by validating every part's
+# `_check_new_col` up front, before mutating any of them (the same
+# validate-before-mutate shape as Phases 199/202/204/205).
+@testset "edit — ConcatEditTable addcolumn! validates every part before mutating any (Phase 293)" begin
+    dir1 = joinpath(mktempdir(), "pm1.tab")
+    dir2 = joinpath(mktempdir(), "pm2.tab")
+    write_table(dir1, "T", ["A" => Int32[1, 2, 3]]; nrow = 3)
+    write_table(dir2, "T", ["A" => Int32[4, 5], "B" => Float64[9.0, 10.0]]; nrow = 2)   # part 2 already has B
+    ccdir = joinpath(mktempdir(), "pm.tab")
+    write_concattable(ccdir, [readtable(dir1), readtable(dir2)])
+
+    # with-data form: the collision is on part 2, but part 1 must stay untouched
+    ce = edit(readtable(ccdir))
+    @test_throws ErrorException addcolumn!(ce, "B", Float64[1.0, 2.0, 3.0, 4.0, 5.0])
+    @test isempty(ce.parts[1].addcols)             # no leftover pending add on the clean part
+    @test isempty(ce.parts[2].addcols)
+    flush(ce)
+    @test columnnames(readtable(dir1)) == ["A"]                 # "B" never landed on part 1
+    @test columnnames(readtable(dir2)) == ["A", "B"]
+    @test column(readtable(dir2), "B")[:] == [9.0, 10.0]        # part 2's own B is untouched
+
+    # no-data form: the same up-front check
+    ce2 = edit(readtable(ccdir))
+    @test_throws ErrorException addcolumn!(ce2, "B"; kind=:ssm)
+    @test isempty(ce2.parts[1].addcols)
+    flush(ce2)
+    @test columnnames(readtable(dir1)) == ["A"]
+
+    # an invalid kind= is also rejected before any part is touched
+    ce3 = edit(readtable(ccdir))
+    @test_throws ArgumentError addcolumn!(ce3, "C", Float64[1.0, 2.0, 3.0, 4.0, 5.0]; kind=:bogus)
+    @test isempty(ce3.parts[1].addcols)
+    @test_throws ArgumentError addcolumn!(ce3, "C"; kind=:bogus)
+    @test isempty(ce3.parts[1].addcols)
+    flush(ce3)   # release ce3's write locks -- neither addcolumn! call above mutated anything,
+                 # so this is a no-op besides that; leaving it unflushed leaked the lock into
+                 # the process-global registry for the rest of the test run (caught live: it
+                 # poisoned lock_tests.jl's "registry starts empty" assertions later in the
+                 # same run -- ce4 below never actually deadlocked on it only because `tlock`
+                 # is a per-directory ReentrantLock and every edit() call here runs on the same
+                 # task, so ce4's own edit() reentered it instead of blocking).
+
+    # a genuinely new name still succeeds on every part
+    ce4 = edit(readtable(ccdir))
+    addcolumn!(ce4, "C", Float64[1.0, 2.0, 3.0, 4.0, 5.0])
+    flush(ce4)
+    @test column(readtable(dir1), "C")[:] == [1.0, 2.0, 3.0]
+    @test column(readtable(dir2), "C")[:] == [4.0, 5.0]
+
+    if _HAVE_CASACORE
+        @test CCT.Table(dir1)[:C][:] == [1.0, 2.0, 3.0]
+        @test CCT.Table(dir2)[:B][:] == [9.0, 10.0]   # untouched by the failed collision above
+    end
+end
+
 # Phase 133: addrows!/removerows! (and removecolumn! for ConcatEditTable)
 # on a RefEditTable/ConcatEditTable give clear, actionable errors instead
 # of a raw MethodError -- confirmed genuinely unsupported by casacore

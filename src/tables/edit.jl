@@ -415,39 +415,58 @@ end
 
 # Build a new column's `ColumnDesc` from a length-agnostic sample of its
 # data (a `Measure`/`Unitful.Quantity` eltype flattens to plain numbers +
-# a MEASINFO/QuantumUnits keyword record, unless `type` pins it) --
-# shared by `addcolumn!(::EditTable, ...)` (Phase 10) and
+# a MEASINFO/QuantumUnits keyword record; `type`/`shape` override the
+# RESULT of that -- see Phase 293 below, not whether it happens at all)
+# -- shared by `addcolumn!(::EditTable, ...)` (Phase 10) and
 # `addcolumn!(::RefEditTable, ...)` (Phase 126), the latter building a
 # full-parent-length column from only the view's own row values.
 function _addcol_desc(name::AbstractString, data;
                       type::Union{CasaType,Nothing}=nothing, shape=nothing)
     vals = collect(data)
     mkw = Record()
-    if type === nothing
-        msp = _measure_column_spec(vals)
-        if msp !== nothing
-            vals = msp.data
-            mkw = _set_kw(Record(), "MEASINFO", TpRecord,
-                          _measinfo_record(msp.kind; ref = msp.ref))
-            # Phase 221 fix: only stamp `QuantumUnits` when non-empty --
-            # a dimensionless kind (`:doppler`, `msp.units == String[]`)
-            # must omit the keyword entirely, matching real casacore
-            # convention and (crucially) `write_table`'s own
-            # `_stamp_measinfo` (`create.jl`), which already has this
-            # exact guard. Live-reproduced before the fix: `write_table`
-            # of an `MDoppler`-typed column correctly wrote NO
-            # `QuantumUnits` keyword at all, while `addcolumn!` of the
-            # identical data unconditionally wrote an empty
-            # `QuantumUnits = String[]` -- the package's own two
-            # Measure-typed-column auto-detection entry points
-            # disagreeing with each other for the same input.
-            isempty(msp.units) || (mkw = _set_kw(mkw, "QuantumUnits", TpArrayString, msp.units))
-        else
-            qsp = _quantity_column_spec(vals)
-            if qsp !== nothing
-                vals = qsp.data
-                mkw = _set_kw(Record(), "QuantumUnits", TpArrayString, qsp.units)
-            end
+    # Phase 293 fix: this used to run ONLY `if type === nothing`, so
+    # `addcolumn!(t, name, measure_or_quantity_data; type=...)` silently
+    # skipped flattening entirely -- `vals` stayed a `Vector{MEpoch{...}}`/
+    # `Vector{Quantity}`, `ct` came from the caller's `type=` (so no error
+    # at `addcolumn!` time), and the raw Measure/Quantity objects got
+    # pushed straight into `t.addcols`. The crash only surfaced deep
+    # inside a LATER `flush` -> `_flush_regen` -> `write_standardstman`,
+    # as a bare `MethodError: no method matching Float64(::MEpoch{UTC})`
+    # that names none of the real cause -- live-reproduced. There is no
+    # legitimate use for the old guard either: `addcolumn!` has no
+    # `units=`/`measures=` kwarg of its own, so the ONLY way to get a
+    # MEASINFO/QuantumUnits keyword onto an added column at all is via
+    # this auto-detection running on genuinely Measure/Quantity-typed
+    # `data` -- nobody could have relied on `type=` suppressing it on
+    # purpose. Now it always runs; `type`/`shape` still override the
+    # RESULTING `ct`/`shp` exactly as documented, they just no longer
+    # skip the flatten that makes a Measure/Quantity `data` writable at
+    # all. A plain (non-Measure/Quantity) `data` is unaffected --
+    # `_measure_column_spec`/`_quantity_column_spec` both return
+    # `nothing` for it, same as before.
+    msp = _measure_column_spec(vals)
+    if msp !== nothing
+        vals = msp.data
+        mkw = _set_kw(Record(), "MEASINFO", TpRecord,
+                      _measinfo_record(msp.kind; ref = msp.ref))
+        # Phase 221 fix: only stamp `QuantumUnits` when non-empty --
+        # a dimensionless kind (`:doppler`, `msp.units == String[]`)
+        # must omit the keyword entirely, matching real casacore
+        # convention and (crucially) `write_table`'s own
+        # `_stamp_measinfo` (`create.jl`), which already has this
+        # exact guard. Live-reproduced before the fix: `write_table`
+        # of an `MDoppler`-typed column correctly wrote NO
+        # `QuantumUnits` keyword at all, while `addcolumn!` of the
+        # identical data unconditionally wrote an empty
+        # `QuantumUnits = String[]` -- the package's own two
+        # Measure-typed-column auto-detection entry points
+        # disagreeing with each other for the same input.
+        isempty(msp.units) || (mkw = _set_kw(mkw, "QuantumUnits", TpArrayString, msp.units))
+    else
+        qsp = _quantity_column_spec(vals)
+        if qsp !== nothing
+            vals = qsp.data
+            mkw = _set_kw(Record(), "QuantumUnits", TpArrayString, qsp.units)
         end
     end
     ct = type === nothing ? _casatype_of(eltype(vals)) : type

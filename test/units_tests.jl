@@ -173,3 +173,30 @@ end
     @test columnunit(t3, "MASS") == UnitfulAstro.Msun
     @test column(t3, "MASS")[:] == [1.0, 2.5, 4.0]
 end
+
+# Phase 292 finding: `columnunit`/`qcolumn`'s own "load Unitful" fallback
+# (`units.jl`'s varargs stubs, overridden by `UnitfulExt` once loaded) had
+# NEVER been exercised by any test -- this file's own `import Unitful,
+# UnitfulAngles, UnitfulAstro` above loads the extension for the whole
+# process before a single `@test` runs, and once loaded it stays loaded,
+# so the fallback genuinely cannot be reached in-process. Spawn a real
+# child process that never imports Unitful, reusing `lock_tests.jl`'s
+# `_JULIA`/`_PROJ` cross-process machinery (already in scope), the same
+# pattern Phase 225 used for the analogous `EarthOrientationExt` gap.
+@testset "units — no-Unitful fallback (child process, Phase 292)" begin
+    child_code = """
+        using MeasurementSets
+        @assert Base.get_extension(MeasurementSets, :UnitfulExt) === nothing
+        d = mktempdir()
+        p = joinpath(d, "t")
+        write_table(p, "T", ["A" => Float64[1.0, 2.0]]; nrow=2)
+        t = readtable(p)
+        ok1 = try columnunit(t, "A"); false catch e; e isa ErrorException &&
+            occursin("import Unitful", e.msg) end
+        ok2 = try qcolumn(t, "A"); false catch e; e isa ErrorException &&
+            occursin("import Unitful", e.msg) end
+        println(ok1 && ok2)
+        """
+    out = read(`$_JULIA --project=$_PROJ --startup-file=no -e $child_code`, String)
+    @test strip(out) == "true"
+end
