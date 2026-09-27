@@ -9693,3 +9693,19 @@ Two more random fuzzes of `measconvert` against casatools `me.measure`:
   frames here.
 
 A fixed-seed 136-assertion guard is in `test/measures_tests.jl`.
+
+### Phase 284 — TaQL-lite GROUP BY: random queries vs real TaQL (one divergence: one-row sample variance)
+
+700 random `SELECT keys, g*(expr)… [WHERE] GROUP BY keys [HAVING]` queries (one or two key columns
+incl. String / Bool keys, one to three `g*` aggregates — `gcount` / `gsum` / `gmean` / `gmin` / `gmax` /
+`gvariance` / `gstddev` / `grms` / `gmedian` / `gsamplevariance` / `gsamplestddev` / `gfirst` /
+`glast` / `gproduct` — over random expressions, random `WHERE` / `HAVING`) compared with real TaQL by
+group key and value. One divergence: **the sample (n−1) variance / stddev of a one-row group is `0.0`
+in real TaQL** (Julia's `var` / `std` gave `NaN`) — `gsamplevariance` / `gsamplestddev` and the
+per-element `gsamplevariances` / `gsamplestddevs` now return `0.0` there. (The running / boxed
+sample variants keep their own behaviour: real TaQL *throws* on a window of fewer than two.)
+
+Not ours: real casacore's **`gmax` of an all-negative group returns `2.2e-308`** (its running
+maximum starts at `DBL_MIN`, the smallest *positive* double), so `gmax(D)` on such a group differs and
+`HAVING gmax(D) > 0` keeps groups that should be dropped — an upstream bug, not reproduced (the guard
+skips it). Kept as a seeded 60-query guard in `test/taql_fuzz_tests.jl`.

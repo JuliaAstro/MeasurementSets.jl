@@ -116,3 +116,42 @@ end
         isempty(bad) || println(bad)
     end
 end
+
+# Phase 284: random GROUP BY queries (1-2 key columns incl. String / Bool keys, 1-3 `g*` aggregates over
+# random expressions, WHERE, HAVING) compared with real TaQL.  700 queries found one divergence: the
+# sample variance / stddev of a ONE-ROW group is 0.0 in real TaQL (Julia's `var` gave NaN).  Not
+# compared: `gmax` of an all-negative group (real casacore returns DBL_MIN = 2.2e-308, an upstream bug --
+# it also lets `HAVING gmax(x) > 0` keep such groups).
+@testset "TaQL-lite GROUP BY vs real TaQL: random queries (Phase 284)" begin
+    if _HAVE_TAQL
+        N = 60; r0 = MersenneTwister(11)
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["ID" => Int32.(1:N), "K" => Int32.(rand(r0, 0:3, N)), "L" => Int32.(rand(r0, 0:2, N)), "I" => Int32.(rand(r0, -6:6, N)),
+            "D" => round.(randn(r0, N) .* 3; digits=1), "E" => Float64.(rand(r0, 1:4, N)) .* 0.5, "B" => rand(r0, Bool, N), "S" => rand(r0, ["ab", "abc", "b", "z"], N)]; nrow=N)
+        t = readtable(d)
+        pick(r, xs) = xs[rand(r, 1:length(xs))]
+        num(r) = pick(r, ("I", "D", "E", "(I + D)", "(D * E)", "abs(D)", "(I % 3)", "ID"))
+        fns = ["gcount()", "gsum", "gmean", "gmin", "gvariance", "gstddev", "grms", "gmedian", "gsamplevariance", "gsamplestddev", "gfirst", "glast"]
+        r = MersenneTwister(284); bad = String[]
+        for _ in 1:60
+            kk = pick(r, (["K"], ["L"], ["K", "L"], ["S"], ["B"], ["K", "S"]))
+            aggs = ["A$i" => (a = pick(r, fns); a == "gcount()" ? a : "$a($(num(r)))") for i in 1:rand(r, 1:3)]
+            wh = rand(r) < 0.4 ? pick(r, ("I > -3", "B", "D < 2.0", "S != 'z'", "ID % 2 == 0")) : nothing
+            hv = rand(r) < 0.3 ? pick(r, ("gcount() > 3", "gsum(I) >= 0", "gmin(E) < 1.5")) : nothing
+            sel = join(vcat(kk, ["$(a.second) AS $(a.first)" for a in aggs]), ", ")
+            cmd = "SELECT $sel FROM \$1" * (wh === nothing ? "" : " WHERE $wh") * " GROUP BY $(join(kk, ", "))" * (hv === nothing ? "" : " HAVING $hv")
+            g = MSv2.groupby(t, kk; select = vcat([k => Symbol(k) for k in kk], [a.first => a.second for a in aggs]), where = wh, having = hv)
+            ours = Dict(Tuple(getproperty(g, Symbol(k))[i] for k in kk) => [getproperty(g, Symbol(a.first))[i] for a in aggs] for i in 1:MSv2.nrow(g))
+            rt = _taqlcmd(cmd, d)
+            real = size(rt, 1) == 0 ? Dict() : Dict(Tuple(collect(rt[Symbol(k)][:])[i] for k in kk) => [collect(rt[Symbol(a.first)][:])[i] for a in aggs] for i in 1:size(rt, 1))
+            ok = length(ours) == length(real) && all(k -> haskey(real, k) && all(j -> (a = ours[k][j]; b = real[k][j];
+                    a == b || (a isa Real && b isa Real && isapprox(a, b; rtol=1e-8, atol=1e-10))), eachindex(ours[k])), keys(ours))
+            ok || push!(bad, cmd)
+        end
+        @test isempty(bad)
+        isempty(bad) || println(bad)
+        # a one-row group: sample variance / stddev are 0.0, not NaN
+        g = MSv2.groupby(t, ["ID"]; select = ["ID" => :ID, "V" => "gsamplevariance(D)", "S" => "gsamplestddev(D)"])
+        @test all(==(0.0), g.V) && all(==(0.0), g.S)
+    end
+end
