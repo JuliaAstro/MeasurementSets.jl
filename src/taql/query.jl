@@ -172,7 +172,7 @@ function _tql_cols(t::AbstractTable, names, asts...)
     plain, measframe = _measframe_split(plain)
     plain, kwkeys = _kw_split(plain)
     d = Dict{String,AbstractVector}(
-        n => (c = _load_col(column(t, n)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
+        n => (c = _load_col(column(t, n; precision=:full)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
         for n in plain)
     isempty(mscal) || merge!(d, _mscal_columns(t, mscal))
     isempty(stokes) || merge!(d, _stokes_setups(t, stokes))
@@ -545,7 +545,7 @@ function query(f::Function, t::AbstractTable;
     orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(t, o) for o in orderby]
     extra = [k.name for k in orderkeys if !(k.name in names)]
     allnames = vcat(collect(names), extra)
-    allcols = AbstractVector[_load_col(column(t, n)) for n in allnames]
+    allcols = AbstractVector[_load_col(column(t, n; precision=:full)) for n in allnames]
     rows = CTDSRows(allcols, Symbol.(allnames), nrow(t))
     matched = [i for (i, row) in enumerate(rows) if _tql_truthy(f(row))]
     cols_by_name = Dict(n => c for (n, c) in zip(allnames, allcols))

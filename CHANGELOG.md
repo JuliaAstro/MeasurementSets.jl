@@ -9599,3 +9599,60 @@ compared after a `DELETE`; (2) `F` is a reserved word (`False`) in real TaQL, so
 cannot be referenced there (ours lets a column of that name win). Also `-0.0 % 4` is `-0.0` in
 real TaQL, `0.0` here (signed zeros compared equal). A seeded 6-seed guard is in
 `test/taql_fuzz_tests.jl`.
+
+### Phase 279 — `mscal.baseline`: autocorrelation rows (found by a random-spec fuzz vs real derivedmscal)
+
+A random-spec fuzz of `mscal.baseline` / `field` / `spw` / `uvdist` against real derivedmscal, on a
+randomised copy of the sample MS (the sample's own rows never have `ANTENNA1 == ANTENNA2`, so
+autocorrelations had never been exercised), found one real divergence: **a bare antenna list
+(`'15'`, `'ea1*'`, `'1~10'`, `'8~19,2~17'`, `'<9'`, …) selects cross-correlations touching the set
+only**, and a leading `!` negates that, so a negated list keeps every autocorrelation — including
+the listed antennas' own. We included the listed antennas' autocorrelations in the positive form
+(and dropped them in the negated one). `&` (cross only), `&&` (both) and `&&&` (auto only) already
+agreed. `mscal.feed` keeps the old rule (there `FEED1 == FEED2` is the normal case). 700 random
+specs afterwards: no mismatch. Also learned: real casacore's grammars are *stricter* than ours —
+`mscal.field('!0')`, a `!` after a comma or `&` in a baseline spec, and `&<9` are parse errors in
+real and accepted here (a benign extension, like `>=`). Regression test: `test/taql_mscal_tests.jl`.
+
+### Phase 280 — J2000 → ITRF direction: casacore's is the *apparent* place (found by comparing mscal value functions on varied rows)
+
+A value fuzz of the `mscal.*` functions against real derivedmscal on a randomised copy of the
+sample MS (TIME spread over a day, random antennas and fields — the sample's own rows are nearly
+one instant) showed `ha` / `hadec` / `azel` / `pa` / `last` agree to a few arc-seconds, but
+`mscal.itrf()` was a **constant ~17″ off** and `delay()` ~18× worse than it should be. casatools'
+`me.measure(dir, 'ITRF')` shows the same offset from us, so the divergence was the direction
+conversion itself: casacore's ITRF direction is the **apparent** place (annual aberration and
+light deflection) rotated to the terrestrial frame, whereas ours was the plain GCRS → ITRS
+rotation of the geometric direction. (It is the ~13″ "EOP / aberration model difference" that
+Phase 92 saw in the EarthMagneticMachine geometry and accepted.)
+
+- `MDirection` conversion to/from `ITRF` now goes through the apparent place (`atci13` /
+  `atic13` + Earth rotation angle and polar motion). Agreement with casatools: 8.5e-5 → 1.5e-6 rad;
+  `mscal.itrf()` 1e-4 → 4.5e-6 rad; `mscal.delay()` 2.2e-9 → 1.2e-10 s (all vs real derivedmscal).
+  Conversions of an ITRF direction into AZEL / HADEC / APP are consistent with that now too.
+- `MBaseline` / `MuvW` (and the phase centre used as the uvw pole) keep the **plain** rotation for
+  ITRF ↔ celestial frames: live-compared with `mscal.uvwj2000()`, the aberrated route is *further*
+  from casacore's baselines (1.1 m vs 0.66 m on ≤ 36 km baselines). A residual of ≲ 7e-5 of the
+  baseline (a few arc-seconds of rotation) between our `uvwj2000()` and casacore's remains — its
+  MBaseline route applies something we do not reproduce (not chased). The `delay()` ↔ `uvw_j2000()`
+  w-component relation test therefore loosens to the aberration size (2e-4).
+
+### Phase 281 — TaQL-lite reads MAIN at full precision; `mscal.stokes` rescale for the pseudo magnitudes
+
+A random `mscal.stokes` fuzz (480 specs: `I`/`Q`/`U`/`V`/`IQUV`/`LIN`/`CIRC`/single correlations/the
+five pseudo types, ± `rescale`, on `DATA` / `FLAG` / `WEIGHT`) against real derivedmscal, on a copy
+of the sample MS with random data and both a circular and an edited-to-linear `POLARIZATION`
+`CORR_TYPE`, found two things:
+
+- **Query expressions computed from MAIN's visibility columns were ~1e-3 (relative) off real TaQL.**
+  `readtable` on a Measurement Set defaults MAIN's `Float32` / `ComplexF32` columns to half
+  precision (Phase 34), and the TaQL engine inherited that, so `mean(DATA)`, `abs(DATA[1,1]) > x`,
+  `mscal.stokes(DATA, ...)` and friends were evaluated on `ComplexF16` values. TaQL-lite now reads
+  its columns at **full precision** (`precision = :full`, as `edit` / `copyms` already do). The
+  half-precision default for `ms[:DATA]` / `column(t, "DATA")` is unchanged; per-cell reads stay
+  lazy, so the cost is decoding, not memory.
+- **`mscal.stokes(..., 'Ptotal' | 'Plinear', true)` was 2× real** — the pseudo types were built from
+  the unscaled I/Q/U/V; with `rescale` they use the rescaled ones (the angle / fraction types were
+  scale-invariant, which is why only the magnitudes showed it).
+
+After both: 480 random specs, no mismatch. Regression test in `test/taql_mscal_tests.jl`.

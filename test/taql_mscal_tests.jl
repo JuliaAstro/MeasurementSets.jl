@@ -239,8 +239,10 @@ end
         # mscal.delay()'s w equivalent = dot(dir, ap1-ap2)/c (ANTENNA1-
         # ANTENNA2, matching the stored UVW's own convention); the fixed
         # uvw_j2000()'s w corresponds to ANTENNA2-ANTENNA1 -- so, up to
-        # the (small) J2000-vs-ITRF frame difference, uj[3] ≈ -c*delay.
-        @test column(q, "uj")[i][3] ≈ -MSv2.C_LIGHT * column(q, "d")[i] rtol = 1e-6
+        # the (small) J2000-vs-ITRF frame difference, uj[3] ≈ -c*delay.  (Phase 280: the
+        # `delay()` direction is now the APPARENT ITRF place, as in casacore, so the two
+        # differ by the annual aberration, up to ~1e-4 of the baseline.)
+        @test column(q, "uj")[i][3] ≈ -MSv2.C_LIGHT * column(q, "d")[i] rtol = 2e-4
     end
 end
 
@@ -1877,6 +1879,117 @@ end
                            ("baseline", "0~3"), ("baseline", "!0"), ("baseline", "0&&1"), ("spw", "0:^2"), ("spw", "0:0~10")]
             r = real_rows(fn, spec); m = mine_rows(fn, spec)
             @test r === nothing ? isempty(m) : r == m
+        end
+    end
+end
+
+# Phase 279: a random-spec fuzz of `mscal.baseline` against real derivedmscal on a randomised
+# copy of the sample MS found that the sample's rows never have ANTENNA1 == ANTENNA2, so
+# autocorrelation handling was untested: a bare antenna list (`'15'`, `'ea1*'`, `'1~10'`, ...)
+# selects CROSS-correlations touching the set only, and a leading `!` negates that, so a negated
+# list keeps every autocorrelation (including the listed antennas' own).  `&&` / `&&&` /
+# `&` already agreed.  (700 random specs incl. those forms: no other divergence.)
+@testset "mscal.baseline with autocorrelation rows (Phase 279)" begin
+    if isdir(SAMPLE_MS)
+        d = joinpath(mktempdir(), "n.ms"); n = 300
+        copyms(SAMPLE_MS, d; rows=1:n)
+        rng = MersenneTwister(279)
+        edit(d) do e
+            e["TIME"][:] = 5.0e9 .+ Float64.(1:n)
+            e["ANTENNA1"][:] = Int32.(rand(rng, 0:25, n)); e["ANTENNA2"][:] = Int32.(rand(rng, 0:25, n))
+        end
+        t = readtable(d)
+        a1 = column(t, "ANTENNA1")[:]; a2 = column(t, "ANTENNA2")[:]
+        @test any(a1 .== a2)
+        sel(spec) = Int.(column(query(t, "mscal.baseline('$spec')"), "TIME")[:] .- 5.0e9)
+        auto(rows) = [i for i in rows if a1[i] == a2[i]]
+        r = sel("15")
+        @test isempty(auto(r)) && all(i -> a1[i] == 15 || a2[i] == 15, r)
+        @test all(i -> a1[i] != a2[i], sel("ea1*"))
+        neg = sel("!ea20")                                  # ea20 is antenna id 18 in this MS
+        @test all(i -> a1[i] == a2[i] || (a1[i] != 18 && a2[i] != 18), neg) && (18 in a1[neg][a1[neg] .== a2[neg]] || !any(i -> a1[i] == 18 && a2[i] == 18, 1:n))
+        @test sort(union(sel("15"), sel("!15"))) == collect(1:n)   # complements
+        # `&&` keeps autocorrelations, `&` drops them, `&&&` keeps only them
+        @test all(i -> a1[i] != a2[i], sel("3~9&3~9")) && any(i -> a1[i] == a2[i], sel("3~9&&3~9")) && all(i -> a1[i] == a2[i], sel("3~9&&&"))
+        if _HAVE_TAQL
+            for spec in ("15", "ea09", "ea1*", "1~10", "8~19,2~17", "!ea20", "!ea01", "3~9&3~9", "3~9&&3~9", "3~9&&&", "0&5;7&8", ">500m", "<800m")
+                ex = "mscal.baseline('$spec')"
+                ours = sort(Float64.(column(query(t, ex), "TIME")[:]))
+                real = (rt = _taqlcmd("SELECT FROM \$1 WHERE $ex", d); size(rt, 1) == 0 ? Float64[] : sort(Float64.(collect(rt[:TIME][:]))))
+                @test ours == real
+            end
+        end
+    end
+end
+
+# Phase 280: mscal value functions against real derivedmscal on a randomised copy of the sample
+# MS (TIME spread over a day, random antennas / fields).  Found: our J2000 -> ITRF DIRECTION was
+# the plain GCRS -> ITRS rotation, ~17" (the annual aberration) from casacore, whose ITRF direction
+# is the apparent place rotated to the terrestrial frame -- it showed in `mscal.itrf()`, in
+# `delay()` (an antenna-baseline . direction product) and in every direction conversion to or from
+# ITRF (also seen as the ~13" residual noted in Phase 92).  Baselines (`MBaseline` / `MuvW`) keep
+# the plain rotation, which is closer to casacore's `uvwj2000`.
+@testset "mscal.itrf()/delay() vs real derivedmscal on varied rows (Phase 280)" begin
+    if isdir(SAMPLE_MS) && _HAVE_TAQL
+        d = joinpath(mktempdir(), "n.ms"); n = 80
+        copyms(SAMPLE_MS, d; rows=1:n)
+        t0 = column(readtable(d), "TIME")[1]; rng = MersenneTwister(280)
+        edit(d) do e
+            e["TIME"][:] = t0 .+ rand(rng, n) .* 86400
+            e["ANTENNA1"][:] = Int32.(rand(rng, 0:25, n)); e["ANTENNA2"][:] = Int32.(rand(rng, 0:25, n))
+            e["FIELD_ID"][:] = Int32.(rand(rng, 0:2, n))
+        end
+        t = readtable(d)
+        sel(ex) = (Vector(column(query(t, "rownumber() > 0"; select=["X" => ex]), "X")[:]),
+                   collect(_taqlcmd("SELECT $ex AS X FROM \$1", d)[:X][:]))
+        o, r = sel("mscal.itrf()")
+        @test maximum(i -> maximum(abs.(rem2pi.(Float64.(o[i]) .- Float64.(r[i]), RoundNearest))), 1:n) < 2e-5    # was ~1e-4
+        for f in ("mscal.delay()", "mscal.delay1()", "mscal.delay2()")
+            o, r = sel(f)
+            @test maximum(abs.(Float64.(o) .- Float64.(r))) < 5e-10                                          # was ~2e-9 s
+        end
+        o, r = sel("mscal.hadec1()")
+        @test maximum(i -> maximum(abs.(rem2pi.(Float64.(o[i]) .- Float64.(r[i]), RoundNearest))), 1:n) < 1e-5
+    end
+end
+
+# Phase 281: a random `mscal.stokes` fuzz against real derivedmscal on a copy of the sample MS with
+# random DATA / FLAG / WEIGHT and both circular and (edited POLARIZATION) linear CORR_TYPE found:
+#  * TaQL-lite evaluated MAIN's visibility columns at the table's default HALF precision
+#    (`ComplexF16`, Phase 34), so every result computed from `DATA` was ~1e-3 relative off real
+#    TaQL (a boundary `abs(DATA[1,1]) > x` could flip).  Query expressions now read at full
+#    precision (`ms[:DATA]` still defaults to half);
+#  * with `rescale = true`, `Ptotal` / `Plinear` (magnitudes) were 2x real: the pseudo types were
+#    built from the unscaled I/Q/U/V.
+@testset "mscal.stokes vs real derivedmscal on random data, circular and linear (Phase 281)" begin
+    if isdir(SAMPLE_MS)
+        for lin in (false, true)
+            n = 12; d = joinpath(mktempdir(), "n.ms"); copyms(SAMPLE_MS, d; rows=1:n)
+            rng = MersenneTwister(lin ? 2 : 1)
+            data = [ComplexF32.(randn(rng, Float32, 4, 64), randn(rng, Float32, 4, 64)) for _ in 1:n]
+            edit(d) do e
+                e["DATA"][:] = data
+                e["FLAG"][:] = [rand(rng, 4, 64) .< 0.15 for _ in 1:n]
+                e["WEIGHT"][:] = [Float32.(rand(rng, 4) .* 3) for _ in 1:n]
+            end
+            lin && edit(joinpath(d, "POLARIZATION")) do e; e["CORR_TYPE"][1] = Int32[9, 10, 11, 12]; end
+            t = readtable(d)
+            # full-precision evaluation: the result of an expression on DATA is the float32 value
+            x = column(query(t, "rownumber() > 0"; select=["X" => "real(DATA[1,1])"]), "X")[:]
+            @test x == Float64.(real.(getindex.(data, 1, 1)))
+            # rescale: Ptotal / Plinear are magnitudes of the rescaled (halved) Stokes values
+            q = column(query(t, "rownumber() > 0"; select=["A" => "mscal.stokes(DATA, 'Ptotal', true)", "B" => "mscal.stokes(DATA, 'Ptotal')",
+                                                          "C" => "mscal.stokes(DATA, 'IQUV', true)", "D" => "mscal.stokes(DATA, 'IQUV')"]), "A")[:]
+            qb = column(query(t, "rownumber() > 0"; select=["B" => "mscal.stokes(DATA, 'Ptotal')"]), "B")[:]
+            @test all(i -> real.(q[i]) ≈ 0.5 .* real.(qb[i]), 1:n)
+            if _HAVE_TAQL
+                for ex in ("mscal.stokes(DATA, 'Ptotal', true)", "mscal.stokes(DATA, 'Plinear', true)", "mscal.stokes(DATA, 'Pangle')", "mscal.stokes(DATA, 'PFtotal')",
+                           "mscal.stokes(DATA, 'I,Q')", "mscal.stokes(DATA, 'I,V', true)")
+                    o = column(query(t, "rownumber() > 0"; select=["X" => ex]), "X")[:]
+                    r = collect(_taqlcmd("SELECT $ex AS X FROM \$1", d)[:X][:])
+                    @test all(i -> all(isapprox.(ComplexF64.(vec(o[i])), ComplexF64.(vec(r[i])); rtol=1e-4, atol=1e-5)), 1:n)
+                end
+            end
         end
     end
 end
