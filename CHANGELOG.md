@@ -9832,3 +9832,26 @@ fed straight into `p.cols[nothing]` with no check — instead of a clear message
 on a *row* took a separate code path that never got the same guard. Fixed to raise the matching
 `KeyError`. New tests in `test/tables_tests.jl`, including row (not just column) access coverage for
 `RefTable` / `GroupedTable` / `ConcatTable`, which had none before this phase.
+
+### Phase 290 — `src/tables/record.jl` + `src/tables/writer.jl` sweep: no new bug, one real finding documented
+
+Fresh read + cross-check of the `Record`/`TableRecord`/keyword-set decoder (`record.jl`) and the
+`table.dat` metadata writer (`writer.jl`) against real casacore source
+(`tables/Tables/TableRecordRep.cc`, `casa/Containers/RecordRep.cc`). Every write/read pair checked
+(nested `TpRecord` fields, `SubTable` values, `_write_aipsarray`'s Bool bit-packing, the
+`storage=:multifile`/`:multihdf5` `ColumnSet` write branch, the dead `"ScalarRecord..."` classname
+branch mirroring a real casacore column kind this package has no construction path for) is either
+already solidly covered (`keywords_tests.jl`'s Phase 267 byte-exact `0x8D 0x05` Bool-array check +
+real-casacore cross-check; a direct live exercise of `storage=:multifile` confirmed its write path is
+genuinely covered elsewhere, just not in this phase's initial coverage subset) or confirmed genuinely
+unreachable through our own writer.
+
+**One real, previously-unexplained finding, documented rather than "fixed":** `read_keyset`'s
+old-style-format decoder (`ScalarKeywordSet`/`ArrayKeywordSet`, flagged since Phase 210 as untestable
+— no real fixture on this machine ever uses the pre-`TableRecord` format) leaves `rec.rectype` at its
+`Record()` default (`RECORD_VARIABLE`) for the Scalar/Array cases. Traced this against real casacore's
+own `TableRecordRep::getRecord` + `TableRecord::getRecord`: only the `TableKeywordSet` branch ever
+assigns the by-reference `recordType` there — for `ScalarKeywordSet`/`ArrayKeywordSet`, real
+casacore's own `Int type;` local is genuinely **read uninitialized** (no assignment on that code path
+at all). There is no well-defined upstream value to match; our default is a deliberate, now-documented
+choice facing real casacore's own undefined behavior, not a divergence to chase.
