@@ -642,6 +642,61 @@ end
     @test [column(rp, "V")[i] for i in 1:6] == V
 end
 
+# Phase 307: the ForwardColumnEngine test above forwards exactly two
+# column shapes (a scalar Float64, a fixed-shape ComplexF32 array) and
+# writes one Int32 scalar -- `getcell`/`getcolumn` (forwardcol.jl) are a
+# pure, type-agnostic pass-through (`column(_fce_ref(fce),
+# fce.vdesc.name)`, no type-specific branch at all), so a String column,
+# a Bool column, and a genuinely VARIABLE-shape (ragged) array column
+# forwarded through `reference_copy` had never actually been tried,
+# despite nothing in the engine's own code obviously restricting them.
+# Cross-checked against `Casacore.jl` (ForwardColumnEngine is
+# auto-registered, so this is a real interop proof, not self-consistency).
+@testset "engine — ForwardColumnEngine random column-type fuzz vs Casacore.jl (Phase 307)" begin
+    rng = MersenneTwister(307)
+    for case in 1:6
+        nr = rand(rng, 3:8)
+        S = [randstring(rng, rand(rng, 0:12)) for _ in 1:nr]          # String, incl. empty
+        Bo = rand(rng, Bool, nr)                                      # Bool scalar
+        I = rand(rng, Int32(-1000):Int32(1000), nr)                   # Int32 scalar (candidate writable)
+        Rag = [rand(rng, rand(rng, 1:5)) for _ in 1:nr]                # variable-shape Float64 array
+
+        src = joinpath(mktempdir(), "src$case.tab")
+        write_table(src, "S", ["S" => S, "BO" => Bo, "I" => I, "RAG" => Rag]; nrow=nr)
+
+        writable = rand(rng, Bool) ? ["I"] : String[]
+        dst = joinpath(dirname(src), "ref$case.tab")
+        reference_copy(dst, readtable(src); writable)
+        r = readtable(dst)
+
+        for nm in ("S", "BO", "I", "RAG")
+            fwd = !(nm in writable)
+            @test (_engine_manager(r, nm).name == "ForwardColumnEngine") == fwd
+        end
+        @test column(r, "S")[:] == S
+        @test column(r, "BO")[:] == Bo
+        @test column(r, "I")[:] == I
+        @test [column(r, "RAG")[i] for i in 1:nr] == Rag
+
+        if _HAVE_CASACORE
+            ct = CCT.Table(dst)
+            @test String.(ct[:S][:]) == S
+            @test Bool.(ct[:BO][:]) == Bo
+            @test Int32.(ct[:I][:]) == I
+            @test [Float64.(ct[:RAG][i]) for i in 1:nr] == Rag
+        end
+
+        # `copytable` materialises even the ragged/String/Bool forwards.
+        plain = joinpath(dirname(src), "plain$case.tab")
+        copytable(plain, readtable(dst))
+        rp = readtable(plain)
+        @test all(_engine_manager(rp, nm).name != "ForwardColumnEngine" for nm in ("S", "BO", "I", "RAG"))
+        @test column(rp, "S")[:] == S
+        @test column(rp, "BO")[:] == Bo
+        @test [column(rp, "RAG")[i] for i in 1:nr] == Rag
+    end
+end
+
 @testset "engine — reference_copy's writable= is validated (Phase 205)" begin
     # `w = Set(String.(writable))` was checked only via `c.name in w`
     # while iterating the SOURCE's real column names — a typo'd

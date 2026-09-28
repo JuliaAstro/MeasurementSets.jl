@@ -10347,3 +10347,27 @@ actually checked" gap — the `uChar`/`Short` stored-type paths were reachable, 
 literally no live verification behind them until now.
 
 New testset in `test/engine_tests.jl` (8 random cases × 3 assertions, fixed-seed `MersenneTwister(306)`).
+
+### Phase 307 — `ForwardColumnEngine` random column-type fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The `ForwardColumnEngine`/`reference_copy` test (Phase 40) only ever forwarded a scalar `Float64` column
+and a fixed-shape `ComplexF32` array column, writing one `Int32` scalar. `getcell`/`getcolumn`
+(`src/datamanagers/forwardcol.jl`) are a pure, type-agnostic pass-through (`column(_fce_ref(fce),
+fce.vdesc.name)` — no type-specific branch at all), so nothing in the engine's own code obviously
+restricted it to those two shapes — but a `String` column, a `Bool` column, and a genuinely
+variable-shape (ragged) array column had never actually been tried forwarded, despite being exactly the
+kind of column a real reference-MS copy (`MSTableImpl::referenceCopy`, what this engine models) would
+routinely need to carry across untouched.
+
+Spread the cross-check (`ForwardColumnEngine` is auto-registered in real casacore, so `Casacore.jl` is a
+genuine interop oracle, not self-consistency) across 6 random source tables mixing `String` (including
+empty strings), `Bool`, `Int32`, and ragged `Float64` array columns, a random subset marked `writable`
+(independent copy) vs. left forwarded, cross-checked both through this package's own reader and through
+`Casacore.jl`'s decode, and through `copytable`'s materialise-through-the-forward path.
+
+No new bug found: every column type — forwarded or independently copied — round-trips correctly through
+both readers in all 6 random configurations, confirming the pass-through implementation is genuinely
+type-agnostic in practice, not just by the absence of an obvious type-specific branch in the source.
+
+New testset in `test/engine_tests.jl` (6 random cases × 4 column types × 3 checks, fixed-seed
+`MersenneTwister(307)`).
