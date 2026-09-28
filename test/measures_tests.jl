@@ -1431,3 +1431,228 @@ for (mjd, x, y, z, a, b, f, v) in [$cs]:
         end
     end
 end
+
+# Phase 298: `ext/SOFAExt.jl` sweep.  A fresh read + a coverage-instrumented
+# run (against `measures_tests.jl` + `taql_mscal_tests.jl`) found no new
+# bug -- one confirmed-dead branch removed (`_dir_to_icrs`'s own
+# `_is_body(A)` case: `_mconv(::MDirection,...)` already routes every
+# body-frame direction through `_body_dir_icrs` directly, before
+# `_dir_to_icrs` is ever called with one -- confirmed by grep, every call
+# site of `_dir_to_icrs`, including its own SUPERGAL/AZELSW/AZELSWGEO
+# recursion, only ever constructs a non-body `MDirection`), plus two
+# genuinely-reachable, previously-uncovered-but-correct paths closed with
+# permanent tests below: the 8 "$(nameof(X)) is not supported" fallback
+# errors (each family's final `error(...)`, reachable via a `MEASINFO`
+# frame name this package parses but doesn't convert -- `OtherRef{S}`),
+# and `_pole_dir`'s `R === ITRF` branch (a `MuvW` conversion whose
+# `frame.direction` -- the phase centre -- is itself stored in ITRF; rare
+# in practice since a real MS phase centre is always J2000-ish, but a
+# real, reachable state).  Both live-verified before being pinned: the
+# fallbacks give a clean, actionable error (not a crash); `_pole_dir`'s
+# ITRF branch was checked against an independent from-scratch computation
+# (0.0" separation) and a round trip through it.
+@testset "measures — SOFAExt unsupported-frame fallbacks (Phase 298)" begin
+    OR = MSv2.OtherRef{:XYZ}
+    fr = MeasFrame(direction = MDirection{J2000}(1.0, 0.5))
+    # epoch: unrecognised source / target scale
+    @test_throws ErrorException measconvert(MEpoch{OR}(58000.0), UTC)
+    @test_throws ErrorException measconvert(MEpoch{UTC}(58000.0), OR)
+    # direction: unrecognised source / target frame (a non-body `OtherRef`,
+    # so it falls all the way through `_dir_to_icrs`/`_icrs_to_dir` to the
+    # final `error(...)`, not the earlier body-direction branch)
+    @test_throws ErrorException measconvert(MDirection{OR}(0.1, 0.2), J2000)
+    @test_throws ErrorException measconvert(MDirection{J2000}(0.1, 0.2), OR)
+    # frequency / radial velocity: unrecognised source / target frame
+    # (needs `frame.direction` set, else the earlier `_n_hat` check fires first)
+    @test_throws ErrorException measconvert(MFrequency{OR}(1.4e9), LSRK; frame = fr)
+    @test_throws ErrorException measconvert(MFrequency{LSRK}(1.4e9), OR; frame = fr)
+    @test_throws ErrorException measconvert(MRadialVelocity{OR}(1e3), LSRK; frame = fr)
+    @test_throws ErrorException measconvert(MRadialVelocity{LSRK}(1e3), OR; frame = fr)
+    # each message names the real cause, not a bare MethodError/StackOverflow
+    try
+        measconvert(MDirection{OR}(0.1, 0.2), J2000)
+        @test false
+    catch err
+        @test occursin("direction frame", sprint(showerror, err))
+        @test occursin("OtherRef", sprint(showerror, err))
+    end
+end
+
+@testset "measures — uvw conversion with an ITRF phase centre (Phase 298)" begin
+    pos = MPosition{ITRF}(2225061.164, -5440057.370, -2481681.150)
+    ep = MEpoch{UTC}(60454.42255)
+    dir_itrf = MDirection{ITRF}(1.0, 0.4)
+    fr = MeasFrame(epoch = ep, position = pos, direction = dir_itrf)
+
+    u0 = MuvW{ITRF}(100.0, 200.0, 300.0)
+    # forward: ITRF -> GALACTIC needs `_pole_dir`'s `R === ITRF` branch to
+    # resolve the (ITRF-stored) phase centre into GALACTIC
+    u1 = measconvert(u0, GALACTIC; frame = fr)
+    @test u1 isa MuvW{GALACTIC}
+    # length-preserving (a pure rotation)
+    @test hypot(u1.u, u1.v, u1.w) ≈ hypot(u0.u, u0.v, u0.w) rtol = 1e-9
+    # backward: GALACTIC -> ITRF exercises the same branch from the other
+    # side (`_pole_dir(dir_itrf, GALACTIC, fr)` is now the "other" frame)
+    u2 = measconvert(u1, ITRF; frame = fr)
+    @test u2.u ≈ u0.u atol = 1e-6
+    @test u2.v ≈ u0.v atol = 1e-6
+    @test u2.w ≈ u0.w atol = 1e-6
+
+    # a third frame (AZEL, needs both epoch+position AND the ITRF-phase-
+    # centre resolution) round-trips too
+    u3 = measconvert(u0, AZEL; frame = fr)
+    u4 = measconvert(u3, ITRF; frame = fr)
+    @test u4.u ≈ u0.u atol = 1e-6
+    @test u4.v ≈ u0.v atol = 1e-6
+    @test u4.w ≈ u0.w atol = 1e-6
+end
+
+# Phase 299: the IGRF earthfield synthesis (`_earthfield_itrf`, a verbatim
+# port of casacore `EarthField::calcField`) and `EarthMagneticMachine` had
+# only ever been cross-checked against real `casatools` at ONE fixed site
+# / epoch (Phase 91's ALMA point + Phase 66's fixture point) -- following
+# the Phases 269-287 pattern where a *single* deterministic cross-check
+# repeatedly missed bugs a broader random fuzz caught, this spreads the
+# same oracle across many random global sites and epochs in one CASA
+# process (CASA startup dominates; looping inside one script call keeps
+# this affordable). No new bug found -- the port holds up across the
+# globe, not just at the one previously-tested location.
+@testset "measures — IGRF earthfield random fuzz vs casatools (Phase 299)" begin
+    if _HAVE_MEAS_CASA
+        rng = MersenneTwister(299)
+        n = 14
+        cases = map(1:n) do _
+            lon = (rand(rng) - 0.5) * 2π
+            lat = asin(2rand(rng) - 1)
+            height = rand(rng) * 3000.0
+            mjd = 51544.0 + rand(rng) * 11000.0     # 2000-01-01 .. ~2030-01-24
+            (; lon, lat, height, mjd)
+        end
+        cs = join(["($(c.lon), $(c.lat), $(c.height), $(c.mjd))" for c in cases], ",")
+        py = """
+from casatools import measures, quanta
+me = measures(); qa = quanta()
+for (lon, lat, height, mjd) in [$cs]:
+    me.done()
+    p_wgs = me.position('WGS84', qa.quantity(lon, 'rad'), qa.quantity(lat, 'rad'), qa.quantity(height, 'm'))
+    p_itrf = me.measure(p_wgs, 'ITRF')
+    r, plo, pla = p_itrf['m2']['value'], p_itrf['m0']['value'], p_itrf['m1']['value']
+    import math
+    x = r * math.cos(pla) * math.cos(plo)
+    y = r * math.cos(pla) * math.sin(plo)
+    z = r * math.sin(pla)
+    me.doframe(me.epoch('utc', qa.quantity(mjd, 'd')))
+    me.doframe(me.position('itrf', qa.quantity(x, 'm'), qa.quantity(y, 'm'), qa.quantity(z, 'm')))
+    b = me.earthmagnetic('IGRF')
+    bi = me.measure(b, 'ITRF')
+    bj = me.measure(b, 'J2000')
+    print(repr(x), repr(y), repr(z), repr(bi['m0']['value']), repr(bi['m1']['value']),
+          repr(bi['m2']['value']), repr(bj['m0']['value']), repr(bj['m1']['value']), repr(bj['m2']['value']))
+"""
+        out = split(strip(read(pipeline(`$_MEAS_CASA -c $py`; stderr = devnull), String)), '\n')
+        @test length(out) == n
+        for (i, c) in enumerate(cases)
+            x, y, z, bix, biy, biz, bjx, bjy, bjz = parse.(Float64, split(out[i]))
+            pos = MPosition{ITRF}(x, y, z)
+            ep = MEpoch{UTC}(c.mjd)
+            bf = earthfield(pos, ep)
+            magw = hypot(bix, biy, biz)
+            @test hypot(bf.x, bf.y, bf.z) ≈ magw rtol = 0.05
+            @test abs(bf.x - bix) < 0.05 * magw + 250
+            @test abs(bf.y - biy) < 0.05 * magw + 250
+            @test abs(bf.z - biz) < 0.05 * magw + 250
+            # frame rotation (ITRF -> J2000): our own conversion, magnitude
+            # preserved, and matches casacore's own rotated components
+            # within the same tolerance (proves the rotation, not just the
+            # field magnitude, is right at each of these sites/epochs)
+            fr = MeasFrame(epoch = ep, position = pos)
+            bj_ours = measconvert(MEarthMagnetic{IGRF}(0.0, 0.0, 1e-6), J2000; frame = fr)
+            @test hypot(bj_ours.x, bj_ours.y, bj_ours.z) ≈ hypot(bf.x, bf.y, bf.z) rtol = 1e-9
+            magwj = hypot(bjx, bjy, bjz)
+            @test abs(bj_ours.x - bjx) < 0.05 * magwj + 250
+            @test abs(bj_ours.y - bjy) < 0.05 * magwj + 250
+            @test abs(bj_ours.z - bjz) < 0.05 * magwj + 250
+        end
+    end
+end
+
+# Phase 300: the solar-system-body direction cross-check (Phase 76) had
+# only ever been checked at ONE fixed epoch/observer position (the
+# fixture's own `EPOCHS_MJD[0]`/`OBS_XYZ[0]`) across 6 bodies -- exactly
+# the shape the Phases 269-287/299 fuzzes have repeatedly found real bugs
+# in. Spreading the oracle across 10 random epochs (1970-2050) and random
+# observer positions in one `casatools` process found a REAL bug: the SUN
+# came out a nearly *constant* ~20.2-20.8" off at every single random
+# case (Mercury/Venus/Moon/Mars/Jupiter did not) -- exactly the classical
+# constant of aberration (Earth's own orbital speed x the ~499s Sun-Earth
+# light time / 1 AU), not `plan94`/`moon98` ephemeris noise. Root cause:
+# `_body_geovec(::Type{SUN},...)` retarded EARTH's own position by the
+# light time (`_earth_helio(tdb - lighttime)`) instead of holding it
+# fixed at the observation time like the general planet method does
+# (`eb = _earth_helio(tdb)`, never retarded -- only the *target*'s
+# position is) -- the Sun's own heliocentric position is trivially the
+# origin at every instant (that's the definition of "heliocentric"), so
+# there is nothing of the Sun's own to retard at all; the "light-time
+# iteration" was retarding the wrong vector's argument, injecting Earth's
+# own orbital displacement over 499s as a spurious systematic offset.
+# Fixed to `_body_geovec(::Type{SUN}, tdb, ::Any) = .-_earth_helio(tdb)`
+# (no iteration). The single fixed-epoch cross-check in this same file
+# happened to pass throughout, purely by luck: the aberration constant
+# varies ~20.1-20.9" across the year (Earth's orbital eccentricity),
+# straddling the existing `20"` SUN tolerance almost exactly, and that
+# one fixture date happened to land just under it.
+@testset "measures — solar-system body direction random fuzz vs casatools (Phase 300)" begin
+    if _HAVE_MEAS_CASA
+        as = MSv2.ARCSEC
+        rng = MersenneTwister(300)
+        ff = 1 / 298.257223563; e2 = ff * (2 - ff)
+        n = 10
+        cases = map(1:n) do _
+            lon = (rand(rng) - 0.5) * 2π
+            lat = asin(2rand(rng) - 1)
+            Rn = 6378137.0 / sqrt(1 - e2 * sin(lat)^2)
+            pos = (Rn * cos(lat) * cos(lon), Rn * cos(lat) * sin(lon), Rn * (1 - e2) * sin(lat))
+            mjd = 40587.0 + rand(rng) * 29200.0     # 1970-01-01 .. ~2050-01-06
+            (; mjd, pos)
+        end
+        cs = join(["($(c.mjd), $(c.pos[1]), $(c.pos[2]), $(c.pos[3]))" for c in cases], ",")
+        bodies = ("SUN", "MOON", "MERCURY", "VENUS", "MARS", "JUPITER")
+        py = """
+from casatools import measures, quanta
+me = measures(); qa = quanta()
+for (mjd, x, y, z) in [$cs]:
+    me.done()
+    e0 = me.epoch('utc', qa.quantity(mjd, 'd'))
+    pos = me.position('itrf', qa.quantity(x, 'm'), qa.quantity(y, 'm'), qa.quantity(z, 'm'))
+    out = []
+    for body in $(bodies):
+        b = me.direction(body)
+        me.doframe(e0); me.doframe(pos)
+        j = me.measure(b, 'J2000')
+        a = me.measure(b, 'AZEL')
+        out += [repr(j['m0']['value']), repr(j['m1']['value']), repr(a['m1']['value'])]
+    print(' '.join(out))
+"""
+        out = split(strip(read(pipeline(`$_MEAS_CASA -c $py`; stderr = devnull), String)), '\n')
+        @test length(out) == n
+        bodytol = Dict("SUN" => 20as, "MOON" => 30as, "MERCURY" => 20as,
+                       "VENUS" => 20as, "MARS" => 40as, "JUPITER" => 120as)
+        Ts = Dict("SUN" => SUN, "MOON" => MOON, "MERCURY" => MERCURY,
+                  "VENUS" => VENUS, "MARS" => MARS, "JUPITER" => JUPITER)
+        for (i, c) in enumerate(cases)
+            r = parse.(Float64, split(out[i]))
+            fr = MeasFrame(epoch = MEpoch{UTC}(c.mjd), position = MPosition{ITRF}(c.pos...))
+            for (k, name) in enumerate(bodies)
+                j2000_lon, j2000_lat, azel_lat = r[3k-2], r[3k-1], r[3k]
+                T = Ts[name]
+                tol = bodytol[name]
+                gj = measconvert(MDirection{T}(0.0, 0.0), J2000; frame = fr)
+                @test rem2pi(gj.lon - j2000_lon, RoundNearest) * cos(gj.lat) ≈ 0 atol = tol
+                @test gj.lat ≈ j2000_lat atol = tol
+                ga = measconvert(MDirection{T}(0.0, 0.0), AZEL; frame = fr)
+                atol_azel = name == "MOON" ? 120as : tol + 60as
+                @test ga.lat ≈ azel_lat atol = atol_azel
+            end
+        end
+    end
+end

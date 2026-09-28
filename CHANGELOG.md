@@ -10075,3 +10075,92 @@ partially-uninitialised buffer.
 
 New tests in `test/container_tests.jl`: the live-reproduced malformed case now errors cleanly, and a
 regression check that an exactly-matching, well-formed file is completely unaffected.
+
+### Phase 298 — `ext/SOFAExt.jl` sweep: one confirmed-dead branch removed, two coverage gaps closed
+
+First dedicated fresh read of the whole reference-frame conversion extension in one pass — it had
+never had a single "sweep this file" phase of its own, only ~40 individual bug-fix phases spread across
+epoch/direction/frequency/radial-velocity/uvw/baseline/Earth-magnetic-field conversions since Phase 66.
+A full read plus a coverage-instrumented run (against `measures_tests.jl` + `taql_mscal_tests.jl` in a
+scratch environment) found no new live bug, but did turn up one genuinely dead branch and two
+real-but-previously-untested reachable paths.
+
+**Dead branch removed**: `_dir_to_icrs`'s own `_is_body(A) && return _body_dir_icrs(A, frame, false)`
+case. Confirmed via `grep` that every call site of `_dir_to_icrs` — its own recursive calls for
+`SUPERGAL`/`AZELSW`/`AZELSWGEO`, and the one external call inside `_mconv(::MDirection,...)` — only
+ever passes a non-body direction: `_mconv` already branches on `_is_body(A)` *before* ever calling
+`_dir_to_icrs`, routing every body-frame direction (`SUN`/`MOON`/planets) through `_body_dir_icrs`
+directly with the right `topo` flag for the target frame. This branch dated from before that `_mconv`
+restructuring (Phase 76) and had been unreachable ever since; removed with a comment recording why.
+
+**Two coverage gaps closed** (both live-verified correct before pinning with permanent tests, not
+assumed): (1) the 8 "`$(nameof(X)) is not supported`" fallback `error(...)`s at the end of each
+conversion family (epoch/direction/frequency/radial-velocity, source-side and target-side) — reachable
+whenever a `MEASINFO` names a frame this package parses but doesn't convert (`OtherRef{S}`); confirmed
+each one raises a clean, actionable error naming the real cause rather than crashing some other way
+(a `MethodError`, an infinite recursion, …). (2) `_pole_dir`'s `R === ITRF` branch (the phase-centre
+resolution inside a `MuvW` conversion, for the case where `frame.direction` is itself stored in `ITRF`
+— rare in practice since a real MS phase centre is always J2000-ish, but a real, reachable state);
+checked against an independent from-scratch computation (0.0″ separation) and a forward/backward round
+trip through a third frame before being pinned as a permanent black-box test via the public
+`measconvert`/`MuvW` API.
+
+New tests in `test/measures_tests.jl`.
+
+### Phase 299 — IGRF earthfield random fuzz vs `casatools` (investigation only, no bug found)
+
+The IGRF-14 spherical-harmonic field synthesis (`_earthfield_itrf`, a verbatim port of casacore
+`EarthField::calcField`) and `EarthMagneticMachine`'s line-of-sight geometry had only ever been
+cross-checked against real `casatools` at *one* fixed site and epoch (Phase 91's ALMA point, reused by
+Phase 66's shared fixture). Following the Phases 269–287 pattern — where a single deterministic
+cross-check repeatedly missed bugs a broader random fuzz caught — this phase spreads the same oracle
+across 14 random global sites (uniform on the sphere, 0–3000 m height) and epochs (2000–2030, the full
+span the bundled IGRF-14 model supports) in one `casatools` process (CASA startup dominates the cost, so
+looping inside one script call keeps a broad sweep affordable).
+
+No new bug found: the field magnitude/components at each random site match `casatools`' IGRF-12 output
+within the already-established model-generation tolerance (~5% + 250 nT — IGRF-12 vs IGRF-14 is a real,
+documented, expected difference, not a bug), and the ITRF→J2000 rotation is confirmed correct
+(magnitude-preserving, and each rotated component matches casacore's own rotated value) at every one of
+the 14 sites/epochs, not just the one previously tested. A legitimate, valuable investigation-only
+result — the port and the rotation both hold up globally, not just at the one location anyone had ever
+actually pointed a real oracle at.
+
+New testset in `test/measures_tests.jl` (112 cross-check assertions, fixed-seed `MersenneTwister(299)`
+for reproducibility).
+
+### Phase 300 — solar-system-body direction random fuzz vs `casatools`: the Sun was off by the constant of aberration
+
+Continuing the Phase 269–287/299 pattern — a single deterministic oracle point repeatedly missing bugs a
+broader random fuzz catches — this phase spread the solar-system-body direction cross-check (Phase 76,
+previously checked at exactly *one* fixed epoch/observer position across 6 bodies) across 10 random
+epochs (1970–2050) and random observer positions, in one `casatools` process.
+
+**Found a real bug**: the Sun's converted direction came out a nearly *constant* ~20.2″–20.8″ away from
+`casatools`' own value at *every single* random case, while Mercury/Venus/Moon/Mars/Jupiter did not show
+anything like this pattern (their residuals were noisy and consistent with the already-documented
+`plan94`/`moon98` ephemeris-accuracy floors). That magnitude and constancy is the unmistakable signature
+of the classical **constant of aberration** (Earth's own orbital speed × the ~499 s Sun–Earth light time,
+÷ 1 AU ≈ 20.5″, varying ~20.1″–20.9″ across the year with Earth's orbital eccentricity) — not ephemeris
+noise.
+
+Root cause: `_body_geovec(::Type{SUN}, tdb, ::Any)` retarded **Earth's own** position by the light time
+(`_earth_helio(tdb - lighttime)`) inside a 2-iteration fixed-point loop, mirroring the shape of the
+general-planet method's light-time iteration — but the general method (correctly) holds Earth's position
+*fixed* at the observation time (`eb = _earth_helio(tdb)`, computed once, never retarded) and only
+retards the *target*'s own position. The Sun has no such "own position" to retard at all: by the very
+definition of a heliocentric coordinate frame, the Sun sits at the origin at every instant, regardless of
+when you evaluate it. Retarding Earth's position instead spuriously injects Earth's own orbital
+displacement over that ~499 s into the computed Sun direction — exactly the aberration-constant-sized
+error observed. Fixed to a one-line, non-iterating `_body_geovec(::Type{SUN}, tdb, ::Any) =
+.-_earth_helio(tdb)`.
+
+This bug has been present since Phase 76 (the first solar-system-body-direction phase) and affected
+*every* conversion of `MDirection{SUN}` to any other frame. The pre-existing single-fixed-epoch
+cross-check in this same file never caught it purely by luck: the aberration constant's yearly range
+(~20.1″–20.9″) straddles the test's own `20″` SUN tolerance almost exactly, and that one fixture date
+happened to land just under it.
+
+New testset in `test/measures_tests.jl` (60 cross-check assertions across the 10 random epochs × 6
+bodies, fixed-seed `MersenneTwister(300)`); confirmed the fix closes every one of the 4 failures the fuzz
+found, with no regression to the existing single-point Sun/planet tests or any other body.
