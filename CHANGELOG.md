@@ -10214,3 +10214,22 @@ SOFA-vs-casacore ephemeris residual (Phase 137/196/280) is itself relative (~1e-
 
 New testset in `test/taql_mscal_tests.jl`; `src/taql/mscal.jl`'s own header comment updated with both
 findings.
+
+### Phase 302 — epoch conversion random fuzz vs `casatools`, including TDB's position term (investigation only, no bug found)
+
+The CASA-oracle epoch conversion cross-check (`measures_fixture.py`) only ever checked 3 fixed epochs —
+and, notably, called `me.doframe(e)` but never `me.doframe(pos)` before converting, so **TDB's
+position-dependent term** (`_dtdb_loc`'s longitude/height-derived arguments to `SOFA.dtdb`) had *never*
+actually been exercised against a real oracle at all; every existing TDB check compared against
+casacore's own position-less default. This phase spreads the oracle across 15 random epochs
+(1975–2030, safely inside the UTC leap-second table) *and* random global observer positions, with the
+position genuinely set via `me.doframe(pos)` before every conversion — the first time this package's
+TDB position term has been checked against anything other than casacore's default.
+
+No new bug found: UTC→{TAI, TT, TDB, UT1} all agree with `casatools` to the same tight tolerances
+already established for the position-less case (TAI/TT to <1e-9 days ≈ 0.1 ms; TDB/UT1 to <1e-7 days,
+the `dtdb`/no-`EarthOrientation` accuracy floor) across every one of the 15 random epoch/position
+combinations, confirming the position-dependent TDB term is correctly wired even though nothing had
+ever actually checked it against an independent oracle before.
+
+New testset in `test/measures_tests.jl` (61 cross-check assertions, fixed-seed `MersenneTwister(302)`).

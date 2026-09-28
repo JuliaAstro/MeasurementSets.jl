@@ -1656,3 +1656,49 @@ for (mjd, x, y, z) in [$cs]:
         end
     end
 end
+
+# Phase 302: the CASA-oracle epoch cross-check (`measures_fixture.py`) only ever checks 3 fixed
+# epochs, and -- notably -- calls `me.doframe(e)` but never `me.doframe(pos)` before converting, so
+# TDB's *position-dependent* term (`_dtdb_loc`'s longitude/height-derived `SOFA.dtdb` arguments)
+# has never actually been exercised against a real oracle at all; every existing TDB check used
+# casacore's own position-less default. This phase spreads the oracle across 15 random epochs
+# (1975-2030, safely inside the UTC leap-second table) *and* random global observer positions, with
+# the position genuinely set via `me.doframe(pos)` before every conversion.
+@testset "measures — epoch conversion random fuzz vs casatools, incl. TDB position term (Phase 302)" begin
+    if _HAVE_MEAS_CASA
+        rng = MersenneTwister(302)
+        ff = 1 / 298.257223563; e2 = ff * (2 - ff)
+        n = 15
+        cases = map(1:n) do _
+            lon = (rand(rng) - 0.5) * 2π
+            lat = asin(2rand(rng) - 1)
+            Rn = 6378137.0 / sqrt(1 - e2 * sin(lat)^2)
+            pos = (Rn * cos(lat) * cos(lon), Rn * cos(lat) * sin(lon), Rn * (1 - e2) * sin(lat))
+            mjd = 42413.0 + rand(rng) * 21360.0     # 1975-01-01 .. ~2033-06-14
+            (; mjd, pos)
+        end
+        cs = join(["($(c.mjd), $(c.pos[1]), $(c.pos[2]), $(c.pos[3]))" for c in cases], ",")
+        py = """
+from casatools import measures, quanta
+me = measures(); qa = quanta()
+for (mjd, x, y, z) in [$cs]:
+    me.done()
+    e0 = me.epoch('utc', qa.quantity(mjd, 'd'))
+    pos = me.position('itrf', qa.quantity(x, 'm'), qa.quantity(y, 'm'), qa.quantity(z, 'm'))
+    me.doframe(e0); me.doframe(pos)
+    out = [repr(me.measure(e0, s)['m0']['value']) for s in ('TAI', 'TT', 'TDB', 'UT1')]
+    print(' '.join(out))
+"""
+        out = split(strip(read(pipeline(`$_MEAS_CASA -c $py`; stderr = devnull), String)), '\n')
+        @test length(out) == n
+        for (i, c) in enumerate(cases)
+            tai, tt, tdb, ut1 = parse.(Float64, split(out[i]))
+            fr = MeasFrame(epoch = MEpoch{UTC}(c.mjd), position = MPosition{ITRF}(c.pos...))
+            e = MEpoch{UTC}(c.mjd)
+            @test measconvert(e, TAI; frame = fr).mjd ≈ tai atol = 1e-9
+            @test measconvert(e, TT; frame = fr).mjd  ≈ tt  atol = 1e-9
+            @test measconvert(e, TDB; frame = fr).mjd ≈ tdb atol = 1e-7   # ~ms, dtdb's own accuracy
+            @test measconvert(e, UT1; frame = fr).mjd ≈ ut1 atol = 1e-7  # no EarthOrientation here
+        end
+    end
+end
