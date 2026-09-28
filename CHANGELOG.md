@@ -10233,3 +10233,25 @@ combinations, confirming the position-dependent TDB term is correctly wired even
 ever actually checked it against an independent oracle before.
 
 New testset in `test/measures_tests.jl` (61 cross-check assertions, fixed-seed `MersenneTwister(302)`).
+
+### Phase 303 — `MBaseline`/`MuvW` frame conversion random fuzz vs `casatools` (investigation only, no bug found)
+
+`MBaseline`/`MuvW` frame conversion (Phase 75) had **no confirmed real-CASA oracle at all** beyond
+`uvw_j2000`'s narrow TaQL-level scope — Phase 75's own risk note explicitly flagged "no CASA oracle
+confirmed available for uvw/baseline". Found live that `casatools.measures()` genuinely has
+`me.baseline(rf, x, y, z)` / `me.uvw(rf, x, y, z)`, each returned as a *spherical* (lon, lat, length)
+triple (the same convention as `MPosition`'s own spherical ITRF representation, Phase 155) rather than
+Cartesian — converted to Cartesian for a direct comparison with this package's own `MBaseline`/`MuvW`
+(always Cartesian). Fuzzed across 12 random epochs/positions/directions and random synthetic baselines
+against 6 target frames for `MBaseline` (`J2000`/`GALACTIC`/`B1950`/`ECLIPTIC`/`AZEL`/`HADEC`) and 3 for
+`MuvW` (`J2000`/`GALACTIC`/`AZEL`).
+
+No new bug found: every conversion matches to a relative error of at most ~1.1e-4 (`MBaseline`) /
+~2.6e-4 (`MuvW`) of the baseline length — squarely the same SOFA-vs-casacore ephemeris/EOP residual
+class already established and accepted for `uvw_j2000`/`itrf`/`delay` elsewhere (Phase 137/196/280/300
+all cite a similar ~1e-4-ish relative floor), not a new divergence. This closes the "no CASA oracle
+confirmed" gap Phase 75 flagged, for the general (non-`uvw_j2000`-specific) conversion machinery
+`MBaseline`/`MuvW` share with the direction-conversion code that Phases 280/300 both found real bugs in
+— genuinely reassuring given that track record, not merely a formality.
+
+New testset in `test/measures_tests.jl` (109 cross-check assertions, fixed-seed `MersenneTwister(303)`).
