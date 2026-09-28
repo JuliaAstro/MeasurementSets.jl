@@ -20,6 +20,7 @@
 
 using MeasurementSets: MultiFileContainer, MultiHDF5Container
 import HDF5
+using Random
 
 # Pack an already-written plain table's per-DM files into a hand-built
 # `table.mfh5`, deleting the originals -- mirrors what a real MultiHDF5
@@ -314,6 +315,69 @@ end
         @test [ct[:A][i] for i in 1:40] == A
         @test [ct[:B][i] for i in 1:40] == B
         @test [ct[:C][i] for i in 1:40] == C
+    end
+end
+
+# Phase 310: the fixed-point "our writer, our reader round trip" test
+# above uses exactly ONE `blocksize` (128) and one fixed SSM+TSM column
+# mix. `_finalize_multifile`'s block-layout logic (assigning each DM
+# file a contiguous 0-based block range sized to its own byte length,
+# `_mf_pack_index`'s run-length encoding of that range, and the
+# fixed-point continuation-block convergence loop) all depend on how
+# each DM file's byte length divides against `blocksize` -- untested
+# territory outside the one fixed 128-byte case and the dedicated
+# header-overflow test below (itself only one blocksize, 64). Spreads
+# random `blocksize` values (64 -- MultiFile's documented floor,
+# Phase 211 -- up to a few KiB), random row counts, and a random mix of
+# SSM (Int32/Float64/String/Bool) and ISM columns into one container,
+# cross-checked against `Casacore.jl` for the non-TSM columns (a
+# single-column TSM group is a known, unrelated pre-existing
+# `Casacore.jl` interop gap -- see the comment above -- so TSM columns
+# here are checked only through this package's own reader).
+@testset "MultiFile — random blocksize/DM-mix fuzz vs Casacore.jl (Phase 310)" begin
+    rng = MersenneTwister(310)
+    for case in 1:6
+        dir = joinpath(mktempdir(), "mf310_$case.tab")
+        nr = rand(rng, 5:40)
+        bs = rand(rng, (64, 96, 128, 200, 333, 512, 1024, 2048))
+
+        cols = Pair{String,Any}[]
+        ismcols = String[]
+        expected = Dict{String,Any}()
+        for i in 1:rand(rng, 2:5)
+            J = rand(rng, (Int32, Float64, String, Bool))
+            nm = "V$i"
+            vals = J === String ? [randstring(rng, rand(rng, 0:8)) for _ in 1:nr] :
+                   J === Bool  ? rand(rng, Bool, nr) :
+                   J === Int32 ? rand(rng, Int32(-1000):Int32(1000), nr) :
+                                 randn(rng, nr) .* 100
+            push!(cols, nm => vals)
+            expected[nm] = vals
+            rand(rng, Bool) && push!(ismcols, nm)   # random subset routed through ISM
+        end
+        # one TSM (fixed-shape array) column, checked only via our own reader
+        Dv = [ComplexF32.(reshape(1:6, 2, 3)) .+ Float32(i) for i in 1:nr]
+        push!(cols, "D" => Dv)
+
+        write_table(dir, "T", cols; nrow=nr, ism=ismcols, tsm=[["D"]],
+                    storage=:multifile, blocksize=bs)
+        @test isfile(joinpath(dir, "table.mf"))
+        @test !any(startswith("table.f"), readdir(dir))
+
+        r = readtable(dir)
+        @test r.container isa MultiFileContainer
+        for (nm, vals) in expected
+            @test column(r, nm)[:] == vals
+        end
+        @test [column(r, "D")[i] for i in 1:nr] == Dv
+
+        if _HAVE_CASACORE
+            ct = CCT.Table(dir)
+            for (nm, vals) in expected
+                got = eltype(vals) === String ? String.(ct[Symbol(nm)][:]) : ct[Symbol(nm)][:]
+                @test got == vals
+            end
+        end
     end
 end
 

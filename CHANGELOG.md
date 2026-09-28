@@ -10429,3 +10429,26 @@ confirming `_tile_layout`'s tie-break sort and the general `TiledColumnStMan` wr
 across a much wider shape/type space than the original fixed-point test ever exercised.
 
 New testset in `test/tsm_multicol_tests.jl` (6 random cases, fixed-seed `MersenneTwister(309)`).
+
+### Phase 310 — `MultiFile` container random blocksize/DM-mix fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The `write_table(...; storage=:multifile)` round-trip test (Phase 21) only ever uses one fixed
+`blocksize` (128) with one fixed SSM+TSM column mix; the dedicated header-overflow test uses a second,
+also-fixed `blocksize` (64). `_finalize_multifile`'s block-layout logic — assigning each data-manager
+file a contiguous 0-based block range sized to its own byte length, `_mf_pack_index`'s run-length
+encoding of that range, and the fixed-point continuation-block convergence loop — all depend on how each
+DM file's byte length divides against `blocksize`, territory outside those two fixed values essentially
+untested.
+
+Spread random `blocksize` values (64 — MultiFile's documented floor, Phase 211 — up to a few KiB), random
+row counts, and a random mix of SSM (`Int32`/`Float64`/`String`/`Bool`) and ISM columns plus one TSM
+column into one container, cross-checked against `Casacore.jl` for the non-TSM columns (a single-column
+TSM group is a known, unrelated pre-existing `Casacore.jl` interop gap documented since Phase 15/21, so
+TSM columns are checked only through this package's own reader, matching the existing test's own
+convention).
+
+No new bug found: all 60 assertions across 6 random blocksize/row-count/column-type-mix configurations
+agree with `Casacore.jl`'s decode — confirming the block-layout and pack-index logic hold across a much
+wider blocksize space than the two fixed values previously exercised.
+
+New testset in `test/container_tests.jl` (6 random cases, fixed-seed `MersenneTwister(310)`).
