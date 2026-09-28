@@ -1656,3 +1656,131 @@ for (mjd, x, y, z) in [$cs]:
         end
     end
 end
+
+# Phase 302: the CASA-oracle epoch cross-check (`measures_fixture.py`) only ever checks 3 fixed
+# epochs, and -- notably -- calls `me.doframe(e)` but never `me.doframe(pos)` before converting, so
+# TDB's *position-dependent* term (`_dtdb_loc`'s longitude/height-derived `SOFA.dtdb` arguments)
+# has never actually been exercised against a real oracle at all; every existing TDB check used
+# casacore's own position-less default. This phase spreads the oracle across 15 random epochs
+# (1975-2030, safely inside the UTC leap-second table) *and* random global observer positions, with
+# the position genuinely set via `me.doframe(pos)` before every conversion.
+@testset "measures — epoch conversion random fuzz vs casatools, incl. TDB position term (Phase 302)" begin
+    if _HAVE_MEAS_CASA
+        rng = MersenneTwister(302)
+        ff = 1 / 298.257223563; e2 = ff * (2 - ff)
+        n = 15
+        cases = map(1:n) do _
+            lon = (rand(rng) - 0.5) * 2π
+            lat = asin(2rand(rng) - 1)
+            Rn = 6378137.0 / sqrt(1 - e2 * sin(lat)^2)
+            pos = (Rn * cos(lat) * cos(lon), Rn * cos(lat) * sin(lon), Rn * (1 - e2) * sin(lat))
+            mjd = 42413.0 + rand(rng) * 21360.0     # 1975-01-01 .. ~2033-06-14
+            (; mjd, pos)
+        end
+        cs = join(["($(c.mjd), $(c.pos[1]), $(c.pos[2]), $(c.pos[3]))" for c in cases], ",")
+        py = """
+from casatools import measures, quanta
+me = measures(); qa = quanta()
+for (mjd, x, y, z) in [$cs]:
+    me.done()
+    e0 = me.epoch('utc', qa.quantity(mjd, 'd'))
+    pos = me.position('itrf', qa.quantity(x, 'm'), qa.quantity(y, 'm'), qa.quantity(z, 'm'))
+    me.doframe(e0); me.doframe(pos)
+    out = [repr(me.measure(e0, s)['m0']['value']) for s in ('TAI', 'TT', 'TDB', 'UT1')]
+    print(' '.join(out))
+"""
+        out = split(strip(read(pipeline(`$_MEAS_CASA -c $py`; stderr = devnull), String)), '\n')
+        @test length(out) == n
+        for (i, c) in enumerate(cases)
+            tai, tt, tdb, ut1 = parse.(Float64, split(out[i]))
+            fr = MeasFrame(epoch = MEpoch{UTC}(c.mjd), position = MPosition{ITRF}(c.pos...))
+            e = MEpoch{UTC}(c.mjd)
+            @test measconvert(e, TAI; frame = fr).mjd ≈ tai atol = 1e-9
+            @test measconvert(e, TT; frame = fr).mjd  ≈ tt  atol = 1e-9
+            @test measconvert(e, TDB; frame = fr).mjd ≈ tdb atol = 1e-7   # ~ms, dtdb's own accuracy
+            @test measconvert(e, UT1; frame = fr).mjd ≈ ut1 atol = 1e-7  # no EarthOrientation here
+        end
+    end
+end
+
+# Phase 303: `MBaseline`/`MuvW` frame conversion (Phase 75) had NO confirmed real-CASA oracle at
+# all beyond `uvw_j2000`'s narrow TaQL-level scope (Phase 75's own risk note: "no CASA oracle
+# confirmed available for uvw/baseline"). Found live that `casatools.measures()` genuinely has
+# `me.baseline(rf, x, y, z)` / `me.uvw(rf, x, y, z)`, each returned as a *spherical* (lon, lat,
+# length) triple (like `MPosition`'s own spherical ITRF representation, Phase 155) rather than
+# Cartesian -- converted to Cartesian here (`sph2xyz`) for a direct comparison with this package's
+# own `MBaseline`/`MuvW` (always Cartesian). Fuzzed across 12 random epochs/positions/directions and
+# random synthetic baselines (not real antenna positions -- the conversion math doesn't care) against
+# 6 target frames for `MBaseline` (`J2000`/`GALACTIC`/`B1950`/`ECLIPTIC`/`AZEL`/`HADEC`) and 3 for
+# `MuvW` (`J2000`/`GALACTIC`/`AZEL`, `AZEL` needing the same `frame.direction` `MuvW` conversion
+# already requires).
+#
+# No new bug found: every conversion matches to a *relative* error of at most ~1.1e-4 (`MBaseline`)
+# / ~2.6e-4 (`MuvW`) of the baseline length -- squarely the same SOFA-vs-casacore ephemeris/EOP
+# residual class already established and accepted for `uvw_j2000`/`itrf`/`delay` elsewhere (Phase
+# 137/196/280/300 all cite ~1e-4-ish relative as the expected floor), not a new divergence. This
+# closes the "no CASA oracle confirmed" gap Phase 75 flagged, for the general (non-uvw_j2000-specific)
+# conversion machinery `MBaseline`/`MuvW` share with the direction-conversion code that Phases
+# 280/300 both found real bugs in.
+@testset "measures — MBaseline / MuvW random fuzz vs casatools (Phase 303)" begin
+    if _HAVE_MEAS_CASA
+        rng = MersenneTwister(303)
+        ff = 1 / 298.257223563; e2 = ff * (2 - ff)
+        n = 12
+        cases = map(1:n) do _
+            lon = (rand(rng) - 0.5) * 2π
+            lat = asin(2rand(rng) - 1)
+            Rn = 6378137.0 / sqrt(1 - e2 * sin(lat)^2)
+            pos = (Rn * cos(lat) * cos(lon), Rn * cos(lat) * sin(lon), Rn * (1 - e2) * sin(lat))
+            mjd = 55000.0 + rand(rng) * 5000
+            a = rand(rng) * 2π; b = asin(2rand(rng) - 1)
+            bx, by, bz = (rand(rng, 3) .- 0.5) .* 2000.0
+            (; mjd, pos, a, b, bx, by, bz)
+        end
+        cs = join(["($(c.mjd), $(c.pos[1]), $(c.pos[2]), $(c.pos[3]), $(c.a), $(c.b), $(c.bx), $(c.by), $(c.bz))"
+                   for c in cases], ",")
+        py = """
+from casatools import measures, quanta
+me = measures(); qa = quanta()
+for (mjd, x, y, z, a, b, bx, by, bz) in [$cs]:
+    me.done()
+    e0 = me.epoch('utc', qa.quantity(mjd, 'd'))
+    pos = me.position('itrf', qa.quantity(x,'m'), qa.quantity(y,'m'), qa.quantity(z,'m'))
+    d = me.direction('j2000', qa.quantity(a,'rad'), qa.quantity(b,'rad'))
+    me.doframe(e0); me.doframe(pos); me.doframe(d)
+    bl = me.baseline('itrf', qa.quantity(bx,'m'), qa.quantity(by,'m'), qa.quantity(bz,'m'))
+    out = []
+    for fr in ('j2000','galactic','b1950','ecliptic','azel','hadec'):
+        r = me.measure(bl, fr)
+        out += [repr(r['m0']['value']), repr(r['m1']['value']), repr(r['m2']['value'])]
+    u = me.uvw('itrf', qa.quantity(bx,'m'), qa.quantity(by,'m'), qa.quantity(bz,'m'))
+    for fr in ('j2000','galactic','azel'):
+        r = me.measure(u, fr)
+        out += [repr(r['m0']['value']), repr(r['m1']['value']), repr(r['m2']['value'])]
+    print(' '.join(out))
+"""
+        out = split(strip(read(pipeline(`$_MEAS_CASA -c $py`; stderr = devnull), String)), '\n')
+        @test length(out) == n
+        sph2xyz(lon, lat, r) = (r * cos(lat) * cos(lon), r * cos(lat) * sin(lon), r * sin(lat))
+        bframes = (J2000, GALACTIC, B1950, ECLIPTIC, AZEL, HADEC)
+        uframes = (J2000, GALACTIC, AZEL)
+        for (i, c) in enumerate(cases)
+            r = parse.(Float64, split(out[i]))
+            fr = MeasFrame(epoch = MEpoch{UTC}(c.mjd), position = MPosition{ITRF}(c.pos...),
+                          direction = MDirection{J2000}(c.a, c.b))
+            L = hypot(c.bx, c.by, c.bz)
+            b0 = MBaseline{ITRF}(c.bx, c.by, c.bz)
+            for (k, T) in enumerate(bframes)
+                ours = measconvert(b0, T; frame = fr)
+                rx, ry, rz = sph2xyz(r[3k-2], r[3k-1], r[3k])
+                @test hypot(ours.x - rx, ours.y - ry, ours.z - rz) / L < 5e-4
+            end
+            u0 = MuvW{ITRF}(c.bx, c.by, c.bz)
+            for (k, T) in enumerate(uframes)
+                ours = measconvert(u0, T; frame = fr)
+                rx, ry, rz = sph2xyz(r[18 + 3k - 2], r[18 + 3k - 1], r[18 + 3k])
+                @test hypot(ours.u - rx, ours.v - ry, ours.w - rz) / L < 5e-4
+            end
+        end
+    end
+end

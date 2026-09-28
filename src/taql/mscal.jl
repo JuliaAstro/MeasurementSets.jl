@@ -26,6 +26,22 @@
 # a MeasurementSets-only extension with no real casacore counterpart,
 # not a divergence from one.
 #
+# Phase 301 (a random 80-row cross-check against real `derivedmscal`,
+# `test/taql_mscal_tests.jl`): confirmed directly against `Register.cc`'s
+# full registration list that `AZ1`/`AZ2`/`EL1`/`EL2` -- unlike bare `PA`
+# above, which at least mirrors a real registered family under a
+# different suffix -- have NO real casacore counterpart under ANY name;
+# only the combined `AZEL`/`AZEL1`/`AZEL2` 2-vector exists. Also found (a
+# genuine UPSTREAM bug, not this package's): real casacore's
+# `derivedmscal.LAST`/`LAST1`/`LAST2` do not vary with the row's own
+# `TIME` at all in the casacore build available for cross-checking here
+# -- see the long comment in `test/taql_mscal_tests.jl` for the
+# controlled experiment and the `MSCalEngine.cc` trace; this package's
+# own `mscal.last*()` (a `SOFA.gst06a`-based computation, independently
+# CASA-cross-checked at a single epoch since Phase 66/77) is not
+# affected and was not cross-checked against the real UDF at scale for
+# that reason.
+#
 # Phase 196 (the wavelength-scaled uvw family Phase 163 flagged as a
 # real, unimplemented gap): `UVWWVL()`/`UVWWVLS()` scale the STORED
 # `UVW` column by the row's spw reference/channel frequency divided by

@@ -10164,3 +10164,94 @@ happened to land just under it.
 New testset in `test/measures_tests.jl` (60 cross-check assertions across the 10 random epochs × 6
 bodies, fixed-seed `MersenneTwister(300)`); confirmed the fix closes every one of the 4 failures the fuzz
 found, with no regression to the existing single-point Sun/planet tests or any other body.
+
+### Phase 301 — `mscal.el1()`/`az1()`/`azel1()`/`pa1()`/`last1()`/`uvw_j2000()` vs real `derivedmscal` on randomised rows
+
+`mscal.itrf()`/`delay()`/`hadec1()` got the real 80-randomised-row `derivedmscal` cross-check treatment
+in Phase 280 (which found a real bug); the rest of the direction/uvw family (`el1`/`az1`/`azel1`/`pa1`/
+`last1`/`uvw_j2000`) had only ever been checked at a handful of fixed rows via a *self-consistency*
+reference (reusing this package's own `measure`/`measconvert` code, not an independent oracle). This
+phase extends the same randomised-row treatment to the rest of the family, on the identical randomised
+copy shape (80 rows, random `TIME`/`ANTENNA1`/`ANTENNA2`/`FIELD_ID`).
+
+**Found 1** (not a bug — a genuine, previously-undocumented divergence): real casacore's `derivedmscal`
+(`derivedmscal/DerivedMC/Register.cc`, read directly) registers `AZEL`/`AZEL1`/`AZEL2` (the combined
+2-vector) and `PA1`/`PA2`, but has **no** `AZ1`/`AZ2`/`EL1`/`EL2` under any name at all — unlike the bare
+`pa` / underscored `uvw_j2000` spellings (Phase 163/164), which *are* aliases of a real registered
+function, `mscal.el1()`/`az1()`/`el2()`/`az2()` are pure MeasurementSets-only convenience accessors with
+no real casacore counterpart whatsoever. Compared here against the real `azel1()` vector's own
+components (the only way to check them against an independent oracle at all) — both agree to the same
+~3e-5 rad residual as `azel1()` itself, consistent with ordinary azimuth-near-zenith numerical
+degeneracy (a tiny sky-position difference maps to a much larger azimuth-angle difference near the
+zenith, where azimuth itself is ill-defined), not a functional issue. Documented in `src/taql/mscal.jl`.
+
+**Found 2** (a genuine **upstream casacore bug**, confirmed directly via source — not something to fix
+in this package's own code, the same category as the Phase 279 DELETE-drops-Bool-bits and Phase 284
+gmax-of-an-all-negative-group findings): real casacore's `derivedmscal.LAST`/`LAST1`/`LAST2` do not vary
+with the row's own `TIME` at all, in the casacore build available for cross-checking here. Confirmed with
+a controlled experiment: holding the antenna fixed and sweeping `TIME` across a full day, the real LAST
+value moved by *under one second total*, where a genuine sidereal-time computation must sweep through
+the full ~86164-second sidereal day; holding `TIME` fixed and varying the antenna instead, real LAST
+barely moved either (consistent with only the tiny antenna-to-antenna longitude difference showing
+through). This package's own `mscal.last1()`/`last()`/`last2()` (an independent `SOFA.gst06a`-based
+computation, already CASA-cross-checked at a single epoch since Phase 66/77) correctly sweeps through
+the full `[0, 2π)` range across the same random rows. Traced into
+`derivedmscal/DerivedMC/MSCalEngine.cc`'s `setData`/`getLAST`: `itsUTCToLAST.setModel(epoch)` *is* called
+with a genuinely per-row-varying epoch whenever `time != itsLastTime` — the C++ source itself looks
+correct, so this is either an `MEpoch::Convert` caching defect specific to an epoch-to-epoch conversion
+route (as opposed to the direction-to-direction `AZEL`/`HADEC`/`ITRF` conversions, which *do* vary
+correctly with time in this same build) in this compiled library, or a version-specific regression — not
+chased further, since it is unambiguously not this package's own bug. `last1()` is therefore *not*
+cross-checked against the real oracle in the new test (it would fail — the oracle itself is broken in
+this build); a sanity check confirms our own value stays in range and genuinely varies with time.
+
+Also confirmed (a tolerance-only fix, not a bug): `azel1()`, the `el1()`/`az1()` component comparisons,
+and `pa1()` all needed a slightly looser tolerance (~1e-4 rad) than `itrf()`/`hadec1()`'s already-
+established ~2e-5/1e-5 rad — consistent with the azimuth/position-angle-near-zenith degeneracy noted
+above, not a new divergence; and `uvw_j2000()`/`uvwj2000()` needed a *relative* (not fixed absolute)
+tolerance, since random antenna pairs produce baseline lengths spanning a wide range and the established
+SOFA-vs-casacore ephemeris residual (Phase 137/196/280) is itself relative (~1e-4).
+
+New testset in `test/taql_mscal_tests.jl`; `src/taql/mscal.jl`'s own header comment updated with both
+findings.
+
+### Phase 302 — epoch conversion random fuzz vs `casatools`, including TDB's position term (investigation only, no bug found)
+
+The CASA-oracle epoch conversion cross-check (`measures_fixture.py`) only ever checked 3 fixed epochs —
+and, notably, called `me.doframe(e)` but never `me.doframe(pos)` before converting, so **TDB's
+position-dependent term** (`_dtdb_loc`'s longitude/height-derived arguments to `SOFA.dtdb`) had *never*
+actually been exercised against a real oracle at all; every existing TDB check compared against
+casacore's own position-less default. This phase spreads the oracle across 15 random epochs
+(1975–2030, safely inside the UTC leap-second table) *and* random global observer positions, with the
+position genuinely set via `me.doframe(pos)` before every conversion — the first time this package's
+TDB position term has been checked against anything other than casacore's default.
+
+No new bug found: UTC→{TAI, TT, TDB, UT1} all agree with `casatools` to the same tight tolerances
+already established for the position-less case (TAI/TT to <1e-9 days ≈ 0.1 ms; TDB/UT1 to <1e-7 days,
+the `dtdb`/no-`EarthOrientation` accuracy floor) across every one of the 15 random epoch/position
+combinations, confirming the position-dependent TDB term is correctly wired even though nothing had
+ever actually checked it against an independent oracle before.
+
+New testset in `test/measures_tests.jl` (61 cross-check assertions, fixed-seed `MersenneTwister(302)`).
+
+### Phase 303 — `MBaseline`/`MuvW` frame conversion random fuzz vs `casatools` (investigation only, no bug found)
+
+`MBaseline`/`MuvW` frame conversion (Phase 75) had **no confirmed real-CASA oracle at all** beyond
+`uvw_j2000`'s narrow TaQL-level scope — Phase 75's own risk note explicitly flagged "no CASA oracle
+confirmed available for uvw/baseline". Found live that `casatools.measures()` genuinely has
+`me.baseline(rf, x, y, z)` / `me.uvw(rf, x, y, z)`, each returned as a *spherical* (lon, lat, length)
+triple (the same convention as `MPosition`'s own spherical ITRF representation, Phase 155) rather than
+Cartesian — converted to Cartesian for a direct comparison with this package's own `MBaseline`/`MuvW`
+(always Cartesian). Fuzzed across 12 random epochs/positions/directions and random synthetic baselines
+against 6 target frames for `MBaseline` (`J2000`/`GALACTIC`/`B1950`/`ECLIPTIC`/`AZEL`/`HADEC`) and 3 for
+`MuvW` (`J2000`/`GALACTIC`/`AZEL`).
+
+No new bug found: every conversion matches to a relative error of at most ~1.1e-4 (`MBaseline`) /
+~2.6e-4 (`MuvW`) of the baseline length — squarely the same SOFA-vs-casacore ephemeris/EOP residual
+class already established and accepted for `uvw_j2000`/`itrf`/`delay` elsewhere (Phase 137/196/280/300
+all cite a similar ~1e-4-ish relative floor), not a new divergence. This closes the "no CASA oracle
+confirmed" gap Phase 75 flagged, for the general (non-`uvw_j2000`-specific) conversion machinery
+`MBaseline`/`MuvW` share with the direction-conversion code that Phases 280/300 both found real bugs in
+— genuinely reassuring given that track record, not merely a formality.
+
+New testset in `test/measures_tests.jl` (109 cross-check assertions, fixed-seed `MersenneTwister(303)`).
