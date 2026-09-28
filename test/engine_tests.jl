@@ -550,6 +550,62 @@ end
     end
 end
 
+# Phase 306: every BitFlagsEngine test above (and every one since Phase
+# 40/156) only ever used `stored_type = TpInt` -- real casacore's
+# `BitFlagsEngine<StoredType>` is genuinely instantiated for THREE stored
+# types (uChar/Short/Int, all three separately auto-registered in
+# `DataManager::initRegisterMap`), and `_engine_typestr(::BitFlags, ...)`
+# builds the on-disk DM class-name string from `_TYPEID[stored_type]` --
+# but nothing had ever actually exercised the uChar/Short spellings
+# against a real casacore open. Also fuzzes random FLAGSETS key sets
+# (beyond the fixed 2-key "CAL"/"RFI" fixture above) and random cell
+# shapes/row counts, cross-checked against Casacore.jl.
+@testset "engine — BitFlagsEngine random-parameter fuzz: stored_type + FLAGSETS vs Casacore.jl (Phase 306)" begin
+    rng = MersenneTwister(306)
+    for case in 1:8
+        stored_type = rand(rng, (MSv2E.TpUChar, MSv2E.TpShort, MSv2E.TpInt))
+        npol = rand(rng, 1:3)
+        nchan = rand(rng, 1:4)
+        nr = rand(rng, 2:6)
+        F = [rand(rng, Bool, npol, nchan) for _ in 1:nr]
+
+        # a random FLAGSETS map of 2-5 named bits (bit 0 reserved -- the
+        # raw stored value is always exactly 0/1, so a mask needs bit 0
+        # set to ever read back `true`) plus some noise bits.
+        nkeys = rand(rng, 2:5)
+        keys_ = ["K$i" for i in 1:nkeys]
+        # exactly one key is guaranteed to include bit 0 so the fuzzed
+        # readmaskkeys selection can deliberately include/exclude it.
+        bits = [i == 1 ? UInt32(1) : UInt32(1 << rand(rng, 1:6)) for i in 1:nkeys]
+        fs = MSv2E.Record()
+        for (k, b) in zip(keys_, bits)
+            MSv2E._kwpush!(fs, k, MSv2E.TpUInt, b)
+        end
+        # a random subset of keys (>=1), possibly including a nonexistent
+        # one (Phase 156's silent-skip path), in random order.
+        chosen = shuffle(rng, keys_)[1:rand(rng, 1:nkeys)]
+        rand(rng, Bool) && push!(chosen, "NOSUCHKEY_$case")
+        expected_mask = reduce(|, (b for (k, b) in zip(keys_, bits) if k in chosen);
+                               init=UInt32(0))
+        expect_true = isodd(expected_mask)      # bit 0 set -> raw storage (0/1) matches
+
+        dir = joinpath(mktempdir(), "bfe306_$case.tab")
+        write_table(dir, "T", ["FLAG" => F]; nrow=nr,
+            engines = Dict("FLAG" => (; kind=MSv2E.BitFlags(), stored_type,
+                                       readmaskkeys=chosen, flagsets=fs)))
+        r = readtable(dir)
+        m = _engine_manager(r, "FLAG")
+        @test m.name == "BitFlagsEngine<" * MSv2E._TYPEID[stored_type]
+        fc = column(r, "FLAG")
+        expected = expect_true ? F : [falses(npol, nchan) for _ in 1:nr]
+        @test [fc[i] for i in 1:nr] == expected
+        if _HAVE_CASACORE
+            ct = CCT.Table(dir)
+            @test [Bool.(ct[:FLAG][i]) for i in 1:nr] == expected
+        end
+    end
+end
+
 @testset "engine — ForwardColumnEngine / reference_copy" begin
     src = joinpath(mktempdir(), "src.tab")
     A = collect(1.0:6.0)

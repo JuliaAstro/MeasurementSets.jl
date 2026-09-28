@@ -10324,3 +10324,26 @@ New testsets in `test/engine_tests.jl`: the random-parameter fuzz (10 cases × 3
 `MersenneTwister(305)`), the autoScale fuzz (5 cases, `MersenneTwister(3050)`), and a permanent
 regression test confirming `Float64`/`ComplexF64` input through any of the three `CompressKind` engines
 now raises a clear error while `Float32`/`ComplexF32` input still works.
+
+### Phase 306 — `BitFlagsEngine` random-parameter fuzz: `stored_type` + `FLAGSETS` vs `Casacore.jl` (investigation only, no bug found)
+
+Every `BitFlagsEngine` test since it was implemented (Phase 40) and its `readmask`/`FLAGSETS` bug fixed
+(Phase 156) had only ever used `stored_type = TpInt` — real casacore's `BitFlagsEngine<StoredType>` is
+genuinely instantiated for three distinct stored types (`uChar`/`Short`/`Int`, each separately
+auto-registered in `DataManager::initRegisterMap`), and `_engine_typestr(::BitFlags, ...)` builds the
+on-disk DM class-name string from `_TYPEID[stored_type]` — but the `uChar`/`Short` spellings had *zero*
+test coverage, let alone a real-casacore open. This phase spreads the `Casacore.jl` cross-check across a
+random `stored_type` (`uChar`/`Short`/`Int`), random cell shapes/row counts, and a random `FLAGSETS` key
+set (2–5 named bits, one deliberately holding bit 0 — the only bit that can ever read back `true`, since
+the raw stored value is always exactly 0/1 — the rest noise bits), with `readmaskkeys` a random subset in
+random order, sometimes including a nonexistent key name (exercising Phase 156's silent-skip path at
+scale, not just the original fixed 2-key fixture).
+
+No new bug found: all 8 random configurations — across all three stored types — produce a DM class-name
+string real casacore accepts (`BitFlagsEngine<uChar   `/`Short   `/`Int     `, confirming the 8-char
+padding is correct for every width, not just the one previously tested) and a mask-recomputed read result
+that matches both this package's own reader and `Casacore.jl`'s decode exactly. Closes a real "never
+actually checked" gap — the `uChar`/`Short` stored-type paths were reachable, plausible-looking code with
+literally no live verification behind them until now.
+
+New testset in `test/engine_tests.jl` (8 random cases × 3 assertions, fixed-seed `MersenneTwister(306)`).
