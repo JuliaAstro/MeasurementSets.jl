@@ -10371,3 +10371,42 @@ type-agnostic in practice, not just by the absence of an obvious type-specific b
 
 New testset in `test/engine_tests.jl` (6 random cases × 4 column types × 3 checks, fixed-seed
 `MersenneTwister(307)`).
+
+### Phase 308 — `write_concattable` random N-part fuzz: found and confirmed a genuine upstream casacore `ConcatTable`/String-column limitation (not a bug in this package)
+
+The `write_concattable` test (Phase 15) only ever concatenates exactly 2 nonempty parts with one
+`Int32` column. Phase 15's own risk note explicitly anticipated a genuinely empty interior part
+("`searchsortedlast` with duplicate offsets ... correctly skips the empty part") but no test had ever
+exercised one. Spread `write_concattable` + `ConcatColumn`'s row→part lookup across a random number of
+parts (2–5), random per-part row counts, and a mix of `Int32`/`Float64`/`String` columns, cross-checked
+against `Casacore.jl`.
+
+**Found a real, reproducible divergence while constructing the fuzz itself**: a `ConcatTable` with an
+empty part positioned *before* a nonempty one (whether first or merely interior) and a `String` column
+threw `"SSMIndex::getIndex - access to non-existing row 0"` through `Casacore.jl`. Live investigation —
+reading `~/Development/CASACORE/tables/DataMan/SSMIndex.cc`'s `getIndex` (throws whenever `itsNUsed==0`,
+i.e. no row has ever been added to that table's SSMIndex) plus a byte-swap experiment (replacing only our
+written `table.f<seq>` with the bytes of a table `CREATE TABLE ... LIMIT 0` itself wrote, keeping
+everything else ours, made the failure disappear) — narrowed it down. The decisive test: does the
+*identical* failure reproduce when the empty part is authored by real casacore's own `CREATE TABLE ...
+LIMIT 0`, not just by this package's writer? **It does, byte-for-byte the same error message**, whether
+the empty part came first or was merely interior — confirming this is a genuine, pre-existing upstream
+casacore `ConcatTable`/`SSMIndStringColumn` limitation (real casacore's own `ConcatColumn` implementation
+evidently bootstraps something, per nonempty part, from every earlier part including empty ones, that
+unconditionally probes row 0), **not a divergence in this package's writer**. An initial hypothesis
+("only the *first* part matters") was itself refined mid-investigation once a broader fuzz case — an
+empty *interior* part followed by a nonempty one — reproduced the identical error; the correct
+characterization is "an empty part anywhere before a nonempty one", not "the first part specifically".
+Confirmed **not** to occur when an empty part is a pure trailing suffix (nothing nonempty follows it), in
+either this package's writer or real casacore's own — nor when the column isn't `String`/SSM-indirect.
+This package's own reader is completely unaffected either way — only real casacore's `ConcatTable`+
+`SSMIndStringColumn` combination has the gap.
+
+The fuzz's own row-count generation is scoped to trailing-only empty parts (the confirmed-safe shape) so
+it targets this package's own correctness against a real, non-broken oracle; the empty-before-nonempty
+case is documented and regression-tested separately, including the real-casacore-authored confirmation.
+
+New testsets in `test/reftable_tests.jl`: the random N-part fuzz (6 cases, fixed-seed
+`MersenneTwister(308)`) and a dedicated testset pinning both the confirmed upstream limitation (our
+writer *and* a real-casacore-authored empty part fail identically) and the confirmed-safe trailing-empty
+case.
