@@ -10452,3 +10452,23 @@ agree with `Casacore.jl`'s decode — confirming the block-layout and pack-index
 wider blocksize space than the two fixed values previously exercised.
 
 New testset in `test/container_tests.jl` (6 random cases, fixed-seed `MersenneTwister(310)`).
+
+### Phase 311 — `TiledCellStMan` random per-row shape + type-mix fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The multi-column `TiledCellStMan` success test (Phase 214) uses exactly 2 columns, one fixed shape family
+(`(2, r+1)`), one type (`Float32`), and 3 rows — and, unlike every other multi-column tiled writer test in
+this file, had **no `Casacore.jl` cross-check at all** for the shared-group success path (only the
+shape-*mismatch* error path was ever exercised against anything). `write_tiledcellstman` requires every
+column in a group to share the same cell dimensionality per row, but the *extent* per dimension is free
+to vary row by row — untested with genuinely random per-row extents, a random column count, or a random
+type mix.
+
+Spread random per-row cell shapes (1-D and 2-D, random extents each row), a random column count (2–3),
+and a random mix of `Float32`/`Float64`/`ComplexF32`/`Int32`/`Bool` types across the shared group,
+cross-checked against `Casacore.jl`.
+
+No new bug found: all 32 assertions across 6 random configurations agree with `Casacore.jl`'s decode —
+the first genuine cross-implementation proof this package's multi-column `TiledCellStMan` writer has ever
+had for its success path, not just its validation-error path.
+
+New testset in `test/tsm_multicol_tests.jl` (6 random cases, fixed-seed `MersenneTwister(311)`).
