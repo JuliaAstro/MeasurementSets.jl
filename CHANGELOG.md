@@ -10429,3 +10429,69 @@ confirming `_tile_layout`'s tie-break sort and the general `TiledColumnStMan` wr
 across a much wider shape/type space than the original fixed-point test ever exercised.
 
 New testset in `test/tsm_multicol_tests.jl` (6 random cases, fixed-seed `MersenneTwister(309)`).
+
+### Phase 310 — `MultiFile` container random blocksize/DM-mix fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The `write_table(...; storage=:multifile)` round-trip test (Phase 21) only ever uses one fixed
+`blocksize` (128) with one fixed SSM+TSM column mix; the dedicated header-overflow test uses a second,
+also-fixed `blocksize` (64). `_finalize_multifile`'s block-layout logic — assigning each data-manager
+file a contiguous 0-based block range sized to its own byte length, `_mf_pack_index`'s run-length
+encoding of that range, and the fixed-point continuation-block convergence loop — all depend on how each
+DM file's byte length divides against `blocksize`, territory outside those two fixed values essentially
+untested.
+
+Spread random `blocksize` values (64 — MultiFile's documented floor, Phase 211 — up to a few KiB), random
+row counts, and a random mix of SSM (`Int32`/`Float64`/`String`/`Bool`) and ISM columns plus one TSM
+column into one container, cross-checked against `Casacore.jl` for the non-TSM columns (a single-column
+TSM group is a known, unrelated pre-existing `Casacore.jl` interop gap documented since Phase 15/21, so
+TSM columns are checked only through this package's own reader, matching the existing test's own
+convention).
+
+No new bug found: all 60 assertions across 6 random blocksize/row-count/column-type-mix configurations
+agree with `Casacore.jl`'s decode — confirming the block-layout and pack-index logic hold across a much
+wider blocksize space than the two fixed values previously exercised.
+
+New testset in `test/container_tests.jl` (6 random cases, fixed-seed `MersenneTwister(310)`).
+
+### Phase 311 — `TiledCellStMan` random per-row shape + type-mix fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The multi-column `TiledCellStMan` success test (Phase 214) uses exactly 2 columns, one fixed shape family
+(`(2, r+1)`), one type (`Float32`), and 3 rows — and, unlike every other multi-column tiled writer test in
+this file, had **no `Casacore.jl` cross-check at all** for the shared-group success path (only the
+shape-*mismatch* error path was ever exercised against anything). `write_tiledcellstman` requires every
+column in a group to share the same cell dimensionality per row, but the *extent* per dimension is free
+to vary row by row — untested with genuinely random per-row extents, a random column count, or a random
+type mix.
+
+Spread random per-row cell shapes (1-D and 2-D, random extents each row), a random column count (2–3),
+and a random mix of `Float32`/`Float64`/`ComplexF32`/`Int32`/`Bool` types across the shared group,
+cross-checked against `Casacore.jl`.
+
+No new bug found: all 32 assertions across 6 random configurations agree with `Casacore.jl`'s decode —
+the first genuine cross-implementation proof this package's multi-column `TiledCellStMan` writer has ever
+had for its success path, not just its validation-error path.
+
+New testset in `test/tsm_multicol_tests.jl` (6 random cases, fixed-seed `MersenneTwister(311)`).
+
+### Phase 312 — `IncrementalStMan` random independent multi-column run-length fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The "ISM writer round-trip" test (Phase 8) uses fixed run-length change points (splits at exactly 20/40
+of 60 rows, runs of exactly 12) for every column; "ISM writer multi-bucket" forces more than one bucket
+but with only one column, one pattern (changes every row). Neither exercises *multiple* columns with
+genuinely random, independent, simultaneous run-length patterns spanning several bucket boundaries at
+once — `_ism_colindex`'s per-column row-number/offset array construction is built per column
+independently, so misaligned bucket boundaries across columns with different change cadences is exactly
+the kind of interaction a fixed single-pattern fixture can't catch.
+
+Spread a random number of columns (2–4), random independent run-length patterns per column (a random
+per-column "hold probability" so each column changes value at unpredictable, uncorrelated points), random
+types (`Int32`/`Float64`/`Bool`/`String`), and row counts large enough to force multiple ISM buckets,
+cross-checked at both the whole-column level and 10 random individual-row lookups per case (not just
+start/middle/end) against `Casacore.jl`.
+
+No new bug found: all assertions across 5 random configurations — each genuinely spanning multiple ISM
+buckets with misaligned per-column change points — agree with `Casacore.jl`'s decode, confirming the
+per-column bucket-index construction and lookup hold under column-to-column bucket-boundary misalignment,
+not just the single-column or fixed-pattern cases previously exercised.
+
+New testset in `test/ism_writer_tests.jl` (5 random cases, fixed-seed `MersenneTwister(312)`).

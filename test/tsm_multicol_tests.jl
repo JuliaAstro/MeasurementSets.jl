@@ -232,6 +232,59 @@ end
     @test [column(r, "B")[i] for i in 1:3] == B2
 end
 
+# Phase 311: the multi-column `TiledCellStMan` SUCCESS case right above
+# uses exactly 2 columns, one fixed shape family ((2,r+1)), one type
+# (Float32), and 3 rows -- and, unlike every other multi-column tiled
+# writer test in this file, has NO `Casacore.jl` cross-check at all for
+# the shared-group success path (only the shape-MISMATCH error path is
+# exercised against anything). `write_tiledcellstman` requires every
+# column in a group to share the same cell DIMENSIONALITY per row (not
+# necessarily the same EXTENT across rows) -- untested with genuinely
+# random per-row extents, a random column count, or a random type mix.
+@testset "TiledCellStMan — random per-row shape + type-mix fuzz vs Casacore.jl (Phase 311)" begin
+    rng = MersenneTwister(311)
+    _randcell(J, shape) = J === Bool ? rand(rng, Bool, shape) :
+                          J === Int32 ? rand(rng, Int32(-500):Int32(500), shape) :
+                          J <: Complex ? J.(randn(rng, shape), randn(rng, shape)) :
+                          J.(randn(rng, shape) .* 10)
+    for case in 1:6
+        dir = joinpath(mktempdir(), "tcell311_$case.tab")
+        nr = rand(rng, 2:6)
+        ncol = rand(rng, 2:3)
+        nrdim = rand(rng, 1:2)
+        # one random extent-per-dimension PER ROW (shared across every
+        # column in the group, as `write_tiledcellstman` requires).
+        rowshapes = [ntuple(_ -> rand(rng, 1:4), nrdim) for _ in 1:nr]
+
+        cols = Pair{String,Any}[]
+        names = String[]
+        expected = Dict{String,Any}()
+        for c in 1:ncol
+            J = rand(rng, (Float32, Float64, ComplexF32, Int32, Bool))
+            nm = "Y$c"
+            vals = [_randcell(J, rowshapes[r]) for r in 1:nr]
+            push!(cols, nm => vals)
+            push!(names, nm)
+            expected[nm] = vals
+        end
+
+        write_table(dir, "T", cols; nrow=nr, tcell=[names])
+        r = readtable(dir)
+        @test r.managers[1].name == "TiledCellStMan"
+        for nm in names
+            @test [column(r, nm)[i] for i in 1:nr] == expected[nm]
+        end
+
+        if _HAVE_CASACORE
+            ct = CCT.Table(dir)
+            for nm in names
+                got = [ct[Symbol(nm)][i] for i in 1:nr]
+                @test got == expected[nm]
+            end
+        end
+    end
+end
+
 # Phase 213 (src/datamanagers sweep, continued): a `TiledCellStMan` row can
 # genuinely have an UNDEFINED cell -- real casacore's own
 # `TiledCellStMan::addRow64` (TiledCellStMan.cc:178-200) creates a null

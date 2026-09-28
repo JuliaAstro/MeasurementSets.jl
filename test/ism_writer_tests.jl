@@ -1,5 +1,7 @@
 # Phase 8: IncrementalStMan writer + ISM indirect arrays.
 
+using Random
+
 @testset "ISM writer round-trip" begin
     n = 60
     a = Int32[i <= 20 ? 1 : (i <= 40 ? 2 : 3) for i in 1:n]   # long runs
@@ -146,6 +148,83 @@ end
     @test getcell(r, "g", n) == float(n)
     if _HAVE_CASACORE
         @test collect(CCT.Table(dir)[:g][:]) == g
+    end
+end
+
+# Phase 312: the "ISM writer round-trip" test above uses FIXED run-length
+# change points (splits at exactly 20/40 of 60 rows, runs of exactly 12)
+# for every column; "ISM writer multi-bucket" forces >1 bucket but with
+# only ONE column, one pattern (changes every row). Neither exercises
+# MULTIPLE columns with genuinely random, independent, simultaneous
+# run-length patterns spanning several bucket boundaries at once --
+# `_ism_colindex`'s per-column row-number/offset array construction
+# (Phase 237/238's own allocation work sits right on top of this) is
+# built per column independently, so misaligned bucket boundaries across
+# columns with different change cadences is exactly the kind of thing a
+# fixed single-pattern fixture can't catch. Spreads a random number of
+# columns (2-4), random independent run-length patterns per column
+# (a random "hold probability" per column, so each column changes value
+# at unpredictable, uncorrelated points), random types
+# (Int32/Float64/Bool/String), and row counts large enough to force
+# multiple ISM buckets, cross-checked at both the whole-column and
+# random-individual-row level against `Casacore.jl`.
+@testset "ISM writer — random independent run-length patterns, multi-column, multi-bucket, vs Casacore.jl (Phase 312)" begin
+    rng = MersenneTwister(312)
+    for case in 1:5
+        n = rand(rng, 2000:6000)
+        ncol = rand(rng, 2:4)
+        cols = Pair{String,Any}[]
+        names = String[]
+        expected = Dict{String,Any}()
+        for c in 1:ncol
+            J = rand(rng, (Int32, Float64, Bool, String))
+            nm = "g$c"
+            holdp = rand(rng, 0.5:0.05:0.98)    # probability the value STAYS the same as the previous row
+            vals = Vector{Any}(undef, n)
+            cur = J === String ? randstring(rng, rand(rng, 0:6)) :
+                  J === Bool  ? rand(rng, Bool) :
+                  J === Int32 ? rand(rng, Int32(-1000):Int32(1000)) : randn(rng) * 100
+            for i in 1:n
+                if i > 1 && rand(rng) >= holdp
+                    cur = J === String ? randstring(rng, rand(rng, 0:6)) :
+                          J === Bool  ? rand(rng, Bool) :
+                          J === Int32 ? rand(rng, Int32(-1000):Int32(1000)) : randn(rng) * 100
+                end
+                vals[i] = cur
+            end
+            vals = identity.(vals)     # narrow Vector{Any} -> the concrete J
+            push!(cols, nm => vals)
+            push!(names, nm)
+            expected[nm] = vals
+        end
+
+        dir = joinpath(mktempdir(), "ism312_$case.tab")
+        write_table(dir, "T", cols; nrow=n, ism=names)
+        r = readtable(dir)
+        inst = MSv2._dm_instance(r, 0)
+        @test inst.buckets > 1    # genuinely forces multiple ISM buckets
+
+        for nm in names
+            @test getcolumn(r, nm) == expected[nm]
+        end
+        # random individual-row lookups, not just start/middle/end -- the
+        # per-column `_ism_colindex` bucket-search path, not just the
+        # bulk getcolumn fast path.
+        for _ in 1:10
+            row = rand(rng, 1:n)
+            for nm in names
+                @test getcell(r, nm, row) == expected[nm][row]
+            end
+        end
+
+        if _HAVE_CASACORE
+            ct = CCT.Table(dir)
+            for nm in names
+                got = expected[nm] isa Vector{String} ? String.(collect(ct[Symbol(nm)][:])) :
+                                                        collect(ct[Symbol(nm)][:])
+                @test got == expected[nm]
+            end
+        end
     end
 end
 
