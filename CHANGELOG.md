@@ -10410,3 +10410,22 @@ New testsets in `test/reftable_tests.jl`: the random N-part fuzz (6 cases, fixed
 `MersenneTwister(308)`) and a dedicated testset pinning both the confirmed upstream limitation (our
 writer *and* a real-casacore-authored empty part fail identically) and the confirmed-safe trailing-empty
 case.
+
+### Phase 309 — `TiledColumnStMan` writer random shape/type-mix fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The `TiledColumnStMan writer` test (Phase 11) only ever uses one fixed cell shape (a 3-element 1-D
+vector) across both its groups, with 3 types total. `write_tiledcolumnstman` requires every column in one
+group to share the identical cell shape (checked directly), but the *types* bound to one shared hypercube
+are free to differ and go through the same canonical-size tie-break sort `_tile_layout` uses everywhere
+else — already dedicated-tested for `TiledShapeStMan`'s "equal-size types" case, but never for
+`TiledColumnStMan` specifically, nor with `Bool`'s zero-canonical-size special case in the mix.
+
+Spread random cell shapes (1-D and 2-D), random per-group column counts (1–3), and a random mix of
+`Float32`/`Float64`/`ComplexF32`/`Int32`/`Bool` types per group across multiple groups in one table,
+cross-checked against `Casacore.jl`.
+
+No new bug found: all 57 assertions across 6 random configurations agree with `Casacore.jl`'s decode —
+confirming `_tile_layout`'s tie-break sort and the general `TiledColumnStMan` write path are correct
+across a much wider shape/type space than the original fixed-point test ever exercised.
+
+New testset in `test/tsm_multicol_tests.jl` (6 random cases, fixed-seed `MersenneTwister(309)`).
