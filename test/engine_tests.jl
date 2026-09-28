@@ -8,6 +8,33 @@ const MSv2E = MeasurementSets
 _engine_manager(r, vname) =
     r.managers[findfirst(m -> m.sequ == columndesc(r, vname).sequ, r.managers)]
 
+# Phase 313: `vc[i] == ct[i]` (bit-for-bit) against real casacore's own
+# decode of the IDENTICAL stored integers is too strict across
+# architectures/compilers. `_decode`'s `CompressFloat`/`CompressComplex`/
+# `CompressComplexSD` methods (virtual.jl) use `muladd(stored, scale,
+# offset)` for precision -- but `muladd` is only a REQUEST to fuse into a
+# single-rounding FMA instruction; whether it actually fuses depends on
+# the target architecture and the compiler/JIT backend, and real
+# casacore's own C++ `scaleOnGet` (`stored*scale+offset`, compiled with
+# its own toolchain's own `-ffp-contract` default) makes that same
+# platform-dependent choice independently. Confirmed via a real x86-64
+# Linux Docker reproduction of the GitHub Actions CI failure this test
+# used to trip on ARM64-vs-x86-64: every mismatch was a tiny
+# (last-Float32-mantissa-bit-scale) rounding difference with the
+# underlying STORED integers always identical between the two sides
+# (printed and checked) -- never a logic/formula divergence. Compare to a
+# small, explicit ULP-scale tolerance instead of exact equality (mirrors
+# this project's own established precedent for a genuine cross-platform
+# floating-point divergence: loosen the test, not the implementation --
+# see the Phase 192 `int()`/`integer()` CI-fix entry in CHANGELOG.md).
+_ulp_close(a::Real, b::Real; ulps::Real=8) =
+    isnan(a) && isnan(b) ? true :
+    isapprox(Float64(a), Float64(b); atol=ulps * eps(Float32) * max(abs(a), abs(b), 1f0), rtol=0)
+_ulp_close(a::Complex, b::Complex; ulps::Real=8) =
+    _ulp_close(real(a), real(b); ulps) && _ulp_close(imag(a), imag(b); ulps)
+_ulp_close(a::AbstractArray, b::AbstractArray; ulps::Real=8) =
+    size(a) == size(b) && all(_ulp_close(x, y; ulps) for (x, y) in zip(a, b))
+
 @testset "engine — ScaledArrayEngine round-trip (Float,Int / Double,Int)" begin
     for (J, ST) in ((Float32, MSv2E.TpInt), (Float64, MSv2E.TpInt))
         dir = joinpath(mktempdir(), "sa.tab")
@@ -62,8 +89,11 @@ end
         if _HAVE_CASACORE
             ct = CCT.Table(dir)
             @test all(maximum(abs.(ct[Symbol(nm)][i] .- vals[i])) <= bound for i in eachindex(vals))
-            # our decoder and casacore's decode the identical stored ints
-            @test all(vc[i] == ct[Symbol(nm)][i] for i in eachindex(vals))
+            # our decoder and casacore's decode the identical stored ints,
+            # to within a small ULP-scale tolerance (Phase 313 -- see the
+            # `_ulp_close` comment above: cross-architecture FMA-fusion
+            # rounding, not a logic divergence)
+            @test all(_ulp_close(vc[i], ct[Symbol(nm)][i]) for i in eachindex(vals))
         end
     end
 end
@@ -144,8 +174,10 @@ end
                           for i in eachindex(vals))
                 # the real cross-implementation check: our decode of OUR
                 # OWN encoded ints matches real casacore's decode of the
-                # same ints, bit-for-bit -- not just "close enough".
-                @test all(vc[i] == ct[Symbol(nm)][i] for i in eachindex(vals))
+                # same ints, to within a small ULP-scale tolerance (Phase
+                # 313 -- CI failed here on x86-64 Linux; see the
+                # `_ulp_close` comment above)
+                @test all(_ulp_close(vc[i], ct[Symbol(nm)][i]) for i in eachindex(vals))
             end
         end
     end
@@ -215,8 +247,13 @@ end
         end
         if _HAVE_CASACORE
             ct = CCT.Table(dir)
+            # Phase 313: same ULP-scale tolerance as the fixed-scale fuzz
+            # above (confirmed on real x86-64 Linux: this autoScale
+            # testset trips the identical cross-architecture FMA-fusion
+            # divergence -- `_ulp_close`'s comment, near the top of this
+            # file, has the full finding).
             for i in 1:nr
-                @test wc[i] == ct[:W][i]
+                @test _ulp_close(wc[i], ct[:W][i])
             end
         end
     end
