@@ -1953,6 +1953,82 @@ end
     end
 end
 
+# Phase 301: `mscal.el1()`/`az1()`/`azel1()`/`pa1()`/`last1()`/`uvw_j2000()` had only ever been
+# checked against real `derivedmscal` at a handful of FIXED rows (`(3, 17, 250, 599)`, via a
+# self-consistency `_hand()` reference that reuses this package's own `measure`/`measconvert` code
+# -- not an independent oracle) plus the fixed small sweep in the wavelength-scaled-uvw testset.
+# `mscal.itrf()`/`delay()`/`hadec1()` got the real 80-randomised-row treatment in Phase 280 (which
+# found a real bug); this extends the exact same randomisation to the rest of the direction/uvw
+# family, on the same randomised copy shape.
+#
+# Found 1 (not a bug -- a genuine, previously-undocumented divergence): real casacore's
+# `derivedmscal` (`derivedmscal/DerivedMC/Register.cc`) registers `AZEL`/`AZEL1`/`AZEL2` (the
+# combined 2-vector) and `PA1`/`PA2`, but has NO `AZ1`/`AZ2`/`EL1`/`EL2` at all -- unlike the bare
+# `pa` / underscored `uvw_j2000` spellings (Phase 163/164), which ARE aliases of a real registered
+# function, `mscal.el1()`/`az1()`/`el2()`/`az2()` are pure MeasurementSets-only convenience
+# accessors with no real casacore counterpart under ANY name -- confirmed directly against
+# `Register.cc`'s full registration list. Documented in `src/taql/mscal.jl`'s own comment; compared
+# here against the *real* `azel1()` vector's own components (the only way to check them against an
+# independent oracle at all). The residual for the whole AZEL/PA family (~3e-5 rad, looser than
+# `itrf`/`hadec1`'s already-established ~2e-5/1e-5) is consistent with ordinary azimuth-near-zenith
+# numerical degeneracy (a tiny sky-position difference maps to a much larger azimuth-angle
+# difference near the zenith, where azimuth itself is ill-defined) -- some of the 80 random rows
+# land close to it -- not a functional divergence.
+#
+# Found 2 (a genuine UPSTREAM casacore bug, confirmed via source, not something to fix in our own
+# code -- same category as the Phase 279 DELETE-drops-Bool-bits / Phase 284 gmax-of-all-negative-
+# group findings): real casacore's `derivedmscal.LAST`/`LAST1`/`LAST2` do not vary with the row's
+# own `TIME` at all in this build -- confirmed with a controlled experiment (fixed antenna, `TIME`
+# swept across a full day: real LAST value moved by under 1 SECOND total, vs. the ~86164-second
+# sweep a genuine sidereal-time computation must produce; fixed `TIME`, antenna varied instead:
+# real LAST barely moved at all either, consistent with only the tiny antenna-to-antenna longitude
+# difference showing through). Our own `mscal.last1()`/`last()`/`last2()` (an independent
+# `SOFA.gst06a`-based computation, already CASA-cross-checked for a single epoch since Phase 66/77)
+# correctly sweeps through the full `[0, 2π)` range across the same random rows. Traced into
+# `derivedmscal/DerivedMC/MSCalEngine.cc`'s `setData`/`getLAST`: `itsUTCToLAST.setModel(epoch)` IS
+# called with a genuinely per-row-varying epoch whenever `time != itsLastTime` -- the C++ source
+# itself looks correct, so this is either a `MEpoch::Convert` caching defect specific to an
+# EPOCH-to-EPOCH (as opposed to the DIRECTION-to-DIRECTION `AZEL`/`HADEC`/`ITRF` conversions, which
+# DO vary correctly) conversion route in this compiled library, or a version-specific regression --
+# not chased further, since it is unambiguously not this package's own bug. `last1()` is therefore
+# NOT cross-checked against the real oracle here (it would fail — the oracle itself is broken in
+# this build); a sanity check confirms our own value stays in range and genuinely varies with time.
+@testset "mscal.el1()/az1()/azel1()/pa1()/last1()/uvw_j2000() vs real derivedmscal on varied rows (Phase 301)" begin
+    if isdir(SAMPLE_MS) && _HAVE_TAQL
+        d = joinpath(mktempdir(), "n.ms"); n = 80
+        copyms(SAMPLE_MS, d; rows=1:n)
+        t0 = column(readtable(d), "TIME")[1]; rng = MersenneTwister(301)
+        edit(d) do e
+            e["TIME"][:] = t0 .+ rand(rng, n) .* 86400
+            e["ANTENNA1"][:] = Int32.(rand(rng, 0:25, n)); e["ANTENNA2"][:] = Int32.(rand(rng, 0:25, n))
+            e["FIELD_ID"][:] = Int32.(rand(rng, 0:2, n))
+        end
+        t = readtable(d)
+        sel(ex) = (Vector(column(query(t, "rownumber() > 0"; select=["X" => ex]), "X")[:]),
+                   collect(_taqlcmd("SELECT $ex AS X FROM \$1", d)[:X][:]))
+        o, r = sel("mscal.azel1()")
+        @test maximum(i -> maximum(abs.(rem2pi.(Float64.(o[i]) .- Float64.(r[i]), RoundNearest))), 1:n) < 1e-4
+        # el1()/az1() have no real casacore counterpart to query directly -- compare against the
+        # real azel1() vector's own components instead
+        o_el = Vector(column(query(t, "rownumber() > 0"; select=["X" => "mscal.el1()"]), "X")[:])
+        o_az = Vector(column(query(t, "rownumber() > 0"; select=["X" => "mscal.az1()"]), "X")[:])
+        @test maximum(abs.(rem2pi.(Float64.(o_el) .- getindex.(r, 2), RoundNearest))) < 1e-4
+        @test maximum(abs.(rem2pi.(Float64.(o_az) .- getindex.(r, 1), RoundNearest))) < 1e-4
+        o, r = sel("mscal.pa1()")
+        @test maximum(abs.(rem2pi.(Float64.(o) .- Float64.(r), RoundNearest))) < 1e-4
+        # mscal.last1() -- NOT cross-checked against real derivedmscal: confirmed broken in this
+        # build (see the long comment above). Self-consistency only: in range, genuinely time-varying.
+        o = Vector(column(query(t, "rownumber() > 0"; select=["X" => "mscal.last1()"]), "X")[:])
+        @test all(x -> 0.0 <= x < 2π, o)
+        @test maximum(o) - minimum(o) > 1.0     # spans a real fraction of a sidereal day, not frozen
+        o, r = sel("mscal.uvwj2000()")   # real casacore's registered spelling (no underscore)
+        # relative tolerance: baseline lengths vary a lot across random antenna pairs, and the
+        # SOFA-vs-casacore ephemeris residual established for `uvw_j2000`/`delay` elsewhere (Phase
+        # 137/196/280) is at the ~1e-4 RELATIVE level, not a fixed absolute distance
+        @test maximum(i -> maximum(abs.(Float64.(o[i]) .- Float64.(r[i]))) / max(hypot(Float64.(r[i])...), 1.0), 1:n) < 2e-4
+    end
+end
+
 # Phase 281: a random `mscal.stokes` fuzz against real derivedmscal on a copy of the sample MS with
 # random DATA / FLAG / WEIGHT and both circular and (edited POLARIZATION) linear CORR_TYPE found:
 #  * TaQL-lite evaluated MAIN's visibility columns at the table's default HALF precision

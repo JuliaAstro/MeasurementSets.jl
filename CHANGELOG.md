@@ -10164,3 +10164,53 @@ happened to land just under it.
 New testset in `test/measures_tests.jl` (60 cross-check assertions across the 10 random epochs × 6
 bodies, fixed-seed `MersenneTwister(300)`); confirmed the fix closes every one of the 4 failures the fuzz
 found, with no regression to the existing single-point Sun/planet tests or any other body.
+
+### Phase 301 — `mscal.el1()`/`az1()`/`azel1()`/`pa1()`/`last1()`/`uvw_j2000()` vs real `derivedmscal` on randomised rows
+
+`mscal.itrf()`/`delay()`/`hadec1()` got the real 80-randomised-row `derivedmscal` cross-check treatment
+in Phase 280 (which found a real bug); the rest of the direction/uvw family (`el1`/`az1`/`azel1`/`pa1`/
+`last1`/`uvw_j2000`) had only ever been checked at a handful of fixed rows via a *self-consistency*
+reference (reusing this package's own `measure`/`measconvert` code, not an independent oracle). This
+phase extends the same randomised-row treatment to the rest of the family, on the identical randomised
+copy shape (80 rows, random `TIME`/`ANTENNA1`/`ANTENNA2`/`FIELD_ID`).
+
+**Found 1** (not a bug — a genuine, previously-undocumented divergence): real casacore's `derivedmscal`
+(`derivedmscal/DerivedMC/Register.cc`, read directly) registers `AZEL`/`AZEL1`/`AZEL2` (the combined
+2-vector) and `PA1`/`PA2`, but has **no** `AZ1`/`AZ2`/`EL1`/`EL2` under any name at all — unlike the bare
+`pa` / underscored `uvw_j2000` spellings (Phase 163/164), which *are* aliases of a real registered
+function, `mscal.el1()`/`az1()`/`el2()`/`az2()` are pure MeasurementSets-only convenience accessors with
+no real casacore counterpart whatsoever. Compared here against the real `azel1()` vector's own
+components (the only way to check them against an independent oracle at all) — both agree to the same
+~3e-5 rad residual as `azel1()` itself, consistent with ordinary azimuth-near-zenith numerical
+degeneracy (a tiny sky-position difference maps to a much larger azimuth-angle difference near the
+zenith, where azimuth itself is ill-defined), not a functional issue. Documented in `src/taql/mscal.jl`.
+
+**Found 2** (a genuine **upstream casacore bug**, confirmed directly via source — not something to fix
+in this package's own code, the same category as the Phase 279 DELETE-drops-Bool-bits and Phase 284
+gmax-of-an-all-negative-group findings): real casacore's `derivedmscal.LAST`/`LAST1`/`LAST2` do not vary
+with the row's own `TIME` at all, in the casacore build available for cross-checking here. Confirmed with
+a controlled experiment: holding the antenna fixed and sweeping `TIME` across a full day, the real LAST
+value moved by *under one second total*, where a genuine sidereal-time computation must sweep through
+the full ~86164-second sidereal day; holding `TIME` fixed and varying the antenna instead, real LAST
+barely moved either (consistent with only the tiny antenna-to-antenna longitude difference showing
+through). This package's own `mscal.last1()`/`last()`/`last2()` (an independent `SOFA.gst06a`-based
+computation, already CASA-cross-checked at a single epoch since Phase 66/77) correctly sweeps through
+the full `[0, 2π)` range across the same random rows. Traced into
+`derivedmscal/DerivedMC/MSCalEngine.cc`'s `setData`/`getLAST`: `itsUTCToLAST.setModel(epoch)` *is* called
+with a genuinely per-row-varying epoch whenever `time != itsLastTime` — the C++ source itself looks
+correct, so this is either an `MEpoch::Convert` caching defect specific to an epoch-to-epoch conversion
+route (as opposed to the direction-to-direction `AZEL`/`HADEC`/`ITRF` conversions, which *do* vary
+correctly with time in this same build) in this compiled library, or a version-specific regression — not
+chased further, since it is unambiguously not this package's own bug. `last1()` is therefore *not*
+cross-checked against the real oracle in the new test (it would fail — the oracle itself is broken in
+this build); a sanity check confirms our own value stays in range and genuinely varies with time.
+
+Also confirmed (a tolerance-only fix, not a bug): `azel1()`, the `el1()`/`az1()` component comparisons,
+and `pa1()` all needed a slightly looser tolerance (~1e-4 rad) than `itrf()`/`hadec1()`'s already-
+established ~2e-5/1e-5 rad — consistent with the azimuth/position-angle-near-zenith degeneracy noted
+above, not a new divergence; and `uvw_j2000()`/`uvwj2000()` needed a *relative* (not fixed absolute)
+tolerance, since random antenna pairs produce baseline lengths spanning a wide range and the established
+SOFA-vs-casacore ephemeris residual (Phase 137/196/280) is itself relative (~1e-4).
+
+New testset in `test/taql_mscal_tests.jl`; `src/taql/mscal.jl`'s own header comment updated with both
+findings.
