@@ -1,6 +1,8 @@
 # Phase 12: virtual column engines (ScaledArrayEngine, ScaledComplexData,
 # CompressFloat, CompressComplex, CompressComplexSD, MappedArrayEngine).
 
+using Random
+
 const MSv2E = MeasurementSets
 
 _engine_manager(r, vname) =
@@ -62,6 +64,160 @@ end
             @test all(maximum(abs.(ct[Symbol(nm)][i] .- vals[i])) <= bound for i in eachindex(vals))
             # our decoder and casacore's decode the identical stored ints
             @test all(vc[i] == ct[Symbol(nm)][i] for i in eachindex(vals))
+        end
+    end
+end
+
+# Phase 305: the CompressFloat/CompressComplex/CompressComplexSD vs
+# Casacore.jl cross-check above (and the autoScale one further down) was,
+# like several other single-fixed-point oracles this project has since
+# widened into real bugs (Phase 280's ITRF-aberration bug, Phase 284's
+# gmax-of-all-negative-group bug, Phase 300's Sun-aberration bug), only
+# ever exercised at ONE fixed cell shape (2,3)/(2,2) with ONE fixed scale
+# per kind and offset always 0. This spreads the SAME Casacore.jl oracle
+# (auto-registered for these three kinds, so a genuine cross-implementation
+# check, not self-consistency) across random cell shapes, random positive
+# scales spanning several magnitude decades, random nonzero offsets, and
+# -- for CompressComplexSD specifically -- a deliberate mix of purely-real
+# (even, "imag==0") and genuinely-complex (odd) cells, since scaleOnPut's
+# even/odd dispatch on the *imaginary part's presence* is the one piece of
+# encode-side logic the fixed 4-cell fixture above never varied.
+@testset "engine — CompressFloat/CompressComplex/SD random-parameter fuzz vs Casacore.jl (Phase 305)" begin
+    rng = MersenneTwister(305)
+    d = mktempdir()
+    for case in 1:10
+        npol = rand(rng, 1:4)
+        nchan = rand(rng, 1:5)
+        nr = rand(rng, 2:5)
+        scale = Float32(exp10(rand(rng, -2.0:0.5:2.0)) * (0.5 + rand(rng)))
+        offset = Float32(randn(rng) * 5)
+        # values stay comfortably inside the ±32767*scale dynamic range
+        # (clamping itself is already directly tested elsewhere -- Phase
+        # 214 -- so this fuzz targets the ordinary encode/decode math).
+        # `amp` MUST be Float32: `CompressFloat`/`CompressComplex`/
+        # `CompressComplexSD` are real casacore's fixed, non-templated
+        # engine classes -- they only ever store Float32/ComplexF32 data
+        # (Phase 305's own `_compress_expected_vtype` check, added by this
+        # phase after a Float64 leak *here*, in an earlier draft of this
+        # very test, silently produced a `TpDComplex`-declared column real
+        # casacore genuinely refused to open: "Invalid data type ...
+        # expected DComplex" -- a real, if narrow, validation gap this
+        # fuzz test itself found).
+        amp = Float32(scale * rand(rng, 3.0:50.0))
+
+        for (kind, nm) in ((MSv2E.CompressFloat(), "F$case"),
+                           (MSv2E.CompressComplex(), "C$case"),
+                           (MSv2E.CompressComplexSD(), "S$case"))
+            dir = joinpath(d, "$(nm)_$(kind isa MSv2E.CompressFloat ? "f" :
+                              kind isa MSv2E.CompressComplex ? "c" : "s").tab")
+            vals = if kind isa MSv2E.CompressFloat
+                [Float32.(offset .+ amp .* (rand(rng, npol, nchan) .- 0.5f0) .* 2)
+                 for _ in 1:nr]
+            else
+                # SD: alternate purely-real (even) and genuinely-complex
+                # (odd) cells -- scaleOnPut's real "imag == 0" even/odd
+                # dispatch is the one piece of encode logic the original
+                # (pre-fuzz) fixed 4-cell fixture never varied.
+                [begin
+                     re = Float32.(offset .+ amp .* (rand(rng, npol, nchan) .- 0.5f0) .* 2)
+                     kind isa MSv2E.CompressComplexSD && isodd(r) ?
+                         ComplexF32.(re) :
+                         ComplexF32.(re, offset .+ amp .* (rand(rng, npol, nchan) .- 0.5f0) .* 2)
+                 end for r in 1:nr]
+            end
+            @assert eltype(vals) <: AbstractArray{<:Union{Float32,ComplexF32}}
+
+            write_table(dir, "T", [nm => vals]; nrow=nr,
+                engines = Dict(nm => (; kind, scale, offset)))
+            r = readtable(dir)
+            vc = column(r, nm)
+            # CompressComplexSD's own design (ENG_SD_IMAG_MULT, virtual.jl)
+            # quantizes a genuinely-complex ("odd") cell's imaginary part at
+            # `scale*2`, twice as coarse as the real part / CompressComplex's
+            # uniform quantization -- a real casacore asymmetry, not a bug;
+            # the tolerance has to account for it.
+            bound = kind isa MSv2E.CompressComplexSD ? scale * 2.02 : scale * 1.01
+            @test all(maximum(abs.(vc[i] .- vals[i])) <= bound for i in eachindex(vals))
+            if _HAVE_CASACORE
+                ct = CCT.Table(dir)
+                @test all(maximum(abs.(ct[Symbol(nm)][i] .- vals[i])) <= bound
+                          for i in eachindex(vals))
+                # the real cross-implementation check: our decode of OUR
+                # OWN encoded ints matches real casacore's decode of the
+                # same ints, bit-for-bit -- not just "close enough".
+                @test all(vc[i] == ct[Symbol(nm)][i] for i in eachindex(vals))
+            end
+        end
+    end
+end
+
+# Phase 305: `write_table(...; engines=Dict(nm => (; kind=CompressComplex(),
+# ...)))` on `ComplexF64` (or `Float64`, for `CompressFloat`) data used to
+# succeed silently, writing a `TpDComplex`-declared column that our own
+# reader tolerates (it narrows/widens transparently) but real casacore
+# genuinely refuses to open. `_compress_expected_vtype` (virtual.jl) now
+# validates this up front.
+@testset "engine — CompressFloat/CompressComplex/SD reject a Float64/ComplexF64 input (Phase 305)" begin
+    dir = joinpath(mktempdir(), "badprec.tab")
+    F = [Float64.(1:4), Float64.(5:8)]
+    @test_throws ErrorException write_table(dir, "T", ["F" => F]; nrow=2,
+        engines = Dict("F" => (; kind=MSv2E.CompressFloat(), scale=0.01f0, offset=0.0f0)))
+    dir2 = joinpath(mktempdir(), "badprec2.tab")
+    C = [ComplexF64[1+2im 3+4im], ComplexF64[5+6im 7+8im]]
+    @test_throws ErrorException write_table(dir2, "T", ["C" => C]; nrow=2,
+        engines = Dict("C" => (; kind=MSv2E.CompressComplex(), scale=0.01f0, offset=0.0f0)))
+    dir3 = joinpath(mktempdir(), "badprec3.tab")
+    @test_throws ErrorException write_table(dir3, "T", ["C" => C]; nrow=2,
+        engines = Dict("C" => (; kind=MSv2E.CompressComplexSD(), scale=0.01f0, offset=0.0f0)))
+    # the correctly-precisioned form still works
+    dir4 = joinpath(mktempdir(), "goodprec.tab")
+    C32 = [ComplexF32.(m) for m in C]
+    write_table(dir4, "T", ["C" => C32]; nrow=2,
+        engines = Dict("C" => (; kind=MSv2E.CompressComplex(), scale=0.01f0, offset=0.0f0)))
+    @test maximum(abs.(column(readtable(dir4), "C")[1] .- C32[1])) <= 0.011f0
+end
+
+# The autoScale (per-row scale/offset) path above was similarly only ever
+# tried with 3 hand-picked rows (a linear range, a single repeated value,
+# an all-NaN row). Spread across random per-row min/max. Real AND
+# imaginary parts are drawn from the *same* per-row offset+spread
+# distribution -- autoScale's `findMinMax` scans both components jointly
+# into one shared (min,max), so a row whose real part sits at a large
+# offset while the imaginary part sits at exactly 0 (an earlier draft of
+# this test did this via a bare `ComplexF32.(real_matrix)` cast) is a
+# genuinely degenerate case, not a representative one: the resulting
+# scale/offset is sized to the real part alone, and the imaginary part's
+# decode (needing `stored ≈ (0-offset)/scale`) can fall outside the
+# representable Int32 range entirely -- a real-data artefact of the test
+# construction, not a codec bug (confirmed: our decode still matched real
+# casacore's bit-for-bit even in that degenerate case, just not close to
+# the *original* value either of them started from).
+@testset "engine — autoScale random-parameter fuzz vs Casacore.jl (Phase 305)" begin
+    rng = MersenneTwister(3050)
+    for case in 1:5
+        npol = rand(rng, 1:3)
+        nchan = rand(rng, 1:4)
+        nr = rand(rng, 3:6)
+        rows = [begin
+                    spread = exp10(rand(rng, -1.0:1.0))
+                    base = randn(rng) * 10
+                    ComplexF32.(base .+ randn(rng, npol, nchan) .* spread,
+                               base .+ randn(rng, npol, nchan) .* spread)
+                end for _ in 1:nr]
+        dir = joinpath(mktempdir(), "as$case.tab")
+        write_table(dir, "T", ["W" => rows]; nrow=nr,
+            engines = Dict("W" => (; kind=MSv2E.CompressComplex(), autoscale=true)))
+        r = readtable(dir)
+        scol = column(r, "W_SCALE")
+        wc = column(r, "W")
+        for i in 1:nr
+            @test maximum(abs.(wc[i] .- rows[i])) <= max(scol[i], eps(Float32)) * 1.01
+        end
+        if _HAVE_CASACORE
+            ct = CCT.Table(dir)
+            for i in 1:nr
+                @test wc[i] == ct[:W][i]
+            end
         end
     end
 end

@@ -405,6 +405,26 @@ _eng_stored_eltype(::Mapped, ::CasaType)            = ComplexF64
 _eng_stored_eltype(::ScaledKind, stored_type::CasaType) = juliatype(stored_type)
 _eng_stored_eltype(::BitFlags, stored_type::CasaType)   = juliatype(stored_type)
 
+# Phase 305: `CompressFloat`/`CompressComplex`/`CompressComplexSD` are real
+# casacore's concrete (non-templated) `VirtualColumnEngine<Float>` /
+# `<Complex>` classes -- unlike `ScaledArrayEngine<S,T>`/`ScaledComplexData
+# <S,T>` (genuinely templated, any `S` the caller picks), they ALWAYS map a
+# `TpFloat`/`TpComplex` virtual column, never `TpDouble`/`TpDComplex`, no
+# matter what precision the caller's own data happens to be in Julia. The
+# encode/decode math throughout this file (`_eng_stored_eltype`, `_encode`,
+# `_decode`) already hardcodes Float32/ComplexF32 for these three kinds --
+# this is the corresponding check on the *declared* virtual-column type,
+# used by `_write_table_core`'s engine loop (Phase 305 finding: writing
+# Float64/ComplexF64 data through one of these engines previously produced
+# a table our own permissive reader tolerated, narrowing/widening via the
+# ordinary Phase-34 precision machinery, but that real casacore genuinely
+# refuses to open -- "Invalid data type ... expected DComplex" -- since
+# these classes are structurally incapable of ever being anything but
+# Float32-based).
+_compress_expected_vtype(::CompressFloat)             = TpFloat
+_compress_expected_vtype(::CompressComplex)           = TpComplex
+_compress_expected_vtype(::CompressComplexSD)         = TpComplex
+
 # --- encode (inverse of decode): one method per engine, same pattern --
 
 function _encode(::ScaledArray, cell::AbstractArray, scale, offset, T::Type)

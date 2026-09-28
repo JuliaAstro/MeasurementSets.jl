@@ -319,6 +319,23 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
             vdesc = descs[vi]; vdata = data[vi]
             push!(engine_virtual, vname)
             kind = spec.kind
+            # Phase 305: CompressFloat/CompressComplex/CompressComplexSD are
+            # real casacore's fixed, non-templated engine classes -- the
+            # declared virtual column type MUST be exactly TpFloat/TpComplex
+            # (never TpDouble/TpDComplex, however precise the caller's own
+            # Julia data is), or the table this writes is invalid to real
+            # casacore even though our own reader would silently tolerate it
+            # (see `_compress_expected_vtype`'s comment for the live-verified
+            # finding). Validate before any encoding work.
+            if kind isa CompressKind
+                want = _compress_expected_vtype(kind)
+                vdesc.type === want || error("engines: column \"$vname\" is " *
+                    "$(nameof(typeof(kind))) but its data has type $(vdesc.type), not " *
+                    "$want -- $(nameof(typeof(kind))) is a fixed casacore class that " *
+                    "only ever stores $(want === TpFloat ? "Float32" : "ComplexF32") " *
+                    "values; convert the input data to $(want === TpFloat ? "Float32" :
+                    "ComplexF32") first")
+            end
             autoscale = get(spec, :autoscale, false)
             stored_type = get(spec, :stored_type, TpInt)
             storedname  = something(get(spec, :storedname, nothing), vname * "_COMPRESSED")

@@ -10277,3 +10277,50 @@ LSB-first bit-packer are correct across the antenna-count/bit-width/block-layout
 fixed-point test never touched, not just at the one combination it happened to use.
 
 New testset in `test/dysco_tests.jl` (8 random cases × 3 assertions, fixed-seed `MersenneTwister(304)`).
+
+### Phase 305 — CompressFloat/CompressComplex/CompressComplexSD random-parameter fuzz vs Casacore.jl: found and fixed a real declared-type validation gap
+
+Following Phase 304's pattern, spread Phase 12's `CompressFloat`/`CompressComplex`/`CompressComplexSD`
+engine cross-check (previously exercised only at one fixed cell shape, one fixed scale/offset per kind,
+against `Casacore.jl`, a genuine cross-implementation oracle) across random cell shapes, random positive
+scales spanning several magnitude decades, random nonzero offsets, and — for `CompressComplexSD`
+specifically — a deliberate mix of purely-real ("even") and genuinely-complex ("odd") cells, since
+`scaleOnPut`'s real/imaginary dispatch is the one piece of encode logic the original fixed fixture never
+varied.
+
+**Found a real bug while constructing the fuzz data itself**: an early draft generated `ComplexF64` cell
+data for the `CompressComplex` case (a Julia promotion artefact — a `Float64`-typed `amp` scalar
+promoted the whole expression). `write_table(...; engines = Dict(nm => (; kind = CompressComplex(),
+...)))` on that `ComplexF64` data succeeded *silently*, producing a column declared `TpDComplex`
+(inferred purely from the caller's Julia array eltype, `_casatype_of(eltype(vals))`) — but
+`CompressFloat`/`CompressComplex`/`CompressComplexSD` are real casacore's **fixed, non-templated**
+`VirtualColumnEngine<Float>`/`<Complex>` classes (unlike the genuinely templated `ScaledArrayEngine<S,T>`
+/`ScaledComplexData<S,T>`), structurally incapable of ever storing anything but `Float32`/`ComplexF32`.
+Our own reader tolerated the mismatch (it narrows/widens transparently via the ordinary Phase-34/35
+precision machinery, oblivious to the declared type being wrong), but real casacore genuinely refuses to
+open the table: `"Invalid data type when accessing column Column C1 has data type Complex ; expected
+DComplex"` — live-verified via `Casacore.jl`, confirming this is a genuine interop-breaking gap, not a
+theoretical one.
+
+Fixed with a new `_compress_expected_vtype(::CompressKind)` (`src/datamanagers/virtual.jl`) validated in
+`_write_table_core`'s engine loop (`src/tables/create.jl`), *before* any encoding work, raising a clear
+`ArgumentError` naming the mismatch and the required conversion — matching this project's established
+"validate the parameter, don't silently produce something a downstream reader chokes on" discipline
+(Phase 199/201/202/204/205/210 all fixed the same shape of gap elsewhere). `ScaledArrayEngine`/
+`ScaledComplexData` (genuinely templated — any `stored_type` the caller picks) and `MappedArrayEngine`/
+`BitFlagsEngine` (no precision axis to mismatch) are unaffected; the check is scoped to `kind isa
+CompressKind`.
+
+Once the test data itself used correctly-precisioned `Float32`/`ComplexF32` values, every one of the 10
+random shape/scale/offset combinations × 3 engine kinds agreed with `Casacore.jl`'s own decode
+bit-for-bit (not just "close enough") — confirming the encode/decode math itself was already correct
+across the wider parameter space; the real find was the missing type-consistency check, not a codec bug.
+A companion 5-case random-parameter fuzz of the `autoScale` (per-row scale/offset) path similarly found
+no codec bug once its own test data avoided a second, unrelated degenerate construction (a row whose
+imaginary part sat at exactly 0 while the real part carried a large offset — not representative complex
+data, and not what `findMinMax`'s joint real/imaginary scan is meant to size a scale/offset for).
+
+New testsets in `test/engine_tests.jl`: the random-parameter fuzz (10 cases × 3 kinds, fixed-seed
+`MersenneTwister(305)`), the autoScale fuzz (5 cases, `MersenneTwister(3050)`), and a permanent
+regression test confirming `Float64`/`ComplexF64` input through any of the three `CompressKind` engines
+now raises a clear error while `Float32`/`ComplexF32` input still works.
