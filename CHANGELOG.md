@@ -10472,3 +10472,26 @@ the first genuine cross-implementation proof this package's multi-column `TiledC
 had for its success path, not just its validation-error path.
 
 New testset in `test/tsm_multicol_tests.jl` (6 random cases, fixed-seed `MersenneTwister(311)`).
+
+### Phase 312 — `IncrementalStMan` random independent multi-column run-length fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The "ISM writer round-trip" test (Phase 8) uses fixed run-length change points (splits at exactly 20/40
+of 60 rows, runs of exactly 12) for every column; "ISM writer multi-bucket" forces more than one bucket
+but with only one column, one pattern (changes every row). Neither exercises *multiple* columns with
+genuinely random, independent, simultaneous run-length patterns spanning several bucket boundaries at
+once — `_ism_colindex`'s per-column row-number/offset array construction is built per column
+independently, so misaligned bucket boundaries across columns with different change cadences is exactly
+the kind of interaction a fixed single-pattern fixture can't catch.
+
+Spread a random number of columns (2–4), random independent run-length patterns per column (a random
+per-column "hold probability" so each column changes value at unpredictable, uncorrelated points), random
+types (`Int32`/`Float64`/`Bool`/`String`), and row counts large enough to force multiple ISM buckets,
+cross-checked at both the whole-column level and 10 random individual-row lookups per case (not just
+start/middle/end) against `Casacore.jl`.
+
+No new bug found: all assertions across 5 random configurations — each genuinely spanning multiple ISM
+buckets with misaligned per-column change points — agree with `Casacore.jl`'s decode, confirming the
+per-column bucket-index construction and lookup hold under column-to-column bucket-boundary misalignment,
+not just the single-column or fixed-pattern cases previously exercised.
+
+New testset in `test/ism_writer_tests.jl` (5 random cases, fixed-seed `MersenneTwister(312)`).
