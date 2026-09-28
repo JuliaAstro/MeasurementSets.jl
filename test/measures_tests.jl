@@ -1575,3 +1575,84 @@ for (lon, lat, height, mjd) in [$cs]:
         end
     end
 end
+
+# Phase 300: the solar-system-body direction cross-check (Phase 76) had
+# only ever been checked at ONE fixed epoch/observer position (the
+# fixture's own `EPOCHS_MJD[0]`/`OBS_XYZ[0]`) across 6 bodies -- exactly
+# the shape the Phases 269-287/299 fuzzes have repeatedly found real bugs
+# in. Spreading the oracle across 10 random epochs (1970-2050) and random
+# observer positions in one `casatools` process found a REAL bug: the SUN
+# came out a nearly *constant* ~20.2-20.8" off at every single random
+# case (Mercury/Venus/Moon/Mars/Jupiter did not) -- exactly the classical
+# constant of aberration (Earth's own orbital speed x the ~499s Sun-Earth
+# light time / 1 AU), not `plan94`/`moon98` ephemeris noise. Root cause:
+# `_body_geovec(::Type{SUN},...)` retarded EARTH's own position by the
+# light time (`_earth_helio(tdb - lighttime)`) instead of holding it
+# fixed at the observation time like the general planet method does
+# (`eb = _earth_helio(tdb)`, never retarded -- only the *target*'s
+# position is) -- the Sun's own heliocentric position is trivially the
+# origin at every instant (that's the definition of "heliocentric"), so
+# there is nothing of the Sun's own to retard at all; the "light-time
+# iteration" was retarding the wrong vector's argument, injecting Earth's
+# own orbital displacement over 499s as a spurious systematic offset.
+# Fixed to `_body_geovec(::Type{SUN}, tdb, ::Any) = .-_earth_helio(tdb)`
+# (no iteration). The single fixed-epoch cross-check in this same file
+# happened to pass throughout, purely by luck: the aberration constant
+# varies ~20.1-20.9" across the year (Earth's orbital eccentricity),
+# straddling the existing `20"` SUN tolerance almost exactly, and that
+# one fixture date happened to land just under it.
+@testset "measures — solar-system body direction random fuzz vs casatools (Phase 300)" begin
+    if _HAVE_MEAS_CASA
+        as = MSv2.ARCSEC
+        rng = MersenneTwister(300)
+        ff = 1 / 298.257223563; e2 = ff * (2 - ff)
+        n = 10
+        cases = map(1:n) do _
+            lon = (rand(rng) - 0.5) * 2π
+            lat = asin(2rand(rng) - 1)
+            Rn = 6378137.0 / sqrt(1 - e2 * sin(lat)^2)
+            pos = (Rn * cos(lat) * cos(lon), Rn * cos(lat) * sin(lon), Rn * (1 - e2) * sin(lat))
+            mjd = 40587.0 + rand(rng) * 29200.0     # 1970-01-01 .. ~2050-01-06
+            (; mjd, pos)
+        end
+        cs = join(["($(c.mjd), $(c.pos[1]), $(c.pos[2]), $(c.pos[3]))" for c in cases], ",")
+        bodies = ("SUN", "MOON", "MERCURY", "VENUS", "MARS", "JUPITER")
+        py = """
+from casatools import measures, quanta
+me = measures(); qa = quanta()
+for (mjd, x, y, z) in [$cs]:
+    me.done()
+    e0 = me.epoch('utc', qa.quantity(mjd, 'd'))
+    pos = me.position('itrf', qa.quantity(x, 'm'), qa.quantity(y, 'm'), qa.quantity(z, 'm'))
+    out = []
+    for body in $(bodies):
+        b = me.direction(body)
+        me.doframe(e0); me.doframe(pos)
+        j = me.measure(b, 'J2000')
+        a = me.measure(b, 'AZEL')
+        out += [repr(j['m0']['value']), repr(j['m1']['value']), repr(a['m1']['value'])]
+    print(' '.join(out))
+"""
+        out = split(strip(read(pipeline(`$_MEAS_CASA -c $py`; stderr = devnull), String)), '\n')
+        @test length(out) == n
+        bodytol = Dict("SUN" => 20as, "MOON" => 30as, "MERCURY" => 20as,
+                       "VENUS" => 20as, "MARS" => 40as, "JUPITER" => 120as)
+        Ts = Dict("SUN" => SUN, "MOON" => MOON, "MERCURY" => MERCURY,
+                  "VENUS" => VENUS, "MARS" => MARS, "JUPITER" => JUPITER)
+        for (i, c) in enumerate(cases)
+            r = parse.(Float64, split(out[i]))
+            fr = MeasFrame(epoch = MEpoch{UTC}(c.mjd), position = MPosition{ITRF}(c.pos...))
+            for (k, name) in enumerate(bodies)
+                j2000_lon, j2000_lat, azel_lat = r[3k-2], r[3k-1], r[3k]
+                T = Ts[name]
+                tol = bodytol[name]
+                gj = measconvert(MDirection{T}(0.0, 0.0), J2000; frame = fr)
+                @test rem2pi(gj.lon - j2000_lon, RoundNearest) * cos(gj.lat) ≈ 0 atol = tol
+                @test gj.lat ≈ j2000_lat atol = tol
+                ga = measconvert(MDirection{T}(0.0, 0.0), AZEL; frame = fr)
+                atol_azel = name == "MOON" ? 120as : tol + 60as
+                @test ga.lat ≈ azel_lat atol = atol_azel
+            end
+        end
+    end
+end

@@ -10128,3 +10128,39 @@ actually pointed a real oracle at.
 
 New testset in `test/measures_tests.jl` (112 cross-check assertions, fixed-seed `MersenneTwister(299)`
 for reproducibility).
+
+### Phase 300 — solar-system-body direction random fuzz vs `casatools`: the Sun was off by the constant of aberration
+
+Continuing the Phase 269–287/299 pattern — a single deterministic oracle point repeatedly missing bugs a
+broader random fuzz catches — this phase spread the solar-system-body direction cross-check (Phase 76,
+previously checked at exactly *one* fixed epoch/observer position across 6 bodies) across 10 random
+epochs (1970–2050) and random observer positions, in one `casatools` process.
+
+**Found a real bug**: the Sun's converted direction came out a nearly *constant* ~20.2″–20.8″ away from
+`casatools`' own value at *every single* random case, while Mercury/Venus/Moon/Mars/Jupiter did not show
+anything like this pattern (their residuals were noisy and consistent with the already-documented
+`plan94`/`moon98` ephemeris-accuracy floors). That magnitude and constancy is the unmistakable signature
+of the classical **constant of aberration** (Earth's own orbital speed × the ~499 s Sun–Earth light time,
+÷ 1 AU ≈ 20.5″, varying ~20.1″–20.9″ across the year with Earth's orbital eccentricity) — not ephemeris
+noise.
+
+Root cause: `_body_geovec(::Type{SUN}, tdb, ::Any)` retarded **Earth's own** position by the light time
+(`_earth_helio(tdb - lighttime)`) inside a 2-iteration fixed-point loop, mirroring the shape of the
+general-planet method's light-time iteration — but the general method (correctly) holds Earth's position
+*fixed* at the observation time (`eb = _earth_helio(tdb)`, computed once, never retarded) and only
+retards the *target*'s own position. The Sun has no such "own position" to retard at all: by the very
+definition of a heliocentric coordinate frame, the Sun sits at the origin at every instant, regardless of
+when you evaluate it. Retarding Earth's position instead spuriously injects Earth's own orbital
+displacement over that ~499 s into the computed Sun direction — exactly the aberration-constant-sized
+error observed. Fixed to a one-line, non-iterating `_body_geovec(::Type{SUN}, tdb, ::Any) =
+.-_earth_helio(tdb)`.
+
+This bug has been present since Phase 76 (the first solar-system-body-direction phase) and affected
+*every* conversion of `MDirection{SUN}` to any other frame. The pre-existing single-fixed-epoch
+cross-check in this same file never caught it purely by luck: the aberration constant's yearly range
+(~20.1″–20.9″) straddles the test's own `20″` SUN tolerance almost exactly, and that one fixture date
+happened to land just under it.
+
+New testset in `test/measures_tests.jl` (60 cross-check assertions across the 10 random epochs × 6
+bodies, fixed-seed `MersenneTwister(300)`); confirmed the fix closes every one of the 4 failures the fuzz
+found, with no regression to the existing single-point Sun/planet tests or any other body.

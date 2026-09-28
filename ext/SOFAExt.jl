@@ -280,14 +280,25 @@ const _C_AUDAY = C_LIGHT * DAYSEC / AU_M      # speed of light, AU/day
 _earth_helio(t) = SOFA.epv00(MJD0, t).helio[1]                 # AU, J2000 eq
 _planet_helio(np, t) = SOFA.plan94(MJD0, t, np)[1]             # AU, J2000 eq
 
-# geocentric vector (AU) of the body at the frame epoch
-function _body_geovec(::Type{SUN}, tdb, ::Any)
-    g = .-_earth_helio(tdb)
-    for _ in 1:2
-        g = .-_earth_helio(tdb - hypot(g...) / _C_AUDAY)
-    end
-    g
-end
+# geocentric vector (AU) of the body at the frame epoch.
+#
+# Phase 300: the Sun's own heliocentric position is, *by construction*,
+# the origin at every instant (the heliocentric frame is defined as
+# Sun-centred) -- unlike a real planet, there is no "the Sun's position
+# at the light-emission time" to retard, only Earth's position at the
+# *observation* time `tdb` matters (exactly the `eb = _earth_helio(tdb)`
+# term the general `_body_geovec(::Type{P},...)` method below holds
+# fixed, never retarded, while it iterates the *target*'s own position).
+# This method used to retard EARTH's position instead
+# (`_earth_helio(tdb - lighttime)`), which is wrong for the same reason
+# it would be wrong to retard `eb` in the planet method: it spuriously
+# injects Earth's own orbital displacement during the ~499 s Sun-Earth
+# light time -- live-verified (fuzzed against real `casatools` at 10
+# random epochs/positions, Phase 300) to be a *consistent* ~20.2-20.8"
+# error, matching the classical constant of aberration (Earth's orbital
+# speed x light-time / 1 AU) almost exactly, not the plan94/moon98
+# ephemeris-accuracy noise every other body's residual actually is.
+_body_geovec(::Type{SUN}, tdb, ::Any) = .-_earth_helio(tdb)
 function _body_geovec(::Type{MOON}, ::Any, tt)
     Tuple(SOFA.moon98(MJD0, tt)[1])            # geocentric GCRS ≈ J2000, AU
 end
