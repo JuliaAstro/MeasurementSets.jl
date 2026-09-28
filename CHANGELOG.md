@@ -10255,3 +10255,25 @@ confirmed" gap Phase 75 flagged, for the general (non-`uvw_j2000`-specific) conv
 — genuinely reassuring given that track record, not merely a formality.
 
 New testset in `test/measures_tests.jl` (109 cross-check assertions, fixed-seed `MersenneTwister(303)`).
+
+### Phase 304 — Dysco write-path random-parameter fuzz vs `casatools` decode (investigation only, no bug found)
+
+Phase 19's write-direction interop oracle (our `write_dyscostman` → real CASA's own `getcol()` decode)
+was, like several other cross-checks this project has since found real bugs by widening (Phase 280's
+ITRF-aberration bug, Phase 284's `gmax`-of-all-negative-group bug, Phase 300's Sun-aberration bug), only
+ever exercised at **one fixed shape/antenna-count/bit-width combination** (`nant=4`, `npol=2`, `nchan=4`,
+`dataBitCount=10`, `weightBitCount=12`, `rowsPerBlock=nbl` — one block per timestamp) crossed with the
+3×4 normalization/distribution grid. This phase spreads the same oracle across 8 random configurations:
+antenna count (2–7, driving `_dysco_metacount`'s AF-normalization antenna-indexed metadata size), cell
+shape (`npol`∈1:3, `nchan`∈1:6), `dataBitCount`/`weightBitCount` (4/6/8/10/12/16 and 4/8/12/16 — bit
+widths the fixed-point test never exercised the generic bit-packer at), and block layout
+(one-block-per-timestamp / one-big-block / a deliberately uneven multi-block split forcing a short final
+block), on top of the existing random normalization×distribution×dither sampling.
+
+No new bug found: every one of the 8 random configurations decodes via real `casatools` to within
+float32-rounding agreement (`< 1e-3` for `DATA`, exactly `0.0` for `WEIGHT_SPECTRUM`'s linear
+quantizer) — confirming `_dysco_metacount`'s per-normalization header-size arithmetic and the generic
+LSB-first bit-packer are correct across the antenna-count/bit-width/block-layout space the original
+fixed-point test never touched, not just at the one combination it happened to use.
+
+New testset in `test/dysco_tests.jl` (8 random cases × 3 assertions, fixed-seed `MersenneTwister(304)`).

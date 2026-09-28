@@ -2,6 +2,8 @@
 # normalizations, all four distributions) -- see src/datamanagers/dysco.jl
 # for the on-disk format and the encode-side algorithms.
 
+using Random
+
 # A CASA install with Dysco compiled into libcasa_tables (confirmed via
 # `nm -gU` on this machine) gives a genuine interop oracle: casatools'
 # table.create(...; dminfo=...) writes a real DyscoStMan-backed column, and
@@ -562,4 +564,84 @@ end
         removecolumn!(t, "ANTENNA1")
     end
     @test !("ANTENNA1" in columnnames(readtable(dir3)))
+end
+
+if _HAVE_CASA
+    @testset "dysco -- random-parameter fuzz vs real CASA decode (Phase 304)" begin
+        # Phase 19's "our writer -> real CASA decode" oracle (the combos
+        # test above) was only ever exercised at ONE fixed shape / antenna
+        # count / bit-width combination (nant=4, npol=2, nchan=4,
+        # dataBitCount=10, weightBitCount=12, rowsPerBlock=nbl), crossed
+        # with the 3x4 normalization/distribution grid.  Following the
+        # pattern that has repeatedly found real bugs elsewhere in this
+        # project (spreading a single-fixed-point oracle across many
+        # random configurations -- e.g. Phase 300's Sun-aberration bug,
+        # Phase 280's ITRF-aberration bug), this spreads the SAME oracle
+        # across random antenna counts, cell shapes, bit widths, and block
+        # layouts (one-block-per-timestamp / one-big-block / a deliberately
+        # uneven multi-block split) -- exercising `_dysco_metacount`'s
+        # antennaCount/rowsPerBlock-dependent header math and the generic
+        # bit-packer at widths the fixed-point test never tried.
+        rng = MersenneTwister(304)
+        for case in 1:8
+            nant = rand(rng, 2:7)
+            npol = rand(rng, 1:3)
+            nchan = rand(rng, 1:6)
+            dataBits = rand(rng, (4, 6, 8, 10, 12, 16))
+            weightBits = rand(rng, (4, 8, 12, 16))
+            ntime = rand(rng, 2:4)
+            normT = rand(rng, (MSv2.AFNorm(), MSv2.RFNorm(), MSv2.RowNorm()))
+            distT = rand(rng, (MSv2.Gaussian(), MSv2.Uniform(), MSv2.StudentsT(),
+                               MSv2.TruncatedGaussian()))
+            dither = rand(rng, (false, true))
+
+            baselines = [(a1, a2) for a1 in 0:nant-1 for a2 in a1:nant-1]
+            nbl = length(baselines)
+            nr = nbl * ntime
+            blockshape = rand(rng, (:onepertime, :onebig, :uneven))
+            rowsPerBlock = blockshape === :onepertime ? nbl :
+                           blockshape === :onebig ? nr :
+                           max(1, cld(nr, 3))       # forces >=3 blocks, an uneven last one
+
+            a1v = Int32[]; a2v = Int32[]
+            for it in 1:ntime, (b1, b2) in baselines
+                push!(a1v, b1); push!(a2v, b2)
+            end
+            timecol = Float64[5.0e9 + 10.0 * ((r - 1) ÷ nbl) for r in 1:nr]
+            fieldid = zeros(Int32, nr)
+            ddid = zeros(Int32, nr)
+
+            vdata = [ComplexF32.(randn(rng, ComplexF64, npol, nchan)) .* 3f0 for _ in 1:nr]
+            vweight = [Float32.(rand(rng, npol, nchan) .* 10) for _ in 1:nr]
+
+            dir = joinpath(mktempdir(), "t.tab")
+            write_table(dir, "T",
+                ["TIME" => timecol, "ANTENNA1" => a1v, "ANTENNA2" => a2v,
+                 "FIELD_ID" => fieldid, "DATA_DESC_ID" => ddid,
+                 "DATA" => vdata, "WEIGHT_SPECTRUM" => vweight];
+                nrow=nr, ism=["TIME", "ANTENNA1", "ANTENNA2", "FIELD_ID", "DATA_DESC_ID"],
+                dysco=[["DATA", "WEIGHT_SPECTRUM"]],
+                dysco_spec=Dict("DATA" => (; normalization=normT, distribution=distT,
+                                           dataBitCount=dataBits, weightBitCount=weightBits,
+                                           antenna1=Int.(a1v), antenna2=Int.(a2v),
+                                           rowsPerBlock, dither)))
+
+            data_c = reinterpret(ComplexF32, _casa_getcol_bytes(dir, "DATA", "complex64"))
+            weight_c = reinterpret(Float32, _casa_getcol_bytes(dir, "WEIGHT_SPECTRUM", "float32"))
+            casa_data(p, ch, r) = data_c[(p-1)*nchan*nr+(ch-1)*nr+r]
+            casa_weight(p, ch, r) = weight_c[(p-1)*nchan*nr+(ch-1)*nr+r]
+
+            t = readtable(dir)
+            dcol = column(t, "DATA")
+            wcol = column(t, "WEIGHT_SPECTRUM")
+            @test size(dcol[1]) == (npol, nchan)
+            maxerr_d = maxerr_w = 0.0
+            for r in 1:nr, ch in 1:nchan, p in 1:npol
+                maxerr_d = max(maxerr_d, abs(dcol[r][p, ch] - casa_data(p, ch, r)))
+                maxerr_w = max(maxerr_w, abs(wcol[r][p, ch] - casa_weight(p, ch, r)))
+            end
+            @test maxerr_d < 1e-3
+            @test maxerr_w < 1e-3
+        end
+    end
 end
