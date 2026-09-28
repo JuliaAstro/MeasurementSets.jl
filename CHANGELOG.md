@@ -10495,3 +10495,41 @@ per-column bucket-index construction and lookup hold under column-to-column buck
 not just the single-column or fixed-pattern cases previously exercised.
 
 New testset in `test/ism_writer_tests.jl` (5 random cases, fixed-seed `MersenneTwister(312)`).
+
+### Phase 313 — CI fix: `CompressFloat`/`CompressComplex`/`CompressComplexSD` engine cross-checks were architecture-dependent (loosened, not the implementation)
+
+Real GitHub Actions CI (Linux x86-64) reported the Phase 305 fuzz testset's exact bit-for-bit decode
+comparison (`test/engine_tests.jl`, `@test all(vc[i] == ct[Symbol(nm)][i] for i in eachindex(vals))`)
+failing, even though the same test passed locally on the developer's Mac (ARM64) both standalone and in
+the full-suite run before the Phase 304–309/310–312 pushes.
+
+Reproduced the failure on demand via the project's own established Docker-based x86-64 methodology
+(the Phase 192/193 precedent): started a genuine `linux/amd64` `julia:1.10` container over this repo,
+confirmed real `x86_64` via `uname -m`, and ran a script mirroring the exact fuzz loop but printing every
+mismatch instead of asserting. The failure reproduced immediately — every mismatch was a tiny
+(last-Float32-mantissa-bit-scale) rounding difference between this package's own decode (`vc[i]`) and
+real casacore's C++ decode (`ct[Symbol(nm)][i]`) of the **identical** stored integers (`stored[i]` printed
+and confirmed equal for every mismatched pair, ruling out an encode-side/stored-integer divergence) —
+never a logic/formula bug.
+
+Root cause: `_decode`'s `CompressFloat`/`CompressComplex`/`CompressComplexSD` methods (`virtual.jl`) use
+`muladd(stored, scale, offset)` for precision. `muladd` is a *request* to fuse the multiply and add into a
+single-rounding FMA instruction when the target supports it — whether it actually fuses is an
+architecture/toolchain choice, made independently by Julia's LLVM backend and by whatever compiler/flags
+built real casacore's own `scaleOnGet` (`stored*scale+offset`) for its target. On this ARM64 Mac the two
+choices happen to coincide; on x86-64 Linux CI they don't, producing a consistent, tiny, legitimate
+last-ULP divergence — not a bug in either implementation, the classic signature of comparing two
+independently-compiled numerical implementations for bit-for-bit equality when only "close" is a
+meaningful guarantee.
+
+Fixed the **test's** own strictness (mirrors the project's Phase 192 precedent: loosen the assertion, not
+the arithmetic) — replaced every remaining `vc[i] == ct[...][i]` cross-implementation check in
+`test/engine_tests.jl` (the original Phase 12 fixed-point test, the Phase 305 fixed-scale fuzz, and the
+Phase 305 autoScale fuzz — the last of which the Docker repro additionally found tripping the identical
+divergence, not reported in the original CI paste but caught rerunning the whole file on x86-64) with a
+small ULP-scale tolerance comparison (`_ulp_close`, 8 ULPs of `Float32` at the compared magnitude).
+
+Verified the fix on **both** platforms — the full existing cross-check suite (`test/engine_tests.jl`) and
+the targeted testsets, standalone, pass cleanly inside a fresh x86-64 Docker container after the fix, and
+the full local test suite (8110/8110) passes unchanged on ARM64. README/memory updated, merge on the
+user's word.
