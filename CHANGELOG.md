@@ -10255,3 +10255,177 @@ confirmed" gap Phase 75 flagged, for the general (non-`uvw_j2000`-specific) conv
 — genuinely reassuring given that track record, not merely a formality.
 
 New testset in `test/measures_tests.jl` (109 cross-check assertions, fixed-seed `MersenneTwister(303)`).
+
+### Phase 304 — Dysco write-path random-parameter fuzz vs `casatools` decode (investigation only, no bug found)
+
+Phase 19's write-direction interop oracle (our `write_dyscostman` → real CASA's own `getcol()` decode)
+was, like several other cross-checks this project has since found real bugs by widening (Phase 280's
+ITRF-aberration bug, Phase 284's `gmax`-of-all-negative-group bug, Phase 300's Sun-aberration bug), only
+ever exercised at **one fixed shape/antenna-count/bit-width combination** (`nant=4`, `npol=2`, `nchan=4`,
+`dataBitCount=10`, `weightBitCount=12`, `rowsPerBlock=nbl` — one block per timestamp) crossed with the
+3×4 normalization/distribution grid. This phase spreads the same oracle across 8 random configurations:
+antenna count (2–7, driving `_dysco_metacount`'s AF-normalization antenna-indexed metadata size), cell
+shape (`npol`∈1:3, `nchan`∈1:6), `dataBitCount`/`weightBitCount` (4/6/8/10/12/16 and 4/8/12/16 — bit
+widths the fixed-point test never exercised the generic bit-packer at), and block layout
+(one-block-per-timestamp / one-big-block / a deliberately uneven multi-block split forcing a short final
+block), on top of the existing random normalization×distribution×dither sampling.
+
+No new bug found: every one of the 8 random configurations decodes via real `casatools` to within
+float32-rounding agreement (`< 1e-3` for `DATA`, exactly `0.0` for `WEIGHT_SPECTRUM`'s linear
+quantizer) — confirming `_dysco_metacount`'s per-normalization header-size arithmetic and the generic
+LSB-first bit-packer are correct across the antenna-count/bit-width/block-layout space the original
+fixed-point test never touched, not just at the one combination it happened to use.
+
+New testset in `test/dysco_tests.jl` (8 random cases × 3 assertions, fixed-seed `MersenneTwister(304)`).
+
+### Phase 305 — CompressFloat/CompressComplex/CompressComplexSD random-parameter fuzz vs Casacore.jl: found and fixed a real declared-type validation gap
+
+Following Phase 304's pattern, spread Phase 12's `CompressFloat`/`CompressComplex`/`CompressComplexSD`
+engine cross-check (previously exercised only at one fixed cell shape, one fixed scale/offset per kind,
+against `Casacore.jl`, a genuine cross-implementation oracle) across random cell shapes, random positive
+scales spanning several magnitude decades, random nonzero offsets, and — for `CompressComplexSD`
+specifically — a deliberate mix of purely-real ("even") and genuinely-complex ("odd") cells, since
+`scaleOnPut`'s real/imaginary dispatch is the one piece of encode logic the original fixed fixture never
+varied.
+
+**Found a real bug while constructing the fuzz data itself**: an early draft generated `ComplexF64` cell
+data for the `CompressComplex` case (a Julia promotion artefact — a `Float64`-typed `amp` scalar
+promoted the whole expression). `write_table(...; engines = Dict(nm => (; kind = CompressComplex(),
+...)))` on that `ComplexF64` data succeeded *silently*, producing a column declared `TpDComplex`
+(inferred purely from the caller's Julia array eltype, `_casatype_of(eltype(vals))`) — but
+`CompressFloat`/`CompressComplex`/`CompressComplexSD` are real casacore's **fixed, non-templated**
+`VirtualColumnEngine<Float>`/`<Complex>` classes (unlike the genuinely templated `ScaledArrayEngine<S,T>`
+/`ScaledComplexData<S,T>`), structurally incapable of ever storing anything but `Float32`/`ComplexF32`.
+Our own reader tolerated the mismatch (it narrows/widens transparently via the ordinary Phase-34/35
+precision machinery, oblivious to the declared type being wrong), but real casacore genuinely refuses to
+open the table: `"Invalid data type when accessing column Column C1 has data type Complex ; expected
+DComplex"` — live-verified via `Casacore.jl`, confirming this is a genuine interop-breaking gap, not a
+theoretical one.
+
+Fixed with a new `_compress_expected_vtype(::CompressKind)` (`src/datamanagers/virtual.jl`) validated in
+`_write_table_core`'s engine loop (`src/tables/create.jl`), *before* any encoding work, raising a clear
+`ArgumentError` naming the mismatch and the required conversion — matching this project's established
+"validate the parameter, don't silently produce something a downstream reader chokes on" discipline
+(Phase 199/201/202/204/205/210 all fixed the same shape of gap elsewhere). `ScaledArrayEngine`/
+`ScaledComplexData` (genuinely templated — any `stored_type` the caller picks) and `MappedArrayEngine`/
+`BitFlagsEngine` (no precision axis to mismatch) are unaffected; the check is scoped to `kind isa
+CompressKind`.
+
+Once the test data itself used correctly-precisioned `Float32`/`ComplexF32` values, every one of the 10
+random shape/scale/offset combinations × 3 engine kinds agreed with `Casacore.jl`'s own decode
+bit-for-bit (not just "close enough") — confirming the encode/decode math itself was already correct
+across the wider parameter space; the real find was the missing type-consistency check, not a codec bug.
+A companion 5-case random-parameter fuzz of the `autoScale` (per-row scale/offset) path similarly found
+no codec bug once its own test data avoided a second, unrelated degenerate construction (a row whose
+imaginary part sat at exactly 0 while the real part carried a large offset — not representative complex
+data, and not what `findMinMax`'s joint real/imaginary scan is meant to size a scale/offset for).
+
+New testsets in `test/engine_tests.jl`: the random-parameter fuzz (10 cases × 3 kinds, fixed-seed
+`MersenneTwister(305)`), the autoScale fuzz (5 cases, `MersenneTwister(3050)`), and a permanent
+regression test confirming `Float64`/`ComplexF64` input through any of the three `CompressKind` engines
+now raises a clear error while `Float32`/`ComplexF32` input still works.
+
+### Phase 306 — `BitFlagsEngine` random-parameter fuzz: `stored_type` + `FLAGSETS` vs `Casacore.jl` (investigation only, no bug found)
+
+Every `BitFlagsEngine` test since it was implemented (Phase 40) and its `readmask`/`FLAGSETS` bug fixed
+(Phase 156) had only ever used `stored_type = TpInt` — real casacore's `BitFlagsEngine<StoredType>` is
+genuinely instantiated for three distinct stored types (`uChar`/`Short`/`Int`, each separately
+auto-registered in `DataManager::initRegisterMap`), and `_engine_typestr(::BitFlags, ...)` builds the
+on-disk DM class-name string from `_TYPEID[stored_type]` — but the `uChar`/`Short` spellings had *zero*
+test coverage, let alone a real-casacore open. This phase spreads the `Casacore.jl` cross-check across a
+random `stored_type` (`uChar`/`Short`/`Int`), random cell shapes/row counts, and a random `FLAGSETS` key
+set (2–5 named bits, one deliberately holding bit 0 — the only bit that can ever read back `true`, since
+the raw stored value is always exactly 0/1 — the rest noise bits), with `readmaskkeys` a random subset in
+random order, sometimes including a nonexistent key name (exercising Phase 156's silent-skip path at
+scale, not just the original fixed 2-key fixture).
+
+No new bug found: all 8 random configurations — across all three stored types — produce a DM class-name
+string real casacore accepts (`BitFlagsEngine<uChar   `/`Short   `/`Int     `, confirming the 8-char
+padding is correct for every width, not just the one previously tested) and a mask-recomputed read result
+that matches both this package's own reader and `Casacore.jl`'s decode exactly. Closes a real "never
+actually checked" gap — the `uChar`/`Short` stored-type paths were reachable, plausible-looking code with
+literally no live verification behind them until now.
+
+New testset in `test/engine_tests.jl` (8 random cases × 3 assertions, fixed-seed `MersenneTwister(306)`).
+
+### Phase 307 — `ForwardColumnEngine` random column-type fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The `ForwardColumnEngine`/`reference_copy` test (Phase 40) only ever forwarded a scalar `Float64` column
+and a fixed-shape `ComplexF32` array column, writing one `Int32` scalar. `getcell`/`getcolumn`
+(`src/datamanagers/forwardcol.jl`) are a pure, type-agnostic pass-through (`column(_fce_ref(fce),
+fce.vdesc.name)` — no type-specific branch at all), so nothing in the engine's own code obviously
+restricted it to those two shapes — but a `String` column, a `Bool` column, and a genuinely
+variable-shape (ragged) array column had never actually been tried forwarded, despite being exactly the
+kind of column a real reference-MS copy (`MSTableImpl::referenceCopy`, what this engine models) would
+routinely need to carry across untouched.
+
+Spread the cross-check (`ForwardColumnEngine` is auto-registered in real casacore, so `Casacore.jl` is a
+genuine interop oracle, not self-consistency) across 6 random source tables mixing `String` (including
+empty strings), `Bool`, `Int32`, and ragged `Float64` array columns, a random subset marked `writable`
+(independent copy) vs. left forwarded, cross-checked both through this package's own reader and through
+`Casacore.jl`'s decode, and through `copytable`'s materialise-through-the-forward path.
+
+No new bug found: every column type — forwarded or independently copied — round-trips correctly through
+both readers in all 6 random configurations, confirming the pass-through implementation is genuinely
+type-agnostic in practice, not just by the absence of an obvious type-specific branch in the source.
+
+New testset in `test/engine_tests.jl` (6 random cases × 4 column types × 3 checks, fixed-seed
+`MersenneTwister(307)`).
+
+### Phase 308 — `write_concattable` random N-part fuzz: found and confirmed a genuine upstream casacore `ConcatTable`/String-column limitation (not a bug in this package)
+
+The `write_concattable` test (Phase 15) only ever concatenates exactly 2 nonempty parts with one
+`Int32` column. Phase 15's own risk note explicitly anticipated a genuinely empty interior part
+("`searchsortedlast` with duplicate offsets ... correctly skips the empty part") but no test had ever
+exercised one. Spread `write_concattable` + `ConcatColumn`'s row→part lookup across a random number of
+parts (2–5), random per-part row counts, and a mix of `Int32`/`Float64`/`String` columns, cross-checked
+against `Casacore.jl`.
+
+**Found a real, reproducible divergence while constructing the fuzz itself**: a `ConcatTable` with an
+empty part positioned *before* a nonempty one (whether first or merely interior) and a `String` column
+threw `"SSMIndex::getIndex - access to non-existing row 0"` through `Casacore.jl`. Live investigation —
+reading `~/Development/CASACORE/tables/DataMan/SSMIndex.cc`'s `getIndex` (throws whenever `itsNUsed==0`,
+i.e. no row has ever been added to that table's SSMIndex) plus a byte-swap experiment (replacing only our
+written `table.f<seq>` with the bytes of a table `CREATE TABLE ... LIMIT 0` itself wrote, keeping
+everything else ours, made the failure disappear) — narrowed it down. The decisive test: does the
+*identical* failure reproduce when the empty part is authored by real casacore's own `CREATE TABLE ...
+LIMIT 0`, not just by this package's writer? **It does, byte-for-byte the same error message**, whether
+the empty part came first or was merely interior — confirming this is a genuine, pre-existing upstream
+casacore `ConcatTable`/`SSMIndStringColumn` limitation (real casacore's own `ConcatColumn` implementation
+evidently bootstraps something, per nonempty part, from every earlier part including empty ones, that
+unconditionally probes row 0), **not a divergence in this package's writer**. An initial hypothesis
+("only the *first* part matters") was itself refined mid-investigation once a broader fuzz case — an
+empty *interior* part followed by a nonempty one — reproduced the identical error; the correct
+characterization is "an empty part anywhere before a nonempty one", not "the first part specifically".
+Confirmed **not** to occur when an empty part is a pure trailing suffix (nothing nonempty follows it), in
+either this package's writer or real casacore's own — nor when the column isn't `String`/SSM-indirect.
+This package's own reader is completely unaffected either way — only real casacore's `ConcatTable`+
+`SSMIndStringColumn` combination has the gap.
+
+The fuzz's own row-count generation is scoped to trailing-only empty parts (the confirmed-safe shape) so
+it targets this package's own correctness against a real, non-broken oracle; the empty-before-nonempty
+case is documented and regression-tested separately, including the real-casacore-authored confirmation.
+
+New testsets in `test/reftable_tests.jl`: the random N-part fuzz (6 cases, fixed-seed
+`MersenneTwister(308)`) and a dedicated testset pinning both the confirmed upstream limitation (our
+writer *and* a real-casacore-authored empty part fail identically) and the confirmed-safe trailing-empty
+case.
+
+### Phase 309 — `TiledColumnStMan` writer random shape/type-mix fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The `TiledColumnStMan writer` test (Phase 11) only ever uses one fixed cell shape (a 3-element 1-D
+vector) across both its groups, with 3 types total. `write_tiledcolumnstman` requires every column in one
+group to share the identical cell shape (checked directly), but the *types* bound to one shared hypercube
+are free to differ and go through the same canonical-size tie-break sort `_tile_layout` uses everywhere
+else — already dedicated-tested for `TiledShapeStMan`'s "equal-size types" case, but never for
+`TiledColumnStMan` specifically, nor with `Bool`'s zero-canonical-size special case in the mix.
+
+Spread random cell shapes (1-D and 2-D), random per-group column counts (1–3), and a random mix of
+`Float32`/`Float64`/`ComplexF32`/`Int32`/`Bool` types per group across multiple groups in one table,
+cross-checked against `Casacore.jl`.
+
+No new bug found: all 57 assertions across 6 random configurations agree with `Casacore.jl`'s decode —
+confirming `_tile_layout`'s tie-break sort and the general `TiledColumnStMan` write path are correct
+across a much wider shape/type space than the original fixed-point test ever exercised.
+
+New testset in `test/tsm_multicol_tests.jl` (6 random cases, fixed-seed `MersenneTwister(309)`).

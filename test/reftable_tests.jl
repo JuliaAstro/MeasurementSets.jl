@@ -1,6 +1,7 @@
 # Phase 14: RefTable + ConcatTable read support.
 
 import Tables
+using Random
 
 # `name => vector` pairs with the per-column eltype preserved (a bare array
 # literal would promote Int32/Float64 columns to a common type).
@@ -296,6 +297,154 @@ end
         cc = CCT.Table(cdir)
         @test size(cc, 1) == 8
         @test cc[:A][:] == vcat(A0, A1)
+    end
+end
+
+# Phase 308: the fixed-point `write_concattable` test above only ever
+# concatenates exactly 2 parts, both nonempty, one Int32 column. Phase
+# 15's own risk note explicitly anticipated a genuinely EMPTY interior
+# part ("searchsortedlast with duplicate offsets ... correctly skips the
+# empty part") but no test has ever actually exercised one. This spreads
+# `write_concattable` + `ConcatColumn`'s row->part lookup across a random
+# number of parts (2-5), random per-part row counts, and a mix of
+# Int32/Float64/String columns, cross-checked against `Casacore.jl`.
+#
+# Empty parts are deliberately only ever a TRAILING suffix here (once a
+# part is 0-row, every later part is too): live investigation (see the
+# dedicated testset below) found real casacore's own `ConcatTable` throws
+# `"SSMIndex::getIndex - access to non-existing row 0"` reading a String
+# column whenever an EMPTY part is followed, anywhere later in the
+# concatenation, by a NONEMPTY one -- and, crucially, this was confirmed
+# to reproduce IDENTICALLY with a table casacore's own `CREATE TABLE ...
+# LIMIT 0` wrote in that same empty-then-nonempty position (not just
+# ours), so it is a genuine pre-existing upstream casacore limitation, not
+# a bug in this package's writer. Excluded from this fuzz's row-count
+# generation for that reason (this fuzz targets OUR OWN correctness, and
+# cross-checking against an oracle that's independently known to be
+# broken for this shape isn't useful) -- documented and regression-tested
+# separately below instead.
+@testset "write_concattable — random N-part fuzz incl. empty parts vs Casacore.jl (Phase 308)" begin
+    rng = MersenneTwister(308)
+    for case in 1:6
+        d = mktempdir()
+        nparts = rand(rng, 2:5)
+        # a random nonempty PREFIX length (1:nparts), zeros only trailing
+        # (see the comment above -- an empty part followed by a nonempty
+        # one is the one shape confirmed broken in real casacore itself).
+        nnonempty = rand(rng, 1:nparts)
+        rowcounts = [i <= nnonempty ? rand(rng, 1:6) : 0 for i in 1:nparts]
+
+        parts = String[]
+        allA = Int32[]; allB = Float64[]; allC = String[]
+        for (i, n) in enumerate(rowcounts)
+            Ai = rand(rng, Int32(-100):Int32(100), n)
+            Bi = randn(rng, n)
+            Ci = [randstring(rng, rand(rng, 0:5)) for _ in 1:n]
+            p = joinpath(d, "p$i")
+            write_table(p, "T", _cols("A" => Ai, "B" => Bi, "C" => Ci); nrow=n)
+            push!(parts, p)
+            append!(allA, Ai); append!(allB, Bi); append!(allC, Ci)
+        end
+
+        cdir = joinpath(d, "cc$case")
+        write_concattable(cdir, [readtable(p) for p in parts])
+        ct = readtable(cdir)
+        @test ct isa ConcatTable
+        total = sum(rowcounts)
+        @test nrow(ct) == total
+        @test ct.offsets == [0; cumsum(rowcounts)]
+        @test column(ct, "A")[:] == allA
+        @test column(ct, "B")[:] == allB
+        @test column(ct, "C")[:] == allC
+        # spot-check every row individually (not just the whole-column
+        # fast path) -- this is what actually exercises ConcatColumn's
+        # per-row `searchsortedlast(offsets, i-1)` part lookup, including
+        # right at every part boundary.
+        for i in 1:total
+            @test column(ct, "A")[i] == allA[i]
+        end
+
+        if _HAVE_CASACORE
+            cc = CCT.Table(cdir)
+            @test size(cc, 1) == total
+            @test cc[:A][:] == allA
+            @test cc[:B][:] == allB
+            @test String.(cc[:C][:]) == allC
+        end
+    end
+end
+
+# Phase 308: found while constructing the fuzz above (an initial draft
+# allowed an empty part to be followed by a nonempty one and hit a
+# genuine, reproducible `Casacore.jl` error reading the concatenated
+# String column). Live investigation (`~/Development/CASACORE/tables/
+# DataMan/SSMIndex.cc`'s `getIndex`, thrown with `itsNUsed == 0` whenever
+# no row has ever been added to a table's SSMIndex) plus a byte-swap
+# experiment (replacing just our written `table.f<seq>` with the bytes of
+# a table `CREATE TABLE ... LIMIT 0` itself wrote, keeping everything else
+# ours, made the failure go away) narrowed it down -- and then a direct
+# comparison settled it, including correcting an initial (too-narrow)
+# hypothesis that this was specifically about the FIRST part: a
+# `ConcatTable` with an EMPTY part somewhere before a NONEMPTY one (first
+# or interior, doesn't matter which) and a String column throws the
+# IDENTICAL `"SSMIndex::getIndex - access to non-existing row 0"` error
+# through `Casacore.jl` regardless of whether that empty part was written
+# by THIS package or by real casacore's own `CREATE TABLE ... LIMIT 0` --
+# i.e. this is a genuine, pre-existing upstream casacore
+# `ConcatTable`/`SSMIndStringColumn` limitation (real casacore's own
+# `ConcatColumn` implementation evidently bootstraps something, per
+# nonempty part, from every EARLIER part including empty ones, that
+# unconditionally probes row 0), not a divergence in this package's
+# writer. Confirmed NOT to occur (in real casacore either) when the empty
+# part is a pure TRAILING suffix (nothing nonempty after it), or when the
+# column isn't a String/SSM-indirect one. This package's OWN reader is
+# unaffected either way (`column(ct, "C")` reads correctly regardless of
+# where the empty part sits, per the assertions below) -- only real
+# casacore's own reader has the gap, so `write_concattable` output with an
+# empty-part-before-a-nonempty-one String column round-trips correctly
+# through this package but not through `Casacore.jl`/real casacore, and
+# that is documented here rather than silently avoided.
+@testset "write_concattable — a String-column ConcatTable with an empty part before a nonempty one: a confirmed upstream casacore limitation, not ours (Phase 308)" begin
+    d = mktempdir()
+    p0 = joinpath(d, "p0")
+    write_table(p0, "T", ["C" => String[]]; nrow=0)
+    p1 = joinpath(d, "p1")
+    write_table(p1, "T", ["C" => ["hello", "world", "foo"]]; nrow=3)
+
+    cdir = joinpath(d, "cc")
+    write_concattable(cdir, [readtable(p0), readtable(p1)])
+    ct = readtable(cdir)
+    @test nrow(ct) == 3
+    @test column(ct, "C")[:] == ["hello", "world", "foo"]   # our own reader: correct regardless
+
+    if _HAVE_TAQL
+        # confirm the SAME failure occurs when the empty (leading) part is
+        # authored by real casacore itself, not just by this package --
+        # the point being made here is that it's upstream, not a
+        # `write_concattable` bug. `_taql_create`'s `CREATE TABLE ...
+        # LIMIT 0` mirrors `test/empty_undefined_tests.jl`'s own pattern.
+        p0x = joinpath(d, "p0x")
+        tc = _taql_create("CREATE TABLE $p0x [C S] LIMIT 0")
+        CCT.flush(tc); tc = nothing; GC.gc(); GC.gc()
+
+        cdirx = joinpath(d, "ccx")
+        write_concattable(cdirx, [readtable(p0x), readtable(p1)])
+        e_ours = try; CCT.Table(cdir)[:C][:]; nothing; catch e; e; end
+        e_real = try; CCT.Table(cdirx)[:C][:]; nothing; catch e; e; end
+        @test e_ours !== nothing            # both fail...
+        @test e_real !== nothing
+        @test occursin("SSMIndex::getIndex", sprint(showerror, e_ours))
+        @test occursin("SSMIndex::getIndex", sprint(showerror, e_real))  # ...identically, even for a real-casacore-authored empty part
+
+        # and confirm the SAME empty part placed as a pure TRAILING
+        # suffix (nothing nonempty after it) is completely unaffected, in
+        # both our reader and real casacore's -- this is specifically an
+        # "empty-before-nonempty" limitation, not "any empty part".
+        cdir2 = joinpath(d, "cc2")
+        write_concattable(cdir2, [readtable(p1), readtable(p0)])   # empty LAST, nothing after it
+        @test column(readtable(cdir2), "C")[:] == ["hello", "world", "foo"]
+        cc2 = CCT.Table(cdir2)
+        @test String.(cc2[:C][:]) == ["hello", "world", "foo"]
     end
 end
 

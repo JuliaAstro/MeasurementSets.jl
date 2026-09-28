@@ -1,6 +1,8 @@
 # Phase 11: multi-column tiled storage managers
 # (TiledShapeStMan shared hypercubes, TiledColumnStMan + TiledCellStMan writers).
 
+using Random
+
 # `_HAVE_TAQL` / `_taql_create` (casacore-authored table via TaQL
 # CREATE TABLE) come from test/taql_helpers.jl.
 
@@ -110,6 +112,71 @@ end
         @test [ct[:U][:, i] for i in 1:6] == U
         @test [ct[:P][:, i] for i in 1:6] == P
         @test [ct[:Q][:, i] for i in 1:6] == Q
+    end
+end
+
+# Phase 309: the fixed-point `TiledColumnStMan writer` test above uses
+# exactly ONE cell shape (a 3-element 1-D vector) across both groups, and
+# only 3 types total (Float64 x2, ComplexF32 x1). `write_tiledcolumnstman`
+# requires every column in one group to share the identical cell shape
+# (checked directly, `size(coldata[k][r]) == s`) but the TYPES bound to
+# one shared hypercube are free to differ and go through the same
+# canonical-size tie-break sort `_tile_layout` uses everywhere else
+# (dedicated-tested for TiledShapeStMan's "equal-size types" case, never
+# for TiledColumnStMan specifically, nor with `Bool`'s zero-canonical-size
+# special case in the mix). Spreads random cell shapes (1-D and 2-D),
+# random per-group column counts (1-3), and a random mix of
+# Float32/Float64/ComplexF32/Int32/Bool types per group across multiple
+# groups in one table, cross-checked against `Casacore.jl`.
+@testset "TiledColumnStMan writer — random shape/type-mix fuzz vs Casacore.jl (Phase 309)" begin
+    rng = MersenneTwister(309)
+    _randcell(J, shape) = J === Bool ? rand(rng, Bool, shape) :
+                          J === Int32 ? rand(rng, Int32(-100):Int32(100), shape) :
+                          J <: Complex ? J.(randn(rng, shape) .+ randn(rng, shape) .* im) :
+                          J.(randn(rng, shape) .* 10)
+    for case in 1:6
+        dir = joinpath(mktempdir(), "tcm309_$case.tab")
+        nr = rand(rng, 2:6)
+        ngroups = rand(rng, 1:2)
+        cols = Pair{String,Any}[]
+        groups = Vector{String}[]
+        expected = Dict{String,Any}()
+        gi = 0
+        for g in 1:ngroups
+            shape = rand(rng, Bool) ? (rand(rng, 1:4),) : (rand(rng, 1:3), rand(rng, 1:3))
+            ncol = rand(rng, 1:3)
+            gnames = String[]
+            for c in 1:ncol
+                gi += 1
+                J = rand(rng, (Float32, Float64, ComplexF32, Int32, Bool))
+                nm = "X$gi"
+                vals = [_randcell(J, shape) for _ in 1:nr]
+                push!(cols, nm => vals)
+                push!(gnames, nm)
+                expected[nm] = vals
+            end
+            push!(groups, gnames)
+        end
+
+        write_table(dir, "T", cols; nrow=nr, tcm=groups)
+        r = readtable(dir)
+        @test all(m.name == "TiledColumnStMan" for m in r.managers)
+        @test length(r.managers) == ngroups
+        for gnames in groups, nm in gnames
+            @test columndesc(r, gnames[1]).sequ == columndesc(r, nm).sequ   # same group -> same instance
+        end
+        for (nm, vals) in expected
+            @test [column(r, nm)[i] for i in 1:nr] == vals
+        end
+
+        if _HAVE_CASACORE
+            ct = CCT.Table(dir)
+            for (nm, vals) in expected
+                got = ndims(vals[1]) == 1 ? [ct[Symbol(nm)][:, i] for i in 1:nr] :
+                                             [ct[Symbol(nm)][:, :, i] for i in 1:nr]
+                @test got == vals
+            end
+        end
     end
 end
 
