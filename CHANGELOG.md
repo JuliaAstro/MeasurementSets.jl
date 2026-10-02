@@ -10725,3 +10725,11 @@ geodetic-looking (lon, lat, height) values under the ITRF type, so `me.observato
 from the Earth's centre. Documented in `src/measures/observatories.jl` (also correcting its stale "falls back to
 antenna 0" note — it is the middle antenna since Phase 144). New test pins the omissions and that every bundled
 position is on the Earth's surface.
+
+### Phase 330 — standard MS schema diffed against a casatools-built MS (no bug found)
+
+Every column of a casatools-simulator-built MS (134 columns over MAIN and 12 subtables) was diffed against
+`stdtable`: all value types agree, no required schema column is absent from the casacore-built MS, and every
+fixed-rank schema shape has casacore's rank. Differences are representational only (casacore repeats a unit per
+component, `m,m,m`, where the schema has `m`; `MODEL_DATA`/`CORRECTED_DATA` are casacore-added optional columns;
+three SOURCE columns report no rank). Pinned by a static snapshot test in `test/schema_tests.jl`.
