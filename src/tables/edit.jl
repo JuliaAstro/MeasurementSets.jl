@@ -330,6 +330,11 @@ end
 
 Append `n` rows.  Appended cells read back as zeros / `""` (or a
 `VariableShape` cell as the previous row's shape) until written.
+
+This is uniform across storage managers.  Real casacore differs for an
+`IncrementalStMan` column, whose appended rows read back as the *previous*
+row's value (the "store on change" file simply has no entry for them) --
+write the values you want rather than relying on either default.
 """
 function addrows!(t::EditTable, n::Integer)
     n >= 0 || error("addrows!: n must be >= 0")

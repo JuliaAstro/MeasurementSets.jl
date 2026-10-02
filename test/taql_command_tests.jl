@@ -1208,3 +1208,59 @@ end
         @test column(readtable(dir), "S")[:] == [["u", "v"] for _ in 1:3]     # casacore-written -> ours
     end
 end
+
+# Phase 318: random JOIN fuzz vs real TaQL.  Random left/right/third tables
+# (duplicate and unmatched keys), chained joins, rowid() index lookup, WHERE /
+# ORDER BY / LIMIT / GROUP BY / HAVING over joined columns.  Every query with a
+# non-empty result matches real TaQL exactly (unmatched rows get the type
+# sentinels).  Real TaQL throws an unexplained "Slicer error" when a join query
+# selects ZERO rows (Phase 253 saw it elsewhere); there ours returns 0 rows.
+if _HAVE_TAQL
+@testset "taql SELECT ... JOIN random fuzz vs real TaQL (Phase 318)" begin
+    rng = MersenneTwister(318)
+    same(a, b) = length(a) == length(b) && all(eachindex(a)) do i
+        a[i] isa AbstractFloat && b[i] isa AbstractFloat ?
+            (isnan(a[i]) && isnan(b[i]) || isapprox(a[i], b[i]; rtol=1e-9)) : isequal(a[i], b[i])
+    end
+    for case in 1:12
+        na = rand(rng, 1:30); nb = rand(rng, 1:12); nc = rand(rng, 1:6)
+        kr = Int32.(1:rand(rng, 3:10))
+        # typed Pair{String,Any}[...] literals: a bare [...] would promote the Int32 keys (Phase 210)
+        A = Pair{String,Any}["K" => Int32.(rand(rng, kr, na)), "V" => round.(randn(rng, na) * 10; digits=2),
+                             "Z" => Int32.(rand(rng, 0:max(nb - 1, 0) + 2, na))]
+        B = Pair{String,Any}["K" => Int32.(rand(rng, kr, nb)), "N" => [rand(rng, ("x", "y", "z", "w")) for _ in 1:nb],
+                             "W" => round.(randn(rng, nb); digits=2), "J" => Int32.(rand(rng, 1:4, nb))]
+        C = Pair{String,Any}["J" => Int32.(rand(rng, 1:4, nc)), "Q" => Int32.(rand(rng, 100:105, nc))]
+        d = [joinpath(mktempdir(), n) for n in ("a", "b", "c")]
+        write_table(d[1], "A", A; nrow=na); write_table(d[2], "B", B; nrow=nb); write_table(d[3], "C", C; nrow=nc)
+        t = readtable.(d)
+        j2 = "FROM \$1 a JOIN \$2 b ON a.K == b.K"
+        j3 = j2 * " JOIN \$3 c ON b.J == c.J"
+        qs = [("SELECT a.V AS X, b.N AS Y $j2", 2),
+              ("SELECT a.V*b.W AS X, a.K AS Y $j2 WHERE b.W > 0", 2),
+              ("SELECT a.V AS X, b.N AS Y $j2 ORDER BY a.V DESC", 2),
+              ("SELECT a.V AS X, c.Q AS Y $j3", 3),
+              ("SELECT b.N AS X, gcount() AS Y $j2 GROUP BY b.N", 2),
+              ("SELECT b.N AS X, gsum(a.V) AS Y $j2 GROUP BY b.N HAVING gcount() > 1", 2),
+              ("SELECT a.V AS X, b.W AS Y FROM \$1 a JOIN \$2 b ON a.Z == b.rowid()", 2),
+              ("SELECT a.V AS X, b.N AS Y $j2 WHERE b.N == 'x' OR a.V < 0 ORDER BY a.V LIMIT 7", 2)]
+        for (q, np) in qs
+            ours = taql(t[1], q, t[2:np]...)
+            real = try
+                rt = _taqlcmd(q, d[1:np]...)
+                Dict(c => collect(rt[Symbol(c)][:]) for c in ("X", "Y"))   # the error can surface lazily here
+            catch e
+                e
+            end
+            if real isa Exception
+                @test occursin("Slicer error", sprint(showerror, real))
+                @test length(column(ours, "X")[:]) == 0
+            else
+                for c in ("X", "Y")
+                    @test same(real[c], collect(column(ours, c)[:]))
+                end
+            end
+        end
+    end
+end
+end

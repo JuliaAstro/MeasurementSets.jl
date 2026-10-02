@@ -645,3 +645,46 @@ if _HAVE_CASA
         end
     end
 end
+
+if _HAVE_CASA
+    @testset "dysco -- random-parameter READ fuzz: casatools-authored table vs our decode (Phase 314)" begin
+        # Phase 304 fuzzed the WRITE direction (ours -> casatools decode)
+        # across random shapes / bit widths / block layouts.  The READ
+        # direction (casatools writes a Dysco table, we decode it) had only
+        # ever been checked at one fixed shape/bit-width (4,5,4,2 / 10,12),
+        # plus the 12 normalization x distribution combos at that same
+        # point.  Spreads it across random antenna counts, cell shapes,
+        # data/weight bit widths and every normalization x distribution.
+        # ntime >= 2: real casacore's own DyscoStMan aborts the process
+        # ("flushed before at least two timeblocks were stored") otherwise.
+        rng = MersenneTwister(314)
+        script = joinpath(@__DIR__, "dysco_fixture.py")
+        for case in 1:8
+            nant = rand(rng, 2:7); ntime = rand(rng, 2:5)
+            nchan = rand(rng, 1:9); npol = rand(rng, 1:4)
+            dbits = rand(rng, (4, 6, 8, 10, 12, 16)); wbits = rand(rng, (4, 8, 12, 16))
+            normstr = rand(rng, ("AF", "RF", "Row"))
+            diststr = rand(rng, ("Gaussian", "Uniform", "StudentT", "TruncatedGaussian"))
+            seed = rand(rng, 1:10^6)
+            dir = mktempdir()
+            out = read(Cmd(`$_CASA_PYTHON $script $dir $nant $ntime $nchan $npol $dbits $wbits $seed $normstr $diststr 5.0`; dir), String)
+            @test occursin("DYSCO_FIXTURE_OK", out)
+            nr = parse.(Int, split(strip(read(joinpath(dir, "meta.txt"), String))))[4]
+            t = readtable(joinpath(dir, "dysco.tab"))
+            dcol = column(t, "DATA"); wcol = column(t, "WEIGHT_SPECTRUM")
+            D = reinterpret(ComplexF32, read(joinpath(dir, "data_decoded.bin")))
+            W = reinterpret(Float32, read(joinpath(dir, "weight_decoded.bin")))
+            ed = ew = mag = 0.0
+            for r in 1:nr, ch in 1:nchan, p in 1:npol
+                i = (p - 1) * nchan * nr + (ch - 1) * nr + r
+                ed = max(ed, abs(dcol[r][p, ch] - D[i]))
+                ew = max(ew, abs(wcol[r][p, ch] - W[i]))
+                mag = max(mag, abs(D[i]))
+            end
+            # both sides decode the SAME stored symbols, so this is float
+            # rounding only, independent of bit width.
+            @test ed <= 1e-5 * max(mag, 1)
+            @test ew <= 1e-5
+        end
+    end
+end

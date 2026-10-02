@@ -10533,3 +10533,68 @@ Verified the fix on **both** platforms — the full existing cross-check suite (
 the targeted testsets, standalone, pass cleanly inside a fresh x86-64 Docker container after the fix, and
 the full local test suite (8110/8110) passes unchanged on ARM64. README/memory updated, merge on the
 user's word.
+
+### Phase 314 — Dysco READ random-parameter fuzz vs casatools-authored tables (investigation only, no bug found)
+
+Phase 304 fuzzed the Dysco *write* direction (our writer → casatools decode). The *read* direction
+(casatools writes a Dysco table, we decode it) had only ever been checked at one fixed shape/bit-width
+point (4 antennas, 4×2 cells, 10/12 bits) plus the 12 normalization × distribution combos at that same
+point. Spread it across random antenna counts (2–7), integrations, cell shapes (1–4 pol × 1–9 chan),
+data/weight bit widths (4–16) and every normalization × distribution: 28 of 30 exploratory configs
+matched casatools' own `getcol()` to float rounding (both sides decode the same stored symbols); the
+other 2 never reached our reader — real casacore's own DyscoStMan aborts the process for `ntime=1`
+("flushed before at least two timeblocks were stored"), so the permanent test uses `ntime ≥ 2`.
+
+Phase numbering note: "start phase 313" arrived after 313 was already used for the CI fix (PR #102),
+so this is 314.
+
+New testset in `test/dysco_tests.jl` (8 random cases, fixed-seed `MersenneTwister(314)`, gated on the
+CASA python like its siblings).
+
+### Phase 315 — `StandardStMan` writer random column-mix fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The SSM writer's bucket sizing (`rowsPerBucket` from the summed cell widths), string buckets and
+bit-packed `Bool` / fixed-shape array cells depend on the column mix and row count, but had only been
+checked with a handful of fixed column sets. Spread 25 exploratory random configurations — 2–6 columns
+of `Int32`/`Float64`/`Float32`/`Bool`/`String`/`ComplexF32`/`UInt8`/`Int16`, scalar or fixed-shape
+array cells, strings from empty to 400 characters, 1 to 3000 rows (several buckets), both byte orders —
+over whole-column and per-row comparison against both the written data and `Casacore.jl`'s decode:
+all agree. New testset in `test/writer_tests.jl` (12 cases, fixed-seed `MersenneTwister(315)`).
+
+### Phase 316 — `write_reftable` random row-list / select / chain fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+Phases 15 and 132 checked `write_reftable` with fixed row lists. Spread 30 exploratory random cases —
+random row lists (repeats, unsorted, and sorted so the `rowOrder` flag is exercised both ways), random
+column subsets with renames over `Int32`/`Float64`/`String`/array columns, and a second RefTable chained
+on the first (flattened to the root on write) — through both our reader and `Casacore.jl`: all agree.
+New testset in `test/reftable_tests.jl` (12 cases, fixed-seed `MersenneTwister(316)`).
+
+### Phase 317 — write → `copytable` → random edit-session pipeline fuzz; a documented `addrows!` divergence from real casacore on ISM columns (no bug)
+
+Spread 25 exploratory random pipelines — `write_table` with mixed `StandardStMan` / `IncrementalStMan` /
+shared-`TiledShapeStMan`-group columns, `copytable` to a fresh table, then a random edit session
+(`setcell!` / `addrows!` / `removerows!`) — against a plain Julia model and `Casacore.jl`: after fixing
+my own model all agree, and the manager mix survives the copy.
+
+The one thing the fuzz surfaced: for an `IncrementalStMan` column an appended row reads back as zero /
+`""` here (the documented, manager-uniform `addrows!` contract — "until written"), whereas real casacore's
+ISM returns the *previous row's value* (confirmed with casatools `addrows`: `[5,5,7,7,9]` → `[…,9,9]`),
+because its "store on change" file simply has no entry for the new rows. Kept ours (uniform, and users set
+the values), and documented the difference in the `addrows!` docstring. The Phase 9 plan text that said ISM
+appends inherit the last value was never what the regen path implements.
+
+New testset in `test/edit_tests.jl` (10 cases, fixed-seed `MersenneTwister(317)`).
+
+### Phase 318 — `taql` SELECT … JOIN random fuzz vs real TaQL (investigation only, no bug found)
+
+Phases 259/260 checked JOIN with a few hand-picked forms. Spread 40 exploratory random cases × 8 query
+shapes — random left/right/third tables with duplicate and unmatched keys, chained joins, `rowid()` index
+lookup, and `WHERE` / `ORDER BY` / `LIMIT` / `GROUP BY` / `HAVING` over joined columns — against real
+`tableCommand`: every query with a non-empty result matches exactly (unmatched rows get the type
+sentinels). The only differences are queries that select **zero rows**, where real TaQL throws an
+unexplained "Slicer error" (seen elsewhere in Phase 253) when the result columns are read, and ours
+returns 0 rows. (My first harness tripped the Phase 210 bare-`[...]`-literal promotion hazard — `Int32`
+keys silently became `Float64`, which real TaQL rejects as a join key — worth remembering when writing
+fuzz fixtures.)
+
+New testset in `test/taql_command_tests.jl` (12 cases × 8 queries, fixed-seed `MersenneTwister(318)`).

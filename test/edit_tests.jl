@@ -715,3 +715,67 @@ end
         @test collect(ct2[:C][:]) == 11:15
     end
 end
+
+# Phase 317: random write_table (mixed SSM / ISM / shared-TSM-group columns)
+# -> copytable -> random edit session (setcell! / addrows! / removerows!)
+# fuzz, checked against a plain Julia model and (where available) Casacore.jl.
+# Also pins the documented appended-row default: zeros / "" for EVERY manager
+# (real casacore's IncrementalStMan inherits the previous row's value instead
+# -- see the `addrows!` docstring).
+@testset "write_table -> copytable -> random edit pipeline fuzz (Phase 317)" begin
+    rng = MersenneTwister(317)
+    for case in 1:10
+        n = rand(rng, (3, 20, 150))
+        ism = String[]
+        cols = Pair{String,Any}[]
+        push!(cols, "I1" => Int32.(cumsum(rand(rng, 0:1, n)))); rand(rng) < 0.6 && push!(ism, "I1")
+        push!(cols, "D1" => randn(rng, n));                      rand(rng) < 0.5 && push!(ism, "D1")
+        push!(cols, "S1" => [join(rand(rng, 'a':'z', rand(rng, 0:6))) for _ in 1:n])
+        shp = [(rand(rng, 2:4), rand(rng, 2:3)) for _ in 1:n]      # ragged -> Casacore.jl-readable
+        push!(cols, "T1" => [randn(rng, ComplexF32, s...) for s in shp])
+        push!(cols, "T2" => [rand(rng, Bool, s...) for s in shp])
+        src = joinpath(mktempdir(), "w.tab")
+        write_table(src, "T", cols; nrow=n, ism=ism, tsm=[["T1", "T2"]])
+        model = Dict(k => copy(v) for (k, v) in cols)
+        cp = joinpath(mktempdir(), "c.tab")
+        copytable(cp, readtable(src))
+        edit(cp) do t
+            for _ in 1:rand(rng, 1:6)
+                m = length(model["I1"])
+                op = rand(rng, 1:4)
+                if op == 1
+                    i = rand(rng, 1:m); v = Int32(rand(rng, -5:5))
+                    t["I1"][i] = v; model["I1"][i] = v
+                elseif op == 2
+                    i = rand(rng, 1:m); v = randn(rng, ComplexF32, size(model["T1"][i])...)
+                    t["T1"][i] = v; model["T1"][i] = v
+                elseif op == 3
+                    k = rand(rng, 1:3); addrows!(t, k)
+                    for _ in 1:k
+                        push!(model["I1"], Int32(0)); push!(model["D1"], 0.0); push!(model["S1"], "")
+                        sz = size(model["T1"][end])
+                        push!(model["T1"], zeros(ComplexF32, sz...)); push!(model["T2"], falses(sz...))
+                    end
+                elseif m > 3
+                    rr = sort(unique(rand(rng, 1:m, rand(rng, 1:2))))
+                    removerows!(t, rr)
+                    for k in keys(model); deleteat!(model[k], rr); end
+                end
+            end
+        end
+        r = readtable(cp)
+        ms = [m.name for m in r.managers]
+        @test any(startswith.(ms, "Tiled")) && any(==("StandardStMan"), ms)
+        ct = _HAVE_CASACORE ? CCT.Table(cp) : nothing
+        for (k, e) in model
+            a = column(r, k)[:]
+            @test length(a) == length(e)
+            @test all(isequal(a[i], e[i]) for i in eachindex(e))
+            if ct !== nothing
+                cc = ct[Symbol(k)]
+                b = e[1] isa AbstractArray ? [cc[i] for i in 1:length(e)] : cc[:]
+                @test all(isequal(b[i], e[i]) for i in eachindex(e))
+            end
+        end
+    end
+end
