@@ -10598,3 +10598,83 @@ keys silently became `Float64`, which real TaQL rejects as a join key — worth 
 fuzz fixtures.)
 
 New testset in `test/taql_command_tests.jl` (12 cases × 8 queries, fixed-seed `MersenneTwister(318)`).
+
+### Phase 319 — `taql` SELECT `ORDER BY` / `DISTINCT` / `LIMIT` / `OFFSET` random fuzz vs real TaQL (no bug; one documented `DISTINCT` tie-order divergence)
+
+Spread 40 exploratory random cases × 8 queries on low-cardinality columns (lots of ties): random 1–3-key
+`ORDER BY` with `ASC`/`DESC`, leading `DESC`, `WHERE`, `LIMIT` / negative `LIMIT` / `OFFSET`. All plain
+`SELECT`s match real `tableCommand` **exactly** (stable multi-key sort, tie order included). Queries with an
+empty or past-the-end window make real TaQL throw a lazy "Slicer error" (as in Phase 318); ours returns
+0 rows or an `ArgumentError`.
+
+`SELECT DISTINCT … ORDER BY k` returns the same *set* of rows, but the order among rows tied on `k` (and an
+`ORDER BY` on an unselected column, or a `LIMIT` cutting through ties) can differ: ours keeps the first row
+of each distinct tuple of the sorted result, whereas real TaQL dedups with a no-duplicates heap sort that
+keeps an arbitrary representative row per tuple (inferred from the tie patterns; small, tie-free cases
+agree). Not worth porting its heap sort — the tie order is unspecified in SQL terms — so it is documented
+in `src/taql/commands.jl` and the test compares `DISTINCT` results as multisets.
+
+New testset in `test/taql_command_tests.jl` (12 cases × 8 queries, fixed-seed `MersenneTwister(319)`).
+
+### Phase 320 — Dysco `copytable` under random write parameters (investigation only, no bug found)
+
+The Dysco copy-preservation test used one fixed configuration. Spread 25 exploratory random configurations —
+2–6 antennas, 1–4 pol × 1–6 chan cells, data bits 6–16, weight bits 8–16, every normalization ×
+distribution, and `rowsPerBlock` of one baseline-set / two / the whole table — through write →
+`copytable`: every compression parameter (normalization, distribution, both bit widths, `rowsPerBlock`,
+`antennaCount`, truncation) is preserved, and weights re-encode exactly. `RowNorm`/`RFNorm` copies decode
+essentially identically; `AFNorm` drifts by up to ~4% of the data magnitude at coarse bit widths because
+its iterative antenna/channel RMS solve is not idempotent on already-quantised data (expected; checked
+loosely at 10%).
+
+New testset in `test/dysco_tests.jl` (10 cases, fixed-seed `MersenneTwister(320)`; not CASA-gated).
+
+### Phase 321 — `MDoppler` conventions + rest-frequency bridge random fuzz vs casatools (investigation only, no bug found)
+
+Phase 72's Doppler conversions and frequency ↔ velocity bridge were cross-checked against casatools at
+exactly one value (RADIO 0.01, one observed/rest pair). Spread the same oracle over 25 random
+physically-valid shifts (|β| < 0.9, rest frequency 1e8–5e11 Hz): all five conventions from a BETA value,
+`doppler(f, rest)`, `radialvelocity`, `frequency(d, rest)` and `restfrequency(f, d)` agree with casatools
+to better than 1e-9 relative (pure algebra). New testset in `test/measures_tests.jl` (25 cases × 9
+quantities, fixed-seed `MersenneTwister(321)`, gated on the CASA python).
+
+### Phase 322 — random-operation fuzz for in-place edits through RefTable / ConcatTable views (investigation only, no bug found)
+
+Phases 125–130 tested `edit(rt::RefTable)` / `edit(ct::ConcatTable)` with fixed rows and fixed parts.
+Spread 30 exploratory random sessions — random (sorted or shuffled) RefTable selections and random 2–3 part
+ConcatTables over scalar / `String` / tiled-array columns, with random cell writes and whole-column writes
+through the view — and compared the underlying parent / parts against a plain Julia model (our reader, and
+`Casacore.jl` for the RefTable case): all agree. The permanent testset also does a random `addcolumn!` through
+each view kind (RefTable: the view's rows get the data and every other parent row 0.0; ConcatTable: the data is
+split across the parts). New testset in `test/edit_tests.jl` (12 cases, fixed-seed `MersenneTwister(322)`).
+
+### Phase 323 — tiled-column random cell-shape fuzz incl. cells larger than a tile (investigation only, no bug found)
+
+The `TiledShapeStMan` / `TiledColumnStMan` writers pick a tile shape for a ~1 MiB target, but were only tested
+with small, fixed cell shapes. Spread 60 exploratory random cases — 1–4 dimensions with extent-1 axes, cell
+types `Float32`/`ComplexF32`/`Float64`/`Int32`/`Bool`, shared one- or two-column groups, and cells up to
+several MB (so a tile holds less than one cell and the tile shape has to be clamped) — through write → read
+(`column(...)[:]`, `rawblock`), an in-place cell edit, and `Casacore.jl` wherever it can fetch a cell
+(104 comparisons; it cannot index every fixed-shape tiled column, a known limitation): all agree. New testset
+in `test/tsm_multicol_tests.jl` (14 cases, fixed-seed `MersenneTwister(323)`).
+
+### Phase 324 — casacore ↔ Unitful unit mapping checked against casatools for every unit name: four silent mis-parses and four unreadable write spellings fixed
+
+A round-trip fuzz of Unitful-typed columns (write → `columnunit`/`qcolumn`) over ~40 units turned up unit
+spellings that did not survive. Checking *every* unit name in casacore's `UnitMap` (152) against casatools'
+own canonical SI value (`qa.canonical(qa.quantity(1, name))`) showed the cause: casacore names that Unitful
+reads as a **different** unit entirely, silently giving wrong numbers:
+
+* `h` (hour) parsed as **Planck's constant**; `a` (annum) as the **are** (100 m²); `G` (gauss) as the
+  **gravitational constant**; `R` (roentgen) as the **gas constant**; `min` did not parse at all.
+
+Fixed in `_UNIT_ALIASES` (`h→hr`, `a→yr`, `min→minute`, `G→Gauss`, plus `Ohm`, `in`, `mile`); `R` and `Gb`
+(gilbert), which have no Unitful counterpart, now raise the usual clear error instead of returning a wrong
+quantity. The **write** direction emitted strings casacore itself cannot read — `hr`, `minute`, `Gauss`,
+`Å`, `Ω` — now mapped to `h`, `min`, `G`, `Angstrom`, `Ohm` (confirmed accepted by casatools). Remaining
+differences are only older numeric constants in casacore (AU 2.7e-10, M0/S0 2.6e-4, `u` 3e-4, `cal` 1e-3
+relative), documented in `src/tables/units.jl`. A TaQL spaced literal such as `3 h` now means three hours
+rather than 3·Planck's-constant.
+
+New testset in `test/units_tests.jl`: a static snapshot of casatools' canonical value for every unit name
+that parses (68 names), the previously mis-parsed names, the write spellings, and table round trips.

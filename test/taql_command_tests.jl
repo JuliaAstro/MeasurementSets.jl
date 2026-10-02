@@ -1264,3 +1264,60 @@ if _HAVE_TAQL
     end
 end
 end
+
+# Phase 319: random ORDER BY / DISTINCT / LIMIT / OFFSET fuzz vs real TaQL, on
+# low-cardinality columns (lots of ties).  Plain SELECTs match real TaQL
+# EXACTLY (stable multi-key sort, DESC / leading-DESC, LIMIT / negative LIMIT /
+# OFFSET).  `SELECT DISTINCT ... ORDER BY` returns the same SET of rows, but
+# real TaQL keeps an arbitrary representative row per distinct tuple (its
+# dedup is a no-duplicates heap sort), so the order among tied rows -- and an
+# ORDER BY on an unselected column -- can differ; there only the multiset is
+# compared (no LIMIT).  A window that is empty / past the end makes real TaQL
+# throw a lazy "Slicer error"; ours returns 0 rows or an ArgumentError.
+if _HAVE_TAQL
+@testset "taql SELECT ORDER BY / DISTINCT / LIMIT random fuzz vs real TaQL (Phase 319)" begin
+    rng = MersenneTwister(319)
+    same(a, b) = length(a) == length(b) && all(eachindex(a)) do i
+        a[i] isa AbstractFloat && b[i] isa AbstractFloat ?
+            (isnan(a[i]) && isnan(b[i]) || isapprox(a[i], b[i]; rtol=1e-9)) : isequal(a[i], b[i])
+    end
+    for case in 1:12
+        n = rand(rng, (1, 2, 8, 25, 60))
+        cols = Pair{String,Any}["I" => Int32.(rand(rng, 0:3, n)), "D" => Float64.(rand(rng, -2:2, n)),
+                                "S" => [rand(rng, ("a", "b", "c")) for _ in 1:n], "R" => Int32.(1:n),
+                                "B" => rand(rng, Bool, n)]
+        d = joinpath(mktempdir(), "t"); write_table(d, "T", cols; nrow=n)
+        t = readtable(d)
+        for _ in 1:8
+            ks = shuffle(rng, ["I", "D", "S", "B", "R"])[1:rand(rng, 1:3)]
+            ob = join([k * rand(rng, ("", " ASC", " DESC")) for k in ks], ", ")
+            lead = rand(rng) < 0.15 ? "DESC " : ""
+            distinct = rand(rng) < 0.25
+            lim = distinct ? "" : rand(rng, ("", "", " LIMIT $(rand(rng, 1:n + 2))", " LIMIT -$(rand(rng, 1:n))",
+                                             " LIMIT $(rand(rng, 1:5)) OFFSET $(rand(rng, 0:4))", " OFFSET $(rand(rng, 0:n))"))
+            wh = rand(rng) < 0.3 ? " WHERE I > 0" : ""
+            sel, scols = distinct ? ("DISTINCT I, S", ["I", "S"]) : ("R, I, D, S", ["R", "I", "D", "S"])
+            q = "SELECT $sel FROM \$1$wh ORDER BY $lead$ob$lim"
+            real = try
+                rt = _taqlcmd(q, d)
+                Dict(c => collect(rt[Symbol(c)][:]) for c in scols)
+            catch e
+                e
+            end
+            ours = try taql(t, q) catch e; e end
+            if real isa Exception
+                @test occursin("Slicer error", sprint(showerror, real))
+                @test ours isa ArgumentError || length(column(ours, scols[1])[:]) == 0
+            elseif distinct
+                rp = sort(collect(zip(real["I"], real["S"])))
+                op = sort(collect(zip(collect(column(ours, "I")[:]), collect(column(ours, "S")[:]))))
+                @test rp == op
+            else
+                for c in scols
+                    @test same(real[c], collect(column(ours, c)[:]))
+                end
+            end
+        end
+    end
+end
+end

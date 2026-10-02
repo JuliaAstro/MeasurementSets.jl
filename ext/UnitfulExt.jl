@@ -34,6 +34,13 @@ end
 
 # one casacore unit string -> Unitful.Units (or `Unitful.NoUnits`)
 function _ms_uparse(s::AbstractString)
+    # a casacore unit name that Unitful would silently read as a DIFFERENT unit (`R` roentgen ->
+    # the gas constant, `Gb` gilbert -> gigabit-ish): refuse it rather than return a wrong value
+    hit0 = get(MS.UNITS_NO_JULIA_COUNTERPART, strip(String(s)), nothing)
+    if hit0 !== nothing && hit0.kind === :unsupported
+        error("MeasurementSets: casacore unit \"$s\" has no Unitful equivalent ($(hit0.note)) " *
+              "— see `MeasurementSets.UNITS_NO_JULIA_COUNTERPART`")
+    end
     n = MS._normalize_unit(s)
     isempty(n) && return Unitful.NoUnits
     try

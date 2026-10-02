@@ -1784,3 +1784,54 @@ for (mjd, x, y, z, a, b, bx, by, bz) in [$cs]:
         end
     end
 end
+
+# Phase 321: the Doppler convention conversions and the frequency <-> velocity (rest-frequency)
+# bridge (Phase 72) were only cross-checked against casatools at ONE value (RADIO 0.01, one fixed
+# observed/rest frequency pair, in `measures_fixture.py`).  Spreads the same oracle over 25 random
+# physically-valid shifts (|beta| < 0.9, rest frequency 1e8-5e11 Hz): every convention (RADIO /
+# OPTICAL / RATIO / BETA / GAMMA) from a BETA value, `doppler(f, rest)`, `radialvelocity`,
+# `frequency(d, rest)` and `restfrequency(f, d)`.  Pure algebra, so the agreement is ~1e-12 relative
+# (checked to 1e-9); casatools reports a Doppler as <value>*c in "m/s", divided back out here.
+@testset "measures — MDoppler conventions + rest-frequency bridge random fuzz vs casatools (Phase 321)" begin
+    if _HAVE_MEAS_CASA
+        rng = MersenneTwister(321)
+        n = 25
+        cases = map(1:n) do _
+            b = (rand(rng) - 0.5) * 1.8
+            rest = exp10(8 + 3.7rand(rng))
+            (b, rest, rest * sqrt((1 - b) / (1 + b)))
+        end
+        cs = join(["($(c[1]), $(c[2]), $(c[3]))" for c in cases], ",")
+        py = """
+from casatools import measures, quanta
+me = measures(); qa = quanta()
+C = 2.99792458e8
+for (b, rest, obs) in [$cs]:
+    out = []
+    d = me.doppler('TRUE', qa.quantity(b, ''))
+    for c in ('RADIO','OPTICAL','RATIO','TRUE','GAMMA'):
+        out.append(repr(me.measure(d, c)['m0']['value'] / C))
+    f = me.frequency('LSRK', qa.quantity(obs, 'Hz'))
+    dd = me.todoppler('TRUE', f, qa.quantity(rest, 'Hz'))
+    out.append(repr(dd['m0']['value'] / C))
+    out.append(repr(me.toradialvelocity('LSRK', dd)['m0']['value']))
+    out.append(repr(me.tofrequency('LSRK', dd, qa.quantity(rest, 'Hz'))['m0']['value']))
+    out.append(repr(me.torestfrequency(f, dd)['m0']['value']))
+    print(' '.join(out))
+"""
+        out = filter(l -> length(split(l)) == 9,
+                     split(strip(read(pipeline(`$_MEAS_CASA -c $py`; stderr = devnull), String)), '\n'))
+        @test length(out) == n
+        for (c, l) in zip(cases, out)
+            v = parse.(Float64, split(l))
+            b, rest, obs = c
+            mine = Float64[measconvert(MDoppler{BETA}(b), T).d for T in (RADIO, OPTICAL, RATIO, BETA, GAMMA)]
+            f = MFrequency{LSRK}(obs)
+            dd = doppler(f, rest)
+            push!(mine, dd.d, radialvelocity(dd).mps, frequency(dd, rest).hz, restfrequency(f, dd).hz)
+            for i in 1:9
+                @test abs(mine[i] - v[i]) <= 1e-9 * max(abs(v[i]), i <= 6 ? 1e-3 : 0.0)
+            end
+        end
+    end
+end

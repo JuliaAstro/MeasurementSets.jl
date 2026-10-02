@@ -26,7 +26,20 @@ const _UNIT_ALIASES = Dict{String,String}(
     "M0"       => "Msun", "S0" => "Msun",  # both "solar mass" (M0 := 1*S0 in casacore)
     "Angstrom" => "angstrom",
     "deg"      => "°",                # UnitfulAngles spells degree as `°`
+    # Phase 324: casacore unit NAMES that Unitful spells differently -- or, worse, uses for
+    # something else entirely (checked against casatools' canonical values for every name in
+    # casacore's UnitMap): without these, "h" (hour) parsed as Planck's constant, "a" (annum) as
+    # the *are* (100 m^2), "G" (gauss) as the gravitational constant, and "min" did not parse.
+    "h"        => "hr",
+    "a"        => "yr",                # casacore annum = Julian year (3.15576e7 s)
+    "min"      => "minute",
+    "G"        => "Gauss",
+    "Ohm"      => "Ω",
+    "in"       => "inch",
+    "mile"     => "mi",
 )
+# Small numeric-constant differences remain where casacore uses older values than Unitful:
+# AU (2.7e-10 relative), M0/S0 solar mass (2.6e-4), u (3e-4), cal (1e-3, IT vs thermochemical).
 
 """
     _normalize_unit(s) -> String
@@ -140,7 +153,9 @@ const _UNIT_ALIASES_INV = Dict{String,String}(
     "″" => "arcsec", "′" => "arcmin",        # how UnitfulAngles prints them
     "°" => "deg", "angstrom" => "Angstrom",
     "percent" => "%", "permille" => "%%",
-    "Msun" => "M0", "M⊙" => "M0")            # "M⊙" is how UnitfulAstro prints it
+    "Msun" => "M0", "M⊙" => "M0",            # "M⊙" is how UnitfulAstro prints it
+    # Phase 324: how Unitful prints these is NOT a casacore unit name (casatools rejects it)
+    "hr" => "h", "minute" => "min", "Gauss" => "G", "Å" => "Angstrom", "Ω" => "Ohm")
 
 _ms_ustring(args...) = _unitful_load_hint()
 
@@ -178,6 +193,8 @@ const UNITS_NO_JULIA_COUNTERPART = Dict{String,NamedTuple{(:kind, :note),Tuple{S
     "FU"      => (kind=:unsupported, note="obscure flux unit -- write 'Jy'"),
     "fu"      => (kind=:unsupported, note="obscure flux unit -- write 'Jy'"),
     "cy"      => (kind=:unsupported, note="casacore century -- write '100yr'"),
+    "R"       => (kind=:unsupported, note="casacore roentgen (R) -- Unitful's `R` is the gas constant; write the quantity in SI"),
+    "Gb"      => (kind=:unsupported, note="casacore gilbert (Gb) -- write the quantity in SI (A)"),
     "deg_2"   => (kind=:unsupported, note="casacore squared-degree -- write '°^2'"),
     "sq_deg"  => (kind=:unsupported, note="squared degree -- write '°^2'"),
     "rad"     => (kind=:dimension,   note="dimensionless here; a base dimension in casacore"),

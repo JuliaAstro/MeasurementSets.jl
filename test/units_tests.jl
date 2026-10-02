@@ -237,3 +237,115 @@ end
     out = read(`$_JULIA --project=$_PROJ --startup-file=no -e $child_code`, String)
     @test strip(out) == "true"
 end
+
+
+# Phase 324: every casacore unit NAME (from casacore's UnitMap) that parses was compared against
+# casatools' own canonical SI value (`qa.canonical(qa.quantity(1, name))`).  This found casacore
+# names that Unitful reads as a DIFFERENT unit -- `h` (hour -> Planck's constant), `a` (annum -> the
+# are), `G` (gauss -> the gravitational constant), `R` (roentgen -> the gas constant) -- plus `min`
+# not parsing, and write-direction spellings casacore rejects (`hr`, `minute`, `Gauss`, `Å`).
+# The table below is a static snapshot of those casatools values; a few names use older constants in
+# casacore than in Unitful (AU 2.7e-10, M0/S0 2.6e-4, u 3e-4, cal 1e-3) and get a looser tolerance.
+const _CASACORE_CANON = Dict{String,Float64}(
+    "%" => 0.01,
+    "%%" => 0.001,
+    "AE" => 149597870659.18134,
+    "AU" => 149597870659.18134,
+    "Angstrom" => 1e-10,
+    "Bq" => 1.0,
+    "C" => 1.0,
+    "F" => 1.0,
+    "G" => 0.0001,
+    "Gal" => 0.01,
+    "Gy" => 1.0,
+    "H" => 1.0,
+    "Hz" => 1.0,
+    "J" => 1.0,
+    "Jy" => 1e-26,
+    "L" => 0.0010000000000000002,
+    "M0" => 1.9889194440735207e+30,
+    "Mx" => 1e-08,
+    "N" => 1.0,
+    "Oe" => 79.57747154594767,
+    "Ohm" => 1.0,
+    "Pa" => 1.0,
+    "S" => 1.0,
+    "S0" => 1.9889194440735207e+30,
+    "St" => 0.0001,
+    "Sv" => 1.0,
+    "T" => 1.0,
+    "Torr" => 133.32236842105263,
+    "UA" => 149597870659.18134,
+    "V" => 1.0,
+    "W" => 1.0,
+    "Wb" => 1.0,
+    "a" => 31557600.0,
+    "ac" => 4046.8564223999992,
+    "adu" => 1.0,
+    "arcmin" => 0.0002908882086657216,
+    "arcsec" => 4.84813681109536e-06,
+    "as" => 4.84813681109536e-06,
+    "atm" => 101325.0,
+    "bar" => 100000.0,
+    "beam" => 1.0,
+    "cal" => 4.1868,
+    "count" => 1.0,
+    "d" => 86400.0,
+    "deg" => 0.017453292519943295,
+    "dyn" => 1e-05,
+    "eV" => 1.60217733e-19,
+    "erg" => 1e-07,
+    "ft" => 0.30479999999999996,
+    "g" => 0.001,
+    "h" => 3600.0,
+    "ha" => 10000.0,
+    "in" => 0.025400000000000002,
+    "l" => 0.0010000000000000002,
+    "lambda" => 1.0,
+    "lb" => 0.45359237,
+    "lm" => 1.0,
+    "lx" => 1.0,
+    "ly" => 9460730470000000.0,
+    "m" => 1.0,
+    "mile" => 1609.3439999999998,
+    "min" => 60.0,
+    "oz" => 0.028349523125,
+    "pc" => 3.085677580649422e+16,
+    "pixel" => 1.0,
+    "u" => 1.661e-27,
+    "yd" => 0.9144,
+    "yr" => 31557600.0,
+)
+@testset "units — every parseable casacore unit name matches casacore's canonical value (Phase 324)" begin
+    up = Base.get_extension(MSv2, :UnitfulExt)._ms_uparse
+    loose = Dict("M0" => 1e-3, "S0" => 1e-3, "u" => 1e-3, "cal" => 1e-2, "AE" => 1e-6, "AU" => 1e-6, "UA" => 1e-6)
+    for (name, cv) in _CASACORE_CANON
+        u = up(name)
+        q = 1.0 * u
+        v = U.ustrip(U.uconvert(U.upreferred(U.unit(q)), q))
+        @test isapprox(v, cv; rtol = get(loose, name, 1e-6))
+    end
+    # the names that used to be read as a different unit entirely
+    @test U.uconvert(U.u"s", 1 * up("h")) == 3600 * U.u"s"
+    @test U.uconvert(U.u"s", 1 * up("min")) == 60 * U.u"s"
+    @test U.uconvert(U.u"s", 1 * up("a")) == 3.15576e7 * U.u"s"
+    @test U.dimension(up("G")) == U.dimension(U.u"T")
+    # no Unitful counterpart: refuse rather than silently return a different quantity
+    @test_throws ErrorException up("R")
+    @test_throws ErrorException up("Gb")
+    # write direction: the strings must be casacore unit names
+    us = MSv2._ms_ustring
+    @test us(U.u"hr") == "h"
+    @test us(U.u"minute") == "min"
+    @test us(U.u"Gauss") == "G"
+    @test us(U.u"Å") == "Angstrom"
+    @test us(U.u"yr") == "yr"
+    # and a round trip through a table
+    for u in (U.u"hr", U.u"minute", U.u"Gauss", U.u"yr")
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["X" => [1.5, 2.5] .* u]; nrow=2)
+        t = readtable(d)
+        @test columnunit(t, "X") == u
+        @test qcolumn(t, "X") == [1.5, 2.5] .* u
+    end
+end

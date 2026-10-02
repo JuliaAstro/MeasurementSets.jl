@@ -779,3 +779,80 @@ end
         end
     end
 end
+
+# Phase 322: random-operation fuzz for in-place edits through RefTable /
+# ConcatTable views (Phases 125-130 used fixed rows / fixed parts).  Random
+# (possibly shuffled) RefTable row selections and random 2-3 part ConcatTables
+# over scalar / String / tiled-array columns; random cell writes and whole-
+# column writes through the view, then a random `addcolumn!` through the view.
+# Checked against a plain Julia model of the underlying parent / parts, via our
+# reader and (RefTable case) Casacore.jl.  A column added through a RefTable
+# view lands on the parent: the view's rows get the data, every other row 0.0.
+@testset "edit — through RefTable / ConcatTable views: random op fuzz (Phase 322)" begin
+    rng = MersenneTwister(322)
+    for case in 1:12
+        n = rand(rng, (5, 20, 60))
+        K = Int32.(1:n); V = randn(rng, n); S = [join(rand(rng, 'a':'z', 3)) for _ in 1:n]
+        A = [randn(rng, 3) for _ in 1:n]
+        mk(path, r) = write_table(path, "T", Pair{String,Any}["K" => K[r], "V" => V[r], "S" => S[r], "A" => A[r]];
+                                  nrow=length(r), tsm=[["A"]])
+        model = Dict{String,Any}("V" => copy(V), "S" => copy(S), "A" => copy(A))
+        newname = "N$case"
+        if rand(rng) < 0.6                                             # ---- RefTable view
+            base = joinpath(mktempdir(), "p.tab"); mk(base, 1:n)
+            rows = sort(unique(rand(rng, 1:n, rand(rng, 1:n))))
+            vrows = rand(rng) < 0.5 ? rows : shuffle(rng, rows)
+            d1 = joinpath(mktempdir(), "r.tab"); write_reftable(d1, readtable(base), vrows)
+            newdata = randn(rng, length(vrows))
+            edit(readtable(d1)) do rv
+                for _ in 1:rand(rng, 1:8)
+                    i = rand(rng, 1:length(vrows)); p = vrows[i]
+                    op = rand(rng, 1:4)
+                    if op == 1;     v = randn(rng);                 rv["V"][i] = v; model["V"][p] = v
+                    elseif op == 2; s = join(rand(rng, 'a':'z', 3)); rv["S"][i] = s; model["S"][p] = s
+                    elseif op == 3; a = randn(rng, 3);              rv["A"][i] = a; model["A"][p] = a
+                    else
+                        vals = randn(rng, length(vrows)); rv["V"][:] = vals
+                        for (j, q) in enumerate(vrows); model["V"][q] = vals[j]; end
+                    end
+                end
+                addcolumn!(rv, newname, newdata)
+            end
+            got = readtable(base)
+            newfull = zeros(n); for (j, q) in enumerate(vrows); newfull[q] = newdata[j]; end
+            @test column(got, newname)[:] == newfull
+            ct = _HAVE_CASACORE ? CCT.Table(base) : nothing
+        else                                                            # ---- ConcatTable view
+            np = rand(rng, 2:3)
+            cuts = sort(unique(vcat(0, rand(rng, 1:n-1, np - 1), n)))
+            parts = String[]
+            for k in 1:length(cuts)-1
+                pd = joinpath(mktempdir(), "p$k.tab"); push!(parts, pd); mk(pd, cuts[k]+1:cuts[k+1])
+            end
+            cdir = joinpath(mktempdir(), "c.tab"); write_concattable(cdir, readtable.(parts))
+            newdata = randn(rng, n)
+            edit(readtable(cdir)) do cv
+                for _ in 1:rand(rng, 1:8)
+                    i = rand(rng, 1:n); op = rand(rng, 1:3)
+                    if op == 1;     v = randn(rng);                 cv["V"][i] = v; model["V"][i] = v
+                    elseif op == 2; s = join(rand(rng, 'a':'z', 3)); cv["S"][i] = s; model["S"][i] = s
+                    else;           a = randn(rng, 3);              cv["A"][i] = a; model["A"][i] = a end
+                end
+                addcolumn!(cv, newname, newdata)
+            end
+            got = readtable(cdir)
+            @test column(got, newname)[:] == newdata
+            ct = nothing
+        end
+        for k in ("V", "S", "A")
+            a = column(got, k)[:]
+            @test all(isequal(a[i], model[k][i]) for i in 1:n)
+        end
+        if ct !== nothing
+            for k in ("V", "S")
+                b = ct[Symbol(k)][:]
+                @test all(isequal(b[i], model[k][i]) for i in 1:n)
+            end
+        end
+    end
+end
