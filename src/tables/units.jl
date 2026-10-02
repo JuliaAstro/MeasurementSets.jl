@@ -41,6 +41,15 @@ const _UNIT_ALIASES = Dict{String,String}(
 # Small numeric-constant differences remain where casacore uses older values than Unitful:
 # AU (2.7e-10 relative), M0/S0 solar mass (2.6e-4), u (3e-4), cal (1e-3, IT vs thermochemical).
 
+# Phase 325: casacore's micro prefix is the letter `u` (`uJy`, `us`, `um`, `uas`), which Unitful does
+# not read as a prefix.  A bare `u` is the atomic mass unit and is left alone, as is any token an alias
+# already handled.
+_casacore_micro(aliased::AbstractString, orig::AbstractString) =
+    (aliased == orig && length(orig) > 1 && startswith(orig, "u") && orig != "us_2") ?
+        "\u03bc" * _casacore_micro_tail(orig[2:end]) : String(aliased)
+# Unitful spells micro-arcsecond `μas` (there is no `μarcsecond`); every other tail is used as written
+_casacore_micro_tail(tail) = tail == "arcsec" ? "as" : tail
+
 """
     _normalize_unit(s) -> String
 
@@ -66,7 +75,7 @@ function _normalize_unit(s::AbstractString)
     # substitute whole tokens (letters/°/µ/% runs) via the alias map --
     # note: deliberately digit-free, so a genuine implicit-exponent
     # suffix (handled next) is never mistaken for part of the name.
-    t = replace(t, r"[A-Za-z°µ%]+" => m -> get(_UNIT_ALIASES, m, m))
+    t = replace(t, r"[A-Za-z°µ%]+" => m -> _casacore_micro(get(_UNIT_ALIASES, m, m), m))
     # casacore's implicit exponent: a unit name immediately followed by
     # a bare digit run (no separator) is that unit raised to that power.
     return replace(t, r"([A-Za-z°µ%])([0-9]+)" => s"\1^\2")

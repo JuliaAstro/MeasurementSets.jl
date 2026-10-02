@@ -10689,3 +10689,12 @@ meaningful. (2) `copytable` re-encodes Dysco with `dither=true` drawing from the
 was nondeterministic run to run (one stray local failure, unreproducible in 5 reruns, exposed this); the test
 now seeds the global RNG as well as its own. Verified identical results over 6 repeated local runs and clean
 on x86-64 Docker.
+### Phase 325 — casacore's micro prefix `u` did not parse (all 24 SI prefixes diffed against casatools)
+
+Following Phase 324's exhaustive name-table diff, compared casacore's 24 SI prefixes × `m`/`Hz`/`g`/`s` against
+casatools' canonical values. Everything agrees except: casacore's **micro prefix is the letter `u`** (`uJy`,
+`us`, `um`, `uas`), which none of Unitful's parsers accept — every microunit raised the "no Unitful
+equivalent" error — and the write direction emitted Unitful's `μ`, which casacore rejects. Fixed both
+(`u<unit>` → `μ<unit>` on read, with `uas`/`uarcsec` → `μas`; `μ`/`µ` → `u` on write); a bare `u` stays the
+atomic mass unit. Not fixed (rare, noted in the test): the 2022 prefixes `Q`/`R`/`q`/`r` (Unitful predates
+them) and `das` (casacore deci-arcsecond vs Unitful deka-second). New testset in `test/units_tests.jl`.
