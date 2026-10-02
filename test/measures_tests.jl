@@ -1867,3 +1867,17 @@ end
         @test rc(:doppler, i - 1) == n
     end
 end
+
+# Phase 329: every name `casatools` lists (59) was diffed against the bundled Observatories table: 53 agree
+# to <1 cm; the other 6 are deliberately omitted because casacore's own entries for them are placeholders
+# or are geodetic (lon, lat, height) values mis-labelled as ITRF (see src/measures/observatories.jl).
+@testset "measures — Observatories table: documented omissions (Phase 329)" begin
+    @test length(MSv2._OBSERVATORIES) == 53
+    for n in ("VLBA", "EVN", "SUNRISE", "OVRO_MMA", "LOFAR", "NGVLA")
+        @test observatory(n) === nothing
+    end
+    # nothing in the table is a placeholder or a ~km-radius mislabelled entry: every position is on the Earth's surface
+    for (n, xyz) in MSv2._OBSERVATORIES
+        @test 6.3e6 < hypot(xyz...) < 6.4e6
+    end
+end

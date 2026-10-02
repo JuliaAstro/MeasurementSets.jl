@@ -3211,13 +3211,15 @@ end
     # Phase 87: bare sexagesimal literals in the tokenizer
     @test MSv2._sexagesimal_unit("h30m") === :ra
     @test MSv2._sexagesimal_unit("d51m16s") === :dec
-    @test MSv2._sexagesimal_unit("h") === :ra
+    @test MSv2._sexagesimal_unit("h") === nothing          # Phase 333: single-field `6h` is a plain quantity
+    @test MSv2._sexagesimal_unit("d") === nothing
+    @test MSv2._sexagesimal_unit("h15s") === :ra
     @test MSv2._sexagesimal_unit("deg") === nothing        # a plain quantity
     @test MSv2._sexagesimal_unit("m") === nothing
     tk(s) = MSv2._taqllite_tokenize(s)[1]
     @test tk("10h30m").kind === :num && tk("10h30m").value ≈ deg2rad(157.5)
     @test tk("45d51m16s").value ≈ deg2rad(45.854444)
-    @test tk("12h").value ≈ pi
+    @test tk("12h").kind === :qty                            # Phase 333: hour, not an RA angle
     @test tk("30deg").kind === :qty                          # unchanged
 
     # in a query
@@ -3232,7 +3234,10 @@ end
     write_table(dir2, "R", Pair{String,Any}["RA" => [2.5, 2.8, 3.1]]; nrow=3)
     tr = readtable(dir2)
     @test query(tr, "RA > 10h30m").rows == [2, 3]            # 157.5 deg = 2.749 rad
-    @test query(tr, "RA BETWEEN 8h AND 12h").rows == [1, 2, 3]
+    # Phase 333: a single-field `8h` is a plain hour quantity (as in real TaQL), so against a UNITLESS column it
+    # is a unit mismatch rather than the old "RA hour angle" reading; against a column with an angle unit it
+    # converts as time-angle (24 h = 2 pi) -- see the Phase 333 testset.
+    @test_throws Exception query(tr, "RA BETWEEN 8h AND 12h")
 end
 
 # Phase 174: `MVTime::read`'s dash-numeric `dd-mm-yyyy` date form (a
@@ -4679,4 +4684,74 @@ end
         @test isempty(agree)
         isempty(agree) || println(agree)
     end
+end
+
+# Phase 332: `datetime('<string>')` random date-format fuzz vs real TaQL.  Real `MVTime::read` accepts more
+# than the ISO-ish list ours had: `Y/M/D` with ANY of `/ T space -` before the time (month/day roll over:
+# `2020/02/30` is 1 March), `H:M[:S[.f]]` or `10h30m15s` times, `D[-]Mon[-]Y` with a 2- or 4-digit year and a
+# `/time`, and -- oddly -- a bare number is an MJD day count (`20200212` is 20200212 days, `58000/12:00` is
+# 58000.5).  `D Mon Y` with spaces and `D/M/Y` are NOT dates in real TaQL (error / garbage) and stay errors.
+if _HAVE_TAQL
+@testset "datetime() string formats vs real TaQL (Phase 332)" begin
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["K" => Int32[1]]; nrow=1)
+    t = readtable(d)
+    ours(s) = try collect(column(taql(t, "SELECT datetime('$s') AS X FROM \$1"), "X")[:])[1] catch; :err end
+    real(s) = try collect(_taqlcmd("SELECT datetime('$s') AS X FROM \$1", d)[:X][:])[1] catch; :err end
+    probes = ["2020/02/12", "2020/2/5", "2020/02/12/10:30", "2020/02/12T10:30", "2020/02/12 10:30", "2020/02/12-10:30",
+              "20200212", "20200212/10:30", "58000", "58000.5", "58000/12:00", "12Feb2020/10:30:15.5", "12Feb20",
+              "12-Feb-20/1:2:3", "2020-02-12/10h30m", "2020/02/12/10h30m15s", "2020-02-12 1:2:3.5", "2020/13/01",
+              "2020/02/30", "2020/02/12/10:30:15:", "Feb 12 2020", "12 Feb 2020 10:30", "10 Dec 2024"]
+    for s in probes
+        r, o = real(s), ours(s)
+        r === :err ? (@test o === :err) : @test o isa Real && isapprox(o, r; atol=1e-9)
+    end
+    rng = MersenneTwister(332)
+    mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    p2(x) = lpad(x, 2, '0')
+    for _ in 1:60
+        y = rand(rng, 1990:2040); m = rand(rng, 1:12); dd = rand(rng, 1:28)
+        H = rand(rng, 0:23); M = rand(rng, 0:59); S = rand(rng, 0:59); fr = rand(rng, (0, 123, 5))
+        tm = rand(rng, ("", "HM", "HMS", "HMSf"))
+        tp(sep) = tm == "" ? "" : sep * (tm == "HM" ? "$(p2(H)):$(p2(M))" : tm == "HMS" ? "$(p2(H)):$(p2(M)):$(p2(S))" :
+                                         "$(p2(H)):$(p2(M)):$(p2(S)).$(lpad(fr, 3, '0'))")
+        s = rand(rng, (() -> "$y-$(p2(m))-$(p2(dd))" * tp("T"), () -> "$y/$m/$dd" * tp("/"), () -> "$dd$(mon[m])$y" * tp("/"),
+                       () -> "$dd-$(mon[m])-$y" * tp("/"), () -> "$dd $(mon[m]) $y" * tp("/"), () -> "$y$(p2(m))$(p2(dd))" * tp("/"),
+                       () -> "$y/$(p2(m))/$(p2(dd))" * tp("T")))()
+        r, o = real(s), ours(s)
+        r === :err ? (@test o === :err) : @test o isa Real && isapprox(o, r; atol=1e-9)
+    end
+end
+end
+
+
+# Phase 333: unit-literal comparisons fuzzed against real TaQL.  Found a real bug: a single-field `6.06h` /
+# `3.73d` was lexed as a sexagesimal ANGLE (RA hours / degrees -> radians), so `TM >= 6.06h` on a column in
+# seconds compared against ~1.6 radians.  Real TaQL treats them as plain hour / day quantities: converted to
+# seconds against a time column, time->angle (24 h = 2 pi) against an angle column; only the multi-field forms
+# (`10h30m`, `30d15m`) are sexagesimal angles.  (Real TaQL rejects BETWEEN with mixed units and scientific
+# notation with a unit; ours is more lenient there.)
+if _HAVE_TAQL && _HAVE_UNITFUL
+@testset "unit-literal comparisons vs real TaQL, incl. single-field h/d (Phase 333)" begin
+    n = 40
+    cols = Pair{String,Any}["TM" => exp10.(range(-1, 6, length=n)), "A" => collect(range(0, 6.2, length=n)),
+                            "FR" => exp10.(range(6, 11, length=n)), "K" => Int32.(1:n)]
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", cols; nrow=n, units=Dict("TM" => "s", "A" => "rad", "FR" => "Hz"))
+    t = readtable(d)
+    ours(q) = collect(column(query(t, q), "K")[:])
+    real(q) = try collect(_taqlcmd("SELECT K FROM \$1 WHERE " * q, d)[:K][:]) catch; :err end
+    for q in ["TM > 1h", "TM > 0.5d", "TM > 1h30m", "TM > 30m", "TM > 90s", "TM < 3.5h",
+              "A > 1h", "A > 10h30m", "A > 30d", "A > 30d15m", "A > 3h", "A > 0.5d", "A > 90deg", "A > 5400arcmin",
+              "FR > 1.4GHz", "FR <= 200MHz", "FR > 1.4e9"]
+        r = real(q)
+        r === :err || @test ours(q) == r
+    end
+    # the specific bug: hour / day against a seconds column
+    @test ours("TM > 1h") == ours("TM > 3600")
+    @test ours("TM > 0.5d") == ours("TM > 43200")
+    # time -> angle coercion: 24 h = 2 pi rad
+    @test ours("A > 12h") == ours("A > $(Float64(pi))")
+    # a time quantity against a unitless column is a unit mismatch, not an RA reading
+    @test_throws Exception query(readtable(let p = joinpath(mktempdir(), "u"); write_table(p, "U", Pair{String,Any}["X" => [1.0, 2.0]]; nrow=2); p end), "X > 1h")
+end
 end

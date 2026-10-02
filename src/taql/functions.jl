@@ -237,9 +237,12 @@ const _TQL_DT_FORMATS = (
 # Returns radians.
 # classify a `<num><unit>` literal's unit run as a sexagesimal token:
 # `h` / `h30m` / `h30m15s` -> :ra, `d` / `d51m` / `d51m16` -> :dec, else
-# `nothing` (a plain quantity literal like `30deg` / `1.4GHz`).
+# `nothing` (a plain quantity literal like `30deg` / `1.4GHz` / a single-field `6h` / `2d`).
 function _sexagesimal_unit(u::AbstractString)
-    m = match(r"^([hd])(?:\d+(?:\.\d+)?m(?:\d+(?:\.\d+)?s?)?|\d+(?:\.\d+)?s)?$", u)
+    # Phase 333: only the MULTI-field forms (`h30m`, `h30m15s`, `d51m`, `d51m16s`, `h15s`) are sexagesimal
+    # angles.  A single-field `6h` / `0.5d` is a plain quantity in real TaQL (hour / day -- a time against a
+    # time column, time-angle against an angle column), so it is left to the quantity-literal path.
+    m = match(r"^([hd])(?:\d+(?:\.\d+)?m(?:\d+(?:\.\d+)?s?)?|\d+(?:\.\d+)?s)$", u)
     m === nothing ? nothing : (m[1] == "h" ? :ra : :dec)
 end
 
@@ -276,7 +279,7 @@ end
 # (`in.tSkipChar('/') || in.tSkipChar('-') || in.tSkipChar(' ')`,
 # `MVTime.cc:513`), not just the ISO `T` -- also live-verified.
 function _tql_parse_dashnum_date(s::AbstractString)
-    m = match(r"^(\d{1,4})-(\d{1,2})-(\d{1,4})(?:[ /T-](\d{1,2}):(\d{1,2}):(\d{1,2}(?:\.\d+)?))?$", s)
+    m = match(Regex("^(\\d{1,4})-(\\d{1,2})-(\\d{1,4})(?:[ /T-]" * _TQL_TIME_RE * ")?\$"), s)
     m === nothing && return nothing
     r = parse(Int, m[1]); mm = parse(Int, m[2]); dd2 = parse(Int, m[3])
     if r > 1000
@@ -287,16 +290,60 @@ function _tql_parse_dashnum_date(s::AbstractString)
         yyyy, mon, day = dd2, mm, r
     end
     (1 <= mon <= 12 && 1 <= day <= 31) || return nothing
-    h  = m[4] === nothing ? 0   : parse(Int, m[4])
-    mi = m[5] === nothing ? 0   : parse(Int, m[5])
-    se = m[6] === nothing ? 0.0 : parse(Float64, m[6])
-    ms = round(Int, 1000 * (se - floor(se)))
-    dt = try
-        Dates.DateTime(yyyy, mon, day, h, mi, floor(Int, se), ms)
+    d = try
+        Dates.DateTime(yyyy, mon, day)
     catch
         return nothing
     end
-    return _tql_mjd_of(dt)
+    return _tql_mjd_of(d) + _tql_time_fraction(m, 4)
+end
+
+# Phase 332: the rest of casacore's `MVTime::read` date grammar (live-probed against real `datetime()`):
+#   * a bare number is an MJD day count: `58000`, `58000.5`, and even `20200212` (NOT a date!), optionally
+#     followed by a time (`20200212/10:30` = 20200212 + 10:30 as a day fraction);
+#   * `Y/M/D` (year first, > 1000) with ANY of `/ T space -` before a time, month and day unbounded, so
+#     `2020/13/01` and `2020/02/30` roll over (Jan 2021, 1 Mar) instead of erroring;
+#   * `D[-]Mon[-]Y` with a 2- or 4-digit year (`12Feb20`, `3Aug2033`; spaces are NOT accepted) and a time only after `/`;
+#   * times as `H:M[:S[.f]]` or `HhMmSs` (`10h30m15s`).
+# (`D/M/Y` is not a date in casacore either -- it gives garbage -- so it stays an error here.)
+const _TQL_TIME_RE = "(?:(\\d{1,2}):(\\d{1,2})(?::(\\d{1,2}(?:\\.\\d+)?))?|(\\d{1,2})h(\\d{1,2})m(?:(\\d{1,2}(?:\\.\\d+)?)s?)?)"
+const _TQL_MONTHS = Dict("jan"=>1, "feb"=>2, "mar"=>3, "apr"=>4, "may"=>5, "jun"=>6, "jul"=>7, "aug"=>8,
+                         "sep"=>9, "oct"=>10, "nov"=>11, "dec"=>12)
+
+# time-of-day match groups (colon form 1:3, `hms` form 4:6) -> fraction of a day
+function _tql_time_fraction(m, k::Int)
+    g(i) = m[k + i - 1]
+    (h, mi, se) = g(1) !== nothing ? (g(1), g(2), g(3)) : (g(4), g(5), g(6))
+    h === nothing && return 0.0
+    (parse(Float64, h) * 3600 + parse(Float64, mi) * 60 + (se === nothing ? 0.0 : parse(Float64, se))) / 86400
+end
+
+# (year, month, day) with month/day unbounded (casacore rolls them over) -> MJD of that day
+function _tql_ymd_rollover(y::Integer, mon::Integer, day::Integer)
+    y += fld(mon - 1, 12); mon = mod(mon - 1, 12) + 1
+    _tql_mjd_of(Dates.DateTime(y, mon, 1)) + (day - 1)
+end
+
+function _tql_parse_casacore_date(s::AbstractString)
+    T = _TQL_TIME_RE
+    # bare number [+ time]
+    m = match(Regex("^(\\d+(?:\\.\\d+)?)(?:[ /T-]" * T * ")?\$"), s)
+    m !== nothing && return parse(Float64, m[1]) + _tql_time_fraction(m, 2)
+    # Y/M/D [time]
+    m = match(Regex("^(\\d{4,})/(\\d+)/(\\d+)(?:[ /T-]" * T * ")?\$"), s)
+    m !== nothing && return _tql_ymd_rollover(parse(Int, m[1]), parse(Int, m[2]), parse(Int, m[3])) +
+                            _tql_time_fraction(m, 4)
+    # D[ -]Mon[ -]Y [/time]
+    m = match(Regex("^(\\d{1,2})-?([A-Za-z]{3})-?(\\d{2}|\\d{4})(?:/" * T * ")?\$"), s)
+    if m !== nothing
+        mon = get(_TQL_MONTHS, lowercase(m[2]), nothing)
+        if mon !== nothing
+            y = parse(Int, m[3])
+            length(m[3]) == 2 && (y += y < 50 ? 2000 : 1900)
+            return _tql_ymd_rollover(y, mon, parse(Int, m[1])) + _tql_time_fraction(m, 4)
+        end
+    end
+    return nothing
 end
 
 function _tql_parse_datetime(s::AbstractString)
@@ -310,6 +357,8 @@ function _tql_parse_datetime(s::AbstractString)
     # 2-digit-year-expansion rule up front so the bare `N-N-N` shape is
     # never handed to a format string that can silently mis-parse it.
     m = _tql_parse_dashnum_date(ss)
+    m === nothing || return m
+    m = _tql_parse_casacore_date(ss)
     m === nothing || return m
     for f in _TQL_DT_FORMATS
         v = tryparse(Dates.DateTime, ss, f)

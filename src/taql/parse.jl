@@ -610,6 +610,12 @@ function _parse_atom_base!(p::TQLParser)
             _advance!(p)
             return TQLQuantityLit(_tql_quantity(t.value, nx.text))
         end
+        # a multi-field sexagesimal literal (`10h30m`, `30d15m`) is an angle; with Unitful loaded it
+        # is a radian quantity, so against a time-unit column it converts as time (24 h = 2 pi) like
+        # real TaQL, and against a unitless column it is a plain number (rad is dimensionless).
+        if tryparse(Float64, t.text) === nothing && occursin(r"[hdms]", t.text) && Base.get_extension(@__MODULE__, :UnitfulExt) !== nothing
+            return TQLQuantityLit(_tql_quantity(t.value, "rad"))
+        end
         return TQLLit(t.value)
     elseif t.kind === :qty
         return TQLQuantityLit(_tql_quantity(t.value[1], t.value[2]))

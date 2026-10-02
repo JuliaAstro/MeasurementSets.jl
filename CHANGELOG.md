@@ -10715,3 +10715,53 @@ radial velocity, Doppler and position all match. **`MEarthMagnetic` did not**: i
 direction list *without* `B1950_VLA`, so codes 5 and up decoded one frame too late (code 5 → `B1950_VLA`
 instead of `BMEAN`, …), and its model type `IGRF` is code 32, which was out of range. Fixed with a dedicated
 `_EM_ENUM` and the code-32 case. New testset in `test/measures_tests.jl` pinning every enum (123 assertions).
+
+### Phase 329 — bundled Observatories table diffed exhaustively against casatools (no bug found)
+
+Phase 218 had spot-checked 14 of the bundled Observatories entries. All 59 names `casatools` lists were now
+compared: the 53 present agree to under 1 cm. The 6 deliberately omitted are unusable even in casacore: `VLBA`/`EVN`
+are ITRF (0,0,0) placeholders, `SUNRISE` is a balloon at (0,0,743 m), and `OVRO_MMA`/`LOFAR`/`NGVLA` store
+geodetic-looking (lon, lat, height) values under the ITRF type, so `me.observatory(name)` returns a ~1 km radius
+from the Earth's centre. Documented in `src/measures/observatories.jl` (also correcting its stale "falls back to
+antenna 0" note — it is the middle antenna since Phase 144). New test pins the omissions and that every bundled
+position is on the Earth's surface.
+
+### Phase 330 — standard MS schema diffed against a casatools-built MS (no bug found)
+
+Every column of a casatools-simulator-built MS (134 columns over MAIN and 12 subtables) was diffed against
+`stdtable`: all value types agree, no required schema column is absent from the casacore-built MS, and every
+fixed-rank schema shape has casacore's rank. Differences are representational only (casacore repeats a unit per
+component, `m,m,m`, where the schema has `m`; `MODEL_DATA`/`CORRECTED_DATA` are casacore-added optional columns;
+three SOURCE columns report no rank). Pinned by a static snapshot test in `test/schema_tests.jl`.
+
+### Phase 331 — hard-coded format constants diffed against casacore's headers (no bug found)
+
+`ColumnDesc::Option` (Direct=1, Undefined=2, FixedShape=4), `StorageOption::Option` (MultiFile=0, MultiHDF5=1,
+SepFile=2) and the ColumnSet version codes all match what the writer/reader hard-code; the 8-character type ids in
+the `ScalarColumnDesc<…>` class names are already proven end to end (real casacore refuses an unknown class name,
+and the Phase 265 type matrix round-trips every type). Pinned by a static test in `test/writer_tests.jl`.
+
+### Phase 332 — `datetime('<string>')` accepts the rest of casacore's date grammar (random format fuzz vs real TaQL)
+
+Spread 400 random date strings over 9 formats against real `datetime()`: ours rejected or misread about a third of
+what casacore's `MVTime::read` accepts. Now matching (live-probed): `Y/M/D` with any of `/ T space -` before a
+time, with month/day unbounded so `2020/02/30` rolls to 1 March; times as `H:M[:S[.f]]` **or** `10h30m15s`
+(including after the dash-numeric `2020-02-12/10h30m`); `D[-]Mon[-]Y` with a 2- or 4-digit year and a `/time`
+(`12Feb20`, `3Aug2033/01:49`); and — oddly but really — a **bare number is an MJD day count** (`58000`,
+`58000/12:00` = 58000.5, and even `20200212` is 20200212 days, not a date). `D Mon Y` with spaces and `D/M/Y` are
+not dates in real TaQL either and stay errors. After the change all 400 strings agree with real TaQL (361 equal
+values, 39 rejected by both). New testset in `test/taql_query_tests.jl` (23 probe strings + 60 random,
+fixed-seed `MersenneTwister(332)`); the existing date/time testsets and `mscal.time` tests are unchanged.
+
+### Phase 333 — single-field `h`/`d` literals are plain time quantities; time ↔ angle coercion (unit-literal fuzz vs real TaQL)
+
+Fuzzing `col <op> <number><unit>` comparisons against real TaQL on columns with units found a real bug: a single-field
+`6.06h` / `3.73d` was lexed as a sexagesimal **angle** (RA hours / degrees → radians), so `TM > 1h` on a column in
+seconds compared against ~0.26 rad. Real TaQL reads single-field `Nh` / `Nd` as plain hour / day quantities (only the
+multi-field `10h30m` / `30d15m` are sexagesimal angles), and converts between time and angle with 24 h = 2π — both
+`TM > 1h30m` on a seconds column (= 5400 s) and `A > 12h` on a radian column (= π). Fixed: `_sexagesimal_unit` needs a
+following `m…`/`s` field; with Unitful loaded the multi-field forms become radian quantities (rad is dimensionless, so
+a unitless column still compares as a plain number); `_bcast` retries a `DimensionError` through an extension hook
+(`_tql_dim_coerce`) that converts a time operand to an angle when the other is an angle. Metre-vs-second style
+mismatches (`TM > 30m`) still error, as in real TaQL. The Phase 87 single-field-`h` assertions were updated. New
+testset in `test/taql_query_tests.jl` cross-checking 17 unit-literal forms against real TaQL.
