@@ -10598,3 +10598,20 @@ keys silently became `Float64`, which real TaQL rejects as a join key — worth 
 fuzz fixtures.)
 
 New testset in `test/taql_command_tests.jl` (12 cases × 8 queries, fixed-seed `MersenneTwister(318)`).
+
+### Phase 319 — `taql` SELECT `ORDER BY` / `DISTINCT` / `LIMIT` / `OFFSET` random fuzz vs real TaQL (no bug; one documented `DISTINCT` tie-order divergence)
+
+Spread 40 exploratory random cases × 8 queries on low-cardinality columns (lots of ties): random 1–3-key
+`ORDER BY` with `ASC`/`DESC`, leading `DESC`, `WHERE`, `LIMIT` / negative `LIMIT` / `OFFSET`. All plain
+`SELECT`s match real `tableCommand` **exactly** (stable multi-key sort, tie order included). Queries with an
+empty or past-the-end window make real TaQL throw a lazy "Slicer error" (as in Phase 318); ours returns
+0 rows or an `ArgumentError`.
+
+`SELECT DISTINCT … ORDER BY k` returns the same *set* of rows, but the order among rows tied on `k` (and an
+`ORDER BY` on an unselected column, or a `LIMIT` cutting through ties) can differ: ours keeps the first row
+of each distinct tuple of the sorted result, whereas real TaQL dedups with a no-duplicates heap sort that
+keeps an arbitrary representative row per tuple (inferred from the tie patterns; small, tie-free cases
+agree). Not worth porting its heap sort — the tie order is unspecified in SQL terms — so it is documented
+in `src/taql/commands.jl` and the test compares `DISTINCT` results as multisets.
+
+New testset in `test/taql_command_tests.jl` (12 cases × 8 queries, fixed-seed `MersenneTwister(319)`).

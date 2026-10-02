@@ -840,6 +840,11 @@ function taql(target, command::AbstractString, others...)
                (orderstr === nothing ? "" : " ORDER BY " * orderstr)
         result = query(t, qstr; select)
         end
+        # DISTINCT (Phase 319): ours keeps the FIRST row of each distinct tuple of the
+        # sorted result.  Real TaQL dedups with a no-duplicates heap sort that keeps an
+        # arbitrary representative row per tuple, so with `DISTINCT ... ORDER BY k` the
+        # order among rows tied on `k` -- and an `ORDER BY` on an unselected column, plus
+        # any `LIMIT` cutting through such ties -- can differ.  The SET of rows is the same.
         if distinct || window !== nothing
             keep = collect(1:nrow(result))
             if distinct
