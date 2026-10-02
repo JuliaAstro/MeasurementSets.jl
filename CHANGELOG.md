@@ -10657,3 +10657,24 @@ several MB (so a tile holds less than one cell and the tile shape has to be clam
 (`column(...)[:]`, `rawblock`), an in-place cell edit, and `Casacore.jl` wherever it can fetch a cell
 (104 comparisons; it cannot index every fixed-shape tiled column, a known limitation): all agree. New testset
 in `test/tsm_multicol_tests.jl` (14 cases, fixed-seed `MersenneTwister(323)`).
+
+### Phase 324 — casacore ↔ Unitful unit mapping checked against casatools for every unit name: four silent mis-parses and four unreadable write spellings fixed
+
+A round-trip fuzz of Unitful-typed columns (write → `columnunit`/`qcolumn`) over ~40 units turned up unit
+spellings that did not survive. Checking *every* unit name in casacore's `UnitMap` (152) against casatools'
+own canonical SI value (`qa.canonical(qa.quantity(1, name))`) showed the cause: casacore names that Unitful
+reads as a **different** unit entirely, silently giving wrong numbers:
+
+* `h` (hour) parsed as **Planck's constant**; `a` (annum) as the **are** (100 m²); `G` (gauss) as the
+  **gravitational constant**; `R` (roentgen) as the **gas constant**; `min` did not parse at all.
+
+Fixed in `_UNIT_ALIASES` (`h→hr`, `a→yr`, `min→minute`, `G→Gauss`, plus `Ohm`, `in`, `mile`); `R` and `Gb`
+(gilbert), which have no Unitful counterpart, now raise the usual clear error instead of returning a wrong
+quantity. The **write** direction emitted strings casacore itself cannot read — `hr`, `minute`, `Gauss`,
+`Å`, `Ω` — now mapped to `h`, `min`, `G`, `Angstrom`, `Ohm` (confirmed accepted by casatools). Remaining
+differences are only older numeric constants in casacore (AU 2.7e-10, M0/S0 2.6e-4, `u` 3e-4, `cal` 1e-3
+relative), documented in `src/tables/units.jl`. A TaQL spaced literal such as `3 h` now means three hours
+rather than 3·Planck's-constant.
+
+New testset in `test/units_tests.jl`: a static snapshot of casatools' canonical value for every unit name
+that parses (68 names), the previously mis-parsed names, the write spellings, and table round trips.
