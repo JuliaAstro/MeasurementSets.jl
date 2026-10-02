@@ -10698,3 +10698,11 @@ equivalent" error — and the write direction emitted Unitful's `μ`, which casa
 (`u<unit>` → `μ<unit>` on read, with `uas`/`uarcsec` → `μas`; `μ`/`µ` → `u` on write); a bare `u` stays the
 atomic mass unit. Not fixed (rare, noted in the test): the 2022 prefixes `Q`/`R`/`q`/`r` (Unitful predates
 them) and `das` (casacore deci-arcsecond vs Unitful deka-second). New testset in `test/units_tests.jl`.
+
+### Phase 326 — `mscal.stokes` polarization-name table diffed against casacore's `Stokes` enum (no bug found)
+
+Applying Phase 324/325's exhaustive name-table diff to polarization names: `_STOKES_NAMES` codes 1–20
+(`I Q U V`, `RR RL LR LL`, `XX XY YX YY`, `RX RY LX LY`, `XR XL YR YL`) match casacore's
+`Stokes::StokesTypes` enum order exactly. casacore additionally defines `PP PQ QP QQ` (21–24) and
+`RCircular` / `LCircular` / `Linear` (25–27), which neither casacore's `StokesConverter` nor `mscal.stokes`
+converts; they raise a clear `ArgumentError`. Pinned by a static test in `test/taql_mscal_tests.jl`.

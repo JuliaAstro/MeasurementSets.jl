@@ -2091,3 +2091,19 @@ end
         end
     end
 end
+
+# Phase 326: casacore's `Stokes::StokesTypes` enum (measures/Measures/Stokes.h) diffed against
+# `_STOKES_NAMES`: codes 1-20 (I Q U V, RR RL LR LL, XX XY YX YY, RX RY LX LY, XR XL YR YL) match exactly.
+# casacore also defines PP PQ QP QQ (21-24) and RCircular / LCircular / Linear (25-27), which the
+# StokesConverter and `mscal.stokes` do not convert; they must fail clearly, not mis-convert.
+@testset "mscal.stokes — polarization-name table matches casacore's Stokes enum (Phase 326)" begin
+    casacore_order = ["I", "Q", "U", "V", "RR", "RL", "LR", "LL", "XX", "XY", "YX", "YY",
+                      "RX", "RY", "LX", "LY", "XR", "XL", "YR", "YL"]
+    for (code, name) in enumerate(casacore_order)
+        @test MSv2._STOKES_NAMES[name] == code
+    end
+    @test length(MSv2._STOKES_NAMES) == 20
+    for bad in ("PP", "PQ", "QP", "QQ", "RCircular", "LCircular", "Z")
+        @test_throws ArgumentError MSv2._parse_stokes_types(bad)
+    end
+end
