@@ -175,7 +175,24 @@ end
 _bcast(f, x) = x isa AbstractArray ? f.(x) : f(x)
 # two array operands must have the SAME shape (real TaQL: "ArrayMath function
 # +: array shapes mismatch" -- no implicit broadcasting; Phase 285)
+# Phase 333: a comparison / arithmetic between a TIME quantity (`6h`, `0.5d`, a column in seconds) and an ANGLE
+# quantity (a column in rad, dimensionless in Unitful) is a unit error in Unitful but a time-angle conversion in
+# casacore (24 h = 2 pi).  `_tql_dim_coerce` (Unitful extension) returns the converted operands or `nothing`.
+_tql_dim_coerce(args...) = nothing     # varargs: the extension method (x, y) is strictly more specific
+_is_dimerror(e) = nameof(typeof(e)) === :DimensionError
+
 function _bcast(f, x, y)
+    try
+        return _bcast_raw(f, x, y)
+    catch e
+        _is_dimerror(e) || rethrow()
+        c = _tql_dim_coerce(x, y)
+        c === nothing && rethrow()
+        return _bcast_raw(f, c[1], c[2])
+    end
+end
+
+function _bcast_raw(f, x, y)
     if x isa AbstractArray && y isa AbstractArray
         size(x) == size(y) || throw(ArgumentError(
             "TaQL-lite: array operands have different shapes $(size(x)) and $(size(y))"))

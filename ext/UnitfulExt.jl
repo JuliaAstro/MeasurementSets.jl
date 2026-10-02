@@ -167,6 +167,19 @@ function MS._ms_ustring(u::Unitful.Units)
           "`MeasurementSets.UNITS_NO_JULIA_COUNTERPART`")
 end
 
+# Phase 333: time <-> angle coercion for TaQL comparisons (casacore: 24 h = 2 pi, so `A > 3h` on a rad column is
+# 3 h = 45 degrees; `UnitfulAngles` angles are dimensionless, so Unitful itself raises a DimensionError).
+_first_q(x) = x isa Unitful.AbstractQuantity ? x : (x isa AbstractArray && !isempty(x) ? _first_q(first(x)) : nothing)
+_is_time(q) = q !== nothing && Unitful.dimension(q) == Unitful.dimension(Unitful.u"s")
+_is_angle(q) = q !== nothing && Unitful.dimension(q) == Unitful.NoDims
+_time_to_angle(x) = Unitful.ustrip(Unitful.u"d", x) * (2pi) * Unitful.u"rad"
+function MS._tql_dim_coerce(x, y)
+    qx, qy = _first_q(x), _first_q(y)
+    _is_time(qx) && _is_angle(qy) && return (_time_to_angle.(x), y)
+    _is_angle(qx) && _is_time(qy) && return (x, _time_to_angle.(y))
+    return nothing
+end
+
 # a column of `Unitful.Quantity` (scalar or array-cell) -> plain numbers
 # in the first element's unit + the `QuantumUnits` string; `nothing` if
 # the eltype is not a quantity.

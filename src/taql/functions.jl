@@ -237,9 +237,12 @@ const _TQL_DT_FORMATS = (
 # Returns radians.
 # classify a `<num><unit>` literal's unit run as a sexagesimal token:
 # `h` / `h30m` / `h30m15s` -> :ra, `d` / `d51m` / `d51m16` -> :dec, else
-# `nothing` (a plain quantity literal like `30deg` / `1.4GHz`).
+# `nothing` (a plain quantity literal like `30deg` / `1.4GHz` / a single-field `6h` / `2d`).
 function _sexagesimal_unit(u::AbstractString)
-    m = match(r"^([hd])(?:\d+(?:\.\d+)?m(?:\d+(?:\.\d+)?s?)?|\d+(?:\.\d+)?s)?$", u)
+    # Phase 333: only the MULTI-field forms (`h30m`, `h30m15s`, `d51m`, `d51m16s`, `h15s`) are sexagesimal
+    # angles.  A single-field `6h` / `0.5d` is a plain quantity in real TaQL (hour / day -- a time against a
+    # time column, time-angle against an angle column), so it is left to the quantity-literal path.
+    m = match(r"^([hd])(?:\d+(?:\.\d+)?m(?:\d+(?:\.\d+)?s?)?|\d+(?:\.\d+)?s)$", u)
     m === nothing ? nothing : (m[1] == "h" ? :ra : :dec)
 end
 
