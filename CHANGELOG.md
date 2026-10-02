@@ -10715,3 +10715,13 @@ radial velocity, Doppler and position all match. **`MEarthMagnetic` did not**: i
 direction list *without* `B1950_VLA`, so codes 5 and up decoded one frame too late (code 5 → `B1950_VLA`
 instead of `BMEAN`, …), and its model type `IGRF` is code 32, which was out of range. Fixed with a dedicated
 `_EM_ENUM` and the code-32 case. New testset in `test/measures_tests.jl` pinning every enum (123 assertions).
+
+### Phase 329 — bundled Observatories table diffed exhaustively against casatools (no bug found)
+
+Phase 218 had spot-checked 14 of the bundled Observatories entries. All 59 names `casatools` lists were now
+compared: the 53 present agree to under 1 cm. The 6 deliberately omitted are unusable even in casacore: `VLBA`/`EVN`
+are ITRF (0,0,0) placeholders, `SUNRISE` is a balloon at (0,0,743 m), and `OVRO_MMA`/`LOFAR`/`NGVLA` store
+geodetic-looking (lon, lat, height) values under the ITRF type, so `me.observatory(name)` returns a ~1 km radius
+from the Earth's centre. Documented in `src/measures/observatories.jl` (also correcting its stale "falls back to
+antenna 0" note — it is the middle antenna since Phase 144). New test pins the omissions and that every bundled
+position is on the Earth's surface.

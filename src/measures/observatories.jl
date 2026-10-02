@@ -5,8 +5,17 @@
 #
 # Bundled snapshot of casacore's `geodetic/Observatories` data table
 # (dumped via `casatools.measures().observatory(name)`, converted to
-# ITRF Cartesian).  Station-array placeholders (VLBA / EVN, position
-# 0,0,0) are omitted -- a lookup miss falls back to antenna 0.
+# ITRF Cartesian).  A lookup miss falls back to the array's middle
+# antenna.
+#
+# Phase 329: ALL 59 names `casatools` lists were diffed against this table: the 53 present agree to
+# <1 cm.  The 6 deliberately omitted are not usable positions even in casacore itself:
+#   VLBA, EVN       placeholders, ITRF (0,0,0) (1e-6 m);
+#   SUNRISE         a balloon-borne telescope, "ITRF" (0,0,743 m);
+#   OVRO_MMA, LOFAR, NGVLA   casacore stores geodetic-looking (lon, lat, height) values under the
+#                   ITRF type, so `me.observatory(name)` yields a ~1 km radius from the geocentre
+#                   (e.g. LOFAR 48.9 m, OVRO_MMA 1188 m).  Reproducing those would give an
+#                   array centre at the middle of the Earth.
 
 const _OBSERVATORIES = Dict{String,NTuple{3,Float64}}(
     "ACA" => (2225066.246, -5440107.534, -2481532.701),
