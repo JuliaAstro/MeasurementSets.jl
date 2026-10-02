@@ -10647,3 +10647,13 @@ through the view — and compared the underlying parent / parts against a plain 
 `Casacore.jl` for the RefTable case): all agree. The permanent testset also does a random `addcolumn!` through
 each view kind (RefTable: the view's rows get the data and every other parent row 0.0; ConcatTable: the data is
 split across the parts). New testset in `test/edit_tests.jl` (12 cases, fixed-seed `MersenneTwister(322)`).
+
+### Phase 323 — tiled-column random cell-shape fuzz incl. cells larger than a tile (investigation only, no bug found)
+
+The `TiledShapeStMan` / `TiledColumnStMan` writers pick a tile shape for a ~1 MiB target, but were only tested
+with small, fixed cell shapes. Spread 60 exploratory random cases — 1–4 dimensions with extent-1 axes, cell
+types `Float32`/`ComplexF32`/`Float64`/`Int32`/`Bool`, shared one- or two-column groups, and cells up to
+several MB (so a tile holds less than one cell and the tile shape has to be clamped) — through write → read
+(`column(...)[:]`, `rawblock`), an in-place cell edit, and `Casacore.jl` wherever it can fetch a cell
+(104 comparisons; it cannot index every fixed-shape tiled column, a known limitation): all agree. New testset
+in `test/tsm_multicol_tests.jl` (14 cases, fixed-seed `MersenneTwister(323)`).

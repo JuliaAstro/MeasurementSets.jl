@@ -600,3 +600,61 @@ if _HAVE_TAQL
         @test column(r, "A")[:] == CC                   # bulk (falls through to read_plane too)
     end
 end
+
+# Phase 323: random cell-shape fuzz for TiledShapeStMan / TiledColumnStMan,
+# including cells far larger than the writer's ~1 MiB tile target (so a tile
+# holds less than one cell and the tile shape has to be clamped), 1-4
+# dimensions with extent-1 axes, shared two-column groups, `rawblock`, and an
+# in-place cell edit.  Casacore.jl cannot index every fixed-shape tiled
+# column, so its comparison only runs where a cell can be fetched.
+@testset "TiledShape/TiledColumnStMan random cell-shape fuzz incl. cells larger than a tile (Phase 323)" begin
+    rng = MersenneTwister(323)
+    ncasacore = 0
+    for case in 1:14
+        shp = ntuple(_ -> rand(rng, (1, 2, 3, 7, 16, 64)), rand(rng, 1:4))
+        if rand(rng) < 0.25
+            shp = ntuple(i -> i == 1 ? rand(rng, (300, 700, 1100)) : rand(rng, (2, 5, 40)), max(length(shp), 2))
+        end
+        nd = length(shp)
+        nrows = prod(shp) > 100_000 ? rand(rng, 1:6) : rand(rng, (1, 3, 40, 300))
+        T = rand(rng, (Float32, ComplexF32, Float64, Int32, Bool))
+        mkcell() = T === Bool ? rand(rng, Bool, shp...) : T <: Complex ? randn(rng, T, shp...) :
+                   T <: AbstractFloat ? randn(rng, T, shp...) : rand(rng, T, shp...)
+        cols = Pair{String,Any}["A" => [mkcell() for _ in 1:nrows]]
+        if rand(rng) < 0.4
+            push!(cols, "B" => [randn(rng, Float64, shp...) for _ in 1:nrows])
+        end
+        groups = [first.(cols)]
+        dir = joinpath(mktempdir(), "t.tab")
+        rand(rng) < 0.5 ? write_table(dir, "T", cols; nrow=nrows, tsm=groups) :
+                          write_table(dir, "T", cols; nrow=nrows, tcm=groups)
+        r = readtable(dir)
+        for (nm, v) in cols
+            a = column(r, nm)[:]
+            @test all(a[i] == v[i] for i in 1:nrows)
+            blk = rawblock(r, nm)
+            @test size(blk) == (shp..., nrows)
+            @test all(blk[ntuple(_ -> :, nd)..., i] == v[i] for i in 1:nrows)
+        end
+        if _HAVE_CASACORE
+            ct = CCT.Table(dir)
+            for (nm, v) in cols
+                cc = ct[Symbol(nm)]
+                for i in unique((1, nrows))
+                    b = try cc[ntuple(_ -> :, nd)..., i] catch; try cc[i] catch; nothing end end
+                    b === nothing && continue
+                    ncasacore += 1
+                    @test b == v[i]
+                end
+            end
+        end
+        newcell = mkcell()
+        edit(dir) do t
+            t["A"][1] = newcell
+        end
+        r2 = readtable(dir)
+        @test column(r2, "A")[1] == newcell
+        @test all(column(r2, "A")[i] == cols[1].second[i] for i in 2:nrows)
+    end
+    _HAVE_CASACORE && @test ncasacore > 0
+end
