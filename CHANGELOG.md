@@ -10774,3 +10774,10 @@ every non-ASCII string differed, because casacore's string functions work on C `
 non-ASCII byte as a word break, and `substr`/`sreverse` cut and reverse bytes (so they can yield invalid UTF-8, as in
 casacore). Comparisons, `+`, `IN`, `LIKE`, `~`/`!~` and `replace`/`trim` already agreed. New testset in
 `test/taql_query_tests.jl` (hand-checked units + a seeded real-TaQL fuzz, `MersenneTwister(334)`).
+
+### Phase 335 — random LIKE / glob / regex pattern fuzz vs real TaQL (investigation only, no bug found)
+
+600 random patterns over `LIKE`, `ILIKE`, glob `~ p/../` (with `*`, `?`, `[ab]`, `[!a]`, `{a,bx}` and the `i` flag) and
+partial / full regex `~ m/../`, `~ f/../`, against 60 random strings, agreed with real TaQL on every row. Confirms the
+Phase 157 line-by-line read of casacore's `fromPattern` / `fromSQLPattern` at scale. A seeded 150-pattern slice is kept
+in `test/taql_query_tests.jl` (`MersenneTwister(335)`).

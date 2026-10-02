@@ -4788,3 +4788,32 @@ end
         end
     end
 end
+
+# Phase 335: random LIKE / ILIKE / glob (`~ p/../`, with `i`) / partial and full regex patterns vs real TaQL.
+# 600 exploratory patterns found no divergence; this seeded guard keeps a slice of them.
+if _HAVE_TAQL
+@testset "random pattern fuzz vs real TaQL (Phase 335)" begin
+    rng = MersenneTwister(335)
+    alpha = collect("abAB_.-x0")
+    n = 60
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["S" => [String(rand(rng, alpha, rand(rng, 0:7))) for _ in 1:n], "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    sqlpat() = join([(r = rand(rng); r < 0.3 ? "%" : r < 0.5 ? "_" : string(rand(rng, alpha))) for _ in 1:rand(rng, 1:5)])
+    globpat() = join([(r = rand(rng); r < 0.2 ? "*" : r < 0.35 ? "?" : r < 0.45 ? "[ab]" : r < 0.52 ? "[!a]" :
+                       r < 0.6 ? "{a,bx}" : string(rand(rng, alpha))) for _ in 1:rand(rng, 1:5)])
+    nbad = 0
+    for _ in 1:150
+        kind = rand(rng, 1:6)
+        sp, gp = sqlpat(), globpat()
+        rp = replace(gp, "{a,bx}" => "(a|bx)")
+        w = kind == 1 ? "S LIKE '$sp'" : kind == 2 ? "S ILIKE '$sp'" : kind == 3 ? "S ~ p/$gp/" :
+            kind == 4 ? "S ~ p/$gp/i" : kind == 5 ? "S ~ m/$rp/" : "S ~ f/$rp/"
+        # an empty result is a lazy Slicer error in real TaQL; a pattern both engines reject counts as agreement
+        r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch e; Int32[] end
+        o = try collect(column(query(t, w), "K")[:]) catch; :err end
+        nbad += (o === :err ? isempty(r) : o == r) ? 0 : 1
+    end
+    @test nbad == 0
+end
+end
