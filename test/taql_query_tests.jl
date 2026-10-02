@@ -4900,3 +4900,31 @@ end
         end
     end
 end
+
+# Phase 339: GROUP BY aggregates have real TaQL's result types (64-bit integers, double precision): `gsum(UInt8)`,
+# `gmin(Int32)`, `gfirst(Int16)` are Int64 and `gmean(Float32)`, `gmax(Float32)`, `gsum(ComplexF32)` are double.
+# Found by comparing the result eltype of 47 aggregates against real TaQL.
+@testset "GROUP BY aggregate result types match real TaQL (Phase 339)" begin
+    n = 12
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => Int32.(1:n), "Y" => Float32.(1:n), "U" => UInt8.(1:n), "H" => Int16.(1:n),
+                                        "C" => ComplexF32.(1:n), "G" => Int32.(repeat(1:3, 4)), "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    ty(f) = eltype(column(taql(t, "SELECT G, $f AS Z FROM \$1 GROUP BY G"), "Z")[:])
+    for (f, T) in ["gsum(U)" => Int64, "gmin(I)" => Int64, "gmax(H)" => Int64, "gfirst(U)" => Int64, "gsum(I)" => Int64,
+                   "gsum(Y)" => Float64, "gmean(Y)" => Float64, "gmin(Y)" => Float64, "gvariance(Y)" => Float64,
+                   "gmedian(Y)" => Float64, "gproduct(Y)" => Float64, "glast(Y)" => Float64, "gsum(C)" => ComplexF64,
+                   "gmean(C)" => ComplexF64, "gmean(I)" => Float64, "gcount()" => Int64]
+        @test ty(f) == T
+    end
+    # values are computed in double / 64-bit: no UInt8 / Float32 accumulation error
+    x = taql(t, "SELECT G, gsum(U) AS Z FROM \$1 GROUP BY G")
+    @test sort(collect(column(x, "Z")[:])) == sort([sum(UInt8(i) for i in 1:n if mod1(i, 3) == g; init=0) for g in 1:3])
+    if _HAVE_TAQL
+        for f in ["gsum(U)", "gmin(I)", "gmax(H)", "gfirst(U)", "gsum(Y)", "gmean(Y)", "gmin(Y)", "gvariance(Y)",
+                  "gmedian(Y)", "gproduct(Y)", "glast(Y)", "gsum(C)", "gmean(C)", "gmean(I)", "gcount()", "gstddev(U)", "grms(Y)"]
+            r = _taqlcmd("SELECT G, $f AS Z FROM \$1 GROUP BY G", d)
+            @test ty(f) == eltype(r[:Z][:])
+        end
+    end
+end

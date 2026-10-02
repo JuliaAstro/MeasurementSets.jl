@@ -10810,3 +10810,13 @@ TaQL-lite left `Float32`/`ComplexF32` results, produced abstract eltypes (`Signe
 alongside the Phase 337 integer widening, computed columns that came out abstract are concretised to `Int64` /
 `Float64` (`_tql_concrete`), and `pi()` / `e()` are `Float64`. All 68 forms agree on type; new testset with a real-TaQL
 cross-check.
+
+### Phase 339 — GROUP BY aggregate result types match real TaQL (47-aggregate eltype probe)
+
+Same finding as Phase 338 for the `g*` aggregates: real TaQL aggregates in 64-bit integers / double precision, so
+`gsum(UInt8)`, `gmin(Int32)`, `gmax(Int16)` and `gfirst(UInt8)` are `Int64` and `gmean`/`gmin`/`gmax`/`gvariance`/
+`gmedian`/`gproduct`/`glast`/`gsum` of `Float32` or `ComplexF32` are `Float64` / `ComplexF64`; TaQL-lite kept the column's
+own narrow type (and `gsum(UInt8)` was `UInt64`). Aggregate arguments are now widened per row (`_widen`, Phase 337/338)
+before the reduction, which also removes `UInt8` / `Float32` accumulation error. Result types of 47 aggregate forms
+now agree with real TaQL (only the array-of-array representation of `growid`/`gstack`/`gaggr` differs, with matching
+element types); `gsum`/`gmean` of a Bool column still work although real TaQL rejects them.

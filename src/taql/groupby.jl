@@ -12,7 +12,8 @@ _geval(::TQLGrouping, cols, g) = throw(ArgumentError(
     "TaQL-lite: GROUPING() must be resolved per grouping set (internal error)"))
 function _geval(e::TQLAggr, cols, g)
     e.arg === nothing && return e.fn(g)                    # gcount()
-    vals = Any[_tqleval(e.arg, cols, i) for i in g]
+    # Phase 339: real TaQL aggregates in 64-bit / double (`gsum(UInt8)` is Int64, `gmean(Float32)` Float64)
+    vals = Any[_widen(_tqleval(e.arg, cols, i)) for i in g]
     e.mode === :perelem && return _perelem_reduce(e.fn, vals)
     any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
     return e.fn(vals)
