@@ -10560,3 +10560,11 @@ of `Int32`/`Float64`/`Float32`/`Bool`/`String`/`ComplexF32`/`UInt8`/`Int16`, sca
 array cells, strings from empty to 400 characters, 1 to 3000 rows (several buckets), both byte orders —
 over whole-column and per-row comparison against both the written data and `Casacore.jl`'s decode:
 all agree. New testset in `test/writer_tests.jl` (12 cases, fixed-seed `MersenneTwister(315)`).
+
+### Phase 316 — `write_reftable` random row-list / select / chain fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+Phases 15 and 132 checked `write_reftable` with fixed row lists. Spread 30 exploratory random cases —
+random row lists (repeats, unsorted, and sorted so the `rowOrder` flag is exercised both ways), random
+column subsets with renames over `Int32`/`Float64`/`String`/array columns, and a second RefTable chained
+on the first (flattened to the root on write) — through both our reader and `Casacore.jl`: all agree.
+New testset in `test/reftable_tests.jl` (12 cases, fixed-seed `MersenneTwister(316)`).

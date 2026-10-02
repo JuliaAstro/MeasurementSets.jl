@@ -731,3 +731,51 @@ end
     write_reftable(dst3, rt, [1, 2])
     @test column(readtable(dst3), "A")[:] == Int32[3, 4]
 end
+
+# Phase 316: write_reftable random row-list / select / chain fuzz vs
+# Casacore.jl.  Phases 15/132 only used fixed row lists; this spreads random
+# row lists (repeats, unsorted, sorted -> the rowOrder flag both ways),
+# random column subsets with renames, and a second RefTable chained on the
+# first (flattened to the root on write, Phase 132), checked through both our
+# reader and Casacore.jl.
+if _HAVE_CASACORE
+@testset "write_reftable random rows/select/chain fuzz vs Casacore.jl (Phase 316)" begin
+    rng = MersenneTwister(316)
+    for case in 1:12
+        n = rand(rng, (1, 5, 50, 400))
+        data = Dict("A" => Int32.(rand(rng, -100:100, n)), "B" => randn(rng, n),
+                    "S" => [join(rand(rng, 'a':'z', rand(rng, 0:9))) for _ in 1:n],
+                    "V" => [randn(rng, 3) for _ in 1:n])
+        base = joinpath(mktempdir(), "p.tab")
+        write_table(base, "T", ["A" => data["A"], "B" => data["B"], "S" => data["S"], "V" => data["V"]]; nrow=n)
+        p = readtable(base)
+        function check(rt, dir, sel, expected)
+            ct = CCT.Table(dir)
+            for (o, s) in sel
+                e = expected(s)
+                a = column(rt, o)[:]
+                @test all(isequal(a[i], e[i]) for i in eachindex(e))
+                cc = ct[Symbol(o)]
+                b = e[1] isa AbstractArray ? [cc[:, i] for i in 1:length(e)] : cc[:]
+                @test all(isequal(b[i], e[i]) for i in eachindex(e))
+            end
+        end
+        k1 = rand(rng, 1:min(n, 60))
+        rows1 = rand(rng) < 0.5 ? rand(rng, 1:n, k1) : sort(unique(rand(rng, 1:n, k1)))
+        names = shuffle(rng, ["A", "B", "S", "V"])[1:rand(rng, 1:4)]
+        sel1 = [(rand(rng) < 0.5 ? "R_" * x : x) => x for x in names]
+        d1 = joinpath(mktempdir(), "r1.tab")
+        write_reftable(d1, p, rows1; select=sel1)
+        r1 = readtable(d1)
+        @test nrow(r1) == length(rows1)
+        check(r1, d1, sel1, s -> data[s][rows1])
+        rows2 = rand(rng, 1:length(rows1), rand(rng, 1:20))
+        sel2 = [(rand(rng) < 0.5 ? "Q_" * o : o) => o for (o, _) in sel1[1:rand(rng, 1:length(sel1))]]
+        d2 = joinpath(mktempdir(), "r2.tab")
+        write_reftable(d2, r1, rows2; select=sel2)
+        r2 = readtable(d2)
+        m1 = Dict(sel1)
+        check(r2, d2, sel2, o -> data[m1[o]][rows1][rows2])
+    end
+end
+end
