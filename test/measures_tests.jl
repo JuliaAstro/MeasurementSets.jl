@@ -1835,3 +1835,35 @@ for (b, rest, obs) in [$cs]:
         end
     end
 end
+
+# Phase 327: the numeric reference-frame enums used to decode a bare-code (no TabRefCodes) `VarRefCol`
+# were diffed against casacore's `Measures/M*.h` `Types` enums (and casatools' `me.listcodes`).  All
+# match except `MEarthMagnetic`, which has no `B1950_VLA` (so every code from 5 up was off by one) and
+# whose `IGRF` model is code 32.
+@testset "measures — bare-code reference enums match casacore's M*::Types (Phase 327)" begin
+    mi(kind) = MSv2.MeasInfo(kind, nothing, "REF", String[], Int[], String[])
+    rc(kind, c) = MSv2._ref_from_code(mi(kind), c)
+    dir = ["J2000", "JMEAN", "JTRUE", "APP", "B1950", "B1950_VLA", "BMEAN", "BTRUE", "GALACTIC", "HADEC", "AZEL",
+           "AZELSW", "AZELGEO", "AZELSWGEO", "JNAT", "ECLIPTIC", "MECLIPTIC", "TECLIPTIC", "SUPERGAL", "ITRF", "TOPO", "ICRS"]
+    for k in (:direction, :uvw, :baseline), (i, n) in enumerate(dir)
+        @test rc(k, i - 1) == n
+    end
+    em = filter(!=("B1950_VLA"), dir)
+    for (i, n) in enumerate(em)
+        @test rc(:earthmagnetic, i - 1) == n
+    end
+    @test rc(:earthmagnetic, 5) == "BMEAN"            # direction code 5 is B1950_VLA
+    @test rc(:earthmagnetic, 32) == "IGRF"
+    for (i, n) in enumerate(["LAST", "LMST", "GMST1", "GAST", "UT1", "UT2", "UTC", "TAI", "TDT", "TCG", "TDB", "TCB"])
+        @test rc(:epoch, i - 1) == n
+    end
+    for (i, n) in enumerate(["REST", "LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO", "LGROUP", "CMB"])
+        @test rc(:frequency, i - 1) == n
+    end
+    for (i, n) in enumerate(["LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO", "LGROUP", "CMB"])
+        @test rc(:radialvelocity, i - 1) == n
+    end
+    for (i, n) in enumerate(["RADIO", "Z", "RATIO", "BETA", "GAMMA"])
+        @test rc(:doppler, i - 1) == n
+    end
+end

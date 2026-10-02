@@ -10706,3 +10706,12 @@ Applying Phase 324/325's exhaustive name-table diff to polarization names: `_STO
 `Stokes::StokesTypes` enum order exactly. casacore additionally defines `PP PQ QP QQ` (21–24) and
 `RCircular` / `LCircular` / `Linear` (25–27), which neither casacore's `StokesConverter` nor `mscal.stokes`
 converts; they raise a clear `ArgumentError`. Pinned by a static test in `test/taql_mscal_tests.jl`.
+
+### Phase 327 — `MEarthMagnetic` bare-code reference enum was off by one (all measure enums diffed against casacore)
+
+The numeric enums used to decode a bare-code `VarRefCol` (no `TabRefCodes`) were diffed against casacore's
+`Measures/M*.h` `Types` enums and casatools' `me.listcodes`. Direction/uvw/baseline, epoch, frequency,
+radial velocity, Doppler and position all match. **`MEarthMagnetic` did not**: its `Types` enum is the
+direction list *without* `B1950_VLA`, so codes 5 and up decoded one frame too late (code 5 → `B1950_VLA`
+instead of `BMEAN`, …), and its model type `IGRF` is code 32, which was out of range. Fixed with a dedicated
+`_EM_ENUM` and the code-32 case. New testset in `test/measures_tests.jl` pinning every enum (123 assertions).
