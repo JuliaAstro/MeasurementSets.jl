@@ -10550,3 +10550,13 @@ so this is 314.
 
 New testset in `test/dysco_tests.jl` (8 random cases, fixed-seed `MersenneTwister(314)`, gated on the
 CASA python like its siblings).
+
+### Phase 315 — `StandardStMan` writer random column-mix fuzz vs `Casacore.jl` (investigation only, no bug found)
+
+The SSM writer's bucket sizing (`rowsPerBucket` from the summed cell widths), string buckets and
+bit-packed `Bool` / fixed-shape array cells depend on the column mix and row count, but had only been
+checked with a handful of fixed column sets. Spread 25 exploratory random configurations — 2–6 columns
+of `Int32`/`Float64`/`Float32`/`Bool`/`String`/`ComplexF32`/`UInt8`/`Int16`, scalar or fixed-shape
+array cells, strings from empty to 400 characters, 1 to 3000 rows (several buckets), both byte orders —
+over whole-column and per-row comparison against both the written data and `Casacore.jl`'s decode:
+all agree. New testset in `test/writer_tests.jl` (12 cases, fixed-seed `MersenneTwister(315)`).

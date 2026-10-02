@@ -346,3 +346,41 @@ end
         @test CCT.Table(dst2)[:ANTENNA1][:] == [0, 1, 2, 0]
     end
 end
+
+# Phase 315: StandardStMan random column-mix fuzz vs Casacore.jl.  The SSM
+# writer was only ever checked with a few fixed column sets and row counts;
+# its bucket sizing (rowsPerBucket from the summed cell widths), string
+# buckets (empty / short / multi-hundred-char strings) and bit-packed Bool /
+# fixed-shape array cells all depend on the column mix and the row count
+# (1 row up to several buckets).  Random mixes, both byte orders.
+if _HAVE_CASACORE
+@testset "StandardStMan random column-mix fuzz vs Casacore.jl (Phase 315)" begin
+    rng = MersenneTwister(315)
+    cell(T) = T === String ? join(rand(rng, 'a':'z', rand(rng) < 0.1 ? 0 :
+                                        rand(rng, 1:(rand(rng) < 0.15 ? 400 : 12)))) :
+              T === Bool ? rand(rng, Bool) : T <: Complex ? T(randn(rng), randn(rng)) :
+              T <: AbstractFloat ? T(randn(rng) * 100) : rand(rng, T)
+    for case in 1:12
+        n = rand(rng, (1, 7, 100, 900, 3000))
+        cols = Pair{String,Any}[]
+        for c in 1:rand(rng, 2:6)
+            T = rand(rng, (Int32, Float64, Float32, Bool, String, ComplexF32, UInt8, Int16))
+            shape = (T === String || rand(rng) < 0.5) ? nothing : rand(rng, ((3,), (2, 2), (5,)))
+            vals = shape === nothing ? [cell(T) for _ in 1:n] :
+                   [reshape([cell(T) for _ in 1:prod(shape)], shape...) for _ in 1:n]
+            push!(cols, "C$c" => vals)
+        end
+        dir = joinpath(mktempdir(), "ssmfuzz.tab")
+        write_table(dir, "T", cols; nrow=n, endian=rand(rng, (:little, :big)))
+        r = readtable(dir); ct = CCT.Table(dir)
+        for (nm, v) in cols
+            a = column(r, nm)[:]
+            @test all(isequal(a[i], v[i]) for i in 1:n)
+            cc = ct[Symbol(nm)]
+            b = v[1] isa AbstractArray ?
+                [copy(selectdim(cc[ntuple(_ -> :, ndims(cc))...], ndims(cc), i)) for i in 1:n] : cc[:]
+            @test all(isequal(b[i], v[i]) for i in 1:n)
+        end
+    end
+end
+end
