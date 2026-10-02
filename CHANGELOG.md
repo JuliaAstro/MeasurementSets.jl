@@ -10637,3 +10637,13 @@ physically-valid shifts (|β| < 0.9, rest frequency 1e8–5e11 Hz): all five con
 `doppler(f, rest)`, `radialvelocity`, `frequency(d, rest)` and `restfrequency(f, d)` agree with casatools
 to better than 1e-9 relative (pure algebra). New testset in `test/measures_tests.jl` (25 cases × 9
 quantities, fixed-seed `MersenneTwister(321)`, gated on the CASA python).
+
+### Phase 322 — random-operation fuzz for in-place edits through RefTable / ConcatTable views (investigation only, no bug found)
+
+Phases 125–130 tested `edit(rt::RefTable)` / `edit(ct::ConcatTable)` with fixed rows and fixed parts.
+Spread 30 exploratory random sessions — random (sorted or shuffled) RefTable selections and random 2–3 part
+ConcatTables over scalar / `String` / tiled-array columns, with random cell writes and whole-column writes
+through the view — and compared the underlying parent / parts against a plain Julia model (our reader, and
+`Casacore.jl` for the RefTable case): all agree. The permanent testset also does a random `addcolumn!` through
+each view kind (RefTable: the view's rows get the data and every other parent row 0.0; ConcatTable: the data is
+split across the parts). New testset in `test/edit_tests.jl` (12 cases, fixed-seed `MersenneTwister(322)`).
