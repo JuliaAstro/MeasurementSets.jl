@@ -10584,3 +10584,17 @@ the values), and documented the difference in the `addrows!` docstring. The Phas
 appends inherit the last value was never what the regen path implements.
 
 New testset in `test/edit_tests.jl` (10 cases, fixed-seed `MersenneTwister(317)`).
+
+### Phase 318 — `taql` SELECT … JOIN random fuzz vs real TaQL (investigation only, no bug found)
+
+Phases 259/260 checked JOIN with a few hand-picked forms. Spread 40 exploratory random cases × 8 query
+shapes — random left/right/third tables with duplicate and unmatched keys, chained joins, `rowid()` index
+lookup, and `WHERE` / `ORDER BY` / `LIMIT` / `GROUP BY` / `HAVING` over joined columns — against real
+`tableCommand`: every query with a non-empty result matches exactly (unmatched rows get the type
+sentinels). The only differences are queries that select **zero rows**, where real TaQL throws an
+unexplained "Slicer error" (seen elsewhere in Phase 253) when the result columns are read, and ours
+returns 0 rows. (My first harness tripped the Phase 210 bare-`[...]`-literal promotion hazard — `Int32`
+keys silently became `Float64`, which real TaQL rejects as a join key — worth remembering when writing
+fuzz fixtures.)
+
+New testset in `test/taql_command_tests.jl` (12 cases × 8 queries, fixed-seed `MersenneTwister(318)`).
