@@ -79,6 +79,11 @@ const _DIRECTION_ENUM = ["J2000", "JMEAN", "JTRUE", "APP", "B1950", "B1950_VLA",
                          "AZELGEO", "AZELSWGEO", "JNAT", "ECLIPTIC", "MECLIPTIC",
                          "TECLIPTIC", "SUPERGAL", "ITRF", "TOPO", "ICRS"]
 
+# Phase 327: `MEarthMagnetic::Types` (measures/Measures/MEarthMagnetic.h) is the direction list WITHOUT
+# `B1950_VLA`, so a bare-code `VarRefCol` decoded with `_DIRECTION_ENUM` was off by one from code 5 up;
+# its model type `IGRF` is code 32.
+const _EM_ENUM = filter(!=("B1950_VLA"), _DIRECTION_ENUM)
+
 const _MEAS_ENUM = Dict{Symbol,Vector{String}}(
     :direction => _DIRECTION_ENUM,
     :uvw => _DIRECTION_ENUM,
@@ -88,7 +93,7 @@ const _MEAS_ENUM = Dict{Symbol,Vector{String}}(
     :radialvelocity => ["LSRK", "LSRD", "BARY", "GEO", "TOPO", "GALACTO",
                         "LGROUP", "CMB"],
     :doppler => ["RADIO", "Z", "RATIO", "BETA", "GAMMA"],
-    :earthmagnetic => _DIRECTION_ENUM,
+    :earthmagnetic => _EM_ENUM,
     :epoch => ["LAST", "LMST", "GMST1", "GAST", "UT1", "UT2", "UTC", "TAI",
                "TDT", "TCG", "TDB", "TCB"],
 )
@@ -141,6 +146,7 @@ function _ref_from_code(mi::MeasInfo, code::Integer)
     if c >= 32 && mi.kind in (:direction, :uvw, :baseline) && haskey(_BODY_ENUM, c)
         return _BODY_ENUM[c]
     end
+    mi.kind === :earthmagnetic && c == 32 && return "IGRF"
     enum = get(_MEAS_ENUM, mi.kind, String[])
     0 <= c < length(enum) || throw(ArgumentError(
         "MEASINFO ref code $c out of range for $(mi.kind)"))

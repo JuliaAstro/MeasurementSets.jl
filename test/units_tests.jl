@@ -349,3 +349,29 @@ const _CASACORE_CANON = Dict{String,Float64}(
         @test qcolumn(t, "X") == [1.5, 2.5] .* u
     end
 end
+
+# Phase 325: diffing casacore's 24 SI prefixes x {m, Hz, g, s} against casatools showed casacore's micro
+# prefix is the letter `u` (`uJy`, `us`, `um`, `uas`) -- none of which parsed.  Still unsupported (rare):
+# the 2022 prefixes Q/R/q/r (Unitful predates them) and `das` (casacore deci-arcsecond; Unitful reads
+# deka-second).
+@testset "units — casacore micro prefix `u` (Phase 325)" begin
+    up = Base.get_extension(MSv2, :UnitfulExt)._ms_uparse
+    SI(u) = (q = 1.0 * u; U.ustrip(U.uconvert(U.upreferred(U.unit(q)), q)))
+    @test SI(up("um")) ≈ 1e-6
+    @test SI(up("us")) ≈ 1e-6
+    @test SI(up("uHz")) ≈ 1e-6
+    @test SI(up("ug")) ≈ 1e-9                        # kg is the SI base
+    @test U.uconvert(U.u"Jy", 1 * up("uJy")) ≈ 1e-6 * U.u"Jy"
+    @test SI(up("uas")) ≈ 1e-6 * SI(up("arcsec"))
+    @test up("u") == U.u"u"                          # bare `u` is still the atomic mass unit
+    @test SI(up("u")) ≈ 1.6605390666e-27
+    # write direction: casacore's spelling, not Unitful's `μ`
+    us = MSv2._ms_ustring
+    @test us(up("us")) == "us"
+    @test us(up("uJy")) == "uJy"
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["X" => [1.5, 2.5] .* up("uJy")]; nrow=2)
+    t = readtable(d)
+    @test MSv2.columndesc(t, "X").keywords["QuantumUnits"] == ["uJy"]
+    @test columnunit(t, "X") == up("uJy")
+end

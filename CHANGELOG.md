@@ -10689,3 +10689,29 @@ meaningful. (2) `copytable` re-encodes Dysco with `dither=true` drawing from the
 was nondeterministic run to run (one stray local failure, unreproducible in 5 reruns, exposed this); the test
 now seeds the global RNG as well as its own. Verified identical results over 6 repeated local runs and clean
 on x86-64 Docker.
+### Phase 325 — casacore's micro prefix `u` did not parse (all 24 SI prefixes diffed against casatools)
+
+Following Phase 324's exhaustive name-table diff, compared casacore's 24 SI prefixes × `m`/`Hz`/`g`/`s` against
+casatools' canonical values. Everything agrees except: casacore's **micro prefix is the letter `u`** (`uJy`,
+`us`, `um`, `uas`), which none of Unitful's parsers accept — every microunit raised the "no Unitful
+equivalent" error — and the write direction emitted Unitful's `μ`, which casacore rejects. Fixed both
+(`u<unit>` → `μ<unit>` on read, with `uas`/`uarcsec` → `μas`; `μ`/`µ` → `u` on write); a bare `u` stays the
+atomic mass unit. Not fixed (rare, noted in the test): the 2022 prefixes `Q`/`R`/`q`/`r` (Unitful predates
+them) and `das` (casacore deci-arcsecond vs Unitful deka-second). New testset in `test/units_tests.jl`.
+
+### Phase 326 — `mscal.stokes` polarization-name table diffed against casacore's `Stokes` enum (no bug found)
+
+Applying Phase 324/325's exhaustive name-table diff to polarization names: `_STOKES_NAMES` codes 1–20
+(`I Q U V`, `RR RL LR LL`, `XX XY YX YY`, `RX RY LX LY`, `XR XL YR YL`) match casacore's
+`Stokes::StokesTypes` enum order exactly. casacore additionally defines `PP PQ QP QQ` (21–24) and
+`RCircular` / `LCircular` / `Linear` (25–27), which neither casacore's `StokesConverter` nor `mscal.stokes`
+converts; they raise a clear `ArgumentError`. Pinned by a static test in `test/taql_mscal_tests.jl`.
+
+### Phase 327 — `MEarthMagnetic` bare-code reference enum was off by one (all measure enums diffed against casacore)
+
+The numeric enums used to decode a bare-code `VarRefCol` (no `TabRefCodes`) were diffed against casacore's
+`Measures/M*.h` `Types` enums and casatools' `me.listcodes`. Direction/uvw/baseline, epoch, frequency,
+radial velocity, Doppler and position all match. **`MEarthMagnetic` did not**: its `Types` enum is the
+direction list *without* `B1950_VLA`, so codes 5 and up decoded one frame too late (code 5 → `B1950_VLA`
+instead of `BMEAN`, …), and its model type `IGRF` is code 32, which was out of range. Fixed with a dedicated
+`_EM_ENUM` and the code-32 case. New testset in `test/measures_tests.jl` pinning every enum (123 assertions).

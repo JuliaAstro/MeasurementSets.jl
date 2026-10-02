@@ -155,6 +155,7 @@ function MS._ms_ustring(u::Unitful.Units)
     s = string(u)
     if !occursin(' ', s)                                    # atomic unit
         cand = get(MS._UNIT_ALIASES_INV, s, s)
+        cand = replace(cand, r"^[μµ]" => "u")                # casacore's micro prefix is `u`
         try
             _ms_uparse(cand) == u && return cand            # verified round-trip
         catch
