@@ -10533,3 +10533,20 @@ Verified the fix on **both** platforms — the full existing cross-check suite (
 the targeted testsets, standalone, pass cleanly inside a fresh x86-64 Docker container after the fix, and
 the full local test suite (8110/8110) passes unchanged on ARM64. README/memory updated, merge on the
 user's word.
+
+### Phase 314 — Dysco READ random-parameter fuzz vs casatools-authored tables (investigation only, no bug found)
+
+Phase 304 fuzzed the Dysco *write* direction (our writer → casatools decode). The *read* direction
+(casatools writes a Dysco table, we decode it) had only ever been checked at one fixed shape/bit-width
+point (4 antennas, 4×2 cells, 10/12 bits) plus the 12 normalization × distribution combos at that same
+point. Spread it across random antenna counts (2–7), integrations, cell shapes (1–4 pol × 1–9 chan),
+data/weight bit widths (4–16) and every normalization × distribution: 28 of 30 exploratory configs
+matched casatools' own `getcol()` to float rounding (both sides decode the same stored symbols); the
+other 2 never reached our reader — real casacore's own DyscoStMan aborts the process for `ntime=1`
+("flushed before at least two timeblocks were stored"), so the permanent test uses `ntime ≥ 2`.
+
+Phase numbering note: "start phase 313" arrived after 313 was already used for the CI fix (PR #102),
+so this is 314.
+
+New testset in `test/dysco_tests.jl` (8 random cases, fixed-seed `MersenneTwister(314)`, gated on the
+CASA python like its siblings).
