@@ -10740,3 +10740,15 @@ three SOURCE columns report no rank). Pinned by a static snapshot test in `test/
 SepFile=2) and the ColumnSet version codes all match what the writer/reader hard-code; the 8-character type ids in
 the `ScalarColumnDesc<…>` class names are already proven end to end (real casacore refuses an unknown class name,
 and the Phase 265 type matrix round-trips every type). Pinned by a static test in `test/writer_tests.jl`.
+
+### Phase 332 — `datetime('<string>')` accepts the rest of casacore's date grammar (random format fuzz vs real TaQL)
+
+Spread 400 random date strings over 9 formats against real `datetime()`: ours rejected or misread about a third of
+what casacore's `MVTime::read` accepts. Now matching (live-probed): `Y/M/D` with any of `/ T space -` before a
+time, with month/day unbounded so `2020/02/30` rolls to 1 March; times as `H:M[:S[.f]]` **or** `10h30m15s`
+(including after the dash-numeric `2020-02-12/10h30m`); `D[-]Mon[-]Y` with a 2- or 4-digit year and a `/time`
+(`12Feb20`, `3Aug2033/01:49`); and — oddly but really — a **bare number is an MJD day count** (`58000`,
+`58000/12:00` = 58000.5, and even `20200212` is 20200212 days, not a date). `D Mon Y` with spaces and `D/M/Y` are
+not dates in real TaQL either and stay errors. After the change all 400 strings agree with real TaQL (361 equal
+values, 39 rejected by both). New testset in `test/taql_query_tests.jl` (23 probe strings + 60 random,
+fixed-seed `MersenneTwister(332)`); the existing date/time testsets and `mscal.time` tests are unchanged.

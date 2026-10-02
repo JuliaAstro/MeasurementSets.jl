@@ -4680,3 +4680,40 @@ end
         isempty(agree) || println(agree)
     end
 end
+
+# Phase 332: `datetime('<string>')` random date-format fuzz vs real TaQL.  Real `MVTime::read` accepts more
+# than the ISO-ish list ours had: `Y/M/D` with ANY of `/ T space -` before the time (month/day roll over:
+# `2020/02/30` is 1 March), `H:M[:S[.f]]` or `10h30m15s` times, `D[-]Mon[-]Y` with a 2- or 4-digit year and a
+# `/time`, and -- oddly -- a bare number is an MJD day count (`20200212` is 20200212 days, `58000/12:00` is
+# 58000.5).  `D Mon Y` with spaces and `D/M/Y` are NOT dates in real TaQL (error / garbage) and stay errors.
+if _HAVE_TAQL
+@testset "datetime() string formats vs real TaQL (Phase 332)" begin
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["K" => Int32[1]]; nrow=1)
+    t = readtable(d)
+    ours(s) = try collect(column(taql(t, "SELECT datetime('$s') AS X FROM \$1"), "X")[:])[1] catch; :err end
+    real(s) = try collect(_taqlcmd("SELECT datetime('$s') AS X FROM \$1", d)[:X][:])[1] catch; :err end
+    probes = ["2020/02/12", "2020/2/5", "2020/02/12/10:30", "2020/02/12T10:30", "2020/02/12 10:30", "2020/02/12-10:30",
+              "20200212", "20200212/10:30", "58000", "58000.5", "58000/12:00", "12Feb2020/10:30:15.5", "12Feb20",
+              "12-Feb-20/1:2:3", "2020-02-12/10h30m", "2020/02/12/10h30m15s", "2020-02-12 1:2:3.5", "2020/13/01",
+              "2020/02/30", "2020/02/12/10:30:15:", "Feb 12 2020", "12 Feb 2020 10:30", "10 Dec 2024"]
+    for s in probes
+        r, o = real(s), ours(s)
+        r === :err ? (@test o === :err) : @test o isa Real && isapprox(o, r; atol=1e-9)
+    end
+    rng = MersenneTwister(332)
+    mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    p2(x) = lpad(x, 2, '0')
+    for _ in 1:60
+        y = rand(rng, 1990:2040); m = rand(rng, 1:12); dd = rand(rng, 1:28)
+        H = rand(rng, 0:23); M = rand(rng, 0:59); S = rand(rng, 0:59); fr = rand(rng, (0, 123, 5))
+        tm = rand(rng, ("", "HM", "HMS", "HMSf"))
+        tp(sep) = tm == "" ? "" : sep * (tm == "HM" ? "$(p2(H)):$(p2(M))" : tm == "HMS" ? "$(p2(H)):$(p2(M)):$(p2(S))" :
+                                         "$(p2(H)):$(p2(M)):$(p2(S)).$(lpad(fr, 3, '0'))")
+        s = rand(rng, (() -> "$y-$(p2(m))-$(p2(dd))" * tp("T"), () -> "$y/$m/$dd" * tp("/"), () -> "$dd$(mon[m])$y" * tp("/"),
+                       () -> "$dd-$(mon[m])-$y" * tp("/"), () -> "$dd $(mon[m]) $y" * tp("/"), () -> "$y$(p2(m))$(p2(dd))" * tp("/"),
+                       () -> "$y/$(p2(m))/$(p2(dd))" * tp("T")))()
+        r, o = real(s), ours(s)
+        r === :err ? (@test o === :err) : @test o isa Real && isapprox(o, r; atol=1e-9)
+    end
+end
+end
