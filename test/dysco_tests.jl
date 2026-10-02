@@ -688,3 +688,55 @@ if _HAVE_CASA
         end
     end
 end
+
+# Phase 320: copytable of a Dysco table under random write parameters.  The
+# existing copy test used one fixed configuration.  Random antenna count /
+# cell shape / data+weight bit widths / normalization / distribution /
+# rowsPerBlock: copytable must preserve every compression parameter (it
+# decodes and re-encodes), and the copy must decode to (nearly) the same
+# values.  RowNorm / RFNorm re-encode their already-quantised values almost
+# exactly; AFNorm re-solves its antenna/channel RMS factors on the decoded
+# data, which is not idempotent, so it drifts by a few percent at coarse bit
+# widths (checked loosely).  Weights are re-encoded exactly.
+@testset "dysco -- copytable preserves parameters under random write parameters (Phase 320)" begin
+    rng = MersenneTwister(320)
+    norms = (MSv2.AFNorm(), MSv2.RFNorm(), MSv2.RowNorm())
+    dists = (MSv2.Gaussian(), MSv2.Uniform(), MSv2.StudentsT(), MSv2.TruncatedGaussian())
+    for case in 1:10
+        nant = rand(rng, 2:6); ntime = rand(rng, 2:5); nchan = rand(rng, 1:6); npol = rand(rng, 1:4)
+        db = rand(rng, (6, 8, 10, 12, 16)); wb = rand(rng, (8, 12, 16))
+        normT = rand(rng, norms); distT = rand(rng, dists)
+        baselines = [(a1, a2) for a1 in 0:nant-1 for a2 in a1:nant-1]
+        nbl = length(baselines); nr = nbl * ntime
+        a1v = Int32[]; a2v = Int32[]
+        for it in 1:ntime, (b1, b2) in baselines
+            push!(a1v, b1); push!(a2v, b2)
+        end
+        rpb = min(rand(rng, (nbl, nbl * 2, nr)), nr)
+        vdata = [ComplexF32.(randn(rng, npol, nchan), randn(rng, npol, nchan)) .* 3f0 for _ in 1:nr]
+        vweight = [Float32.(rand(rng, npol, nchan) .* 10) for _ in 1:nr]
+        cols = Pair{String,Any}["TIME" => collect(5.0e9 .+ (1:nr)), "ANTENNA1" => a1v, "ANTENNA2" => a2v,
+                                "FIELD_ID" => zeros(Int32, nr), "DATA_DESC_ID" => zeros(Int32, nr),
+                                "DATA" => vdata, "WEIGHT_SPECTRUM" => vweight]
+        src = joinpath(mktempdir(), "s.tab")
+        write_table(src, "T", cols; nrow=nr, ism=["TIME", "ANTENNA1", "ANTENNA2", "FIELD_ID", "DATA_DESC_ID"],
+            dysco=[["DATA", "WEIGHT_SPECTRUM"]],
+            dysco_spec=Dict("DATA" => (; normalization=normT, distribution=distT, dataBitCount=db,
+                                       weightBitCount=wb, antenna1=Int.(a1v), antenna2=Int.(a2v),
+                                       rowsPerBlock=rpb, dither=false)))
+        ts = readtable(src); i1 = column(ts, "DATA").inst
+        dst = joinpath(mktempdir(), "d.tab"); copytable(dst, ts)
+        td = readtable(dst); i2 = column(td, "DATA").inst
+        @test typeof(i2.normalization) == typeof(i1.normalization) == typeof(normT)
+        @test typeof(i2.distribution) == typeof(i1.distribution) == typeof(distT)
+        @test (i2.dataBitCount, i2.weightBitCount, i2.rowsPerBlock, i2.antennaCount) ==
+              (i1.dataBitCount, i1.weightBitCount, i1.rowsPerBlock, i1.antennaCount)
+        @test i2.distributionTruncation == i1.distributionTruncation
+        s = column(ts, "DATA")[:]; d = column(td, "DATA")[:]
+        mag = maximum(maximum(abs.(x)) for x in s)
+        relerr = maximum(maximum(abs.(s[r] .- d[r])) for r in 1:nr) / mag
+        @test relerr <= (normT isa MSv2.AFNorm ? 0.1 : 1e-4)
+        ws = column(ts, "WEIGHT_SPECTRUM")[:]; wd = column(td, "WEIGHT_SPECTRUM")[:]
+        @test all(ws[r] == wd[r] for r in 1:nr)
+    end
+end

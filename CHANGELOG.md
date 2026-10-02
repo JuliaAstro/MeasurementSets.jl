@@ -10615,3 +10615,16 @@ agree). Not worth porting its heap sort — the tie order is unspecified in SQL 
 in `src/taql/commands.jl` and the test compares `DISTINCT` results as multisets.
 
 New testset in `test/taql_command_tests.jl` (12 cases × 8 queries, fixed-seed `MersenneTwister(319)`).
+
+### Phase 320 — Dysco `copytable` under random write parameters (investigation only, no bug found)
+
+The Dysco copy-preservation test used one fixed configuration. Spread 25 exploratory random configurations —
+2–6 antennas, 1–4 pol × 1–6 chan cells, data bits 6–16, weight bits 8–16, every normalization ×
+distribution, and `rowsPerBlock` of one baseline-set / two / the whole table — through write →
+`copytable`: every compression parameter (normalization, distribution, both bit widths, `rowsPerBlock`,
+`antennaCount`, truncation) is preserved, and weights re-encode exactly. `RowNorm`/`RFNorm` copies decode
+essentially identically; `AFNorm` drifts by up to ~4% of the data magnitude at coarse bit widths because
+its iterative antenna/channel RMS solve is not idempotent on already-quantised data (expected; checked
+loosely at 10%).
+
+New testset in `test/dysco_tests.jl` (10 cases, fixed-seed `MersenneTwister(320)`; not CASA-gated).
