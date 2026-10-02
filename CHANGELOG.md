@@ -10781,3 +10781,13 @@ casacore). Comparisons, `+`, `IN`, `LIKE`, `~`/`!~` and `replace`/`trim` already
 partial / full regex `~ m/../`, `~ f/../`, against 60 random strings, agreed with real TaQL on every row. Confirms the
 Phase 157 line-by-line read of casacore's `fromPattern` / `fromSQLPattern` at scale. A seeded 150-pattern slice is kept
 in `test/taql_query_tests.jl` (`MersenneTwister(335)`).
+
+### Phase 336 — `IN [...]` elements may be arbitrary expressions (28-form probe vs real TaQL)
+
+Real TaQL evaluates each `IN [...]` element as an expression per row: `A IN [A, 3]`, `A IN [2*2, sqrt(16)]`,
+`S IN ['s1', 's'+'2']`, `A IN [K+1, K-1]` and ranges with expression bounds (`[1+1:4]`, `[1:K]`, `[K:K+2]`).
+TaQL-lite only accepted literals and literal ranges, so all of those raised a parse error. Elements now parse at
+arithmetic level; an all-literal element stays static and is validated at parse time as before (`[5:1]`, step 0 still
+error), anything else becomes a `TQLExpr` / `TQLDynRange` resolved per row (`_in_resolve`) in both the row and group
+evaluators, with the visitors (`_tqlrefs!`, `_has_aggr`, `_has_qty`, `_sg`) following the sub-expressions. 15 forms
+cross-checked against real TaQL. Still lenient where real errors: `IN []` (matches nothing), `A IN [true]`, `NOT A IN [3:20]`.

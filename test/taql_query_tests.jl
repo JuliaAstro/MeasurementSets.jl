@@ -4817,3 +4817,38 @@ if _HAVE_TAQL
     @test nbad == 0
 end
 end
+
+# Phase 336: `IN [...]` elements are arbitrary expressions (and ranges may have expression bounds) in real TaQL;
+# before, only literals / literal ranges parsed.  Found by probing 28 IN forms against real TaQL.
+@testset "IN lists with expression elements (Phase 336)" begin
+    n = 24
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => Int32.(1:n), "B" => Float64.(0.5 .* (1:n)),
+                                        "S" => [string("s", i % 5) for i in 1:n], "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    rows(w) = collect(column(query(t, w), "K")[:])
+    # static (all-literal) elements are unchanged
+    @test MSv2._taqllite_parse("A IN [1, 3:6]", Set(["A"])) isa MSv2.TQLIn
+    @test_throws ArgumentError MSv2._taqllite_parse("A IN [5:1]", Set(["A"]))
+    @test_throws ArgumentError MSv2._taqllite_parse("A IN [1:5:0]", Set(["A"]))
+    @test rows("A IN [1,2+3,4]") == [1, 4, 5]
+    @test rows("A IN [2*2, 3*3]") == [4, 9]
+    @test rows("A IN [sqrt(16), abs(-3)]") == [3, 4]
+    @test rows("A IN [1+1:4]") == [2, 3, 4]
+    @test rows("S IN ['s1', 's'+'2']") == [i for i in 1:n if i % 5 in (1, 2)]
+    @test rows("A IN [K]") == collect(1:n)             # a column element, per row
+    @test rows("A IN [K+1, K-1]") == Int[]             # never equal to A == K
+    @test rows("A IN [1:K]") == collect(1:n)           # a range whose bound is a column
+    @test rows("A IN [K:K+2]") == collect(1:n)
+    @test rows("A IN [rownumber()]") == collect(1:n)
+    @test rows("A NOT IN [K+1, 3]") == [i for i in 1:n if i != 3]
+    @test rows("A IN [K+1:K+3]") == Int[]
+    if _HAVE_TAQL
+        for w in ["A IN [1,2+3,4]", "A IN [2*2, 3*3]", "A IN [A, 3]", "A IN [sqrt(16), abs(-3)]", "A IN [1+1:4]",
+                  "S IN ['s1','s'+'2']", "S IN [upcase('s3')]", "S IN ['s1', S]", "A IN [rownumber()]", "A IN [K]",
+                  "A IN [K+1, K-1]", "A IN [1:K]", "A IN [K:K+2]", "B IN [1:3]", "A IN [1, 3:6, 9]"]
+            r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch; Int32[] end
+            @test rows(w) == r
+        end
+    end
+end
