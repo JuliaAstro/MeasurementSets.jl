@@ -1,3 +1,5 @@
+using Random
+
 # Phase 6: writers (AipsIO write side, write_table, copyms, create_ms).
 
 using MeasurementSets: AipsWriter, putstart, putend, wr_u32, wr_i32, wr_string,
