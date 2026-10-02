@@ -207,6 +207,11 @@ end
 const _SmallInt = Union{Int8,UInt8,Int16,UInt16,Int32,UInt32}
 _widen(x::_SmallInt) = Int64(x)
 _widen(x::AbstractArray{<:_SmallInt}) = Int64.(x)
+# ... and in double precision: Float32 / Float16 -> Float64, ComplexF32 -> ComplexF64 (Phase 338)
+_widen(x::Union{Float32,Float16}) = Float64(x)
+_widen(x::AbstractArray{<:Union{Float32,Float16}}) = Float64.(x)
+_widen(x::Complex{<:Union{Float32,Float16}}) = ComplexF64(x)
+_widen(x::AbstractArray{<:Complex{<:Union{Float32,Float16}}}) = ComplexF64.(x)
 _widen(x) = x
 _bcast(f, x) = (x = _widen(x); x isa AbstractArray ? f.(x) : f(x))
 # two array operands must have the SAME shape (real TaQL: "ArrayMath function

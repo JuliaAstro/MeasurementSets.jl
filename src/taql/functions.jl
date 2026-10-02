@@ -1914,9 +1914,9 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         n == 0 || throw(ArgumentError("TaQL-lite: rowid() takes no arguments in \"$src\""))
         return TQLArith(-, TQLRowNum(), TQLLit(1))
     elseif name == "pi" && n == 0
-        return TQLLit(π)
+        return TQLLit(Float64(π))
     elseif name == "e" && n == 0
-        return TQLLit(ℯ)
+        return TQLLit(Float64(ℯ))
     elseif name == "c" && n == 0
         # `c()` (`cFUNC`, `TableParseFunc.cc:266-267`) is the speed of
         # light, `C::c` -- the same value already in `src/constants.jl`

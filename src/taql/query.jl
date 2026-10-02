@@ -243,6 +243,16 @@ _select_all_proj(cls) = all(c -> c[2] === :proj, cls)
 # `rows` are the surviving 1-based indices (ORDER BY-sorted). A computed
 # column whose values come out as a `Unitful.Quantity` (a quantity
 # literal was used) is stripped to a plain number -- dimensionless only.
+# Phase 338: a computed column mixing Int32 / Int64 (or Float32 / Float64) rows narrows to an abstract eltype
+# (`Signed`, `AbstractFloat`); real TaQL results are plain Int64 / Float64.
+function _tql_concrete(v::AbstractVector)
+    isconcretetype(eltype(v)) && return v
+    isempty(v) && return v
+    all(x -> x isa Integer && !(x isa Bool), v) && return Int64.(v)
+    all(x -> x isa Real && !(x isa Bool), v) && return Float64.(v)
+    return v
+end
+
 function _select_materialize(cls, src::AbstractTable, rows::Vector{Int})
     exprasts = TQLExpr[]
     refs = Set{String}()
@@ -260,10 +270,10 @@ function _select_materialize(cls, src::AbstractTable, rows::Vector{Int})
         if kind === :proj
             push!(out, Symbol(nm) => _mapcol(column(src, v), rows))
         elseif kind === :expr
-            push!(out, Symbol(nm) => identity.(Any[_strip(_tqleval(v, cd, i)) for i in rows]))
+            push!(out, Symbol(nm) => _tql_concrete(identity.(Any[_strip(_tqleval(v, cd, i)) for i in rows])))
         else                                       # :mpair -> data + mask
             vals = Any[_tqleval(v[2], cd, i) for i in rows]
-            push!(out, Symbol(nm) => identity.(Any[_strip(x) for x in vals]))
+            push!(out, Symbol(nm) => _tql_concrete(identity.(Any[_strip(x) for x in vals])))
             push!(out, Symbol(v[1]) => identity.(Any[
                 x isa TQLMArray ? x.mask : _bcast(!isfinite, _unwrap_marray(x)) for x in vals]))
         end

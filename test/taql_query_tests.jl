@@ -516,7 +516,7 @@ end
     @test parse("rownumber() > 1").lhs isa MSv2.TQLRowNum
     @test parse("rownr() > 1").lhs isa MSv2.TQLRowNum
     @test parse("pi() > 3").lhs isa MSv2.TQLLit
-    @test parse("e() > 2").lhs.value == ℯ
+    @test parse("e() > 2").lhs.value ≈ ℯ
 
     # errors: unknown function, wrong arity
     @test_throws ArgumentError parse("bogus(A) > 0")
@@ -4873,6 +4873,30 @@ end
         for w in ["U * U > 100", "~U == 250", "~U == -6", "U + 250 > 255", "I * 100 > 0", "H * H > 100000000", "U - 10 < 0", "-U < 0"]
             r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch; Int32[] end
             @test rows(w) == r
+        end
+    end
+end
+
+# Phase 338: computed SELECT columns have real TaQL's result types -- arithmetic is done in double precision
+# (Float32 -> Float64, ComplexF32 -> ComplexF64) and mixed Int32/Int64 rows give a plain Int64 column, not an abstract
+# eltype.  Found by comparing the eltype of 68 `SELECT <expr> AS Z` forms against real TaQL.
+@testset "computed SELECT result types match real TaQL (Phase 338)" begin
+    n = 8
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => Int32.(1:n), "J" => Int64.(1:n), "X" => Float64.(1:n), "Y" => Float32.(1:n),
+                                        "P" => Bool[isodd(i) for i in 1:n], "C" => ComplexF32.(1:n), "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    ty(f) = eltype(column(query(t, "K >= 0"; select=["Z" => f]), "Z")[:])
+    @test ty("Y + 1") == Float64 && ty("Y * Y") == Float64 && ty("I + Y") == Float64
+    @test ty("sqrt(Y)") == Float64 && ty("abs(Y)") == Float64 && ty("-Y") == Float64 && ty("exp(Y)") == Float64
+    @test ty("C * 2") == ComplexF64 && ty("conj(C)") == ComplexF64 && ty("abs(C)") == Float64 && ty("real(C)") == Float64
+    @test ty("iif(P, I, J)") == Int64 && ty("iif(P, Y, 1.0)") == Float64
+    @test ty("pi()") == Float64
+    @test ty("I + J") == Int64 && ty("I > 2") == Bool && ty("I") == Int32     # plain / bool results keep their type
+    if _HAVE_TAQL
+        for f in ["Y + 1", "Y * Y", "I + Y", "sqrt(Y)", "abs(Y)", "-Y", "exp(Y)", "C * 2", "conj(C)", "abs(C)", "real(C)",
+                  "iif(P, I, J)", "iif(P, Y, 1.0)", "pi()", "I + J", "I > 2", "I", "fmod(Y, 3)", "square(Y)", "sign(Y)"]
+            @test ty(f) == eltype(_taqlcmd("SELECT $f AS Z FROM \$1", d)[:Z][:])
         end
     end
 end

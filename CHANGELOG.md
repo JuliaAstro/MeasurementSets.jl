@@ -10800,3 +10800,13 @@ bits (`U * U` for 16 is 256, `~5` is -6). Integers narrower than `Int64` are now
 bitwise / comparison broadcast (`_widen` in `_bcast` / `_bcast_raw`), which also removes `Int32` / `Int16` overflow in
 expressions like `I * 100000000`. The remaining differences in the probe are all forms real TaQL rejects
 (bool arithmetic, `S == 1`, `P & Q`, ...) that TaQL-lite accepts leniently. New testset with a real-TaQL cross-check.
+
+### Phase 338 — computed SELECT result types match real TaQL (68-form eltype probe)
+
+Comparing the column type of 68 `SELECT <expr> AS Z` forms against real TaQL: real computes in double precision, so
+`Float32` operands give `Float64` and `ComplexF32` give `ComplexF64`, and results are plain `Int64` / `Float64` columns.
+TaQL-lite left `Float32`/`ComplexF32` results, produced abstract eltypes (`Signed`, `AbstractFloat`) when rows mixed
+`Int32`/`Int64`, and returned `Irrational` for `pi()`. Now `Float32`/`Float16`/`ComplexF32` operands are widened to double
+alongside the Phase 337 integer widening, computed columns that came out abstract are concretised to `Int64` /
+`Float64` (`_tql_concrete`), and `pi()` / `e()` are `Float64`. All 68 forms agree on type; new testset with a real-TaQL
+cross-check.
