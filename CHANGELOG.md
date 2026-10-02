@@ -10733,3 +10733,10 @@ Every column of a casatools-simulator-built MS (134 columns over MAIN and 12 sub
 fixed-rank schema shape has casacore's rank. Differences are representational only (casacore repeats a unit per
 component, `m,m,m`, where the schema has `m`; `MODEL_DATA`/`CORRECTED_DATA` are casacore-added optional columns;
 three SOURCE columns report no rank). Pinned by a static snapshot test in `test/schema_tests.jl`.
+
+### Phase 331 — hard-coded format constants diffed against casacore's headers (no bug found)
+
+`ColumnDesc::Option` (Direct=1, Undefined=2, FixedShape=4), `StorageOption::Option` (MultiFile=0, MultiHDF5=1,
+SepFile=2) and the ColumnSet version codes all match what the writer/reader hard-code; the 8-character type ids in
+the `ScalarColumnDesc<…>` class names are already proven end to end (real casacore refuses an unknown class name,
+and the Phase 265 type matrix round-trips every type). Pinned by a static test in `test/writer_tests.jl`.

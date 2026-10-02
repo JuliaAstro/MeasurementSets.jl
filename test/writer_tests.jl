@@ -386,3 +386,19 @@ if _HAVE_CASACORE
     end
 end
 end
+
+# Phase 331: the numeric format constants the writer/reader hard-code, diffed against casacore's headers:
+# `ColumnDesc::Option` (Direct=1, Undefined=2, FixedShape=4) and `StorageOption::Option` (MultiFile=0,
+# MultiHDF5=1, SepFile=2 -- the values written into a version -3 ColumnSet), plus the 8-character type ids of
+# the `ScalarColumnDesc<...>` / `ArrayColumnDesc<...>` class names (any wrong one makes real casacore refuse
+# the table, so those are also exercised end to end by the Phase 265 type matrix).
+@testset "format constants match casacore's headers (Phase 331)" begin
+    @test (MSv2.COLOPT_DIRECT, MSv2.COLOPT_UNDEFINED, MSv2.COLOPT_FIXEDSHAPE) == (1, 2, 4)
+    @test MSv2.STORAGEOPT_CODE[:multifile] == 0
+    @test MSv2.STORAGEOPT_CODE[:multihdf5] == 1
+    @test MSv2.STORAGEOPT_CODE[:sepfile] == 2
+    @test (MSv2.COLUMNSET_SEPFILE, MSv2.COLUMNSET_STORAGEOPT) == (-2, -3)
+    @test all(length(v) == 8 for v in values(MSv2._TYPEID))
+    @test MSv2._classname(MSv2.TpFloat, true) == "ArrayColumnDesc<float   "
+    @test MSv2._classname(MSv2.TpDComplex, false) == "ScalarColumnDesc<DComplex"
+end
