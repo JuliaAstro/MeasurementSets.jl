@@ -132,19 +132,28 @@ _tql_rtrim(s::AbstractString) = String(rstrip(c -> c == ' ' || c == '\t', s))
 # `isdigit(*p)` check, but has no case to change). `sreverse`/
 # `reversestring` are a plain character reversal, matching Julia's
 # `reverse(::AbstractString)` exactly.
+# Phase 334: casacore's string functions are BYTE-oriented (C `char`, ASCII-only case/class tests):
+# `strlength("é")` is 2, `upcase("é")` is unchanged, `substr` / `sreverse` cut and reverse UTF-8 bytes
+# (live-probed vs real TaQL on random strings). Results may therefore be invalid UTF-8, as in casacore.
+_ascii_up(b::UInt8) = UInt8('a') <= b <= UInt8('z') ? b - 0x20 : b
+_ascii_lo(b::UInt8) = UInt8('A') <= b <= UInt8('Z') ? b + 0x20 : b
+_ascii_alnum(b::UInt8) = UInt8('a') <= b <= UInt8('z') || UInt8('A') <= b <= UInt8('Z') || UInt8('0') <= b <= UInt8('9')
+_tql_upper(s::AbstractString) = String(map(_ascii_up, collect(codeunits(s))))
+_tql_lower(s::AbstractString) = String(map(_ascii_lo, collect(codeunits(s))))
+_tql_strlen(s::AbstractString) = ncodeunits(s)
+_tql_sreverse(s::AbstractString) = String(reverse(collect(codeunits(s))))
 function _tql_capitalize(s::AbstractString)
-    io = IOBuffer()
+    bs = collect(codeunits(s))
     at_word = false
-    for c in s
-        if isletter(c) || isdigit(c)
-            write(io, at_word ? lowercase(c) : uppercase(c))
+    for i in eachindex(bs)
+        if _ascii_alnum(bs[i])
+            bs[i] = at_word ? _ascii_lo(bs[i]) : _ascii_up(bs[i])
             at_word = true
         else
-            write(io, c)
             at_word = false
         end
     end
-    return String(take!(io))
+    return String(bs)
 end
 
 _tql_arraymask(x::TQLMArray) = x.mask
@@ -909,9 +918,9 @@ end
 # `substr(s, start[, len])`: 0-based start, negative start counts from the end
 # (clamped at 0), negative/zero len gives "", no len = rest of the string.
 function _tql_substr(s::AbstractString, start::Real, len::Real=typemax(Int))
-    n = length(s); st = Int(start); st < 0 && (st = max(0, st + n))
+    bs = codeunits(s); n = length(bs); st = Int(start); st < 0 && (st = max(0, st + n))
     (len <= 0 || st >= n) && return ""
-    return String(SubString(s, nextind(s, 0, st + 1), nextind(s, 0, min(n, st + Int(min(len, n))))))
+    return String(bs[st+1:min(n, st + Int(min(len, n)))])
 end
 # `replace(s, pat, rep)`: literal (not regex) replace-all; empty pattern = no-op.
 _tql_replace(s::AbstractString, pat::AbstractString, rep::AbstractString) =
@@ -1184,20 +1193,20 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "replacemasked" => (_tql_replacemasked, 2:2),
     "replaceunmasked" => (_tql_replaceunmasked, 2:2),
     # --- string ---
-    "strlength" => (_sew(length), 1:1), "len" => (_sew(length), 1:1),
+    "strlength" => (_sew(_tql_strlen), 1:1), "len" => (_sew(_tql_strlen), 1:1),
     "regex" => (s -> _tql_pattern(:regex, s), 1:1),
     "pattern" => (s -> _tql_pattern(:pattern, s), 1:1),
     "sqlpattern" => (s -> _tql_pattern(:sqlpattern, s), 1:1),
-    "upcase" => (_sew(uppercase), 1:1), "upper" => (_sew(uppercase), 1:1), "toupper" => (_sew(uppercase), 1:1),
-    "to_upper" => (_sew(uppercase), 1:1),
-    "downcase" => (_sew(lowercase), 1:1), "lower" => (_sew(lowercase), 1:1), "tolower" => (_sew(lowercase), 1:1),
-    "to_lower" => (_sew(lowercase), 1:1),
+    "upcase" => (_sew(_tql_upper), 1:1), "upper" => (_sew(_tql_upper), 1:1), "toupper" => (_sew(_tql_upper), 1:1),
+    "to_upper" => (_sew(_tql_upper), 1:1),
+    "downcase" => (_sew(_tql_lower), 1:1), "lower" => (_sew(_tql_lower), 1:1), "tolower" => (_sew(_tql_lower), 1:1),
+    "to_lower" => (_sew(_tql_lower), 1:1),
     "capitalize" => (_sew(_tql_capitalize), 1:1),
     "string" => (_sew(_tql_str), 1:2), "str" => (_sew(_tql_str), 1:2),
     "substr" => (_sew(_tql_substr), 2:3), "substring" => (_sew(_tql_substr), 2:3),
     "replace" => (_sew(_tql_replace), 3:3),
     "bool" => (_tql_bool, 1:1), "boolean" => (_tql_bool, 1:1),
-    "reversestring" => (_sew(reverse), 1:1), "sreverse" => (_sew(reverse), 1:1),
+    "reversestring" => (_sew(_tql_sreverse), 1:1), "sreverse" => (_sew(_tql_sreverse), 1:1),
     "trim" => (_sew(_tql_trim), 1:1), "ltrim" => (_sew(_tql_ltrim), 1:1), "rtrim" => (_sew(_tql_rtrim), 1:1),
     # --- misc ---
     "iif" => (_tql_iif, 3:3),

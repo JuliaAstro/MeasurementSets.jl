@@ -4755,3 +4755,36 @@ if _HAVE_TAQL && _HAVE_UNITFUL
     @test_throws Exception query(readtable(let p = joinpath(mktempdir(), "u"); write_table(p, "U", Pair{String,Any}["X" => [1.0, 2.0]]; nrow=2); p end), "X > 1h")
 end
 end
+
+# Phase 334: casacore's string functions are byte-oriented (ASCII-only case/class tests, UTF-8 bytes counted /
+# cut / reversed).  Found by a random-string fuzz vs real TaQL: every non-ASCII string disagreed.
+@testset "string functions are byte-oriented like casacore (Phase 334)" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    @test f("strlength")("é") == 2
+    @test f("upcase")("aé") == "Aé"
+    @test f("downcase")("AÉ") == "aÉ"
+    @test f("capitalize")("hello wörld") == "Hello WöRld"       # `ö` bytes are not letters, so `rld` starts a word
+    @test codeunits(f("substr")("é", 1)) == UInt8[0xa9]            # cuts inside the 2-byte character
+    @test codeunits(f("sreverse")("aé")) == UInt8[0xa9, 0xc3, 0x61]
+    @test f("strlength")("abc") == 3 && f("sreverse")("abc") == "cba" && f("substr")("hello", 1, 3) == "ell"
+    if _HAVE_TAQL
+        rng = MersenneTwister(334)
+        alpha = collect("abAB xy_-.01é")
+        rs() = String(rand(rng, alpha, rand(rng, 0:9)))
+        n = 40
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["S" => [rs() for _ in 1:n], "U" => [rs() for _ in 1:n], "K" => Int32.(1:n)]; nrow=n)
+        t = readtable(d)
+        for fe in ["upcase(S)", "downcase(S)", "trim(S)", "ltrim(S)", "rtrim(S)", "capitalize(S)", "sreverse(S)",
+                   "strlength(S)", "substr(S,1)", "substr(S,0,2)", "substr(S,-3)", "substr(S,1,3)",
+                   "replace(S,'a','Z')", "S+U", "upcase(S)+downcase(U)"]
+            r = _taqlcmd("SELECT K, $fe AS X FROM \$1", d)
+            o = query(t, "K >= 0"; select=["K" => "K", "X" => fe])
+            @test string.(collect(r[:X][:])) == string.(collect(column(o, "X")[:]))
+        end
+        for fe in ["S == U", "S < U", "S >= U", "S IN ['a','ab']", "S LIKE 'a%'", "S ~ p/a*/", "S ~ m/[ab]x/", "S !~ f/a.*/i"]
+            r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $fe", d)[:K][:]) catch; Int32[] end
+            @test collect(column(query(t, fe), "K")[:]) == r
+        end
+    end
+end

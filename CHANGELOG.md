@@ -10765,3 +10765,12 @@ a unitless column still compares as a plain number); `_bcast` retries a `Dimensi
 (`_tql_dim_coerce`) that converts a time operand to an angle when the other is an angle. Metre-vs-second style
 mismatches (`TM > 30m`) still error, as in real TaQL. The Phase 87 single-field-`h` assertions were updated. New
 testset in `test/taql_query_tests.jl` cross-checking 17 unit-literal forms against real TaQL.
+
+### Phase 334 — string functions are byte-oriented like casacore (random-string fuzz vs real TaQL)
+
+Random strings (including a non-ASCII `é`) through 26 string forms against real TaQL: everything agreed for ASCII, but
+every non-ASCII string differed, because casacore's string functions work on C `char` bytes. Now matching:
+`strlength` counts UTF-8 bytes (`é` is 2), `upcase`/`downcase`/`capitalize` change ASCII letters only and treat any
+non-ASCII byte as a word break, and `substr`/`sreverse` cut and reverse bytes (so they can yield invalid UTF-8, as in
+casacore). Comparisons, `+`, `IN`, `LIKE`, `~`/`!~` and `replace`/`trim` already agreed. New testset in
+`test/taql_query_tests.jl` (hand-checked units + a seeded real-TaQL fuzz, `MersenneTwister(334)`).
