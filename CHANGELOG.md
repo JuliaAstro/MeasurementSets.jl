@@ -10628,3 +10628,12 @@ its iterative antenna/channel RMS solve is not idempotent on already-quantised d
 loosely at 10%).
 
 New testset in `test/dysco_tests.jl` (10 cases, fixed-seed `MersenneTwister(320)`; not CASA-gated).
+
+### Phase 321 — `MDoppler` conventions + rest-frequency bridge random fuzz vs casatools (investigation only, no bug found)
+
+Phase 72's Doppler conversions and frequency ↔ velocity bridge were cross-checked against casatools at
+exactly one value (RADIO 0.01, one observed/rest pair). Spread the same oracle over 25 random
+physically-valid shifts (|β| < 0.9, rest frequency 1e8–5e11 Hz): all five conventions from a BETA value,
+`doppler(f, rest)`, `radialvelocity`, `frequency(d, rest)` and `restfrequency(f, d)` agree with casatools
+to better than 1e-9 relative (pure algebra). New testset in `test/measures_tests.jl` (25 cases × 9
+quantities, fixed-seed `MersenneTwister(321)`, gated on the CASA python).
