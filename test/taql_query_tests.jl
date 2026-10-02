@@ -4852,3 +4852,27 @@ end
         end
     end
 end
+
+# Phase 337: integer arithmetic in TaQL is 64-bit.  A mixed-type WHERE probe (100 forms) vs real TaQL found
+# `U * U > 100` / `~U == 250` on a UInt8 column wrapping at 8 bits here; small integers are now widened to Int64.
+@testset "integer arithmetic is 64-bit like real TaQL (Phase 337)" begin
+    n = 16
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["U" => UInt8.(1:n), "I" => Int32.(1:n) .* Int32(100_000_000),
+                                        "H" => Int16.(1:n) .* Int16(1000), "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    rows(w) = collect(column(query(t, w), "K")[:])
+    @test rows("U * U > 100") == collect(11:16)          # 11^2 = 121; UInt8 would wrap 16*16 = 256 -> 0
+    @test rows("~U == 250") == Int[]                      # 64-bit complement of 5 is -6, not 250
+    @test rows("~U == -6") == [5]
+    @test rows("U + 250 > 255") == collect(6:16)          # no UInt8 wrap-around
+    @test rows("I * 100 > 0") == collect(1:n)             # Int32 would overflow
+    @test rows("H * H > 100000000") == [i for i in 1:n if (1000i)^2 > 100_000_000]
+    @test rows("-U < 0") == collect(1:n)
+    if _HAVE_TAQL
+        for w in ["U * U > 100", "~U == 250", "~U == -6", "U + 250 > 255", "I * 100 > 0", "H * H > 100000000", "U - 10 < 0", "-U < 0"]
+            r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch; Int32[] end
+            @test rows(w) == r
+        end
+    end
+end

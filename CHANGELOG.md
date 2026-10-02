@@ -10791,3 +10791,12 @@ arithmetic level; an all-literal element stays static and is validated at parse 
 error), anything else becomes a `TQLExpr` / `TQLDynRange` resolved per row (`_in_resolve`) in both the row and group
 evaluators, with the visitors (`_tqlrefs!`, `_has_aggr`, `_has_qty`, `_sg`) following the sub-expressions. 15 forms
 cross-checked against real TaQL. Still lenient where real errors: `IN []` (matches nothing), `A IN [true]`, `NOT A IN [3:20]`.
+
+### Phase 337 — integer arithmetic is 64-bit like real TaQL (mixed-type WHERE probe vs real TaQL)
+
+A 100-form probe mixing Int32/Int64/UInt8/Float/Bool/String columns against real TaQL found two value differences:
+`U * U > 100` and `~U == 250` on a `UInt8` column wrapped at 8 bits here, whereas real TaQL promotes integers to 64
+bits (`U * U` for 16 is 256, `~5` is -6). Integers narrower than `Int64` are now widened before every arithmetic /
+bitwise / comparison broadcast (`_widen` in `_bcast` / `_bcast_raw`), which also removes `Int32` / `Int16` overflow in
+expressions like `I * 100000000`. The remaining differences in the probe are all forms real TaQL rejects
+(bool arithmetic, `S == 1`, `P & Q`, ...) that TaQL-lite accepts leniently. New testset with a real-TaQL cross-check.

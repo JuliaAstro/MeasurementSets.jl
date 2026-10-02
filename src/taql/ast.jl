@@ -111,6 +111,8 @@ function _in_resolve(vals, ev)
     for v in vals
         if v isa TQLExpr
             x = ev(v)
+            nameof(typeof(x)) === :TQLPatternVal && throw(ArgumentError(
+                "TaQL-lite: a regex / pattern value cannot be an element of IN [...] (real TaQL rejects it too)"))
             x isa AbstractArray ? append!(out, x) : push!(out, x)
         elseif v isa TQLDynRange
             lo = ev(v.lo); hi = v.hi === nothing ? nothing : ev(v.hi); st = v.step === nothing ? 1 : ev(v.step)
@@ -200,7 +202,13 @@ end
 # `if` -- correct, exactly as real TaQL requires `any(...)`/`all(...)`
 # there. `AND`/`OR` stay scalar (short-circuit); `NOT` broadcasts so
 # `NOT FLAG` / `V[!FLAG]` negate an array-cell mask elementwise.
-_bcast(f, x) = x isa AbstractArray ? f.(x) : f(x)
+# Phase 334/337: real TaQL does integer arithmetic in 64 bits (`U * U` on a UInt8 column does not wrap at 255,
+# `~U` is a 64-bit complement), so integers narrower than Int64 are widened before any operation.
+const _SmallInt = Union{Int8,UInt8,Int16,UInt16,Int32,UInt32}
+_widen(x::_SmallInt) = Int64(x)
+_widen(x::AbstractArray{<:_SmallInt}) = Int64.(x)
+_widen(x) = x
+_bcast(f, x) = (x = _widen(x); x isa AbstractArray ? f.(x) : f(x))
 # two array operands must have the SAME shape (real TaQL: "ArrayMath function
 # +: array shapes mismatch" -- no implicit broadcasting; Phase 285)
 # Phase 333: a comparison / arithmetic between a TIME quantity (`6h`, `0.5d`, a column in seconds) and an ANGLE
@@ -221,6 +229,7 @@ function _bcast(f, x, y)
 end
 
 function _bcast_raw(f, x, y)
+    x = _widen(x); y = _widen(y)
     if x isa AbstractArray && y isa AbstractArray
         size(x) == size(y) || throw(ArgumentError(
             "TaQL-lite: array operands have different shapes $(size(x)) and $(size(y))"))
