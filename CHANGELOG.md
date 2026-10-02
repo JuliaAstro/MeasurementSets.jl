@@ -10568,3 +10568,19 @@ random row lists (repeats, unsorted, and sorted so the `rowOrder` flag is exerci
 column subsets with renames over `Int32`/`Float64`/`String`/array columns, and a second RefTable chained
 on the first (flattened to the root on write) — through both our reader and `Casacore.jl`: all agree.
 New testset in `test/reftable_tests.jl` (12 cases, fixed-seed `MersenneTwister(316)`).
+
+### Phase 317 — write → `copytable` → random edit-session pipeline fuzz; a documented `addrows!` divergence from real casacore on ISM columns (no bug)
+
+Spread 25 exploratory random pipelines — `write_table` with mixed `StandardStMan` / `IncrementalStMan` /
+shared-`TiledShapeStMan`-group columns, `copytable` to a fresh table, then a random edit session
+(`setcell!` / `addrows!` / `removerows!`) — against a plain Julia model and `Casacore.jl`: after fixing
+my own model all agree, and the manager mix survives the copy.
+
+The one thing the fuzz surfaced: for an `IncrementalStMan` column an appended row reads back as zero /
+`""` here (the documented, manager-uniform `addrows!` contract — "until written"), whereas real casacore's
+ISM returns the *previous row's value* (confirmed with casatools `addrows`: `[5,5,7,7,9]` → `[…,9,9]`),
+because its "store on change" file simply has no entry for the new rows. Kept ours (uniform, and users set
+the values), and documented the difference in the `addrows!` docstring. The Phase 9 plan text that said ISM
+appends inherit the last value was never what the regen path implements.
+
+New testset in `test/edit_tests.jl` (10 cases, fixed-seed `MersenneTwister(317)`).
