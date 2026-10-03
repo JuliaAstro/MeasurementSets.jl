@@ -10862,3 +10862,17 @@ GitHub Actions (Linux x86-64, Julia 1.10) failed the Phase 335 random pattern gu
 (`~ m/../`, `~ f/../`) forms the generator built with stacked quantifiers such as `?*` and `**`. Real casacore on Linux
 accepts those, while PCRE (and casacore on macOS) rejects them, so the two engines disagreed only on invalid patterns.
 Reproduced in an x86-64 Linux container; the test now collapses stacked quantifiers in the regex forms. No package change.
+
+### Phase 343 — `meas.*` epochs are seconds; more direction frames (random conversion fuzz vs real TaQL)
+
+A random fuzz of `meas.<frame>([lon,lat], 'SRC', epoch, 'OBS')` over 13 frames, epochs and observatories against real
+TaQL's `meas` UDFs found that real casacore reads a **plain-number epoch as seconds since MJD 0** (the unit of a `TIME`
+column) — `meas.app(d,'J2000',60454.0)` is the year-1858 answer, `60454d` or `60454.0*86400` the 2024 one. The Phase 249
+value-first forms assumed MJD days (that held only for the `d` forms), so any observer-dependent conversion given an epoch
+was wrong by an epoch error. Plain epochs are now seconds, unit quantities (`60454d`, `30deg`, `5 m`) are converted by the
+Unitful extension, and the older source-first numeric forms (`meas.azel('J2000', lon, lat, mjd, x, y, z)`) keep MJD days;
+`datetime()` / `mjd()` values are days here, so multiply by 86400 to use one as an epoch. Also added `azelgeo`, `azelsw`,
+`azelswgeo` and `supergal` to the `meas.*` direction frames (and `AZELGEO`/`AZELSW`/`AZELSWGEO` as epoch/position-needing
+sources). After the fix 369 random conversions agree with real TaQL within the usual SOFA-vs-casacore residual (observer
+frames ~arcsec; B1950↔`AZELSW` up to ~4″). Still unsupported: the mean/true/natural frames `JMEAN`, `JTRUE`, `JNAT`, `BMEAN`,
+`BTRUE`, `MECLIPTIC`, `TECLIPTIC`. New testset with a seeded real-TaQL cross-check.

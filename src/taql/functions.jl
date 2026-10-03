@@ -1333,7 +1333,8 @@ const _MEAS_DIR_FRAMES = Dict{String,DataType}(
     "j2000" => J2000, "b1950" => B1950, "app" => APP, "apparent" => APP,
     "galactic" => GALACTIC, "gal" => GALACTIC, "ecliptic" => ECLIPTIC,
     "ecl" => ECLIPTIC, "azel" => AZEL, "hadec" => HADEC, "itrf" => ITRF,
-    "icrs" => ICRS)
+    "icrs" => ICRS, "supergal" => SUPERGAL, "azelgeo" => AZELGEO,
+    "azelsw" => AZELSW, "azelswgeo" => AZELSWGEO)
 const _MEAS_EPOCH_FRAMES = Dict{String,DataType}(
     "utc" => UTC, "tai" => TAI, "tt" => TT, "tdt" => TT, "tdb" => TDB, "ut1" => UT1)
 const _MEAS_FREQ_FRAMES = Dict{String,DataType}(
@@ -1345,8 +1346,8 @@ const _MEAS_DOPPLER_CONV = Dict{String,DataType}(
 const _MEAS_POS_FRAMES = Dict{String,DataType}(
     "itrf" => ITRF, "wgs84" => WGS84, "wgs" => WGS84)
 
-_meas_dir_needs_epoch(R) = R === APP || R === AZEL || R === HADEC || R === ITRF
-_meas_dir_needs_pos(R) = R === AZEL || R === HADEC || R === ITRF
+_meas_dir_needs_epoch(R) = R === APP || R === AZEL || R === HADEC || R === ITRF || R === AZELGEO || R === AZELSW || R === AZELSWGEO
+_meas_dir_needs_pos(R) = R === AZEL || R === HADEC || R === ITRF || R === AZELGEO || R === AZELSW || R === AZELSWGEO
 
 function _meas_frame(mjd, xyz)
     fr = MeasFrame()
@@ -1565,9 +1566,11 @@ end
 # the direction ARRAY first): `meas.b1950([ra,dec] [, 'SRC' [, epoch [, pos]]])`
 # with `pos` a 3-vector (metres) or an observatory name, `meas.doppler('TO',
 # value [, 'FROM'])`, and `meas.last(epoch, pos)`. Plain numbers are radians /
-# MJD days / metres (real TaQL also takes unit quantities, coerced by the
-# Unitful extension when loaded).
-_tql_plain(x, kind::Symbol) = float(x)
+# SECONDS since MJD 0 (the unit of a `TIME` column; live-verified in Phase 343 -- `meas.app(d,'J2000',60454.0)` is
+# the year-1858 answer, `60454d` or `60454.0*86400` the 2024 one; an earlier note here said MJD days) / metres, and
+# real TaQL also takes unit quantities (`60454d`, `30deg`), coerced by the Unitful extension when loaded.
+# (`datetime()` / `mjd()` values are MJD *days* here, so multiply by 86400 to use one as an epoch.)
+_tql_plain(x, kind::Symbol) = kind === :time ? float(x) / 86400.0 : float(x)
 # real casacore returns a direction's longitude in (-pi, pi]
 _meas_lon_pm_pi(d) = (d[1] = atan(sin(d[1]), cos(d[1])); d)
 _meas_pos_arg(a::TQLLit) = a.value isa AbstractString ?

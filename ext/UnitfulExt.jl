@@ -216,4 +216,11 @@ function MS._unit_factor(from::AbstractString, to::AbstractString)
     end
 end
 
+# Phase 343: a unit quantity given to a value-first `meas.*` argument (`60454d`, `30deg`, `5 m`) -> the plain
+# number the engine uses (epoch -> MJD days, angle -> radians, length -> metres)
+function MS._tql_plain(x::Unitful.AbstractQuantity, kind::Symbol)
+    u = kind === :time ? Unitful.u"d" : kind === :angle ? Unitful.u"rad" : Unitful.u"m"
+    return Float64(Unitful.ustrip(Unitful.uconvert(u, x)))
+end
+
 end # module
