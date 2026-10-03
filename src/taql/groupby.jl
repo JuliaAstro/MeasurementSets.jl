@@ -150,6 +150,8 @@ a column literally named `names` / `cols` is accessible only through
 struct GroupedTable <: AbstractTable
     names::Vector{Symbol}
     cols::Vector{AbstractVector}
+    units::Dict{Symbol,Vector{String}}      # per-column `QuantumUnits` (Phase 341); persisted by `copytable`
+    GroupedTable(names, cols, units=Dict{Symbol,Vector{String}}()) = new(names, cols, units)
 end
 
 nrow(gt::GroupedTable) = isempty(getfield(gt, :cols)) ? 0 : length(getfield(gt, :cols)[1])
@@ -182,8 +184,12 @@ end
 # (the generic `::AbstractTable` methods in tables/interface.jl cover
 # `istable`/`columns`/`columnnames`/`getcolumn`/`schema`/`rows`).
 Base.getproperty(x::GroupedTable, s::Symbol) =
-    s === :names || s === :cols ? getfield(x, s) : column(x, String(s))
+    s === :names || s === :cols || s === :units ? getfield(x, s) : column(x, String(s))
 Base.propertynames(x::GroupedTable) = Tuple(getfield(x, :names))
+# Phase 341: units + builder used by the select materialiser (defined here, after the type)
+_col_units(gt::GroupedTable, n::AbstractString) = get(getfield(gt, :units), Symbol(n), nothing)
+_mk_grouped(ps, units) = GroupedTable(first.(ps), AbstractVector[last(x) for x in ps], units)
+
 
 function Base.show(io::IO, ::MIME"text/plain", x::GroupedTable)
     nr = nrow(x)
@@ -217,7 +223,7 @@ function query(gt::GroupedTable, wherestr::AbstractString;
     keep = _apply_orderby(keep, orderby, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
     ps = _select_materialize(cls, gt, keep)
-    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
+    return _mk_grouped(ps, _select_units(cls, gt))
 end
 
 """
@@ -239,7 +245,7 @@ function query(f::Function, gt::GroupedTable;
     keep = _apply_orderby(keep, orderkeys, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
     ps = _select_materialize(cls, gt, keep)
-    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
+    return _mk_grouped(ps, _select_units(cls, gt))
 end
 
 _gb_names(c::Union{AbstractString,Symbol}) = String[String(c)]
@@ -293,6 +299,7 @@ function _where_rows(t::AbstractTable, where, cols::AbstractDict)
     ast = _taqllite_parse(String(where), Set(columnnames(t)))
     !_has_aggr(ast) ||
         throw(ArgumentError("WHERE must not contain aggregate functions"))
+    ast = _unit_conv(ast, t)
     return [i for i in 1:nrow(t) if _tql_truthy(_tqleval(ast, cols, i))]
 end
 

@@ -1938,13 +1938,15 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         # true`, `nearabs(5.0, 5.2, 0.1) == false`.
         n in (2, 3) || throw(ArgumentError("TaQL-lite: $name(a, b[, tol]) in \"$src\""))
         base = name == "near" ? _tql_near : _tql_nearabs
-        fn = n == 2 ? ((a, b) -> base(a, b, 1.0e-13)) : ((a, b, tol) -> base(a, b, tol))
+        # elementwise over array cells (Phase 340: `near(B, A)` on two array columns is a Bool array)
+        bc(a, b, tol) = (a isa AbstractArray || b isa AbstractArray) ? base.(a, b, tol) : base(a, b, tol)
+        fn = n == 2 ? ((a, b) -> bc(a, b, 1.0e-13)) : ((a, b, tol) -> bc(a, b, tol))
         return TQLFunc(fn, args)
     elseif name == "min" || name == "max"
         n in 1:2 || throw(ArgumentError("TaQL-lite: $name() takes 1 or 2 arguments in \"$src\""))
         base = name == "min" ? _tql_min2 : _tql_max2
         fn = n == 1 ? _red(x -> (name == "min" ? minimum : maximum)(x), :elt) : _ew2(base)
-        return TQLFunc(fn, args)
+        return TQLFunc(fn, args, name)
     elseif name in ("angdist", "angdistx", "angulardistance", "angulardistancex")
         n in (2, 4) || throw(ArgumentError(
             "TaQL-lite: $name() takes 4 scalar radians or two `[lon, lat]` arrays in \"$src\""))
@@ -1966,6 +1968,6 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         "TaQL-lite: $name() takes $(arity == 1:1 ? "1 argument" :
          length(arity) == 1 ? "$(first(arity)) arguments" :
          "$(first(arity))–$(last(arity)) arguments"), got $n, in \"$src\""))
-    return TQLFunc(fn, args)
+    return TQLFunc(fn, args, name)
 end
 

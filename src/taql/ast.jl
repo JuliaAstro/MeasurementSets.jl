@@ -161,6 +161,8 @@ end
 struct TQLFunc <: TQLExpr           # NAME(args...) -- resolved Julia callable + parsed args
     fn::Base.Callable
     args::Vector{TQLExpr}
+    name::String                    # the function's TaQL name ("" for the internally-built ones; Phase 341, unit inference)
+    TQLFunc(fn, args, name::AbstractString="") = new(fn, args, String(name))
 end
 struct TQLRowNum <: TQLExpr end     # rownumber() / rownr() -- the 1-based row index
 struct TQLAggr <: TQLExpr           # g*(arg) -- reduces over a group's rows (groupby only)
@@ -359,7 +361,7 @@ _tql_truthy(::Missing) = false
 _tql_truthy(x) = throw(ArgumentError(
     "TaQL-lite: a WHERE/HAVING/join condition must evaluate to Bool, got $(typeof(x))"))
 
-_tqleval(e::TQLCol, cols, i) = cols[e.name][i]
+_tqleval(e::TQLCol, cols, i) = _widen(cols[e.name][i])    # real TaQL reads columns as Int64 / Double (Phase 340)
 _tqleval(e::TQLLit, cols, i) = e.value
 _tqleval(e::TQLQuantityLit, cols, i) = e.value
 _tqleval(e::TQLArrayLit, cols, i) = [_tqleval(x, cols, i) for x in e.elems]
@@ -437,7 +439,10 @@ function _tql_do_index(arr, axes, ev)
         m = _as_mask(axes, ev)
         m !== nothing && return TQLMArray(collect(arr), BitArray(collect(m)))
     end
-    return arr[_tql_index_tuple(arr, axes, ev)...]
+    idx = _tql_index_tuple(arr, axes, ev)
+    all(i -> i isa Integer, idx) && return arr[idx...]
+    # Phase 340 (live-verified): a scalar subscript among slices keeps a length-1 axis (`B[1:2,1]` is 2x1)
+    return arr[map(i -> i isa Integer ? (i:i) : i, idx)...]
 end
 
 # write `rhs` into `arr` at the resolved index tuple (used by `update!`
@@ -553,7 +558,7 @@ _sg(e::TQLBetween, r) = TQLBetween(_sg(e.lhs, r), _sg(e.lo, r), _sg(e.hi, r), e.
 _sg(e::TQLIn, r) = TQLIn(_sg(e.lhs, r), Any[v isa TQLExpr ? _sg(v, r) : v isa TQLDynRange ?
     TQLDynRange(_sg(v.lo, r), v.hi === nothing ? nothing : _sg(v.hi, r), v.step === nothing ? nothing : _sg(v.step, r)) : v for v in e.vals])
 _sg(e::TQLMatch, r) = TQLMatch(_sg(e.lhs, r), e.regex, e.negate)
-_sg(e::TQLFunc, r) = TQLFunc(e.fn, TQLExpr[_sg(a, r) for a in e.args])
+_sg(e::TQLFunc, r) = TQLFunc(e.fn, TQLExpr[_sg(a, r) for a in e.args], e.name)
 _sg(e::TQLAggr, r) = e.arg === nothing ? e : TQLAggr(e.fn, _sg(e.arg, r), e.mode)
 _sg(e::TQLIndex, r) = TQLIndex(_sg(e.base, r),
     Any[ax isa NamedTuple ?

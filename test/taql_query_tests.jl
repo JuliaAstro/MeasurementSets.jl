@@ -4806,7 +4806,9 @@ if _HAVE_TAQL
     for _ in 1:150
         kind = rand(rng, 1:6)
         sp, gp = sqlpat(), globpat()
-        rp = replace(gp, "{a,bx}" => "(a|bx)")
+        # the regex forms reuse the glob text; stacked quantifiers (`?*`, `**`) are invalid in PCRE but accepted by
+        # casacore's regex on Linux (rejected on macOS), so collapse them to keep both engines on valid patterns
+        rp = replace(replace(gp, "{a,bx}" => "(a|bx)"), r"[*?]{2,}" => "*")
         w = kind == 1 ? "S LIKE '$sp'" : kind == 2 ? "S ILIKE '$sp'" : kind == 3 ? "S ~ p/$gp/" :
             kind == 4 ? "S ~ p/$gp/i" : kind == 5 ? "S ~ m/$rp/" : "S ~ f/$rp/"
         # an empty result is a lazy Slicer error in real TaQL; a pattern both engines reject counts as agreement
@@ -4925,6 +4927,126 @@ end
                   "gmedian(Y)", "gproduct(Y)", "glast(Y)", "gsum(C)", "gmean(C)", "gmean(I)", "gcount()", "gstddev(U)", "grms(Y)"]
             r = _taqlcmd("SELECT G, $f AS Z FROM \$1 GROUP BY G", d)
             @test ty(f) == eltype(r[:Z][:])
+        end
+    end
+end
+
+# Phase 340: array-valued expressions vs real TaQL (87 forms, result eltype + shape).  Found: columns are read as
+# Int64 / Double inside expressions (so `sum(U)`, `transpose(B)`, `resize(B,..)` of a UInt8 / Float32 cell are 64-bit /
+# double); a scalar subscript among slices keeps a length-1 axis (`B[1:2,1]` is 2x1, `shape(B[1,1:2])` is [1,2]);
+# `near()` / `nearabs()` are elementwise on array cells.
+@testset "array expressions: widening, kept subscript axes, elementwise near (Phase 340)" begin
+    n = 4
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => [Float64.(i .* ones(2, 3)) for i in 1:n], "B" => [Float32.(i .* ones(2, 3)) for i in 1:n],
+                                        "U" => [UInt8.(i .* ones(2, 3)) for i in 1:n], "K" => Int32.(1:n)]; nrow=n,
+                tsm=[["A", "B", "U"]])
+    t = readtable(d)
+    val(f) = column(query(t, "K >= 0"; select=["Z" => f]), "Z")[1]
+    @test eltype(val("sum(U)")) == Int64 && eltype(val("min(U)")) == Int64 && eltype(val("sum(B)")) == Float64
+    @test eltype(val("transpose(B)")) == Float64 && eltype(val("resize(B,[3,3])")) == Float64 && eltype(val("reversearray(U)")) == Int64
+    @test eltype(val("sums(B,1)")) == Float64 && eltype(val("B[1,1]")) == Float64 && eltype(val("flatten(B)")) == Float64
+    @test size(val("B[1:2,1]")) == (2, 1) && size(val("B[1,1:2]")) == (1, 2) && size(val("B[1:2,1:3]")) == (2, 3)
+    @test val("B[1,1]") isa Float64
+    @test val("shape(B[1:2,1])") == [2, 1] && val("ndim(B[1:2,1])") == 2
+    @test val("near(B, A)") == trues(2, 3) && val("nearabs(B, A, 0.1)") == trues(2, 3)
+    @test val("near(B, A + 1)") == falses(2, 3)
+    if _HAVE_TAQL
+        for f in ["sum(U)", "min(U)", "sum(B)", "transpose(B)", "resize(B,[3,3])", "reversearray(U)", "sums(B,1)", "B[1,1]",
+                  "flatten(B)", "B[1:2,1]", "B[1,1:2]", "B[1:2,1:3]", "near(B,A)", "nearabs(B,A,0.1)", "mean(B)", "variances(B,1)"]
+            r = _taqlcmd("SELECT $f AS Z FROM \$1", d)[:Z][1]
+            o = val(f)
+            @test (eltype(o), size(o)) == (eltype(r), size(r))
+        end
+    end
+end
+
+# Phase 341: `SELECT <expr> AS Z ... INTO/GIVING` persists the column type and `QuantumUnits` like real TaQL (24 forms
+# of column type / shape / units compared; 44 forms of the unit rules).  A computed column used to lose its unit, and so
+# did every column of a SELECT that mixed projections with computed expressions.
+@testset "computed SELECT columns keep QuantumUnits like real TaQL (Phase 341)" begin
+    n = 4
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["X" => Float64.(1:n), "Y" => Float64.(1:n), "Z" => Float64.(1:n), "R" => Float64.(1:n)]; nrow=n,
+                units=Dict("X" => "m", "Y" => "Hz", "Z" => "m", "R" => "rad"))
+    t = readtable(d)
+    function unit(e)
+        po = joinpath(mktempdir(), "o")
+        taql(t, "SELECT $e AS W FROM \$1 INTO '$po'")
+        return get(columndesc(readtable(po), "W").keywords, "QuantumUnits", nothing)
+    end
+    cases = ["X" => ["m"], "X+1" => ["m"], "1+X" => ["m"], "X-1" => ["m"], "X+Z" => ["m"], "X*2" => ["m"], "2*X" => ["m"],
+             "X/2" => ["m"], "2/X" => ["(m)-1"], "X*Y" => ["m.Hz"], "X*X" => ["m.m"], "X/X" => nothing, "X/Y" => ["m/(Hz)"],
+             "-X" => ["m"], "+X" => ["m"], "X%2" => ["m"], "X//2" => ["m"], "X**2" => nothing, "abs(X)" => ["m"],
+             "min(X,Z)" => ["m"], "max(X,1)" => ["m"], "iif(X>1,X,Z)" => ["m"], "mean(X)" => ["m"], "floor(X)" => ["m"],
+             "round(X)" => ["m"], "sign(X)" => nothing, "R+R" => ["rad"], "sin(R)" => nothing, "R*2" => ["rad"],
+             "X>1" => nothing, "int(X)" => nothing, "square(X)" => ["m.m"], "(X+Z)*2" => ["m"], "X*2+1" => ["m"],
+             "rownumber()" => nothing, "X+rownumber()" => ["m"]]
+    for (e, u) in cases
+        @test unit(e) == u
+    end
+    # projections and computed columns of one SELECT both keep their units
+    po = joinpath(mktempdir(), "o")
+    taql(t, "SELECT X, X*Y AS W FROM \$1 INTO '$po'")
+    rt = readtable(po)
+    @test get(columndesc(rt, "X").keywords, "QuantumUnits", nothing) == ["m"]
+    @test get(columndesc(rt, "W").keywords, "QuantumUnits", nothing) == ["m.Hz"]
+    @test column(query(t, "X > 0"; select=["W" => "(X)"]), "W")[:] == collect(1.0:n)      # a parenthesised column is a projection
+    if _HAVE_TAQL
+        for e in ["X", "X+1", "X*2", "2/X", "X*Y", "X/Y", "-X", "abs(X)", "min(X,Z)", "square(X)", "(X+Z)*2", "X>1", "sign(X)", "X**2"]
+            pr = joinpath(mktempdir(), "r")
+            _taqlcmd("SELECT $e AS W FROM \$1 GIVING '$pr'", d)
+            @test get(columndesc(readtable(pr), "W").keywords, "QuantumUnits", nothing) == unit(e)
+        end
+    end
+end
+
+# Phase 342: real TaQL converts units inside expressions -- the right operand of `+ - % //`, a comparison, `BETWEEN`,
+# `IN [..]`, `min`/`max`/`iif` branches and a `/` divisor is converted to the left operand's unit, and `UPDATE SET X = <expr>`
+# converts the value to X's unit (an incompatible dimension is an error).  Found by probing 19 UPDATE and 33 SELECT / WHERE
+# forms on columns in m / km / Hz / rad / deg: TaQL-lite compared and stored the raw numbers.
+@testset "unit conversion inside expressions and UPDATE like real TaQL (Phase 342)" begin
+    n = 6
+    mk() = (p = joinpath(mktempdir(), "t");
+            write_table(p, "T", Pair{String,Any}["X" => Float64.(1:n) .* 500, "KM" => Float64.(1:n) ./ 2, "Y" => Float64.(1:n),
+                        "R" => Float64.(1:n) ./ 4, "DEG" => Float64.(10 .* (1:n)), "K" => Int32.(1:n)]; nrow=n,
+                        units=Dict("X" => "m", "KM" => "km", "Y" => "Hz", "R" => "rad", "DEG" => "deg")); p)
+    d = mk(); t = readtable(d)
+    sel(e) = collect(column(query(t, "K >= 0"; select=["W" => e]), "W")[:])
+    @test sel("X + KM") ≈ Float64.(1:n) .* 500 .+ Float64.(1:n) ./ 2 .* 1000
+    @test sel("KM + X") ≈ Float64.(1:n) ./ 2 .+ Float64.(1:n) .* 0.5
+    @test sel("X / KM") ≈ ones(n)                                       # divisor converted to the dividend's unit
+    @test sel("min(X, KM)") ≈ Float64.(1:n) .* 500
+    @test sel("R + DEG") ≈ Float64.(1:n) ./ 4 .+ deg2rad.(10 .* (1:n))
+    @test sel("X * KM") ≈ Float64.(1:n) .* 500 .* Float64.(1:n) ./ 2    # `*` joins units, no conversion
+    rows(w) = collect(column(query(t, w), "K")[:])
+    @test rows("X > KM") == Int[] && rows("X == KM") == collect(1:n) && rows("X >= KM") == collect(1:n)   # equal after conversion
+    @test rows("X BETWEEN KM AND KM*3") == collect(1:n) && rows("X IN [KM, 1000]") == collect(1:n)
+    function upd(s)
+        dd = mk(); update!(dd; set=[s]); return readtable(dd)
+    end
+    @test collect(column(upd("X" => "KM"), "X")) ≈ Float64.(1:n) ./ 2 .* 1000
+    @test collect(column(upd("KM" => "X"), "KM")) ≈ Float64.(1:n) .* 0.5
+    @test collect(column(upd("R" => "DEG"), "R")) ≈ deg2rad.(10 .* (1:n))
+    @test collect(column(upd("DEG" => "R * 4"), "DEG")) ≈ rad2deg.(Float64.(1:n))
+    @test collect(column(upd("X" => "X + KM"), "X")) ≈ Float64.(1:n) .* 500 .+ Float64.(1:n) ./ 2 .* 1000
+    @test collect(column(upd("X" => "1000"), "X")) == fill(1000.0, n)                 # a unitless value is stored as is
+    @test_throws ArgumentError update!(mk(); set=["X" => "Y"])                         # Hz into a metre column
+    @test_throws ArgumentError update!(mk(); set=["Y" => "X"])
+    if _HAVE_TAQL
+        for s in ["X = KM", "KM = X", "R = DEG", "DEG = R", "X = X + KM", "X = KM + 1", "X = KM / 1000", "X = 5 * KM"]
+            d1 = mk(); d2 = mk()
+            _taqlcmd("UPDATE \$1 SET $s", d1)
+            c = String(strip(first(split(s, "="))))
+            taql(d2, "UPDATE \$1 SET $s")
+            @test collect(column(readtable(d1), c)) ≈ collect(column(readtable(d2), c))
+        end
+        for e in ["X + KM", "KM + X", "X - KM", "X / KM", "KM / X", "R + DEG", "min(X, KM)", "max(KM, X)", "iif(X > 1000, X, KM)", "X % KM"]
+            @test sel(e) ≈ collect(_taqlcmd("SELECT $e AS W FROM \$1", d)[:W][:])
+        end
+        for w in ["X > KM", "KM < X", "X >= 2*KM", "R > DEG", "X BETWEEN KM AND KM*3", "KM BETWEEN X AND X*2", "X IN [KM, 1000]"]
+            r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch; Int32[] end   # empty = lazy Slicer error
+            @test rows(w) == r
         end
     end
 end

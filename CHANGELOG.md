@@ -10820,3 +10820,45 @@ own narrow type (and `gsum(UInt8)` was `UInt64`). Aggregate arguments are now wi
 before the reduction, which also removes `UInt8` / `Float32` accumulation error. Result types of 47 aggregate forms
 now agree with real TaQL (only the array-of-array representation of `growid`/`gstack`/`gaggr` differs, with matching
 element types); `gsum`/`gmean` of a Bool column still work although real TaQL rejects them.
+
+### Phase 340 — array expressions: 64-bit/double reads, kept subscript axes, elementwise `near()` (87-form probe vs real TaQL)
+
+Result element type and shape of 87 array-valued `SELECT` expressions against real TaQL found three differences.
+(1) Real TaQL reads columns as `Int64` / `Double` inside expressions, so `sum(U)`, `min(U)`, `transpose(B)`, `resize`,
+`flatten`, `B[1,1]`, `boxedsum`, `sums` ... of `UInt8` / `Int32` / `Float32` cells are 64-bit / double; a column read inside an
+expression is now widened (`_widen`, extending Phases 337–339; plain projections and group-key columns keep their stored
+type). (2) A scalar subscript among slices keeps a length-1 axis (`B[1:2,1]` is 2×1, `shape(B[1,1:2])` is `[1,2]`);
+only an all-scalar subscript gives a scalar. This corrects Phase 42's claim that scalar axes are dropped (that is Julia's
+rule). (3) `near(a,b[,tol])` / `nearabs` are elementwise on array cells. New testset with a real-TaQL cross-check.
+
+### Phase 341 — computed SELECT columns keep `QuantumUnits` when persisted (probe vs real TaQL `GIVING`)
+
+Persisting `SELECT <expr> AS Z ...` (`INTO` / `GIVING`) and comparing the new column's type, shape and units against real
+TaQL: types and shapes agree (real writes computed array columns variable-shape, ours fixed-shape — left), but a computed
+column lost its `QuantumUnits`, and so did *every* column of a SELECT that mixed projections with computed expressions
+(only an all-projection SELECT, a lazy `RefTable`, kept them). Real TaQL propagates units through expressions; probing 44
+forms gave the rules now implemented: a plain column keeps its unit; `+ - % //` keep it (unitless operand neutral); `*`
+joins (`m.Hz`), `/` divides (`m/(Hz)`, `(m)-1`, equal units → none); unary minus, `abs`/`min`/`max`/`mean`/`floor`/`round`/
+`real`/`iif` keep it, `square` squares it; `**`, comparisons, trig, `sign`, `int` and the rest are unitless (mismatched
+`+` and `sqrt(X)` are unit errors in real TaQL and stay lenient here). `GroupedTable` gained a `units` field (persisted by
+`copytable` / `INTO`); `TQLFunc` records its name. Also fixed: an expression that reduces to a bare column (`+X`, `(X)`)
+is a projection of that column, not a lookup of its source text. New testset with a real-TaQL cross-check.
+
+### Phase 342 — unit conversion inside expressions and `UPDATE` (probe vs real TaQL)
+
+Probing `UPDATE ... SET` (19 forms) and `SELECT` / `WHERE` (33 forms) on columns in m, km, Hz, rad and deg: real TaQL converts
+units inside expressions while TaQL-lite used the raw numbers (`SET X = KM` stored 1 instead of 1000 for a metre column,
+`X + KM` added km to m). Now, as in real TaQL: the right operand of `+ - % //`, of a comparison, a `BETWEEN` bound, an
+`IN [...]` element, a `min`/`max`/`iif` branch and the divisor of `/` of the same dimension is converted to the left
+operand's unit, and `UPDATE SET X = <expr>` converts the value to X's unit; assigning an incompatible dimension (`Hz` into
+a `m` column) is an error. `*` joins units without converting. Implemented as an AST rewrite (`_unit_rw`, `_unit_conv`,
+`_unit_assign`) that multiplies the conversion factor in as a literal; the factor comes from the Unitful extension
+(`_unit_factor`, `nothing`/no conversion without it). Reads stay lenient for mismatched dimensions (real TaQL errors) and
+real TaQL's odd `BETWEEN` behaviour with a unitless bound is not reproduced. New testset with a real-TaQL cross-check.
+
+### Phase 342 follow-up — CI fix: Phase 335 pattern guard generated invalid regexes
+
+GitHub Actions (Linux x86-64, Julia 1.10) failed the Phase 335 random pattern guard on 4 of 150 patterns, all regex
+(`~ m/../`, `~ f/../`) forms the generator built with stacked quantifiers such as `?*` and `**`. Real casacore on Linux
+accepts those, while PCRE (and casacore on macOS) rejects them, so the two engines disagreed only on invalid patterns.
+Reproduced in an x86-64 Linux container; the test now collapses stacked quantifiers in the regex forms. No package change.

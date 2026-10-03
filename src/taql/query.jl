@@ -253,6 +253,134 @@ function _tql_concrete(v::AbstractVector)
     return v
 end
 
+# ---- Phase 341: `QuantumUnits` of a computed SELECT column (live-probed vs real TaQL) -------------------------------
+# A plain column keeps its unit; `+ - % //` keep it (a unitless operand is neutral, mismatched units are an error in
+# real TaQL -> no unit here), `*` joins units (`m.Hz`), `/` divides (`m/(Hz)`, `(m)-1`, same unit -> none), unary
+# minus, `abs`/`min`/`max`/`mean`/`floor`/`round`/`real`/`iif` keep it, `square` squares it, everything else
+# (`**`, comparisons, trig, `sign`, `int`, reductions to counts, ...) is unitless.
+_col_units(t::AbstractTable, n::AbstractString) = try
+    u = get(columndesc(t, n).keywords, "QuantumUnits", nothing)
+    u === nothing ? nothing : String.(u)
+catch
+    nothing
+end
+_u1(u) = (u === nothing || length(u) != 1) ? nothing : u[1]
+# Phase 342: unit-aware rewrite.  Real TaQL converts units inside expressions (live-probed): in `+ - % //` and in
+# comparisons the right operand is converted to the left operand's unit (`X + KM` with X in m, KM in km adds
+# 1000*KM), `min`/`max`/`iif` branches likewise, and `UPDATE SET X = <expr>` converts the value to X's unit
+# (a dimension mismatch is an error).  `_unit_rw` returns the rewritten AST (conversion factors multiplied in
+# as literals) and the expression's unit string.  `_unit_factor` (Unitful extension) gives the factor, or
+# `nothing` when units are unknown / incompatible -> no conversion (the old behaviour).
+_unit_factor(args...) = nothing
+_unit_scale(e::TQLExpr, f) = (f isa Real && f != 1) ? TQLArith(*, e, TQLLit(f)) : e
+_unit_rw(e::TQLCol, uof) = (e, _u1(uof(e.name)))
+function _unit_rw(e::TQLNeg, uof)
+    a, u = _unit_rw(e.a, uof)
+    return TQLNeg(a), u
+end
+function _unit_rw(e::TQLArith, uof)
+    a, ua = _unit_rw(e.lhs, uof); b, ub = _unit_rw(e.rhs, uof)
+    if e.op === _tql_add || e.op === (-) || e.op === _tql_mod || e.op === _tql_floordiv
+        if ua !== nothing && ub !== nothing && ua != ub
+            b = _unit_scale(b, _unit_factor(ub, ua))
+            return TQLArith(e.op, a, b), ua
+        end
+        return TQLArith(e.op, a, b), ua === nothing ? ub : ua
+    elseif e.op === (*)
+        return TQLArith(e.op, a, b), ua === nothing ? ub : ub === nothing ? ua : string(ua, ".", ub)
+    elseif e.op === (/)
+        if ua !== nothing && ub !== nothing && ua != ub
+            f = _unit_factor(ub, ua)          # same dimension: the divisor is converted to the dividend's unit
+            f isa Real && return TQLArith(e.op, a, _unit_scale(b, f)), nothing
+        end
+        u = ub === nothing ? ua : ua === nothing ? string("(", ub, ")-1") : ua == ub ? nothing : string(ua, "/(", ub, ")")
+        return TQLArith(e.op, a, b), u
+    end
+    return TQLArith(e.op, a, b), nothing
+end
+function _unit_rw(e::TQLCmp, uof)
+    a, ua = _unit_rw(e.lhs, uof); b, ub = _unit_rw(e.rhs, uof)
+    if ua !== nothing && ub !== nothing && ua != ub
+        b = _unit_scale(b, _unit_factor(ub, ua))
+    end
+    return TQLCmp(e.op, a, b), nothing
+end
+function _unit_rw(e::TQLFunc, uof)
+    rs = [_unit_rw(a, uof) for a in e.args]
+    args = TQLExpr[r[1] for r in rs]; us = [r[2] for r in rs]
+    same = e.name in ("min", "max") ? (1:length(args)) : e.name == "iif" && length(args) == 3 ? (2:3) : nothing
+    if same !== nothing
+        ks = [i for i in same if us[i] !== nothing]
+        if !isempty(ks)
+            u0 = us[ks[1]]
+            for i in ks[2:end]
+                us[i] != u0 && (args[i] = _unit_scale(args[i], _unit_factor(us[i], u0)))
+            end
+            return TQLFunc(e.fn, args, e.name), u0
+        end
+        return TQLFunc(e.fn, args, e.name), nothing
+    end
+    u = e.name in ("abs", "mean", "avg", "floor", "round", "real") && length(us) >= 1 ? us[1] :
+        e.name in ("square", "sqr") && length(us) == 1 && us[1] !== nothing ? string(us[1], ".", us[1]) : nothing
+    return TQLFunc(e.fn, args, e.name), u
+end
+# every other node: rewrite the children (units do not propagate through them)
+_unit_rw(e::TQLExpr, uof) = (_unit_children(e, uof), nothing)
+_unit_children(e::TQLAnd, uof) = TQLAnd(_unit_rw(e.a, uof)[1], _unit_rw(e.b, uof)[1])
+_unit_children(e::TQLOr, uof) = TQLOr(_unit_rw(e.a, uof)[1], _unit_rw(e.b, uof)[1])
+_unit_children(e::TQLNot, uof) = TQLNot(_unit_rw(e.a, uof)[1])
+function _unit_children(e::TQLBetween, uof)
+    a, ua = _unit_rw(e.lhs, uof)
+    conv(x) = begin
+        b, ub = _unit_rw(x, uof)
+        (ua !== nothing && ub !== nothing && ua != ub) ? _unit_scale(b, _unit_factor(ub, ua)) : b
+    end
+    return TQLBetween(a, conv(e.lo), conv(e.hi), e.negate)
+end
+function _unit_children(e::TQLIn, uof)
+    a, ua = _unit_rw(e.lhs, uof)
+    vals = Any[]
+    for v in e.vals
+        if v isa TQLExpr
+            b, ub = _unit_rw(v, uof)
+            ua !== nothing && ub !== nothing && ua != ub && (b = _unit_scale(b, _unit_factor(ub, ua)))
+            push!(vals, b)
+        else
+            push!(vals, v)
+        end
+    end
+    return TQLIn(a, vals)
+end
+_unit_children(e::TQLExpr, uof) = e
+_expr_unit(e::TQLExpr, uof) = _unit_rw(e, uof)[2]
+# rewrite an expression for a table (`uof(name)` = that column's units)
+_unit_conv(e::TQLExpr, t::AbstractTable) = _unit_rw(e, n -> _col_units(t, n))[1]
+# `SET target = rhs`: convert the value to the target column's unit; a dimension mismatch is an error
+function _unit_assign(rhs::TQLExpr, tunit, uof)
+    r, u = _unit_rw(rhs, uof)
+    (tunit === nothing || u === nothing || u == tunit) && return r
+    f = _unit_factor(u, tunit)
+    f === :mismatch && throw(ArgumentError(
+        "TaQL-lite: cannot assign a value in unit \"$u\" to a column in unit \"$tunit\" (units do not conform)"))
+    return _unit_scale(r, f)
+end
+
+# the `QuantumUnits` of every output column of a select (`cls` as in `_select_materialize`)
+function _select_units(cls, src::AbstractTable)
+    out = Dict{Symbol,Vector{String}}()
+    uof = n -> _col_units(src, n)
+    for (nm, kind, v) in cls
+        if kind === :proj
+            u = _col_units(src, v)
+            u === nothing || (out[Symbol(nm)] = u)
+        elseif kind === :expr
+            u = _expr_unit(v, uof)
+            u === nothing || (out[Symbol(nm)] = String[u])
+        end
+    end
+    return out
+end
+
 function _select_materialize(cls, src::AbstractTable, rows::Vector{Int})
     exprasts = TQLExpr[]
     refs = Set{String}()
@@ -270,7 +398,8 @@ function _select_materialize(cls, src::AbstractTable, rows::Vector{Int})
         if kind === :proj
             push!(out, Symbol(nm) => _mapcol(column(src, v), rows))
         elseif kind === :expr
-            push!(out, Symbol(nm) => _tql_concrete(identity.(Any[_strip(_tqleval(v, cd, i)) for i in rows])))
+            v2 = _unit_conv(v, src)
+            push!(out, Symbol(nm) => _tql_concrete(identity.(Any[_strip(_tqleval(v2, cd, i)) for i in rows])))
         else                                       # :mpair -> data + mask
             vals = Any[_tqleval(v[2], cd, i) for i in rows]
             push!(out, Symbol(nm) => _tql_concrete(identity.(Any[_strip(x) for x in vals])))
@@ -499,6 +628,7 @@ function query(t::AbstractTable, wherestr::AbstractString;
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
     validnames = Set(columnnames(t))
     ast, orderby = _taqllite_parse_query(wherestr, validnames)
+    ast === nothing || (ast = _unit_conv(ast, t))
     needed = Set{String}()
     ast === nothing || _tqlrefs!(needed, ast)
     _orderby_refs!(needed, orderby)
@@ -509,13 +639,13 @@ function query(t::AbstractTable, wherestr::AbstractString;
     matched = _apply_orderby(matched, orderby, cols)
     cls = _select_classify(select, validnames)
     if _select_all_proj(cls)
-        namemap, order = _select_spec(t, select)
+        namemap, order = _select_spec(t, Pair{String,String}[String(c[1]) => c[3] for c in cls])   # classified: `+X` / `(X)` -> column X
         parent, rows, namemap = _flatten_query_parent(t, matched, namemap)
         return RefTable("", parent, rows, namemap, order,
                         parent.type, parent.subtype, parent.readme)
     end
     ps = _select_materialize(cls, t, matched)
-    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
+    return _mk_grouped(ps, _select_units(cls, t))
 end
 
 _normalize_orderkey(t::AbstractTable, s::Union{AbstractString,Symbol}) = begin
@@ -562,12 +692,12 @@ function query(f::Function, t::AbstractTable;
     matched = _apply_orderby(matched, orderkeys, cols_by_name)
     cls = _select_classify(select, Set(columnnames(t)))
     if _select_all_proj(cls)
-        namemap, order = _select_spec(t, select)
+        namemap, order = _select_spec(t, Pair{String,String}[String(c[1]) => c[3] for c in cls])   # classified: `+X` / `(X)` -> column X
         parent, rows2, namemap = _flatten_query_parent(t, matched, namemap)
         return RefTable("", parent, rows2, namemap, order,
                         parent.type, parent.subtype, parent.readme)
     end
     ps = _select_materialize(cls, t, matched)
-    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
+    return _mk_grouped(ps, _select_units(cls, t))
 end
 
