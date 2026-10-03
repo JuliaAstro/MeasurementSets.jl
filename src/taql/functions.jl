@@ -1384,6 +1384,48 @@ function _meas_two_scale_args(kind::AbstractString, dict, args::Vector{TQLExpr},
     (S, T)
 end
 
+# ---- Phase 345: the real-casacore value-first `meas.freq` / `meas.rv` / `meas.riseset` / `meas.pos` forms -----------
+# `meas.freq('TARGET', value [, 'SRC'] [, [ra, dec]] [, epoch] [, pos])` (and `meas.rv`): the optional pieces are told apart
+# by type -- a 2-element array is the J2000 direction, a 3-element array or an observatory-name string the position, any
+# other expression the epoch (plain number = SECONDS since MJD 0, Phase 343); no SRC means the value is already in TARGET;
+# frequencies are Hz and radial velocities km/s (real casacore's default unit for a plain number).
+function _meas_spectral_vf(kind::Symbol, args::Vector{TQLExpr}, src::AbstractString)
+    T = get(_MEAS_FREQ_FRAMES, lowercase(String(args[1].value)), nothing)
+    T === nothing && throw(ArgumentError("TaQL-lite: meas.$kind: unknown frame \"$(args[1].value)\" in \"$src\""))
+    S = T; i = 3; n = length(args)
+    if i <= n && args[i] isa TQLLit && args[i].value isa AbstractString &&
+       haskey(_MEAS_FREQ_FRAMES, lowercase(String(args[i].value)))
+        S = _MEAS_FREQ_FRAMES[lowercase(String(args[i].value))]; i += 1
+    end
+    dirx = nothing; epx = nothing; posx = nothing
+    while i <= n
+        a = args[i]
+        if a isa TQLArrayLit && length(a.elems) == 2 && dirx === nothing
+            dirx = a
+        elseif (a isa TQLArrayLit && length(a.elems) == 3) || (a isa TQLLit && a.value isa AbstractString)
+            posx === nothing || throw(ArgumentError("TaQL-lite: meas.$kind: two positions in \"$src\""))
+            posx = _meas_pos_arg(a)
+        else
+            epx === nothing || throw(ArgumentError("TaQL-lite: meas.$kind: two epochs in \"$src\""))
+            epx = a
+        end
+        i += 1
+    end
+    xs = TQLExpr[args[2]]
+    hasd = dirx !== nothing; hase = epx !== nothing; hasp = posx !== nothing
+    hasd && push!(xs, dirx); hase && push!(xs, epx); hasp && push!(xs, posx)
+    return TQLFunc((v, rest...) -> begin
+        j = 1
+        fr = MeasFrame()
+        if hasd; d = rest[j]; j += 1; fr.direction = MDirection{J2000}(float(d[1]), float(d[2])); end
+        if hase; fr.epoch = MEpoch{UTC}(_tql_plain(rest[j], :time)); j += 1; end
+        if hasp; fr.position = MPosition{ITRF}(_meas_xyz(rest[j])...); j += 1; end
+        # real casacore's plain radial-velocity unit is km/s (live-verified: LSRK -> BARY shifts 1000 by 9.277)
+        kind === :freq ? measconvert(MFrequency{S}(float(v)), T; frame=fr).hz :
+                         measconvert(MRadialVelocity{S}(1000.0 * float(v)), T; frame=fr).mps / 1000.0
+    end, xs)
+end
+
 function _meas_dir_convert(target::DataType, sref::AbstractString, lon, lat, mjd, xyz)
     S = get(_DIRECTION_FRAMES, uppercase(strip(String(sref))), nothing)
     S === nothing && throw(ArgumentError("meas: unknown source frame \"$sref\""))
@@ -1689,6 +1731,14 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
             "TaQL-lite: meas.last(mjd, x, y, z) in \"$src\""))
         return TQLFunc((m, x, y, z) -> _lst(_meas_frame(m, (x, y, z))), args)
     end
+    _vf_spectral = length(args) >= 2 && args[1] isa TQLLit && args[1].value isa AbstractString &&
+                   !(args[2] isa TQLLit && args[2].value isa AbstractString)
+    if (fn == "freq" || fn == "frequency") && _vf_spectral
+        return _meas_spectral_vf(:freq, args, src)
+    end
+    if (fn == "rv" || fn == "radialvelocity") && _vf_spectral
+        return _meas_spectral_vf(:rv, args, src)
+    end
     if fn == "freq" || fn == "frequency"
         (S, T) = _meas_two_scale_args("freq", _MEAS_FREQ_FRAMES, args, src)
         length(args) == 9 || throw(ArgumentError(
@@ -1725,10 +1775,30 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
             "TaQL-lite: meas.doppler('SCONV', 'TCONV', value) in \"$src\""))
         return TQLFunc(v -> measconvert(MDoppler{S}(float(v)), T).d, args[3:end])
     end
+    if fn == "riseset" && length(args) >= 3 && args[1] isa TQLArrayLit && length(args[1].elems) == 2
+        # real form: meas.riseset([ra, dec] [, 'J2000'], epoch, pos [, elev0]) -> [rise, set] MJD days; epoch in seconds
+        rest = args[2:end]
+        if !isempty(rest) && rest[1] isa TQLLit && rest[1].value isa AbstractString
+            uppercase(String(rest[1].value)) == "J2000" || throw(ArgumentError("meas.riseset: only J2000 directions in \"$src\""))
+            rest = rest[2:end]
+        end
+        length(rest) in (2, 3) || throw(ArgumentError("TaQL-lite: meas.riseset([ra, dec], epoch, pos[, elev0]) in \"$src\""))
+        xs = TQLExpr[args[1], rest[1], _meas_pos_arg(rest[2])]
+        length(rest) == 3 && push!(xs, rest[3])
+        return TQLFunc((d, ep, p, e0...) -> collect(Float64, _riseset(float(d[1]), float(d[2]), _tql_plain(ep, :time), _meas_xyz(p)..., e0...)), xs)
+    end
     if fn == "riseset"
         length(args) in (6, 7) || throw(ArgumentError(
             "TaQL-lite: meas.riseset(ra, dec, mjd, x, y, z[, elev0]) in \"$src\""))
         return TQLFunc((rargs...) -> collect(Float64, _riseset(rargs...)), args)
+    end
+    if (fn == "pos" || fn == "position") && length(args) == 2 && args[1] isa TQLLit && args[2] isa TQLLit &&
+       args[1].value isa AbstractString && args[2].value isa AbstractString && lowercase(String(args[1].value)) == "itrf"
+        # real form: meas.pos('ITRF', 'OBSERVATORY') -> [x, y, z] metres
+        return TQLFunc(() -> collect(Float64, _meas_xyz(_meas_pos_arg(args[2]).value)), TQLExpr[])
+    end
+    if fn == "itrfxyz" && length(args) == 1 && args[1] isa TQLLit && args[1].value isa AbstractString
+        return TQLFunc(() -> collect(Float64, _meas_xyz(_meas_pos_arg(args[1]).value)), TQLExpr[])
     end
     if fn == "pos" || fn == "position"
         (S, T) = _meas_two_scale_args("pos", _MEAS_POS_FRAMES, args, src)

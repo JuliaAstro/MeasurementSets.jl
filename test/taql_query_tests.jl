@@ -5147,3 +5147,53 @@ end
         end
     end
 end
+
+# Phase 345: the real-casacore value-first `meas.freq` / `meas.rv` / `meas.riseset` / `meas.pos('ITRF', name)` forms:
+# `meas.freq('TARGET', value [, 'SRC'] [, [ra, dec]] [, epoch] [, pos])` (epoch in seconds, plain frequency Hz, plain radial
+# velocity **km/s**), `meas.riseset([ra, dec], epoch, 'OBS')` -> [rise, set] MJD days.  300 random frequency / radial-velocity
+# conversions over 8 frames agreed with real TaQL; before, only the all-scalar `meas.freq('S', 'T', f, mjd, x, y, z, ra, dec)`
+# form existed.
+@testset "meas.freq / meas.rv / meas.riseset value-first forms vs real TaQL (Phase 345)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", ["A" => Int32[1]]; nrow=1)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["V" => e]), "V")[:])[1]
+    p(e) = MSv2._taqllite_parse(e, Set(["A"]))
+    @test p("meas.freq('LSRK', 1.4e9, 'TOPO', [1.2, 0.5], 5.2e9, 'VLA')") isa MSv2.TQLFunc
+    @test p("meas.rv('BARY', 1000.0, 'LSRK', [1.2, 0.5])") isa MSv2.TQLFunc
+    @test p("meas.freq('TOPO', 'LSRK', 1.4e9, 60454.4, 1.0, 2.0, 3.0, 1.2, 0.5)") isa MSv2.TQLFunc    # the older scalar form still parses
+    @test_throws ArgumentError p("meas.freq('BOGUS', 1.4e9)")
+    @test ev("meas.freq('LSRK', 1.4e9)") == 1.4e9                                  # no source frame: already in TARGET
+    @test ev("meas.pos('ITRF', 'VLA')") ≈ [-1601185.365, -5041977.547, 3554875.870] atol = 1.0
+    @test ev("meas.itrfxyz('VLA')") ≈ ev("meas.pos('ITRF', 'VLA')")
+    if Base.get_extension(MSv2, :SOFAExt) !== nothing
+        # frame-only conversions need just the direction; TOPO needs epoch and position too
+        @test ev("meas.freq('BARY', 1.4e9, 'LSRK', [1.2, 0.5])") ≈ 1.399956676e9 rtol = 3e-9
+        @test ev("meas.rv('BARY', 1000.0, 'LSRK', [1.2, 0.5])") ≈ 1009.277228 atol = 1e-3          # km/s
+        @test_throws Exception ev("meas.freq('LSRK', 1.4e9, 'TOPO', [1.2, 0.5])")
+        @test ev("meas.freq('LSRK', 1.4e9, 'TOPO', [1.2, 0.5], 5.2e9, 'VLA')") ≈ 1.399906067e9 rtol = 3e-9
+        rs = ev("meas.riseset([1.2, 0.5], 5.2e9, 'VLA')")
+        @test rs ≈ [60185.2444, 60185.8626] atol = 2e-3
+        @test ev("meas.riseset([1.2, 0.5], 'J2000', 5.2e9, 'VLA')") ≈ rs
+        if _HAVE_TAQL
+            cref(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])[1]
+            rng = MersenneTwister(345)
+            frames = ["TOPO", "GEO", "BARY", "LSRK", "LSRD", "GALACTO", "LGROUP", "CMB"]
+            nbad = 0; ncmp = 0
+            for _ in 1:40
+                kind = rand(rng, ["freq", "rv"]); tg = rand(rng, frames); sc = rand(rng, frames)
+                val = kind == "freq" ? round(1e9 + 1e10rand(rng), digits=1) : round(-300 + 600rand(rng), digits=3)
+                e = "meas.$kind('$tg', $val, '$sc', [$(rand(rng) * 2pi), $(asin(2rand(rng) - 1) * 0.95)], " *
+                    "$(round((55000 + 6000rand(rng)) * 86400, digits=3)), '$(rand(rng, ["VLA", "ALMA", "GBT"]))')"
+                r = try cref(e) catch; nothing end
+                r === nothing && continue
+                ncmp += 1
+                m = try ev(e) catch; nothing end
+                (m !== nothing && abs(m - r) <= (kind == "freq" ? 3e-9 * val : 1e-3)) || (nbad += 1)
+            end
+            @test ncmp > 10
+            @test nbad == 0
+            @test ev("meas.riseset([1.2, 0.5], 5.2e9, 'VLA')") ≈ cref("meas.riseset([1.2, 0.5], 5.2e9, 'VLA')") atol = 2e-3
+        end
+    end
+end

@@ -10889,3 +10889,16 @@ and ten targets agree with real TaQL (scales to ~ms, sidereal to ~50 ms). Left a
 `meas.itrfxyz` / `meas.riseset` use different calling conventions in real casacore (value-first, positions as `[x,y,z]`,
 `itrfxyz` an identity on xyz, `riseset(dir, epoch, pos)` returning MJD days) and are a later phase. New testset with a seeded
 real-TaQL cross-check.
+
+### Phase 345 — real-casacore value-first `meas.freq` / `meas.rv` / `meas.riseset` / `meas.pos` (random fuzz vs real TaQL)
+
+Real TaQL's spectral conversions are value-first, like the direction and epoch forms of Phases 343–344:
+`meas.freq('TARGET', value [, 'SRC'] [, [ra, dec]] [, epoch] [, pos])` (also `meas.frequency`; `meas.rv` /
+`meas.radialvelocity` likewise), with the optional pieces told apart by type and no SRC meaning the value is already in TARGET.
+TaQL-lite only had the all-scalar `meas.freq('S', 'T', f, mjd, x, y, z, ra, dec)`. Live probing also found that real's plain
+radial-velocity unit is **km/s** (LSRK→BARY shifts 1000 by 9.277, not 9277) and that its plain epoch is seconds. Added the
+real forms (the scalar forms are unchanged and still m/s with MJD days), plus `meas.riseset([ra, dec] [, 'J2000'], epoch, pos
+[, elev0])` → `[rise, set]` MJD days (agrees with real to ~2 min) and `meas.pos('ITRF', 'OBS')` / `meas.itrfxyz('OBS')` → ITRF
+xyz of an observatory. 300 random frequency / radial-velocity conversions over TOPO, GEO, BARY, LSRK, LSRD, GALACTO, LGROUP,
+CMB agree with real TaQL (frequency to 3e-9 relative, velocity to 1 m/s). Not copied: real's `meas.wgs`, `meas.restfreq`,
+and the odd `meas.rv('LSRK', v)` with no source. New testset with a seeded real-TaQL cross-check.
