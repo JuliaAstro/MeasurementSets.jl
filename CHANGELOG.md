@@ -10916,3 +10916,16 @@ reproduced: setting an existing keyword moves it to the end of the set, integers
 the storage-manager blocks verbatim (a data manager addresses its columns by position, so no data file is touched; a virtual
 engine's stored-column link and `Hypercolumn_*` lists follow a rename). Not copied: real leaves an uninitialised fixed-shape
 column's cells as garbage (zeros here). New testset with a real-TaQL cross-check.
+
+### Phase 347 — `CREATE TABLE` / `DROP TABLE` as TaQL commands (cross-checked against real TaQL)
+
+Continuing the TaQL command set after Phase 346's `ALTER TABLE`: `taql("CREATE TABLE 'path' [A I4, B R8 [NDIM=1], C R4 [SHAPE=[2,3],
+UNIT=\"m\", COMMENT=\"..\"], ...] [LIMIT n] [DMINFO ...]")` creates a table of default-valued rows (zeros, empty strings, `false`;
+undefined cells for an NDIM-only array column), with `AS [storage="multifile", blocksize=n]` and an `IncrementalStMan` DMINFO,
+and `DROP TABLE 'path'` / `taql(path, "DROP TABLE \$1")` deletes a table (never a directory that is not a table). Both work
+without a target table (`taql("CREATE ...")`). 24 CREATE forms compared with real TaQL: column types, shapes, units, comments,
+data managers and default rows agree; types are case-insensitive, names keep their case, `LIMIT` takes a constant expression,
+duplicate columns / unknown types / `NDIM` vs `SHAPE` disagreement / unsupported attributes are errors. Not copied: real
+leaves a fixed-shape array column's cells uninitialised, lists the `DMINFO` manager first, and segfaults on `LIMIT -1` (an error
+here). Also: `write_table` gained `shapes=` and `comments=` keywords. `COUNT` results cannot be read back through Casacore.jl, so
+`COUNT` stays unimplemented.

@@ -584,6 +584,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      measures::AbstractDict=Dict{String,Any}(),
                      units::AbstractDict=Dict{String,Any}(),
                      keywords::AbstractDict=Dict{String,Any}(),
+                     shapes::AbstractDict=Dict{String,Any}(), comments::AbstractDict=Dict{String,String}(),
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
@@ -622,11 +623,11 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         end
         length(vals) == nrow || error("column $cn: $(length(vals)) values, expected $nrow")
         et = _casatype_of(eltype(vals))
-        shp = _infer_shape(vals)
+        shp = get(shapes, cn, _infer_shape(vals))      # `shapes=` forces a cell shape (e.g. `VariableShape(2)` for empty cells)
         sc = stdcol(cn)
         ct = sc === nothing ? et : sc.type
         arr = _is_tsm(shp) || (shp isa Dims && !isempty(shp))
-        push!(descs, ColumnDesc(cn, sc === nothing ? "" : sc.comment,
+        push!(descs, ColumnDesc(cn, haskey(comments, cn) ? String(comments[cn]) : sc === nothing ? "" : sc.comment,
             "", "", ct, _classname(ct, arr), shp, Int32(0), UInt32(0),
             Record(), nothing, nothing))
         push!(data, vals)

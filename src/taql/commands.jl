@@ -797,6 +797,144 @@ function _alter_kwname(s)
 end
 
 
+# ---- Phase 347: `CREATE TABLE` / `DROP TABLE` (live-probed against real TaQL) -----------------------------------------
+# `CREATE TABLE path [AS [storage="multifile", blocksize=n]] [name type [[NDIM=n, SHAPE=[..], UNIT="m", COMMENT=".."]], ...]
+#  [LIMIT nrow] [DMINFO [TYPE="IncrementalStMan", COLUMNS=["A", ..]]]` makes a new table of default-valued rows (zeros, empty
+# strings, `false`; undefined cells for an NDIM-only array column); `DROP TABLE path` deletes one.  Both work without a target
+# table: `taql("CREATE TABLE ...")`.
+function _bracket_group(s::AbstractString, i::Int)       # s[i] == '[' -> (inner text, index after the matching ']')
+    depth = 0; q = '\0'
+    for k in i:lastindex(s)
+        c = s[k]
+        if q != '\0'
+            c == q && (q = '\0')
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '['
+            depth += 1
+        elseif c == ']'
+            depth -= 1
+            depth == 0 && return (s[nextind(s, i):prevind(s, k)], nextind(s, k))
+        end
+    end
+    throw(ArgumentError("taql: unbalanced '[' in \"$s\""))
+end
+
+function _taql_table_path(tok::AbstractString)
+    t = strip(tok)
+    return String(length(t) >= 2 && t[1] in ('\'', '"') && t[end] == t[1] ? t[2:end-1] : t)
+end
+
+function _taql_create(command::AbstractString)
+    s = String(strip(command))
+    m = match(r"^CREATE\s+TABLE\s+('[^']*'|\"[^\"]*\"|[^\s\[]+)\s*"i, s)
+    m === nothing && throw(ArgumentError("taql: malformed CREATE TABLE command"))
+    path = _taql_table_path(m.captures[1])
+    i = m.offset + length(m.match)
+    rest(i) = lstrip(s[i:end])
+    storage = :sepfile; blocksize = DEFAULT_MF_BLOCKSIZE
+    am = match(r"^AS\s*(?=\[)"i, rest(i))
+    if am !== nothing
+        i += (length(s[i:end]) - length(rest(i))) + length(am.match)
+        inner, i = _bracket_group(s, i)
+        for opt in _split_commas(inner)
+            om = match(r"^(\w+)\s*=\s*(.+)$"s, strip(opt))
+            om === nothing && throw(ArgumentError("taql: malformed CREATE TABLE option \"$opt\""))
+            key = lowercase(om.captures[1]); val = strip(strip(om.captures[2]), ['"', '\''])
+            if key == "storage"
+                storage = Symbol(lowercase(val))
+            elseif key == "blocksize"
+                blocksize = parse(Int, val)
+            else
+                throw(ArgumentError("taql: unsupported CREATE TABLE option $key"))
+            end
+        end
+    end
+    i += length(s[i:end]) - length(rest(i))
+    (i <= lastindex(s) && s[i] == '[') || throw(ArgumentError("taql: CREATE TABLE needs a column list [name type, ...]"))
+    colstr, i = _bracket_group(s, i)
+    tail = String(strip(s[i:end]))
+    nrows = 0; dminfo = nothing
+    lm = match(r"^LIMIT\s+(.+?)(?=\s+DMINFO\b|$)"is, tail)
+    if lm !== nothing
+        nrows = Int(_taql_const(String(strip(lm.captures[1]))))
+        nrows >= 0 || throw(ArgumentError("taql: CREATE TABLE LIMIT must not be negative"))
+        tail = String(strip(tail[length(lm.match)+1:end]))
+    end
+    dm = match(r"^DMINFO\s*(?=\[)"i, tail)
+    if dm !== nothing
+        j = findfirst('[', tail)
+        dminfo, j2 = _bracket_group(tail, j)
+        tail = String(strip(tail[j2:end]))
+    end
+    isempty(tail) || throw(ArgumentError("taql: unexpected text after CREATE TABLE: \"$tail\""))
+    cols = Pair{String,Any}[]; shapes = Dict{String,Any}(); units = Dict{String,Any}(); comments = Dict{String,String}()
+    for item in (isempty(strip(colstr)) ? String[] : _split_commas(colstr))
+        im = match(r"^(\w+)\s+(\w+)\s*(?:\[(.*)\])?\s*$"s, strip(item))
+        im === nothing && throw(ArgumentError("taql: malformed column \"$item\" in CREATE TABLE (need `name type`)"))
+        name = String(im.captures[1]); T = get(_ALTER_TYPES, uppercase(im.captures[2]), nothing)
+        T === nothing && throw(ArgumentError("taql: unknown column type \"$(im.captures[2])\" in CREATE TABLE"))
+        any(p -> first(p) == name, cols) && throw(ArgumentError("taql: duplicate column \"$name\" in CREATE TABLE"))
+        ndim = nothing; shp = nothing
+        if im.captures[3] !== nothing
+            for a in _split_commas(im.captures[3])
+                aa = match(r"^(\w+)\s*=\s*(.+)$"s, strip(a))
+                aa === nothing && throw(ArgumentError("taql: malformed column attribute \"$a\""))
+                key = uppercase(aa.captures[1]); val = String(strip(aa.captures[2]))
+                if key == "NDIM"
+                    ndim = parse(Int, val)
+                elseif key == "SHAPE"
+                    shp = Tuple(parse.(Int, split(strip(val, ['[', ']']), ',')))
+                elseif key == "UNIT"
+                    u = _taql_const(val); units[name] = u isa AbstractString ? [String(u)] : String.(u)
+                elseif key == "COMMENT"
+                    comments[name] = String(_taql_const(val))
+                else
+                    throw(ArgumentError("taql: unsupported column attribute $key in CREATE TABLE"))
+                end
+            end
+        end
+        z = T === String ? "" : zero(T)
+        if shp !== nothing
+            ndim === nothing || ndim == length(shp) || throw(ArgumentError("taql: NDIM and SHAPE disagree for column \"$name\""))
+            data = [fill(z, shp...) for _ in 1:nrows]; shapes[name] = shp
+        elseif ndim !== nothing && ndim > 0
+            data = [fill(z, ntuple(_ -> 0, ndim)...) for _ in 1:nrows]; shapes[name] = VariableShape(ndim)
+        elseif ndim !== nothing && ndim == 0
+            data = [fill(z, 0) for _ in 1:nrows]; shapes[name] = VariableDims()
+        else
+            data = fill(z, nrows)
+        end
+        push!(cols, name => data)
+    end
+    ism = String[]
+    if dminfo !== nothing
+        dt = match(r"TYPE\s*=\s*[\"']([^\"']+)[\"']"i, dminfo)
+        dcols = match(r"COLUMNS\s*=\s*\[(.*?)\]"is, dminfo)
+        dtype = dt === nothing ? "StandardStMan" : String(dt.captures[1])
+        if dtype == "IncrementalStMan"
+            ism = dcols === nothing ? String[first(c) for c in cols] :
+                  String[String(strip(x, [' ', '"', '\''])) for x in split(dcols.captures[1], ',')]
+        elseif dtype != "StandardStMan"
+            throw(ArgumentError("taql: CREATE TABLE DMINFO TYPE \"$dtype\" is not supported (StandardStMan / IncrementalStMan)"))
+        end
+    end
+    ispath(path) && throw(ArgumentError("taql: $path already exists"))
+    write_table(path, "", cols; nrow=nrows, units, shapes, comments, ism, storage, blocksize)
+    return path
+end
+
+function _taql_drop_table(target, command::AbstractString)
+    m = match(r"^DROP\s+TABLE\s+(\S+)\s*$"i, strip(command))
+    m === nothing && throw(ArgumentError("taql: malformed DROP TABLE command"))
+    tok = String(m.captures[1])
+    path = occursin(r"^\$\d+$", tok) ? _cmd_path(target) : _taql_table_path(tok)
+    isfile(joinpath(path, "table.dat")) || throw(ArgumentError("taql: $path is not a table"))
+    rm(path; recursive=true)
+    return path
+end
+
+
 """
     taql(target, command::AbstractString)
 
@@ -825,6 +963,9 @@ the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
 string are not supported (use `copytable(dst, groupby(…))`, or
 `insert!(t, groupby(…))`).
 """
+# target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
+taql(command::AbstractString) = taql(nothing, command)
+
 function taql(target, command::AbstractString, others...)
     cmd = strip(command)
     kw = uppercase(String(first(split(cmd; limit=2))))
@@ -833,6 +974,10 @@ function taql(target, command::AbstractString, others...)
     end
     if kw == "ALTER"
         return _taql_alter(target, cmd)
+    elseif kw == "CREATE"
+        return _taql_create(cmd)
+    elseif kw == "DROP"
+        return _taql_drop_table(target, cmd)
     end
     if kw == "UPDATE"
         m = match(Regex("^UPDATE\\s+(?:\\S+\\s+)?SET\\s+(.+?)(?:\\s+WHERE\\s+(.+?))?" *

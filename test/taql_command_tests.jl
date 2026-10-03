@@ -1404,3 +1404,68 @@ end
         end
     end
 end
+
+# Phase 347: `CREATE TABLE` and `DROP TABLE` as target-less commands, `taql("CREATE TABLE ...")`.  24 CREATE forms compared against
+# real TaQL (column names / types / shapes / units / comments / data managers / default rows).  Real casacore leaves the cells of a
+# fixed-shape array column uninitialised (garbage) and lists the DMINFO data manager first; neither is copied.  (Real
+# `CREATE TABLE ... LIMIT -1` crashes casacore, so it can't be an oracle; here a negative LIMIT is an error.)
+@testset "taql CREATE TABLE / DROP TABLE vs real TaQL (Phase 347)" begin
+    newpath() = joinpath(mktempdir(), "n")
+    cols(t) = [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape), c.comment, c.keywords.names, c.keywords.values) for c in t.desc.columns]
+    p = newpath()
+    taql("CREATE TABLE '$p' [A I4, B R8, S S, F B, C C8, V R8 [NDIM=1], M R4 [NDIM=2, SHAPE=[2,3]], Q U1] LIMIT 3")
+    t = readtable(p)
+    @test nrow(t) == 3 && columnnames(t) == ["A", "B", "S", "F", "C", "V", "M", "Q"]
+    @test collect(column(t, "A")) == Int32[0, 0, 0] && collect(column(t, "S")) == fill("", 3) && collect(column(t, "F")) == falses(3)
+    @test eltype(column(t, "C")) == ComplexF64 && eltype(column(t, "Q")) == UInt8
+    @test columndesc(t, "V").shape == MSv2.VariableShape(1) && columndesc(t, "M").shape == (2, 3)
+    @test all(isempty, column(t, "V")[:]) && all(==(zeros(Float32, 2, 3)), column(t, "M")[:])
+    p = newpath(); taql("CREATE TABLE '$p' [A I4 [UNIT=\"m\", COMMENT=\"c\"], a r8] LIMIT 2+1")    # types are case-insensitive, names keep case
+    t = readtable(p)
+    @test nrow(t) == 3 && columnnames(t) == ["A", "a"] && columndesc(t, "A").comment == "c"
+    @test columndesc(t, "A").keywords["QuantumUnits"] == ["m"]
+    p = newpath(); taql("CREATE TABLE '$p' [] LIMIT 2"); @test nrow(readtable(p)) == 2 && isempty(columnnames(readtable(p)))
+    p = newpath(); taql("CREATE TABLE '$p' [A I4]"); @test nrow(readtable(p)) == 0
+    p = newpath(); taql("CREATE TABLE '$p' [A I4, B R8] LIMIT 4 DMINFO [TYPE=\"IncrementalStMan\", NAME=\"ISM\", COLUMNS=[\"A\"]]")
+    @test sort([m.name for m in readtable(p).managers]) == ["IncrementalStMan", "StandardStMan"]
+    p = newpath(); taql("CREATE TABLE '$p' AS [storage=\"multifile\", blocksize=1024] [A I4] LIMIT 2")
+    @test readtable(p).container isa MSv2.MultiFileContainer
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A I4, A R8] LIMIT 1")             # duplicate column
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A ZZ] LIMIT 1")                   # unknown type
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A I4 [NDIM=1, SHAPE=[2,3]]] LIMIT 1")
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A I4] LIMIT -1")
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A I4 [DEFAULT=7]] LIMIT 1")
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A,B] LIMIT 1")
+    @test_throws ArgumentError taql("CREATE TABLE '$p' [A I4] LIMIT 1")                              # exists
+    # DROP TABLE
+    p = newpath(); taql("CREATE TABLE '$p' [A I4] LIMIT 2")
+    @test isdir(p)
+    taql("DROP TABLE '$p'")
+    @test !ispath(p)
+    p = newpath(); taql("CREATE TABLE '$p' [A I4] LIMIT 2")
+    taql(p, "DROP TABLE \$1"); @test !ispath(p)
+    @test_throws ArgumentError taql("DROP TABLE '$(mktempdir())'")                                 # not a table: nothing is deleted
+    if _HAVE_TAQL
+        function state(pp)
+            t = readtable(pp)
+            (nrow(t), [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape), c.comment, c.keywords.names, c.keywords.values) for c in t.desc.columns],
+             sort([m.name for m in t.managers]),
+             # real leaves a fixed-shape array column's cells uninitialised, so compare the other columns' first rows only
+             [map(v -> v isa AbstractArray ? Array(v) : v, collect(column(t, c.name)[:])[1:min(end, 2)])
+              for c in t.desc.columns if !(c.shape isa Tuple && !isempty(c.shape))])
+        end
+        for c in ["[A I4, B R8] LIMIT 5", "[A I4, B R8, S S] LIMIT 3", "[A I4 [NDIM=1]] LIMIT 3", "[A I4 [SHAPE=[2,3]]] LIMIT 3", "[A I4, B R8]",
+                  "[A I4] LIMIT 0", "[A I4, B R8] LIMIT 4 DMINFO [TYPE=\"IncrementalStMan\", NAME=\"ISM\", COLUMNS=[\"A\"]]",
+                  "[A C8, B B, C U1] LIMIT 2", "[A I4 [UNIT=\"m\"]] LIMIT 2", "[A I4 [COMMENT=\"hi\"]] LIMIT 2", "[A I4 [UNIT=\"m\", COMMENT=\"c\"]] LIMIT 1",
+                  "[A I4 [UNIT=[\"m\"]]] LIMIT 1", "[] LIMIT 2", "[A I4] LIMIT 2+1", "[a i4] LIMIT 1", "[A R8 [NDIM=0]] LIMIT 2", "[A R8 [NDIM=2]] LIMIT 2"]
+            p1 = newpath(); p2 = newpath()
+            x = _taqlcmd("CREATE TABLE '$p1' $c"); x = nothing
+            taql("CREATE TABLE '$p2' $c")
+            for _ in 1:50                                  # casacore finalises (flushes) the new table when its handle is collected
+                GC.gc(); GC.gc(); sleep(0.1)
+                isfile(joinpath(p1, "table.dat")) && break
+            end
+            @test state(p1) == state(p2)
+        end
+    end
+end
