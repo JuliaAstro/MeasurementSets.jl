@@ -516,7 +516,7 @@ end
     @test parse("rownumber() > 1").lhs isa MSv2.TQLRowNum
     @test parse("rownr() > 1").lhs isa MSv2.TQLRowNum
     @test parse("pi() > 3").lhs isa MSv2.TQLLit
-    @test parse("e() > 2").lhs.value == ℯ
+    @test parse("e() > 2").lhs.value ≈ ℯ
 
     # errors: unknown function, wrong arity
     @test_throws ArgumentError parse("bogus(A) > 0")
@@ -4754,4 +4754,177 @@ if _HAVE_TAQL && _HAVE_UNITFUL
     # a time quantity against a unitless column is a unit mismatch, not an RA reading
     @test_throws Exception query(readtable(let p = joinpath(mktempdir(), "u"); write_table(p, "U", Pair{String,Any}["X" => [1.0, 2.0]]; nrow=2); p end), "X > 1h")
 end
+end
+
+# Phase 334: casacore's string functions are byte-oriented (ASCII-only case/class tests, UTF-8 bytes counted /
+# cut / reversed).  Found by a random-string fuzz vs real TaQL: every non-ASCII string disagreed.
+@testset "string functions are byte-oriented like casacore (Phase 334)" begin
+    f(n) = MSv2._TQL_FUNCS[n][1]
+    @test f("strlength")("é") == 2
+    @test f("upcase")("aé") == "Aé"
+    @test f("downcase")("AÉ") == "aÉ"
+    @test f("capitalize")("hello wörld") == "Hello WöRld"       # `ö` bytes are not letters, so `rld` starts a word
+    @test codeunits(f("substr")("é", 1)) == UInt8[0xa9]            # cuts inside the 2-byte character
+    @test codeunits(f("sreverse")("aé")) == UInt8[0xa9, 0xc3, 0x61]
+    @test f("strlength")("abc") == 3 && f("sreverse")("abc") == "cba" && f("substr")("hello", 1, 3) == "ell"
+    if _HAVE_TAQL
+        rng = MersenneTwister(334)
+        alpha = collect("abAB xy_-.01é")
+        rs() = String(rand(rng, alpha, rand(rng, 0:9)))
+        n = 40
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["S" => [rs() for _ in 1:n], "U" => [rs() for _ in 1:n], "K" => Int32.(1:n)]; nrow=n)
+        t = readtable(d)
+        for fe in ["upcase(S)", "downcase(S)", "trim(S)", "ltrim(S)", "rtrim(S)", "capitalize(S)", "sreverse(S)",
+                   "strlength(S)", "substr(S,1)", "substr(S,0,2)", "substr(S,-3)", "substr(S,1,3)",
+                   "replace(S,'a','Z')", "S+U", "upcase(S)+downcase(U)"]
+            r = _taqlcmd("SELECT K, $fe AS X FROM \$1", d)
+            o = query(t, "K >= 0"; select=["K" => "K", "X" => fe])
+            @test string.(collect(r[:X][:])) == string.(collect(column(o, "X")[:]))
+        end
+        for fe in ["S == U", "S < U", "S >= U", "S IN ['a','ab']", "S LIKE 'a%'", "S ~ p/a*/", "S ~ m/[ab]x/", "S !~ f/a.*/i"]
+            r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $fe", d)[:K][:]) catch; Int32[] end
+            @test collect(column(query(t, fe), "K")[:]) == r
+        end
+    end
+end
+
+# Phase 335: random LIKE / ILIKE / glob (`~ p/../`, with `i`) / partial and full regex patterns vs real TaQL.
+# 600 exploratory patterns found no divergence; this seeded guard keeps a slice of them.
+if _HAVE_TAQL
+@testset "random pattern fuzz vs real TaQL (Phase 335)" begin
+    rng = MersenneTwister(335)
+    alpha = collect("abAB_.-x0")
+    n = 60
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["S" => [String(rand(rng, alpha, rand(rng, 0:7))) for _ in 1:n], "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    sqlpat() = join([(r = rand(rng); r < 0.3 ? "%" : r < 0.5 ? "_" : string(rand(rng, alpha))) for _ in 1:rand(rng, 1:5)])
+    globpat() = join([(r = rand(rng); r < 0.2 ? "*" : r < 0.35 ? "?" : r < 0.45 ? "[ab]" : r < 0.52 ? "[!a]" :
+                       r < 0.6 ? "{a,bx}" : string(rand(rng, alpha))) for _ in 1:rand(rng, 1:5)])
+    nbad = 0
+    for _ in 1:150
+        kind = rand(rng, 1:6)
+        sp, gp = sqlpat(), globpat()
+        rp = replace(gp, "{a,bx}" => "(a|bx)")
+        w = kind == 1 ? "S LIKE '$sp'" : kind == 2 ? "S ILIKE '$sp'" : kind == 3 ? "S ~ p/$gp/" :
+            kind == 4 ? "S ~ p/$gp/i" : kind == 5 ? "S ~ m/$rp/" : "S ~ f/$rp/"
+        # an empty result is a lazy Slicer error in real TaQL; a pattern both engines reject counts as agreement
+        r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch e; Int32[] end
+        o = try collect(column(query(t, w), "K")[:]) catch; :err end
+        nbad += (o === :err ? isempty(r) : o == r) ? 0 : 1
+    end
+    @test nbad == 0
+end
+end
+
+# Phase 336: `IN [...]` elements are arbitrary expressions (and ranges may have expression bounds) in real TaQL;
+# before, only literals / literal ranges parsed.  Found by probing 28 IN forms against real TaQL.
+@testset "IN lists with expression elements (Phase 336)" begin
+    n = 24
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => Int32.(1:n), "B" => Float64.(0.5 .* (1:n)),
+                                        "S" => [string("s", i % 5) for i in 1:n], "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    rows(w) = collect(column(query(t, w), "K")[:])
+    # static (all-literal) elements are unchanged
+    @test MSv2._taqllite_parse("A IN [1, 3:6]", Set(["A"])) isa MSv2.TQLIn
+    @test_throws ArgumentError MSv2._taqllite_parse("A IN [5:1]", Set(["A"]))
+    @test_throws ArgumentError MSv2._taqllite_parse("A IN [1:5:0]", Set(["A"]))
+    @test rows("A IN [1,2+3,4]") == [1, 4, 5]
+    @test rows("A IN [2*2, 3*3]") == [4, 9]
+    @test rows("A IN [sqrt(16), abs(-3)]") == [3, 4]
+    @test rows("A IN [1+1:4]") == [2, 3, 4]
+    @test rows("S IN ['s1', 's'+'2']") == [i for i in 1:n if i % 5 in (1, 2)]
+    @test rows("A IN [K]") == collect(1:n)             # a column element, per row
+    @test rows("A IN [K+1, K-1]") == Int[]             # never equal to A == K
+    @test rows("A IN [1:K]") == collect(1:n)           # a range whose bound is a column
+    @test rows("A IN [K:K+2]") == collect(1:n)
+    @test rows("A IN [rownumber()]") == collect(1:n)
+    @test rows("A NOT IN [K+1, 3]") == [i for i in 1:n if i != 3]
+    @test rows("A IN [K+1:K+3]") == Int[]
+    if _HAVE_TAQL
+        for w in ["A IN [1,2+3,4]", "A IN [2*2, 3*3]", "A IN [A, 3]", "A IN [sqrt(16), abs(-3)]", "A IN [1+1:4]",
+                  "S IN ['s1','s'+'2']", "S IN [upcase('s3')]", "S IN ['s1', S]", "A IN [rownumber()]", "A IN [K]",
+                  "A IN [K+1, K-1]", "A IN [1:K]", "A IN [K:K+2]", "B IN [1:3]", "A IN [1, 3:6, 9]"]
+            r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch; Int32[] end
+            @test rows(w) == r
+        end
+    end
+end
+
+# Phase 337: integer arithmetic in TaQL is 64-bit.  A mixed-type WHERE probe (100 forms) vs real TaQL found
+# `U * U > 100` / `~U == 250` on a UInt8 column wrapping at 8 bits here; small integers are now widened to Int64.
+@testset "integer arithmetic is 64-bit like real TaQL (Phase 337)" begin
+    n = 16
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["U" => UInt8.(1:n), "I" => Int32.(1:n) .* Int32(100_000_000),
+                                        "H" => Int16.(1:n) .* Int16(1000), "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    rows(w) = collect(column(query(t, w), "K")[:])
+    @test rows("U * U > 100") == collect(11:16)          # 11^2 = 121; UInt8 would wrap 16*16 = 256 -> 0
+    @test rows("~U == 250") == Int[]                      # 64-bit complement of 5 is -6, not 250
+    @test rows("~U == -6") == [5]
+    @test rows("U + 250 > 255") == collect(6:16)          # no UInt8 wrap-around
+    @test rows("I * 100 > 0") == collect(1:n)             # Int32 would overflow
+    @test rows("H * H > 100000000") == [i for i in 1:n if (1000i)^2 > 100_000_000]
+    @test rows("-U < 0") == collect(1:n)
+    if _HAVE_TAQL
+        for w in ["U * U > 100", "~U == 250", "~U == -6", "U + 250 > 255", "I * 100 > 0", "H * H > 100000000", "U - 10 < 0", "-U < 0"]
+            r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch; Int32[] end
+            @test rows(w) == r
+        end
+    end
+end
+
+# Phase 338: computed SELECT columns have real TaQL's result types -- arithmetic is done in double precision
+# (Float32 -> Float64, ComplexF32 -> ComplexF64) and mixed Int32/Int64 rows give a plain Int64 column, not an abstract
+# eltype.  Found by comparing the eltype of 68 `SELECT <expr> AS Z` forms against real TaQL.
+@testset "computed SELECT result types match real TaQL (Phase 338)" begin
+    n = 8
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => Int32.(1:n), "J" => Int64.(1:n), "X" => Float64.(1:n), "Y" => Float32.(1:n),
+                                        "P" => Bool[isodd(i) for i in 1:n], "C" => ComplexF32.(1:n), "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    ty(f) = eltype(column(query(t, "K >= 0"; select=["Z" => f]), "Z")[:])
+    @test ty("Y + 1") == Float64 && ty("Y * Y") == Float64 && ty("I + Y") == Float64
+    @test ty("sqrt(Y)") == Float64 && ty("abs(Y)") == Float64 && ty("-Y") == Float64 && ty("exp(Y)") == Float64
+    @test ty("C * 2") == ComplexF64 && ty("conj(C)") == ComplexF64 && ty("abs(C)") == Float64 && ty("real(C)") == Float64
+    @test ty("iif(P, I, J)") == Int64 && ty("iif(P, Y, 1.0)") == Float64
+    @test ty("pi()") == Float64
+    @test ty("I + J") == Int64 && ty("I > 2") == Bool && ty("I") == Int32     # plain / bool results keep their type
+    if _HAVE_TAQL
+        for f in ["Y + 1", "Y * Y", "I + Y", "sqrt(Y)", "abs(Y)", "-Y", "exp(Y)", "C * 2", "conj(C)", "abs(C)", "real(C)",
+                  "iif(P, I, J)", "iif(P, Y, 1.0)", "pi()", "I + J", "I > 2", "I", "fmod(Y, 3)", "square(Y)", "sign(Y)"]
+            @test ty(f) == eltype(_taqlcmd("SELECT $f AS Z FROM \$1", d)[:Z][:])
+        end
+    end
+end
+
+# Phase 339: GROUP BY aggregates have real TaQL's result types (64-bit integers, double precision): `gsum(UInt8)`,
+# `gmin(Int32)`, `gfirst(Int16)` are Int64 and `gmean(Float32)`, `gmax(Float32)`, `gsum(ComplexF32)` are double.
+# Found by comparing the result eltype of 47 aggregates against real TaQL.
+@testset "GROUP BY aggregate result types match real TaQL (Phase 339)" begin
+    n = 12
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => Int32.(1:n), "Y" => Float32.(1:n), "U" => UInt8.(1:n), "H" => Int16.(1:n),
+                                        "C" => ComplexF32.(1:n), "G" => Int32.(repeat(1:3, 4)), "K" => Int32.(1:n)]; nrow=n)
+    t = readtable(d)
+    ty(f) = eltype(column(taql(t, "SELECT G, $f AS Z FROM \$1 GROUP BY G"), "Z")[:])
+    for (f, T) in ["gsum(U)" => Int64, "gmin(I)" => Int64, "gmax(H)" => Int64, "gfirst(U)" => Int64, "gsum(I)" => Int64,
+                   "gsum(Y)" => Float64, "gmean(Y)" => Float64, "gmin(Y)" => Float64, "gvariance(Y)" => Float64,
+                   "gmedian(Y)" => Float64, "gproduct(Y)" => Float64, "glast(Y)" => Float64, "gsum(C)" => ComplexF64,
+                   "gmean(C)" => ComplexF64, "gmean(I)" => Float64, "gcount()" => Int64]
+        @test ty(f) == T
+    end
+    # values are computed in double / 64-bit: no UInt8 / Float32 accumulation error
+    x = taql(t, "SELECT G, gsum(U) AS Z FROM \$1 GROUP BY G")
+    @test sort(collect(column(x, "Z")[:])) == sort([sum(UInt8(i) for i in 1:n if mod1(i, 3) == g; init=0) for g in 1:3])
+    if _HAVE_TAQL
+        for f in ["gsum(U)", "gmin(I)", "gmax(H)", "gfirst(U)", "gsum(Y)", "gmean(Y)", "gmin(Y)", "gvariance(Y)",
+                  "gmedian(Y)", "gproduct(Y)", "glast(Y)", "gsum(C)", "gmean(C)", "gmean(I)", "gcount()", "gstddev(U)", "grms(Y)"]
+            r = _taqlcmd("SELECT G, $f AS Z FROM \$1 GROUP BY G", d)
+            @test ty(f) == eltype(r[:Z][:])
+        end
+    end
 end

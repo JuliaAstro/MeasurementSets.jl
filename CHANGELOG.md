@@ -10765,3 +10765,58 @@ a unitless column still compares as a plain number); `_bcast` retries a `Dimensi
 (`_tql_dim_coerce`) that converts a time operand to an angle when the other is an angle. Metre-vs-second style
 mismatches (`TM > 30m`) still error, as in real TaQL. The Phase 87 single-field-`h` assertions were updated. New
 testset in `test/taql_query_tests.jl` cross-checking 17 unit-literal forms against real TaQL.
+
+### Phase 334 — string functions are byte-oriented like casacore (random-string fuzz vs real TaQL)
+
+Random strings (including a non-ASCII `é`) through 26 string forms against real TaQL: everything agreed for ASCII, but
+every non-ASCII string differed, because casacore's string functions work on C `char` bytes. Now matching:
+`strlength` counts UTF-8 bytes (`é` is 2), `upcase`/`downcase`/`capitalize` change ASCII letters only and treat any
+non-ASCII byte as a word break, and `substr`/`sreverse` cut and reverse bytes (so they can yield invalid UTF-8, as in
+casacore). Comparisons, `+`, `IN`, `LIKE`, `~`/`!~` and `replace`/`trim` already agreed. New testset in
+`test/taql_query_tests.jl` (hand-checked units + a seeded real-TaQL fuzz, `MersenneTwister(334)`).
+
+### Phase 335 — random LIKE / glob / regex pattern fuzz vs real TaQL (investigation only, no bug found)
+
+600 random patterns over `LIKE`, `ILIKE`, glob `~ p/../` (with `*`, `?`, `[ab]`, `[!a]`, `{a,bx}` and the `i` flag) and
+partial / full regex `~ m/../`, `~ f/../`, against 60 random strings, agreed with real TaQL on every row. Confirms the
+Phase 157 line-by-line read of casacore's `fromPattern` / `fromSQLPattern` at scale. A seeded 150-pattern slice is kept
+in `test/taql_query_tests.jl` (`MersenneTwister(335)`).
+
+### Phase 336 — `IN [...]` elements may be arbitrary expressions (28-form probe vs real TaQL)
+
+Real TaQL evaluates each `IN [...]` element as an expression per row: `A IN [A, 3]`, `A IN [2*2, sqrt(16)]`,
+`S IN ['s1', 's'+'2']`, `A IN [K+1, K-1]` and ranges with expression bounds (`[1+1:4]`, `[1:K]`, `[K:K+2]`).
+TaQL-lite only accepted literals and literal ranges, so all of those raised a parse error. Elements now parse at
+arithmetic level; an all-literal element stays static and is validated at parse time as before (`[5:1]`, step 0 still
+error), anything else becomes a `TQLExpr` / `TQLDynRange` resolved per row (`_in_resolve`) in both the row and group
+evaluators, with the visitors (`_tqlrefs!`, `_has_aggr`, `_has_qty`, `_sg`) following the sub-expressions. 15 forms
+cross-checked against real TaQL. Still lenient where real errors: `IN []` (matches nothing), `A IN [true]`, `NOT A IN [3:20]`.
+
+### Phase 337 — integer arithmetic is 64-bit like real TaQL (mixed-type WHERE probe vs real TaQL)
+
+A 100-form probe mixing Int32/Int64/UInt8/Float/Bool/String columns against real TaQL found two value differences:
+`U * U > 100` and `~U == 250` on a `UInt8` column wrapped at 8 bits here, whereas real TaQL promotes integers to 64
+bits (`U * U` for 16 is 256, `~5` is -6). Integers narrower than `Int64` are now widened before every arithmetic /
+bitwise / comparison broadcast (`_widen` in `_bcast` / `_bcast_raw`), which also removes `Int32` / `Int16` overflow in
+expressions like `I * 100000000`. The remaining differences in the probe are all forms real TaQL rejects
+(bool arithmetic, `S == 1`, `P & Q`, ...) that TaQL-lite accepts leniently. New testset with a real-TaQL cross-check.
+
+### Phase 338 — computed SELECT result types match real TaQL (68-form eltype probe)
+
+Comparing the column type of 68 `SELECT <expr> AS Z` forms against real TaQL: real computes in double precision, so
+`Float32` operands give `Float64` and `ComplexF32` give `ComplexF64`, and results are plain `Int64` / `Float64` columns.
+TaQL-lite left `Float32`/`ComplexF32` results, produced abstract eltypes (`Signed`, `AbstractFloat`) when rows mixed
+`Int32`/`Int64`, and returned `Irrational` for `pi()`. Now `Float32`/`Float16`/`ComplexF32` operands are widened to double
+alongside the Phase 337 integer widening, computed columns that came out abstract are concretised to `Int64` /
+`Float64` (`_tql_concrete`), and `pi()` / `e()` are `Float64`. All 68 forms agree on type; new testset with a real-TaQL
+cross-check.
+
+### Phase 339 — GROUP BY aggregate result types match real TaQL (47-aggregate eltype probe)
+
+Same finding as Phase 338 for the `g*` aggregates: real TaQL aggregates in 64-bit integers / double precision, so
+`gsum(UInt8)`, `gmin(Int32)`, `gmax(Int16)` and `gfirst(UInt8)` are `Int64` and `gmean`/`gmin`/`gmax`/`gvariance`/
+`gmedian`/`gproduct`/`glast`/`gsum` of `Float32` or `ComplexF32` are `Float64` / `ComplexF64`; TaQL-lite kept the column's
+own narrow type (and `gsum(UInt8)` was `UInt64`). Aggregate arguments are now widened per row (`_widen`, Phase 337/338)
+before the reduction, which also removes `UInt8` / `Float32` accumulation error. Result types of 47 aggregate forms
+now agree with real TaQL (only the array-of-array representation of `growid`/`gstack`/`gaggr` differs, with matching
+element types); `gsum`/`gmean` of a Bool column still work although real TaQL rejects them.

@@ -93,7 +93,37 @@ struct TQLNot <: TQLExpr
 end
 struct TQLIn <: TQLExpr
     lhs::TQLExpr
-    vals::Vector{Any}      # literals and/or `TQLRangeSet`s
+    vals::Vector{Any}      # literals, `TQLRangeSet`s, and (Phase 336) `TQLExpr` / `TQLDynRange` elements
+end
+# Phase 336: real TaQL's `IN [...]` elements are arbitrary expressions (`[A, 3]`, `[2*2, sqrt(16)]`,
+# `[K:K+2]`) evaluated per row; a range keeps its bounds as expressions.
+struct TQLDynRange
+    lo::TQLExpr
+    hi::Union{Nothing,TQLExpr}
+    step::Union{Nothing,TQLExpr}
+end
+_in_subexprs(vals) = TQLExpr[x for v in vals for x in (v isa TQLExpr ? (v,) : v isa TQLDynRange ?
+    filter(!isnothing, (v.lo, v.hi, v.step)) : ())]
+# turn dynamic elements into plain literals / `TQLRangeSet`s for one row (`ev` evaluates an expression)
+function _in_resolve(vals, ev)
+    any(v -> v isa TQLExpr || v isa TQLDynRange, vals) || return vals
+    out = Any[]
+    for v in vals
+        if v isa TQLExpr
+            x = ev(v)
+            nameof(typeof(x)) === :TQLPatternVal && throw(ArgumentError(
+                "TaQL-lite: a regex / pattern value cannot be an element of IN [...] (real TaQL rejects it too)"))
+            x isa AbstractArray ? append!(out, x) : push!(out, x)
+        elseif v isa TQLDynRange
+            lo = ev(v.lo); hi = v.hi === nothing ? nothing : ev(v.hi); st = v.step === nothing ? 1 : ev(v.step)
+            (lo isa Real && (hi === nothing || hi isa Real) && st isa Real && st > 0) || throw(ArgumentError(
+                "TaQL-lite: a range in IN [...] needs numeric bounds and a positive step"))
+            (hi === nothing || hi >= lo) && push!(out, TQLRangeSet(lo, hi, st))
+        else
+            push!(out, v)
+        end
+    end
+    return out
 end
 # `lo:hi[:step]` element of an `IN [...]` list (Phase 243). Live-verified
 # against real TaQL: a DISCRETE lattice `lo, lo+step, ...` up to `hi`
@@ -172,7 +202,18 @@ end
 # `if` -- correct, exactly as real TaQL requires `any(...)`/`all(...)`
 # there. `AND`/`OR` stay scalar (short-circuit); `NOT` broadcasts so
 # `NOT FLAG` / `V[!FLAG]` negate an array-cell mask elementwise.
-_bcast(f, x) = x isa AbstractArray ? f.(x) : f(x)
+# Phase 334/337: real TaQL does integer arithmetic in 64 bits (`U * U` on a UInt8 column does not wrap at 255,
+# `~U` is a 64-bit complement), so integers narrower than Int64 are widened before any operation.
+const _SmallInt = Union{Int8,UInt8,Int16,UInt16,Int32,UInt32}
+_widen(x::_SmallInt) = Int64(x)
+_widen(x::AbstractArray{<:_SmallInt}) = Int64.(x)
+# ... and in double precision: Float32 / Float16 -> Float64, ComplexF32 -> ComplexF64 (Phase 338)
+_widen(x::Union{Float32,Float16}) = Float64(x)
+_widen(x::AbstractArray{<:Union{Float32,Float16}}) = Float64.(x)
+_widen(x::Complex{<:Union{Float32,Float16}}) = ComplexF64(x)
+_widen(x::AbstractArray{<:Complex{<:Union{Float32,Float16}}}) = ComplexF64.(x)
+_widen(x) = x
+_bcast(f, x) = (x = _widen(x); x isa AbstractArray ? f.(x) : f(x))
 # two array operands must have the SAME shape (real TaQL: "ArrayMath function
 # +: array shapes mismatch" -- no implicit broadcasting; Phase 285)
 # Phase 333: a comparison / arithmetic between a TIME quantity (`6h`, `0.5d`, a column in seconds) and an ANGLE
@@ -193,6 +234,7 @@ function _bcast(f, x, y)
 end
 
 function _bcast_raw(f, x, y)
+    x = _widen(x); y = _widen(y)
     if x isa AbstractArray && y isa AbstractArray
         size(x) == size(y) || throw(ArgumentError(
             "TaQL-lite: array operands have different shapes $(size(x)) and $(size(y))"))
@@ -325,7 +367,7 @@ _tqleval(e::TQLCmp, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e
 _tqleval(e::TQLAnd, cols, i) = _tql_and(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLOr, cols, i) = _tql_or(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLNot, cols, i) = _bcast(!, _tqleval(e.a, cols, i))
-_tqleval(e::TQLIn, cols, i) = _tql_in(_tqleval(e.lhs, cols, i), e.vals)
+_tqleval(e::TQLIn, cols, i) = _tql_in(_tqleval(e.lhs, cols, i), _in_resolve(e.vals, x -> _tqleval(x, cols, i)))
 _tqleval(e::TQLArith, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLNeg, cols, i) = _bcast(-, _tqleval(e.a, cols, i))
 _tqleval(e::TQLBitNot, cols, i) = _bcast((~), _tqleval(e.a, cols, i))
@@ -508,7 +550,8 @@ _sg(e::TQLNot, r) = TQLNot(_sg(e.a, r))
 _sg(e::TQLNeg, r) = TQLNeg(_sg(e.a, r))
 _sg(e::TQLBitNot, r) = TQLBitNot(_sg(e.a, r))
 _sg(e::TQLBetween, r) = TQLBetween(_sg(e.lhs, r), _sg(e.lo, r), _sg(e.hi, r), e.negate)
-_sg(e::TQLIn, r) = TQLIn(_sg(e.lhs, r), e.vals)
+_sg(e::TQLIn, r) = TQLIn(_sg(e.lhs, r), Any[v isa TQLExpr ? _sg(v, r) : v isa TQLDynRange ?
+    TQLDynRange(_sg(v.lo, r), v.hi === nothing ? nothing : _sg(v.hi, r), v.step === nothing ? nothing : _sg(v.step, r)) : v for v in e.vals])
 _sg(e::TQLMatch, r) = TQLMatch(_sg(e.lhs, r), e.regex, e.negate)
 _sg(e::TQLFunc, r) = TQLFunc(e.fn, TQLExpr[_sg(a, r) for a in e.args])
 _sg(e::TQLAggr, r) = e.arg === nothing ? e : TQLAggr(e.fn, _sg(e.arg, r), e.mode)
@@ -535,7 +578,7 @@ _tqlrefs!(seen, e::TQLCmp) = (_tqlrefs!(seen, e.lhs); _tqlrefs!(seen, e.rhs))
 _tqlrefs!(seen, e::TQLAnd) = (_tqlrefs!(seen, e.a); _tqlrefs!(seen, e.b))
 _tqlrefs!(seen, e::TQLOr) = (_tqlrefs!(seen, e.a); _tqlrefs!(seen, e.b))
 _tqlrefs!(seen, e::TQLNot) = _tqlrefs!(seen, e.a)
-_tqlrefs!(seen, e::TQLIn) = _tqlrefs!(seen, e.lhs)
+_tqlrefs!(seen, e::TQLIn) = (_tqlrefs!(seen, e.lhs); foreach(x -> _tqlrefs!(seen, x), _in_subexprs(e.vals)))
 _tqlrefs!(seen, e::TQLArith) = (_tqlrefs!(seen, e.lhs); _tqlrefs!(seen, e.rhs))
 _tqlrefs!(seen, e::TQLNeg) = _tqlrefs!(seen, e.a)
 _tqlrefs!(seen, e::TQLBitNot) = _tqlrefs!(seen, e.a)
@@ -576,7 +619,7 @@ _has_aggr(e::TQLNot) = _has_aggr(e.a)
 _has_aggr(e::TQLNeg) = _has_aggr(e.a)
 _has_aggr(e::TQLBitNot) = _has_aggr(e.a)
 _has_aggr(e::TQLMaskOf) = _has_aggr(e.e)
-_has_aggr(e::TQLIn) = _has_aggr(e.lhs)
+_has_aggr(e::TQLIn) = _has_aggr(e.lhs) || any(_has_aggr, _in_subexprs(e.vals))
 _has_aggr(e::TQLMatch) = _has_aggr(e.lhs)
 _has_aggr(e::TQLFunc) = any(_has_aggr, e.args)
 _has_aggr(e::TQLIndex) = _has_aggr(e.base) || any(e.axes) do ax
@@ -602,7 +645,7 @@ _has_qty(e::TQLNot) = _has_qty(e.a)
 _has_qty(e::TQLNeg) = _has_qty(e.a)
 _has_qty(e::TQLBitNot) = _has_qty(e.a)
 _has_qty(e::TQLMaskOf) = _has_qty(e.e)
-_has_qty(e::TQLIn) = _has_qty(e.lhs)
+_has_qty(e::TQLIn) = _has_qty(e.lhs) || any(_has_qty, _in_subexprs(e.vals))
 _has_qty(e::TQLMatch) = _has_qty(e.lhs)
 _has_qty(e::TQLFunc) = any(_has_qty, e.args)
 _has_qty(e::TQLAggr) = e.arg !== nothing && _has_qty(e.arg)

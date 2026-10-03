@@ -379,26 +379,32 @@ function _parse_comparison!(p::TQLParser)
     end
 end
 
-# one `IN [...]` element: a literal, or `lo:hi[:step]` / `lo:` (Phase 243)
+# one `IN [...]` element: a literal, `lo:hi[:step]` / `lo:` (Phase 243), or -- Phase 336, like real TaQL --
+# an arbitrary expression / a range with expression bounds. All-literal elements stay static (validated at
+# parse time); anything else becomes a `TQLExpr` / `TQLDynRange` resolved per row.
+_islit(e) = e isa TQLLit && e.value isa Real
 function _parse_in_element!(p::TQLParser)
-    lo = _parse_literal_value!(p)
-    _peek(p).kind === :colon || return lo
-    lo isa Real || throw(ArgumentError("TaQL-lite: a range in IN [...] needs numeric bounds in \"$(p.src)\""))
+    lo = _parse_bitor!(p)
+    if _peek(p).kind !== :colon
+        return lo isa TQLLit ? lo.value : lo
+    end
     _advance!(p)
     hi = nothing
     if !(_peek(p).kind in (:comma, :rbracket, :colon))
-        hi = _parse_literal_value!(p)
-        hi isa Real || throw(ArgumentError("TaQL-lite: a range in IN [...] needs numeric bounds in \"$(p.src)\""))
-        hi >= lo || throw(ArgumentError("TaQL-lite: empty range $lo:$hi in IN [...] in \"$(p.src)\""))
+        hi = _parse_bitor!(p)
     end
-    step = 1
+    step = nothing
     if _peek(p).kind === :colon
         _advance!(p)
-        step = _parse_literal_value!(p)
-        (step isa Real && step > 0) || throw(ArgumentError(
-            "TaQL-lite: the step of a range in IN [...] must be a positive number in \"$(p.src)\""))
+        step = _parse_bitor!(p)
     end
-    return TQLRangeSet(lo, hi, step)
+    if _islit(lo) && (hi === nothing || _islit(hi)) && (step === nothing || _islit(step))
+        l = lo.value; h = hi === nothing ? nothing : hi.value; s = step === nothing ? 1 : step.value
+        h === nothing || h >= l || throw(ArgumentError("TaQL-lite: empty range $l:$h in IN [...] in \"$(p.src)\""))
+        s > 0 || throw(ArgumentError("TaQL-lite: the step of a range in IN [...] must be a positive number in \"$(p.src)\""))
+        return TQLRangeSet(l, h, s)
+    end
+    return TQLDynRange(lo, hi, step)
 end
 
 function _parse_in_list!(p::TQLParser, lhs::TQLExpr, negate::Bool)

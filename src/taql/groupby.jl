@@ -12,7 +12,8 @@ _geval(::TQLGrouping, cols, g) = throw(ArgumentError(
     "TaQL-lite: GROUPING() must be resolved per grouping set (internal error)"))
 function _geval(e::TQLAggr, cols, g)
     e.arg === nothing && return e.fn(g)                    # gcount()
-    vals = Any[_tqleval(e.arg, cols, i) for i in g]
+    # Phase 339: real TaQL aggregates in 64-bit / double (`gsum(UInt8)` is Int64, `gmean(Float32)` Float64)
+    vals = Any[_widen(_tqleval(e.arg, cols, i)) for i in g]
     e.mode === :perelem && return _perelem_reduce(e.fn, vals)
     any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
     return e.fn(vals)
@@ -66,7 +67,7 @@ _geval(e::TQLMaskOf, cols, g) = (v = _geval(e.e, cols, g);
 _geval(e::TQLAnd, cols, g) = _tql_and(_geval(e.a, cols, g), _geval(e.b, cols, g))
 _geval(e::TQLOr, cols, g) = _tql_or(_geval(e.a, cols, g), _geval(e.b, cols, g))
 _geval(e::TQLNot, cols, g) = _bcast(!, _geval(e.a, cols, g))
-_geval(e::TQLIn, cols, g) = _tql_in(_geval(e.lhs, cols, g), e.vals)
+_geval(e::TQLIn, cols, g) = _tql_in(_geval(e.lhs, cols, g), _in_resolve(e.vals, x -> _geval(x, cols, g)))
 _geval(e::TQLMatch, cols, g) =
     xor(occursin(e.regex, _geval(e.lhs, cols, g)::AbstractString), e.negate)
 _geval(e::TQLFunc, cols, g) =
