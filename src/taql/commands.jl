@@ -897,11 +897,11 @@ function _taql_create(command::AbstractString)
         z = T === String ? "" : zero(T)
         if shp !== nothing
             ndim === nothing || ndim == length(shp) || throw(ArgumentError("taql: NDIM and SHAPE disagree for column \"$name\""))
-            data = [fill(z, shp...) for _ in 1:nrows]; shapes[name] = shp
+            data = Array{T,length(shp)}[fill(z, shp...) for _ in 1:nrows]; shapes[name] = shp
         elseif ndim !== nothing && ndim > 0
-            data = [fill(z, ntuple(_ -> 0, ndim)...) for _ in 1:nrows]; shapes[name] = VariableShape(ndim)
+            data = Array{T,ndim}[fill(z, ntuple(_ -> 0, ndim)...) for _ in 1:nrows]; shapes[name] = VariableShape(ndim)   # typed: a zero-row column keeps its eltype
         elseif ndim !== nothing && ndim == 0
-            data = [fill(z, 0) for _ in 1:nrows]; shapes[name] = VariableDims()
+            data = Vector{T}[fill(z, 0) for _ in 1:nrows]; shapes[name] = VariableDims()
         else
             data = fill(z, nrows)
         end

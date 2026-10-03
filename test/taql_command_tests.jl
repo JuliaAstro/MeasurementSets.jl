@@ -1469,3 +1469,50 @@ end
         end
     end
 end
+
+# Phase 348: random CREATE TABLE specs vs real TaQL (types, NDIM/SHAPE, UNIT, COMMENT, LIMIT incl. 0 / absent, DMINFO).  Found: a column with
+# no rows and a variable / fixed array shape (NDIM, or LIMIT 0 + SHAPE) had no element type and could not be written.
+@testset "taql CREATE TABLE random specs vs real TaQL (Phase 348)" begin
+    newpath() = joinpath(mktempdir(), "n")
+    for ty in ("R4", "U1"), spec in ("[NDIM=2]", "[SHAPE=[3,1,2]]", "[NDIM=0]")      # zero rows keep their element type
+        p = newpath(); taql("CREATE TABLE '$p' [A $ty $spec] LIMIT 0")
+        @test nrow(readtable(p)) == 0 && columndesc(readtable(p), "A").type == (ty == "R4" ? MSv2.TpFloat : MSv2.TpUChar)
+    end
+    if _HAVE_TAQL
+        function state(pp)
+            t = readtable(pp)
+            (nrow(t), [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape), c.comment, c.keywords.names, c.keywords.values) for c in t.desc.columns],
+             sort([m.name for m in t.managers]),
+             [map(v -> v isa AbstractArray ? Array(v) : v, collect(column(t, c.name)[:])[1:min(end, 2)])
+              for c in t.desc.columns if !(c.shape isa Tuple && !isempty(c.shape))])
+        end
+        rng = MersenneTwister(348)
+        types = ["I2", "I4", "R4", "R8", "S", "B", "C8", "C16", "U1", "U2", "U4", "I8"]
+        function gen()
+            nc = rand(rng, 0:4); names = ["C$i" for i in 1:nc]; specs = String[]
+            for nm in names
+                opts = String[]; r = rand(rng)
+                r < .25 ? push!(opts, "NDIM=$(rand(rng, 0:3))") : r < .4 && push!(opts, "SHAPE=[" * join(rand(rng, 1:4, rand(rng, 1:3)), ",") * "]")
+                rand(rng) < .25 && push!(opts, "UNIT=\"" * rand(rng, ["m", "Hz", "s", "Jy"]) * "\"")
+                rand(rng) < .25 && push!(opts, "COMMENT=\"c$(rand(rng, 1:99))\"")
+                push!(specs, nm * " " * rand(rng, types) * (isempty(opts) ? "" : " [" * join(opts, ", ") * "]"))
+            end
+            s = "[" * join(specs, ", ") * "]"
+            rand(rng) < .8 && (s *= " LIMIT $(rand(rng, 0:6))")
+            nc >= 2 && rand(rng) < .3 && (s *= " DMINFO [TYPE=\"IncrementalStMan\", NAME=\"ISM\", COLUMNS=[\"$(names[1])\"]]")
+            s
+        end
+        for _ in 1:25
+            c = gen(); p1 = newpath(); p2 = newpath()
+            ok1 = try x = _taqlcmd("CREATE TABLE '$p1' $c"); x = nothing; true catch; false end   # real rejects e.g. C16
+            ok2 = try taql("CREATE TABLE '$p2' $c"); true catch; false end
+            @test ok1 == ok2
+            (ok1 && ok2) || continue
+            for _ in 1:50
+                GC.gc(); GC.gc(); sleep(0.1)
+                isfile(joinpath(p1, "table.dat")) && break
+            end
+            @test state(p1) == state(p2)
+        end
+    end
+end

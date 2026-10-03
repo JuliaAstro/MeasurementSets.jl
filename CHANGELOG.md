@@ -10929,3 +10929,7 @@ duplicate columns / unknown types / `NDIM` vs `SHAPE` disagreement / unsupported
 leaves a fixed-shape array column's cells uninitialised, lists the `DMINFO` manager first, and segfaults on `LIMIT -1` (an error
 here). Also: `write_table` gained `shapes=` and `comments=` keywords. `COUNT` results cannot be read back through Casacore.jl, so
 `COUNT` stays unimplemented.
+
+### Phase 348 — `CREATE TABLE` random-spec fuzz vs real TaQL
+
+60 random `CREATE TABLE` specs (12 types, `NDIM`/`SHAPE`, `UNIT`, `COMMENT`, `LIMIT` incl. 0/absent, `DMINFO`) compared with real TaQL. Fixed one bug: a variable- or fixed-shape array column with no rows (`[A R4 [NDIM=2]]` without `LIMIT`, or `LIMIT 0`) had element type `Any` and failed to write. Also probed `meas.jmean/jtrue/jnat/bmean/btrue/mecliptic/tecliptic`: real TaQL's `meas.*` does not expose those frames at all, so they are not a TaQL gap (only reachable through casatools measures).
