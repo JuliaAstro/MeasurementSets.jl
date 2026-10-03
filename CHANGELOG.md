@@ -10855,3 +10855,10 @@ a `m` column) is an error. `*` joins units without converting. Implemented as an
 `_unit_assign`) that multiplies the conversion factor in as a literal; the factor comes from the Unitful extension
 (`_unit_factor`, `nothing`/no conversion without it). Reads stay lenient for mismatched dimensions (real TaQL errors) and
 real TaQL's odd `BETWEEN` behaviour with a unitless bound is not reproduced. New testset with a real-TaQL cross-check.
+
+### Phase 342 follow-up — CI fix: Phase 335 pattern guard generated invalid regexes
+
+GitHub Actions (Linux x86-64, Julia 1.10) failed the Phase 335 random pattern guard on 4 of 150 patterns, all regex
+(`~ m/../`, `~ f/../`) forms the generator built with stacked quantifiers such as `?*` and `**`. Real casacore on Linux
+accepts those, while PCRE (and casacore on macOS) rejects them, so the two engines disagreed only on invalid patterns.
+Reproduced in an x86-64 Linux container; the test now collapses stacked quantifiers in the regex forms. No package change.

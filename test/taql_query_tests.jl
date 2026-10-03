@@ -4806,7 +4806,9 @@ if _HAVE_TAQL
     for _ in 1:150
         kind = rand(rng, 1:6)
         sp, gp = sqlpat(), globpat()
-        rp = replace(gp, "{a,bx}" => "(a|bx)")
+        # the regex forms reuse the glob text; stacked quantifiers (`?*`, `**`) are invalid in PCRE but accepted by
+        # casacore's regex on Linux (rejected on macOS), so collapse them to keep both engines on valid patterns
+        rp = replace(replace(gp, "{a,bx}" => "(a|bx)"), r"[*?]{2,}" => "*")
         w = kind == 1 ? "S LIKE '$sp'" : kind == 2 ? "S ILIKE '$sp'" : kind == 3 ? "S ~ p/$gp/" :
             kind == 4 ? "S ~ p/$gp/i" : kind == 5 ? "S ~ m/$rp/" : "S ~ f/$rp/"
         # an empty result is a lazy Slicer error in real TaQL; a pattern both engines reject counts as agreement
