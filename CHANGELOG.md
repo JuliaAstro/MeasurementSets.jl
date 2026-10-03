@@ -10820,3 +10820,13 @@ own narrow type (and `gsum(UInt8)` was `UInt64`). Aggregate arguments are now wi
 before the reduction, which also removes `UInt8` / `Float32` accumulation error. Result types of 47 aggregate forms
 now agree with real TaQL (only the array-of-array representation of `growid`/`gstack`/`gaggr` differs, with matching
 element types); `gsum`/`gmean` of a Bool column still work although real TaQL rejects them.
+
+### Phase 340 — array expressions: 64-bit/double reads, kept subscript axes, elementwise `near()` (87-form probe vs real TaQL)
+
+Result element type and shape of 87 array-valued `SELECT` expressions against real TaQL found three differences.
+(1) Real TaQL reads columns as `Int64` / `Double` inside expressions, so `sum(U)`, `min(U)`, `transpose(B)`, `resize`,
+`flatten`, `B[1,1]`, `boxedsum`, `sums` ... of `UInt8` / `Int32` / `Float32` cells are 64-bit / double; a column read inside an
+expression is now widened (`_widen`, extending Phases 337–339; plain projections and group-key columns keep their stored
+type). (2) A scalar subscript among slices keeps a length-1 axis (`B[1:2,1]` is 2×1, `shape(B[1,1:2])` is `[1,2]`);
+only an all-scalar subscript gives a scalar. This corrects Phase 42's claim that scalar axes are dropped (that is Julia's
+rule). (3) `near(a,b[,tol])` / `nearabs` are elementwise on array cells. New testset with a real-TaQL cross-check.

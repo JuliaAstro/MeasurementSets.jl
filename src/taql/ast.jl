@@ -359,7 +359,7 @@ _tql_truthy(::Missing) = false
 _tql_truthy(x) = throw(ArgumentError(
     "TaQL-lite: a WHERE/HAVING/join condition must evaluate to Bool, got $(typeof(x))"))
 
-_tqleval(e::TQLCol, cols, i) = cols[e.name][i]
+_tqleval(e::TQLCol, cols, i) = _widen(cols[e.name][i])    # real TaQL reads columns as Int64 / Double (Phase 340)
 _tqleval(e::TQLLit, cols, i) = e.value
 _tqleval(e::TQLQuantityLit, cols, i) = e.value
 _tqleval(e::TQLArrayLit, cols, i) = [_tqleval(x, cols, i) for x in e.elems]
@@ -437,7 +437,10 @@ function _tql_do_index(arr, axes, ev)
         m = _as_mask(axes, ev)
         m !== nothing && return TQLMArray(collect(arr), BitArray(collect(m)))
     end
-    return arr[_tql_index_tuple(arr, axes, ev)...]
+    idx = _tql_index_tuple(arr, axes, ev)
+    all(i -> i isa Integer, idx) && return arr[idx...]
+    # Phase 340 (live-verified): a scalar subscript among slices keeps a length-1 axis (`B[1:2,1]` is 2x1)
+    return arr[map(i -> i isa Integer ? (i:i) : i, idx)...]
 end
 
 # write `rhs` into `arr` at the resolved index tuple (used by `update!`

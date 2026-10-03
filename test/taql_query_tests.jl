@@ -4928,3 +4928,33 @@ end
         end
     end
 end
+
+# Phase 340: array-valued expressions vs real TaQL (87 forms, result eltype + shape).  Found: columns are read as
+# Int64 / Double inside expressions (so `sum(U)`, `transpose(B)`, `resize(B,..)` of a UInt8 / Float32 cell are 64-bit /
+# double); a scalar subscript among slices keeps a length-1 axis (`B[1:2,1]` is 2x1, `shape(B[1,1:2])` is [1,2]);
+# `near()` / `nearabs()` are elementwise on array cells.
+@testset "array expressions: widening, kept subscript axes, elementwise near (Phase 340)" begin
+    n = 4
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => [Float64.(i .* ones(2, 3)) for i in 1:n], "B" => [Float32.(i .* ones(2, 3)) for i in 1:n],
+                                        "U" => [UInt8.(i .* ones(2, 3)) for i in 1:n], "K" => Int32.(1:n)]; nrow=n,
+                tsm=[["A", "B", "U"]])
+    t = readtable(d)
+    val(f) = column(query(t, "K >= 0"; select=["Z" => f]), "Z")[1]
+    @test eltype(val("sum(U)")) == Int64 && eltype(val("min(U)")) == Int64 && eltype(val("sum(B)")) == Float64
+    @test eltype(val("transpose(B)")) == Float64 && eltype(val("resize(B,[3,3])")) == Float64 && eltype(val("reversearray(U)")) == Int64
+    @test eltype(val("sums(B,1)")) == Float64 && eltype(val("B[1,1]")) == Float64 && eltype(val("flatten(B)")) == Float64
+    @test size(val("B[1:2,1]")) == (2, 1) && size(val("B[1,1:2]")) == (1, 2) && size(val("B[1:2,1:3]")) == (2, 3)
+    @test val("B[1,1]") isa Float64
+    @test val("shape(B[1:2,1])") == [2, 1] && val("ndim(B[1:2,1])") == 2
+    @test val("near(B, A)") == trues(2, 3) && val("nearabs(B, A, 0.1)") == trues(2, 3)
+    @test val("near(B, A + 1)") == falses(2, 3)
+    if _HAVE_TAQL
+        for f in ["sum(U)", "min(U)", "sum(B)", "transpose(B)", "resize(B,[3,3])", "reversearray(U)", "sums(B,1)", "B[1,1]",
+                  "flatten(B)", "B[1:2,1]", "B[1,1:2]", "B[1:2,1:3]", "near(B,A)", "nearabs(B,A,0.1)", "mean(B)", "variances(B,1)"]
+            r = _taqlcmd("SELECT $f AS Z FROM \$1", d)[:Z][1]
+            o = val(f)
+            @test (eltype(o), size(o)) == (eltype(r), size(r))
+        end
+    end
+end
