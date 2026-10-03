@@ -170,6 +170,15 @@ end
 # real (SOFA) sidereal-time relation converge to sub-second precision.
 const _SIDEREAL_RATE = 2π * 1.00273781191135448
 
+# Phase 344: Greenwich (:gmst, :gast) and local (:lmst, :last) mean / apparent sidereal time, radians in [0, 2pi)
+function MS._sidereal(frame::MeasFrame, kind::Symbol)
+    uta, utb = _frame_ut1(frame)
+    tta, ttb = _frame_tt(frame)
+    elong = kind in (:lmst, :last) ? _frame_site(frame)[1] : 0.0
+    g = kind in (:gmst, :lmst) ? SOFA.gmst06(uta, utb, tta, ttb) : SOFA.gst06a(uta, utb, tta, ttb)
+    return mod2pi(g + elong)
+end
+
 function _mjd_for_lst(lst_target::Real, mjd0::Real, pos::MPosition)
     fr(m) = MeasFrame(epoch = MEpoch{UTC}(m), position = pos)
     lst0 = MS._lst(fr(mjd0))

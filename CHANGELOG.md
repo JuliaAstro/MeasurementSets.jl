@@ -10876,3 +10876,16 @@ Unitful extension, and the older source-first numeric forms (`meas.azel('J2000',
 sources). After the fix 369 random conversions agree with real TaQL within the usual SOFA-vs-casacore residual (observer
 frames ~arcsec; B1950↔`AZELSW` up to ~4″). Still unsupported: the mean/true/natural frames `JMEAN`, `JTRUE`, `JNAT`, `BMEAN`,
 `BTRUE`, `MECLIPTIC`, `TECLIPTIC`. New testset with a seeded real-TaQL cross-check.
+
+### Phase 344 — `meas.epoch` as real casacore has it: seconds, source scale, sidereal scales (random fuzz vs real TaQL)
+
+Following Phase 343, probing the other `meas.*` families against real TaQL showed `meas.epoch('TARGET', value [, 'SOURCE'
+[, pos]])` takes and returns **seconds since MJD 0** (so `meas.epoch('TAI', TIME)` works on a `TIME` column directly), accepts a
+source scale, and also converts to the sidereal scales `GMST1`/`GAST`/`LMST`/`LAST` (seconds of the sidereal day; the local
+ones need a position). TaQL-lite only had the day-valued `meas.epoch('TAI', mjd)`. It is now the real form (the old
+day-valued call is gone: use `meas.epoch('TAI', TIME)` instead of `meas.epoch('TAI', TIME/86400.0)`); the
+sidereal scales use a new `_sidereal` helper (SOFA `gmst06` / `gst06a`). 200 random conversions over UTC/TAI/TT/TDB/UT1 sources
+and ten targets agree with real TaQL (scales to ~ms, sidereal to ~50 ms). Left alone: `meas.freq` / `meas.rv` / `meas.pos` /
+`meas.itrfxyz` / `meas.riseset` use different calling conventions in real casacore (value-first, positions as `[x,y,z]`,
+`itrfxyz` an identity on xyz, `riseset(dir, epoch, pos)` returning MJD days) and are a later phase. New testset with a seeded
+real-TaQL cross-check.

@@ -1653,11 +1653,31 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
         return TQLFunc(cb, rest)
     end
     if fn == "epoch"
-        (length(args) == 2 && args[1] isa TQLLit && args[1].value isa AbstractString) ||
-            throw(ArgumentError("TaQL-lite: meas.epoch('TAI'|'TT'|'TDB'|'UT1'|'UTC', mjd) in \"$src\""))
-        T = get(_MEAS_EPOCH_FRAMES, lowercase(String(args[1].value)), nothing)
+        # real casacore: `meas.epoch('TARGET', value [, 'SOURCE' [, pos]])` -- value and result are SECONDS since MJD 0
+        # (Phase 343/344, live-verified); UTC TAI TT/TDT TDB UT1 and the sidereal scales GMST1 GAST LMST LAST (seconds of
+        # the sidereal day; the local ones need a position -- an observatory name or [x, y, z]).
+        (2 <= length(args) <= 4 && args[1] isa TQLLit && args[1].value isa AbstractString) ||
+            throw(ArgumentError("TaQL-lite: meas.epoch('TARGET', epoch [, 'SOURCE' [, pos]]) in \"$src\""))
+        tgt = lowercase(String(args[1].value))
+        sidereal = Dict("gmst1" => :gmst, "gmst" => :gmst, "gast" => :gast, "lmst" => :lmst, "last" => :last)
+        srcs = length(args) >= 3 ? args[3] : TQLLit("UTC")
+        (srcs isa TQLLit && srcs.value isa AbstractString) || throw(ArgumentError("meas.epoch: the source scale must be a literal"))
+        S = get(_MEAS_EPOCH_FRAMES, lowercase(String(srcs.value)), nothing)
+        S === nothing && throw(ArgumentError("meas.epoch: unknown source scale \"$(srcs.value)\""))
+        posarg = length(args) == 4 ? _meas_pos_arg(args[4]) : TQLLit(nothing)
+        if haskey(sidereal, tgt)
+            kind = sidereal[tgt]
+            (kind in (:lmst, :last) && length(args) < 4) && throw(ArgumentError("meas.epoch('$(args[1].value)') needs a position"))
+            return TQLFunc((v, p) -> _sidereal(_meas_frame(measconvert(MEpoch{S}(_tql_plain(v, :time)), UTC).mjd,
+                                                           p === nothing ? nothing : _meas_xyz(p)), kind) / (2pi) * 86400.0,
+                           TQLExpr[args[2], posarg])
+        end
+        T = get(_MEAS_EPOCH_FRAMES, tgt, nothing)
         T === nothing && throw(ArgumentError("meas.epoch: unknown scale \"$(args[1].value)\""))
-        return TQLFunc(m -> measconvert(MEpoch{UTC}(float(m)), T).mjd, args[2:end])
+        return TQLFunc((v, p) -> begin
+            fr = p === nothing ? MeasFrame() : _meas_frame(nothing, _meas_xyz(p))
+            measconvert(MEpoch{S}(_tql_plain(v, :time)), T; frame=fr).mjd * 86400.0
+        end, TQLExpr[args[2], posarg])
     end
     if (fn == "last" || fn == "lst") && length(args) == 2      # real form: meas.last(epoch, pos)
         # real returns the local sidereal time as SECONDS of the sidereal day

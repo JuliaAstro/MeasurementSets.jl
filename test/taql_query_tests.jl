@@ -2981,9 +2981,9 @@ end
         "meas.azel(RA, DEC, TIME/86400.0, -1601185.0, -5041977.0, 3554876.0)[2]"])
     @test all(x -> -pi/2 <= x <= pi/2, collect(az.el))
 
-    # meas.epoch: TAI − UTC ≈ 37 s
-    e = query(t, "TIME > 0"; select = ["tai" => "meas.epoch('TAI', TIME/86400.0)"])
-    @test collect(e.tai)[1] - 60454.42 ≈ 37 / 86400 atol = 1e-6
+    # meas.epoch: TAI − UTC ≈ 37 s; value and result are SECONDS since MJD 0 (like a TIME column), Phase 344
+    e = query(t, "TIME > 0"; select = ["tai" => "meas.epoch('TAI', TIME)", "t" => "TIME"])
+    @test collect(e.tai)[1] - collect(e.t)[1] ≈ 37 atol = 1e-3
 
     # meas.last returns a sidereal angle in [0, 2π)
     l = query(t, "TIME > 0"; select = ["last" =>
@@ -5100,5 +5100,50 @@ end
         end
         @test ncmp > 10
         @test nbad == 0
+    end
+end
+
+# Phase 344: `meas.epoch('TARGET', value [, 'SOURCE' [, pos]])` as real casacore has it -- seconds in / seconds out, a source
+# scale, and the sidereal scales GMST1 / GAST / LMST / LAST (seconds of the sidereal day).  200 random conversions over
+# UTC / TAI / TT / TDB / UT1 sources and 10 targets agreed with real TaQL (a day-valued `meas.epoch('TAI', mjd)` used to be
+# the only form).
+@testset "meas.epoch: seconds, source scale, sidereal scales vs real TaQL (Phase 344)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", ["A" => Int32[1]]; nrow=1)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["V" => e]), "V")[:])[1]
+    p(e) = MSv2._taqllite_parse(e, Set(["A"]))
+    @test p("meas.epoch('TAI', 5.2e9)") isa MSv2.TQLFunc
+    @test p("meas.epoch('TAI', 5.2e9, 'UTC', 'VLA')") isa MSv2.TQLFunc
+    @test_throws ArgumentError p("meas.epoch('BOGUS', 5.2e9)")
+    @test_throws ArgumentError p("meas.epoch('TAI', 5.2e9, 'BOGUS')")
+    @test_throws ArgumentError p("meas.epoch('LAST', 5.2e9)")             # needs a position
+    if Base.get_extension(MSv2, :SOFAExt) !== nothing
+        @test ev("meas.epoch('TAI', 5.2e9)") ≈ 5.2e9 + 37 atol = 1e-3
+        @test ev("meas.epoch('TT', 5.2e9)") ≈ 5.2e9 + 69.184 atol = 1e-3
+        @test ev("meas.epoch('UTC', 5.2e9 + 37, 'TAI')") ≈ 5.2e9 atol = 1e-3       # source scale
+        @test 0 <= ev("meas.epoch('LAST', 5.2e9, 'UTC', 'VLA')") < 86400
+        @test ev("meas.epoch('LAST', 5.2e9, 'UTC', 'VLA')") != ev("meas.epoch('GAST', 5.2e9)")
+        # the local sidereal time differs from the Greenwich one by the observatory longitude (in seconds of sidereal day)
+        @test ev("meas.epoch('GMST1', 5.2e9)") ≈ ev("meas.epoch('LMST', 5.2e9, 'UTC', [6378137.0, 0.0, 0.0])") atol = 1e-6
+        if _HAVE_TAQL
+            cref(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])[1]
+            rng = MersenneTwister(344)
+            scales = ["UTC", "TAI", "TT", "TDT", "TDB", "UT1", "GMST1", "GAST", "LMST", "LAST"]
+            nbad = 0; ncmp = 0
+            for _ in 1:40
+                tg = rand(rng, scales); sc = rand(rng, ["UTC", "TAI", "TT", "TDB", "UT1"])
+                ep = round((55000 + 6000rand(rng)) * 86400, digits=3)
+                e = "meas.epoch('$tg', $ep, '$sc'" * (rand(rng) < 0.6 || tg in ("LMST", "LAST") ? ", '$(rand(rng, ["VLA", "ALMA", "GBT"]))')" : ")")
+                r = try cref(e) catch; nothing end
+                r === nothing && continue
+                ncmp += 1
+                m = try ev(e) catch; nothing end
+                sidereal = tg in ("GMST1", "GAST", "LMST", "LAST")
+                (m !== nothing && (sidereal ? abs(mod(m - r + 43200, 86400) - 43200) <= 0.1 : abs(m - r) <= 1e-2)) || (nbad += 1)
+            end
+            @test ncmp > 10
+            @test nbad == 0
+        end
     end
 end
