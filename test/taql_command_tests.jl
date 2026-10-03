@@ -1321,3 +1321,86 @@ if _HAVE_TAQL
     end
 end
 end
+
+# Phase 346: `ALTER TABLE` -- ADD / DROP / RENAME COLUMN and SET / DROP / RENAME KEYWORD (table and `COL::kw` column keywords).
+# 32 commands compared against real TaQL on twin tables (columns, types, shapes, keyword order and types, data): all agree.
+# Real quirks reproduced: setting an existing keyword moves it to the END of the set; integers are stored as Int64 and a mixed
+# `[1.5, 2]` array as Float64; several clauses may follow one `ALTER TABLE`; failures (unknown column, rename onto an existing
+# one) leave the table unchanged.
+@testset "taql ALTER TABLE vs real TaQL (Phase 346)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["A" => Int32.(1:4), "B" => Float64.(1:4), "S" => ["a", "b", "c", "d"], "K" => Int32.(1:4)];
+                        nrow=4, keywords=Dict("KW1" => 5, "KW2" => "x")); d)
+    kwlist(t) = [(t.desc.public.names[i] => t.desc.public.values[i]) for i in eachindex(t.desc.public.names)]
+    colnames(t) = [c.name for c in t.desc.columns]
+    d = mk()
+    taql(d, "ALTER TABLE \$1 SET KEYWORD KW1=7, KW3='z'")
+    @test kwlist(readtable(d)) == ["KW2" => "x", "KW1" => 7, "KW3" => "z"]         # KW1 moved to the end
+    @test readtable(d).desc.public.values[2] isa Int64
+    taql(d, "ALTER TABLE \$1 SET KEYWORD KW4=[1.5,2], KW5=(1+2)*3, KW6=true")
+    kw = Dict(kwlist(readtable(d)))
+    @test kw["KW4"] == [1.5, 2.0] && kw["KW5"] == 9 && kw["KW6"] === true
+    taql(d, "ALTER TABLE \$1 DROP KEYWORD KW3")
+    @test !haskey(Dict(kwlist(readtable(d))), "KW3")
+    taql(d, "ALTER TABLE \$1 RENAME KEYWORD KW1 TO KWX")
+    @test last(kwlist(readtable(d))) == ("KWX" => 7)
+    taql(d, "ALTER TABLE \$1 SET KEYWORD A::QuantumUnits=['m'], B::MyKw=3")
+    @test columndesc(readtable(d), "A").keywords.values == [["m"]]
+    @test_throws KeyError taql(d, "ALTER TABLE \$1 DROP KEYWORD NOSUCH")
+    # columns
+    d = mk()
+    taql(d, "ALTER TABLE \$1 RENAME COLUMN A TO AA, B TO BB")
+    @test colnames(readtable(d)) == ["AA", "BB", "S", "K"] && collect(column(readtable(d), "AA")) == Int32.(1:4)
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 RENAME COLUMN AA TO BB")      # already exists
+    @test_throws KeyError taql(d, "ALTER TABLE \$1 DROP COLUMN NOSUCH")
+    @test colnames(readtable(d)) == ["AA", "BB", "S", "K"]                             # unchanged by the failures
+    taql(d, "ALTER TABLE \$1 DROP COLUMN BB RENAME COLUMN AA TO A")                   # several clauses
+    @test colnames(readtable(d)) == ["A", "S", "K"]
+    taql(d, "ALTER TABLE \$1 ADD COLUMN N1 R8, N2 I4, N3 S DMINFO [TYPE=\"StandardStMan\", NAME=\"SSM2\"]")
+    t = readtable(d)
+    @test colnames(t) == ["A", "S", "K", "N1", "N2", "N3"]
+    @test eltype(column(t, "N1")) == Float64 && eltype(column(t, "N2")) == Int32 && eltype(column(t, "N3")) == String
+    @test collect(column(t, "N1")) == zeros(4) && collect(column(t, "N3")) == fill("", 4)
+    taql(d, "ALTER TABLE \$1 ADD COLUMN V R8 [NDIM=1], W B DMINFO [TYPE=\"StandardStMan\", NAME=\"SSM3\"]")
+    t = readtable(d)
+    @test columndesc(t, "V").shape == MSv2.VariableShape(1) && columndesc(t, "W").type == MSv2.TpBool
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 ADD COLUMN Q ZZ")             # unknown type
+    # a renamed column keeps its data, units and the engine links that name it
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["F" => Float64.(1:4)]; nrow=4, units=Dict("F" => "Hz"))
+    renamecolumn!(d, "F", "FREQ")
+    @test get(columndesc(readtable(d), "FREQ").keywords, "QuantumUnits", nothing) == ["Hz"]
+    d2 = joinpath(mktempdir(), "t")
+    write_table(d2, "T", Pair{String,Any}["V" => [Float32.(i .* ones(2, 2)) for i in 1:3]]; nrow=3,
+                engines=Dict("V" => (; kind=MSv2.CompressFloat(), scale=0.01, offset=0.0)))
+    renamecolumn!(d2, "V_COMPRESSED", "VC")
+    @test collect(column(readtable(d2), "V"))[2] ≈ Float32.(2 .* ones(2, 2)) atol = 0.01    # the engine follows its stored column
+    if _HAVE_TAQL
+        function state(dd)
+            t = readtable(dd)
+            (colnames(t), [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape)) for c in t.desc.columns], kwlist(t),
+             [collect(column(t, c.name)[:])[1:2] for c in t.desc.columns if !(c.name in ("N4",))])
+        end
+        dm = " DMINFO [TYPE=\"StandardStMan\", NAME=\"SSM2\"]"
+        for c in ["SET KEYWORD KW1=7, KW3=2", "DROP KEYWORD KW1", "RENAME KEYWORD KW1 TO KW9", "RENAME COLUMN A TO AA, B TO BB",
+                  "DROP COLUMN A, B", "RENAME COLUMN A TO AA DROP COLUMN B", "SET KEYWORD KW6=(1+2)*3", "SET KEYWORD KW8=[1.5,2]",
+                  "SET KEYWORD KW8=true", "SET KEYWORD KW8=['a','b']", "ADD COLUMN N1 R8, N2 I4" * dm, "ADD COLUMN N1 S" * dm,
+                  "ADD COLUMN N1 R8 [NDIM=1]" * dm, "ADD COLUMN N1 B" * dm, "ADD COLUMN N1 C8" * dm, "ADD COLUMN N1 U1" * dm,
+                  "ADD COLUMN N1 R8 [NDIM=0]" * dm, "ADD COLUMN N1 R8 [NDIM=2]" * dm]
+            d1 = mk(); d2 = mk()
+            before = state(d1)
+            x = _taqlcmd("ALTER TABLE \$1 $c", d1); x = nothing      # drop the handle so casacore flushes the table
+            taql(d2, "ALTER TABLE \$1 $c")
+            for _ in 1:50                          # casacore flushes the altered table when its handle is finalised
+                GC.gc(); GC.gc(); sleep(0.1)
+                state(d1) != before && break
+            end
+            @test state(d1) == state(d2)
+        end
+        for c in ["DROP COLUMN NOSUCH", "RENAME COLUMN A TO B", "DROP KEYWORD NOSUCH", "ADD COLUMN K R8" * dm]
+            d1 = mk(); d2 = mk()
+            @test_throws Exception _taqlcmd("ALTER TABLE \$1 $c", d1)
+            @test_throws Exception taql(d2, "ALTER TABLE \$1 $c")
+        end
+    end
+end

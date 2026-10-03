@@ -10902,3 +10902,17 @@ real forms (the scalar forms are unchanged and still m/s with MJD days), plus `m
 xyz of an observatory. 300 random frequency / radial-velocity conversions over TOPO, GEO, BARY, LSRK, LSRD, GALACTO, LGROUP,
 CMB agree with real TaQL (frequency to 3e-9 relative, velocity to 1 m/s). Not copied: real's `meas.wgs`, `meas.restfreq`,
 and the odd `meas.rv('LSRK', v)` with no source. New testset with a seeded real-TaQL cross-check.
+
+### Phase 346 — `ALTER TABLE` (probed and cross-checked against real TaQL)
+
+TaQL-lite had no way to change a table's structure from a command. `taql(table, "ALTER TABLE \$1 clause ...")` now does what
+real `ALTER TABLE` does (32 commands compared on twin tables): `ADD COLUMN name type [[NDIM=n, SHAPE=[..]]] [, ...]
+[DMINFO ...]` (types `B U1 I2 U2 I4 U4 I8 R4 R8 C4 C8 S` and the long names; zeros / empty strings / `false`, undefined cells for an
+NDIM-only array column), `DROP COLUMN a[, b]`, `RENAME COLUMN a TO b[, ...]`, `SET KEYWORD k=expr[, ...]` (a constant
+expression; `COL::k` for a column keyword), `DROP KEYWORD`, `RENAME KEYWORD a TO b`, several clauses per command. Real quirks
+reproduced: setting an existing keyword moves it to the end of the set, integers are `Int64` and a mixed `[1.5, 2]` is
+`Float64`, failures leave the table unchanged. The metadata operations are also Julia functions — `renamecolumn!(path, old, new)`,
+`setkeyword!(path, name, value; column)`, `removekeyword!(path, name; column)` — implemented as a `table.dat` rewrite that reuses
+the storage-manager blocks verbatim (a data manager addresses its columns by position, so no data file is touched; a virtual
+engine's stored-column link and `Hypercolumn_*` lists follow a rename). Not copied: real leaves an uninitialised fixed-shape
+column's cells as garbage (zeros here). New testset with a real-TaQL cross-check.
