@@ -4998,3 +4998,53 @@ end
         end
     end
 end
+
+# Phase 342: real TaQL converts units inside expressions -- the right operand of `+ - % //`, a comparison, `BETWEEN`,
+# `IN [..]`, `min`/`max`/`iif` branches and a `/` divisor is converted to the left operand's unit, and `UPDATE SET X = <expr>`
+# converts the value to X's unit (an incompatible dimension is an error).  Found by probing 19 UPDATE and 33 SELECT / WHERE
+# forms on columns in m / km / Hz / rad / deg: TaQL-lite compared and stored the raw numbers.
+@testset "unit conversion inside expressions and UPDATE like real TaQL (Phase 342)" begin
+    n = 6
+    mk() = (p = joinpath(mktempdir(), "t");
+            write_table(p, "T", Pair{String,Any}["X" => Float64.(1:n) .* 500, "KM" => Float64.(1:n) ./ 2, "Y" => Float64.(1:n),
+                        "R" => Float64.(1:n) ./ 4, "DEG" => Float64.(10 .* (1:n)), "K" => Int32.(1:n)]; nrow=n,
+                        units=Dict("X" => "m", "KM" => "km", "Y" => "Hz", "R" => "rad", "DEG" => "deg")); p)
+    d = mk(); t = readtable(d)
+    sel(e) = collect(column(query(t, "K >= 0"; select=["W" => e]), "W")[:])
+    @test sel("X + KM") ≈ Float64.(1:n) .* 500 .+ Float64.(1:n) ./ 2 .* 1000
+    @test sel("KM + X") ≈ Float64.(1:n) ./ 2 .+ Float64.(1:n) .* 0.5
+    @test sel("X / KM") ≈ ones(n)                                       # divisor converted to the dividend's unit
+    @test sel("min(X, KM)") ≈ Float64.(1:n) .* 500
+    @test sel("R + DEG") ≈ Float64.(1:n) ./ 4 .+ deg2rad.(10 .* (1:n))
+    @test sel("X * KM") ≈ Float64.(1:n) .* 500 .* Float64.(1:n) ./ 2    # `*` joins units, no conversion
+    rows(w) = collect(column(query(t, w), "K")[:])
+    @test rows("X > KM") == Int[] && rows("X == KM") == collect(1:n) && rows("X >= KM") == collect(1:n)   # equal after conversion
+    @test rows("X BETWEEN KM AND KM*3") == collect(1:n) && rows("X IN [KM, 1000]") == collect(1:n)
+    function upd(s)
+        dd = mk(); update!(dd; set=[s]); return readtable(dd)
+    end
+    @test collect(column(upd("X" => "KM"), "X")) ≈ Float64.(1:n) ./ 2 .* 1000
+    @test collect(column(upd("KM" => "X"), "KM")) ≈ Float64.(1:n) .* 0.5
+    @test collect(column(upd("R" => "DEG"), "R")) ≈ deg2rad.(10 .* (1:n))
+    @test collect(column(upd("DEG" => "R * 4"), "DEG")) ≈ rad2deg.(Float64.(1:n))
+    @test collect(column(upd("X" => "X + KM"), "X")) ≈ Float64.(1:n) .* 500 .+ Float64.(1:n) ./ 2 .* 1000
+    @test collect(column(upd("X" => "1000"), "X")) == fill(1000.0, n)                 # a unitless value is stored as is
+    @test_throws ArgumentError update!(mk(); set=["X" => "Y"])                         # Hz into a metre column
+    @test_throws ArgumentError update!(mk(); set=["Y" => "X"])
+    if _HAVE_TAQL
+        for s in ["X = KM", "KM = X", "R = DEG", "DEG = R", "X = X + KM", "X = KM + 1", "X = KM / 1000", "X = 5 * KM"]
+            d1 = mk(); d2 = mk()
+            _taqlcmd("UPDATE \$1 SET $s", d1)
+            c = String(strip(first(split(s, "="))))
+            taql(d2, "UPDATE \$1 SET $s")
+            @test collect(column(readtable(d1), c)) ≈ collect(column(readtable(d2), c))
+        end
+        for e in ["X + KM", "KM + X", "X - KM", "X / KM", "KM / X", "R + DEG", "min(X, KM)", "max(KM, X)", "iif(X > 1000, X, KM)", "X % KM"]
+            @test sel(e) ≈ collect(_taqlcmd("SELECT $e AS W FROM \$1", d)[:W][:])
+        end
+        for w in ["X > KM", "KM < X", "X >= 2*KM", "R > DEG", "X BETWEEN KM AND KM*3", "KM BETWEEN X AND X*2", "X IN [KM, 1000]"]
+            r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch; Int32[] end   # empty = lazy Slicer error
+            @test rows(w) == r
+        end
+    end
+end

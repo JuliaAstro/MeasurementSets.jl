@@ -91,6 +91,8 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
         rhs = rv isa TQLExpr ? rv : _taqllite_parse(String(rv), vn)
         !_has_aggr(rhs) ||
             throw(ArgumentError("update!: SET expression \"$(rv)\" must not aggregate"))
+        tcol = lhs isa TQLCol ? lhs.name : (fl0 = _flatten_lhs(lhs); fl0 === nothing ? nothing : fl0[1])
+        tcol === nothing || (rhs = _unit_assign(rhs, _u1(_col_units(rd, tcol)), n -> _col_units(rd, n)))
         if lhs isa TQLCol
             push!(specs, (lhs.name, nothing, rhs))
         else
@@ -114,7 +116,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
     whereast = nothing
     if where isa AbstractString
         union!(needed, _tql_where_refs(where, rd))
-        whereast = _taqllite_parse(String(where), vn)
+        whereast = _unit_conv(_taqllite_parse(String(where), vn), rd)
     elseif where isa Function
         union!(needed, columnnames(rd))
     end

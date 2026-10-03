@@ -199,4 +199,21 @@ function MS._quantity_column_spec(vals::AbstractVector)
     return nothing
 end
 
+# Phase 342: the multiplicative factor taking a value in unit `from` to unit `to` (casacore unit strings, `m.Hz`,
+# `m/(Hz)`, `(m)-1`, ...); `nothing` when either does not parse (or is an offset unit); `:mismatch` when both
+# parse but the dimensions differ.
+function MS._unit_factor(from::AbstractString, to::AbstractString)
+    uf = ut = nothing
+    try
+        uf = _ms_uparse(String(from)); ut = _ms_uparse(String(to))
+    catch
+        return nothing
+    end
+    try
+        return Float64(Unitful.ustrip(Unitful.uconvert(ut, 1.0 * uf)))
+    catch e
+        return nameof(typeof(e)) === :DimensionError ? :mismatch : nothing
+    end
+end
+
 end # module

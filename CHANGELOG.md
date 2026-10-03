@@ -10843,3 +10843,15 @@ joins (`m.Hz`), `/` divides (`m/(Hz)`, `(m)-1`, equal units → none); unary min
 `+` and `sqrt(X)` are unit errors in real TaQL and stay lenient here). `GroupedTable` gained a `units` field (persisted by
 `copytable` / `INTO`); `TQLFunc` records its name. Also fixed: an expression that reduces to a bare column (`+X`, `(X)`)
 is a projection of that column, not a lookup of its source text. New testset with a real-TaQL cross-check.
+
+### Phase 342 — unit conversion inside expressions and `UPDATE` (probe vs real TaQL)
+
+Probing `UPDATE ... SET` (19 forms) and `SELECT` / `WHERE` (33 forms) on columns in m, km, Hz, rad and deg: real TaQL converts
+units inside expressions while TaQL-lite used the raw numbers (`SET X = KM` stored 1 instead of 1000 for a metre column,
+`X + KM` added km to m). Now, as in real TaQL: the right operand of `+ - % //`, of a comparison, a `BETWEEN` bound, an
+`IN [...]` element, a `min`/`max`/`iif` branch and the divisor of `/` of the same dimension is converted to the left
+operand's unit, and `UPDATE SET X = <expr>` converts the value to X's unit; assigning an incompatible dimension (`Hz` into
+a `m` column) is an error. `*` joins units without converting. Implemented as an AST rewrite (`_unit_rw`, `_unit_conv`,
+`_unit_assign`) that multiplies the conversion factor in as a literal; the factor comes from the Unitful extension
+(`_unit_factor`, `nothing`/no conversion without it). Reads stay lenient for mismatched dimensions (real TaQL errors) and
+real TaQL's odd `BETWEEN` behaviour with a unitless bound is not reproduced. New testset with a real-TaQL cross-check.

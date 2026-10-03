@@ -299,6 +299,7 @@ function _where_rows(t::AbstractTable, where, cols::AbstractDict)
     ast = _taqllite_parse(String(where), Set(columnnames(t)))
     !_has_aggr(ast) ||
         throw(ArgumentError("WHERE must not contain aggregate functions"))
+    ast = _unit_conv(ast, t)
     return [i for i in 1:nrow(t) if _tql_truthy(_tqleval(ast, cols, i))]
 end
 
