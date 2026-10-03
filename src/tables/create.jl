@@ -846,7 +846,8 @@ function _copy_table(dir::AbstractString, gt::GroupedTable, r=1:nrow(gt);
                      name::AbstractString="TABLE", kwargs...)
     nms = columnnames(gt)
     cols = Pair{Symbol,Any}[Symbol(n) => collect(column(gt, n))[r] for n in nms]
-    write_table(dir, name, cols; nrow=length(r))
+    write_table(dir, name, cols; nrow=length(r),
+                units=Dict{String,Any}(String(k) => v for (k, v) in getfield(gt, :units) if String(k) in nms))
 end
 
 """

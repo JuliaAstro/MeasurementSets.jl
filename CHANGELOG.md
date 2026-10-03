@@ -10830,3 +10830,16 @@ expression is now widened (`_widen`, extending Phases 337–339; plain projectio
 type). (2) A scalar subscript among slices keeps a length-1 axis (`B[1:2,1]` is 2×1, `shape(B[1,1:2])` is `[1,2]`);
 only an all-scalar subscript gives a scalar. This corrects Phase 42's claim that scalar axes are dropped (that is Julia's
 rule). (3) `near(a,b[,tol])` / `nearabs` are elementwise on array cells. New testset with a real-TaQL cross-check.
+
+### Phase 341 — computed SELECT columns keep `QuantumUnits` when persisted (probe vs real TaQL `GIVING`)
+
+Persisting `SELECT <expr> AS Z ...` (`INTO` / `GIVING`) and comparing the new column's type, shape and units against real
+TaQL: types and shapes agree (real writes computed array columns variable-shape, ours fixed-shape — left), but a computed
+column lost its `QuantumUnits`, and so did *every* column of a SELECT that mixed projections with computed expressions
+(only an all-projection SELECT, a lazy `RefTable`, kept them). Real TaQL propagates units through expressions; probing 44
+forms gave the rules now implemented: a plain column keeps its unit; `+ - % //` keep it (unitless operand neutral); `*`
+joins (`m.Hz`), `/` divides (`m/(Hz)`, `(m)-1`, equal units → none); unary minus, `abs`/`min`/`max`/`mean`/`floor`/`round`/
+`real`/`iif` keep it, `square` squares it; `**`, comparisons, trig, `sign`, `int` and the rest are unitless (mismatched
+`+` and `sqrt(X)` are unit errors in real TaQL and stay lenient here). `GroupedTable` gained a `units` field (persisted by
+`copytable` / `INTO`); `TQLFunc` records its name. Also fixed: an expression that reduces to a bare column (`+X`, `(X)`)
+is a projection of that column, not a lookup of its source text. New testset with a real-TaQL cross-check.

@@ -1946,7 +1946,7 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         n in 1:2 || throw(ArgumentError("TaQL-lite: $name() takes 1 or 2 arguments in \"$src\""))
         base = name == "min" ? _tql_min2 : _tql_max2
         fn = n == 1 ? _red(x -> (name == "min" ? minimum : maximum)(x), :elt) : _ew2(base)
-        return TQLFunc(fn, args)
+        return TQLFunc(fn, args, name)
     elseif name in ("angdist", "angdistx", "angulardistance", "angulardistancex")
         n in (2, 4) || throw(ArgumentError(
             "TaQL-lite: $name() takes 4 scalar radians or two `[lon, lat]` arrays in \"$src\""))
@@ -1968,6 +1968,6 @@ function _make_func(name::String, args::Vector{TQLExpr}, src::AbstractString)
         "TaQL-lite: $name() takes $(arity == 1:1 ? "1 argument" :
          length(arity) == 1 ? "$(first(arity)) arguments" :
          "$(first(arity))–$(last(arity)) arguments"), got $n, in \"$src\""))
-    return TQLFunc(fn, args)
+    return TQLFunc(fn, args, name)
 end
 

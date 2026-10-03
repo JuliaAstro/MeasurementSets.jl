@@ -253,6 +253,62 @@ function _tql_concrete(v::AbstractVector)
     return v
 end
 
+# ---- Phase 341: `QuantumUnits` of a computed SELECT column (live-probed vs real TaQL) -------------------------------
+# A plain column keeps its unit; `+ - % //` keep it (a unitless operand is neutral, mismatched units are an error in
+# real TaQL -> no unit here), `*` joins units (`m.Hz`), `/` divides (`m/(Hz)`, `(m)-1`, same unit -> none), unary
+# minus, `abs`/`min`/`max`/`mean`/`floor`/`round`/`real`/`iif` keep it, `square` squares it, everything else
+# (`**`, comparisons, trig, `sign`, `int`, reductions to counts, ...) is unitless.
+_col_units(t::AbstractTable, n::AbstractString) = try
+    u = get(columndesc(t, n).keywords, "QuantumUnits", nothing)
+    u === nothing ? nothing : String.(u)
+catch
+    nothing
+end
+_u1(u) = (u === nothing || length(u) != 1) ? nothing : u[1]
+_expr_unit(e::TQLCol, uof) = _u1(uof(e.name))
+_expr_unit(e::TQLNeg, uof) = _expr_unit(e.a, uof)
+function _expr_unit(e::TQLArith, uof)
+    ua = _expr_unit(e.lhs, uof); ub = _expr_unit(e.rhs, uof)
+    if e.op === _tql_add || e.op === (-) || e.op === _tql_mod || e.op === _tql_floordiv
+        return ua === nothing ? ub : ub === nothing ? ua : ua == ub ? ua : nothing
+    elseif e.op === (*)
+        return ua === nothing ? ub : ub === nothing ? ua : string(ua, ".", ub)
+    elseif e.op === (/)
+        return ub === nothing ? ua : ua === nothing ? string("(", ub, ")-1") : ua == ub ? nothing : string(ua, "/(", ub, ")")
+    end
+    return nothing
+end
+function _expr_unit(e::TQLFunc, uof)
+    us = [_expr_unit(a, uof) for a in e.args]
+    if e.name in ("abs", "min", "max", "mean", "avg", "floor", "round", "real")
+        ks = filter(!isnothing, us)
+        return isempty(ks) ? nothing : (all(==(ks[1]), ks) ? ks[1] : nothing)
+    elseif e.name == "iif" && length(us) == 3
+        ks = filter(!isnothing, us[2:3])
+        return isempty(ks) ? nothing : (all(==(ks[1]), ks) ? ks[1] : nothing)
+    elseif e.name in ("square", "sqr") && length(us) == 1 && us[1] !== nothing
+        return string(us[1], ".", us[1])
+    end
+    return nothing
+end
+_expr_unit(::TQLExpr, uof) = nothing
+
+# the `QuantumUnits` of every output column of a select (`cls` as in `_select_materialize`)
+function _select_units(cls, src::AbstractTable)
+    out = Dict{Symbol,Vector{String}}()
+    uof = n -> _col_units(src, n)
+    for (nm, kind, v) in cls
+        if kind === :proj
+            u = _col_units(src, v)
+            u === nothing || (out[Symbol(nm)] = u)
+        elseif kind === :expr
+            u = _expr_unit(v, uof)
+            u === nothing || (out[Symbol(nm)] = String[u])
+        end
+    end
+    return out
+end
+
 function _select_materialize(cls, src::AbstractTable, rows::Vector{Int})
     exprasts = TQLExpr[]
     refs = Set{String}()
@@ -509,13 +565,13 @@ function query(t::AbstractTable, wherestr::AbstractString;
     matched = _apply_orderby(matched, orderby, cols)
     cls = _select_classify(select, validnames)
     if _select_all_proj(cls)
-        namemap, order = _select_spec(t, select)
+        namemap, order = _select_spec(t, Pair{String,String}[String(c[1]) => c[3] for c in cls])   # classified: `+X` / `(X)` -> column X
         parent, rows, namemap = _flatten_query_parent(t, matched, namemap)
         return RefTable("", parent, rows, namemap, order,
                         parent.type, parent.subtype, parent.readme)
     end
     ps = _select_materialize(cls, t, matched)
-    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
+    return _mk_grouped(ps, _select_units(cls, t))
 end
 
 _normalize_orderkey(t::AbstractTable, s::Union{AbstractString,Symbol}) = begin
@@ -562,12 +618,12 @@ function query(f::Function, t::AbstractTable;
     matched = _apply_orderby(matched, orderkeys, cols_by_name)
     cls = _select_classify(select, Set(columnnames(t)))
     if _select_all_proj(cls)
-        namemap, order = _select_spec(t, select)
+        namemap, order = _select_spec(t, Pair{String,String}[String(c[1]) => c[3] for c in cls])   # classified: `+X` / `(X)` -> column X
         parent, rows2, namemap = _flatten_query_parent(t, matched, namemap)
         return RefTable("", parent, rows2, namemap, order,
                         parent.type, parent.subtype, parent.readme)
     end
     ps = _select_materialize(cls, t, matched)
-    return GroupedTable(first.(ps), AbstractVector[last(x) for x in ps])
+    return _mk_grouped(ps, _select_units(cls, t))
 end
 

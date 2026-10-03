@@ -161,6 +161,8 @@ end
 struct TQLFunc <: TQLExpr           # NAME(args...) -- resolved Julia callable + parsed args
     fn::Base.Callable
     args::Vector{TQLExpr}
+    name::String                    # the function's TaQL name ("" for the internally-built ones; Phase 341, unit inference)
+    TQLFunc(fn, args, name::AbstractString="") = new(fn, args, String(name))
 end
 struct TQLRowNum <: TQLExpr end     # rownumber() / rownr() -- the 1-based row index
 struct TQLAggr <: TQLExpr           # g*(arg) -- reduces over a group's rows (groupby only)
@@ -556,7 +558,7 @@ _sg(e::TQLBetween, r) = TQLBetween(_sg(e.lhs, r), _sg(e.lo, r), _sg(e.hi, r), e.
 _sg(e::TQLIn, r) = TQLIn(_sg(e.lhs, r), Any[v isa TQLExpr ? _sg(v, r) : v isa TQLDynRange ?
     TQLDynRange(_sg(v.lo, r), v.hi === nothing ? nothing : _sg(v.hi, r), v.step === nothing ? nothing : _sg(v.step, r)) : v for v in e.vals])
 _sg(e::TQLMatch, r) = TQLMatch(_sg(e.lhs, r), e.regex, e.negate)
-_sg(e::TQLFunc, r) = TQLFunc(e.fn, TQLExpr[_sg(a, r) for a in e.args])
+_sg(e::TQLFunc, r) = TQLFunc(e.fn, TQLExpr[_sg(a, r) for a in e.args], e.name)
 _sg(e::TQLAggr, r) = e.arg === nothing ? e : TQLAggr(e.fn, _sg(e.arg, r), e.mode)
 _sg(e::TQLIndex, r) = TQLIndex(_sg(e.base, r),
     Any[ax isa NamedTuple ?
