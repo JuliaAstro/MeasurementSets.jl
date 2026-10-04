@@ -626,6 +626,9 @@ function _taql_subst_subqueries(target, body::AbstractString)
         neg = m.captures[1] !== nothing
         if uppercase(m.captures[2]) == "EXISTS"
             v = nrow(r) > 0
+            # real TaQL treats `EXISTS (... LIMIT n)` as empty when fewer than n rows match (a positive one errors)
+            lm = match(r"^(.*)\bLIMIT\s+(\d+)\s*$"is, inner)
+            lm !== nothing && nrow(taql(target, String(lm.captures[1]))) < parse(Int, lm.captures[2]) && (v = false)
             body = body[1:m.offset-1] * (xor(v, neg) ? "TRUE" : "FALSE") * body[close+1:end]
         else
             names = columnnames(r)
@@ -658,7 +661,8 @@ function _taql_preprocess_select(target, body::AbstractString)
     body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
     body = replace(body, r"^SELECT\s+ALL\s+"i => "SELECT ")          # `SELECT ALL` = the default
     body = replace(body, r"\bORDERBY\b"i => "ORDER BY")               # one-word spelling
-    # FROM (SELECT ...) -> the inner result becomes the queried table
+    # FROM (SELECT ...) -> the inner result becomes the queried table (sub-queries in the WHERE still name the original table, `$1`)
+    orig = target
     m = match(r"\bFROM\s*\("i, body)
     if m !== nothing
         open = m.offset + length(m.match) - 1
@@ -668,7 +672,7 @@ function _taql_preprocess_select(target, body::AbstractString)
         target = taql(target, inner)
         body = body[1:m.offset-1] * "FROM __sub" * body[close+1:end]
     end
-    body = _taql_subst_subqueries(target, body)
+    body = _taql_subst_subqueries(orig, body)
     # `FROM name [AS] alias` -> drop the alias and its `alias.` qualifiers
     am = match(r"\bFROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|INTO|GIVING)\b)(\w+)"i, body)
     if am !== nothing
