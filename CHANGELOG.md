@@ -10981,3 +10981,7 @@ The Docker run found the Phase 357 guard drew a case where `gmaxs` hit real casa
 ### Phase 358 — JOIN column type / value fuzz vs real TaQL
 
 540 random `SELECT … FROM $1 a JOIN $2 b ON a.K == b.K` queries over Int32 / Int64 keys and right columns of every type (compared in order with real TaQL). Fixed: an unmatched row of a right *array* column is an empty array (any array column in the right table made the whole JOIN fail with "column of type SubArray… is not supported"), and right-table Float32 / ComplexF32 columns are widened to Double / ComplexF64 like real TaQL's result columns. Not copied: real rejects Double join keys; TaQL-lite matches them.
+
+### Phase 359 — INSERT / UPDATE value-coercion fuzz vs real TaQL
+
+550 random `INSERT … VALUES` / `SET` / `LIMIT` commands (ints, floats, strings, arrays into every column type) compared with real TaQL on twin tables, all cells and column types. Fixed: an integer into a narrower integer column wraps (`SET H=40000` → -25536 in an Int16 column, `U=-1` → 255); a fixed-shape array column takes a scalar (broadcast to every element) or an array of exactly its shape — a wrong-sized array was silently truncated by `UPDATE` and accepted by `INSERT`; an `UPDATE` scalar fills the cell's current shape (also in variable-shape columns). Not copied: real rejects Bool into numeric columns and a string / number into the wrong kind; TaQL-lite is more lenient.

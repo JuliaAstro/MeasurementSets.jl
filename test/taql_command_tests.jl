@@ -1737,3 +1737,53 @@ end
         end
     end
 end
+
+# Phase 359: random INSERT (VALUES / SET / LIMIT; ints, floats, strings, arrays into every column type) vs real TaQL on twin tables, all cells and
+# column types compared (550 commands).  Found: an integer into a NARROWER integer column wraps (`SET H=40000` -> -25536 in Int16, `U=-1` -> 255);
+# a FIXED-shape array column takes a scalar (broadcast) or an array of exactly its shape -- a wrong-sized array was silently TRUNCATED by UPDATE and
+# accepted by INSERT; an UPDATE scalar fills the cell's current shape (also in variable-shape columns).  Not copied: real rejects Bool into numeric
+# columns and strings / numbers into the wrong kind; TaQL-lite is more lenient.
+@testset "taql INSERT / UPDATE integer wrap + fixed-shape array cells vs real TaQL (Phase 359)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["I" => Int32.(1:2), "H" => Int16.(1:2), "U" => UInt8.(1:2), "AF" => [Float64.(i .* ones(2)) for i in 1:2],
+                        "VF" => [Float64.(1:i) for i in 1:2], "AT" => [["x", "y"] for _ in 1:2]]; nrow=2); d)
+    col(d, c) = collect(column(readtable(d), c)[:])
+    d = mk(); taql(d, "INSERT INTO t SET H=40000, U=-1, I=5000000000, AF=3, AT='s'")
+    @test col(d, "H")[3] == -25536 && col(d, "U")[3] == 255 && col(d, "I")[3] == 705032704 && collect(col(d, "AF")[3]) == [3.0, 3.0] && collect(col(d, "AT")[3]) == ["s", "s"]
+    @test_throws ArgumentError taql(d, "INSERT INTO t SET AF=[1,2,3]")
+    @test_throws ArgumentError taql(d, "INSERT INTO t SET AF=[1]")
+    @test nrow(readtable(d)) == 3                                                      # the failed commands added no rows
+    d = mk(); taql(d, "UPDATE t SET AF=3, VF=7, H=40000, U=300 WHERE I==2")
+    @test collect(col(d, "AF")[2]) == [3.0, 3.0] && col(d, "VF") == [[1.0], [7.0, 7.0]] && col(d, "H") == [1, -25536] && col(d, "U") == [1, 44]
+    @test_throws ArgumentError taql(d, "UPDATE t SET AF=[1,2,3]")
+    @test collect(col(d, "AF")[1]) == [1.0, 1.0]                                      # unchanged by the failure
+    if _HAVE_TAQL
+        rng = MersenneTwister(359)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        mk2() = (d = joinpath(mktempdir(), "t");
+                 write_table(d, "T", Pair{String,Any}["I" => Int32.(1:3), "H" => Int16.(1:3), "U" => UInt8.(1:3), "FL" => Float32.(1:3), "D" => Float64.(1:3),
+                            "B" => [true, false, true], "S" => ["a", "b", "c"], "C" => ComplexF64.(1:3), "AF" => [Float64.(i .* ones(2)) for i in 1:3],
+                            "AT" => [["x", "y"] for _ in 1:3]]; nrow=3); d)
+        # only forms real TaQL accepts for the column kind (no Bool into numbers, no string into numbers)
+        vals = Dict("I" => ["7", "-3", "2.7", "1e3", "3+4"], "H" => ["7", "-3", "2.7", "40000"], "U" => ["7", "300", "-1", "2.5"], "FL" => ["1.5", "3", "1e10"],
+                    "D" => ["2.5", "7", "-1e-3", "(1+2)/4"], "B" => ["true", "false"], "S" => ["'z'", "''"], "C" => ["3", "2.5", "(1+2)", "complex(1,2)"],
+                    "AF" => ["[1,2]", "[1.5,2.5]", "[1,2,3]", "3"], "AT" => ["['p','q']", "['p']", "'s'"])
+        cn = collect(keys(vals)); sort!(cn)
+        state(dd) = (t = readtable(dd); (nrow(t), [(c.name, c.type) for c in t.desc.columns], [map(v -> v isa AbstractArray ? Array(v) : v, collect(column(t, c.name)[:])) for c in t.desc.columns]))
+        close(a, b) = a isa AbstractArray ? (size(a) == size(b) && all(close.(a, b))) : (a == b || (a isa AbstractFloat && b isa AbstractFloat && (isapprox(a, b; rtol=1e-6) || isnan(a) && isnan(b))))
+        for _ in 1:60
+            cs = unique([pick(cn) for _ in 1:rand(rng, 1:4)])
+            rows = join(["(" * join([pick(vals[c]) for c in cs], ", ") * ")" for _ in 1:rand(rng, 1:2)], ", ")
+            cmd = rand(rng, 1:3) == 1 ? "INSERT INTO \$1 SET " * join(["$c=$(pick(vals[c]))" for c in cs], ", ") :
+                  "INSERT INTO \$1 ($(join(cs, ", "))) VALUES $rows" * (rand(rng) < .3 ? " LIMIT $(rand(rng, 1:3))" : "")
+            d1 = mk2(); d2 = mk2(); b = state(d1)
+            ok1 = try x = _taqlcmd(cmd, d1); x = nothing; true catch; false end
+            ok2 = try taql(d2, cmd, d2); true catch; false end
+            @test ok1 == ok2
+            (ok1 && ok2) || continue
+            for _ in 1:40; GC.gc(); GC.gc(); sleep(0.05); state(d1) != b && break; end
+            s1 = state(d1); s2 = state(d2)
+            @test s1[1] == s2[1] && s1[2] == s2[2] && all(j -> all(i -> close(s1[3][j][i], s2[3][j][i]), eachindex(s1[3][j])), eachindex(s1[3]))
+        end
+    end
+end
