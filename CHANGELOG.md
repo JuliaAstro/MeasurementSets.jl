@@ -10985,3 +10985,7 @@ The Docker run found the Phase 357 guard drew a case where `gmaxs` hit real casa
 ### Phase 359 — INSERT / UPDATE value-coercion fuzz vs real TaQL
 
 550 random `INSERT … VALUES` / `SET` / `LIMIT` commands (ints, floats, strings, arrays into every column type) compared with real TaQL on twin tables, all cells and column types. Fixed: an integer into a narrower integer column wraps (`SET H=40000` → -25536 in an Int16 column, `U=-1` → 255); a fixed-shape array column takes a scalar (broadcast to every element) or an array of exactly its shape — a wrong-sized array was silently truncated by `UPDATE` and accepted by `INSERT`; an `UPDATE` scalar fills the cell's current shape (also in variable-shape columns). Not copied: real rejects Bool into numeric columns and a string / number into the wrong kind; TaQL-lite is more lenient.
+
+### Phase 360 — epoch-measure columns are dates (date-function fuzz on MS-style TIME columns)
+
+Real TaQL types a column with an epoch `MEASINFO` (every MS `TIME`) as a date: `year(TIME)`, `mjd(TIME)`, `date(TIME)`, `TIME > datetime('…')` and `TIME > mjd('…')` read its seconds as a date. TaQL-lite took the seconds as MJD days, so every `datetime` comparison on a `TIME` column was silently wrong. Fixed: in a query that uses a date function the epoch columns held in seconds are converted to MJD days (a bare number beside such a column is then days too — a documented difference), and `mjd('<date string>')` parses the string. 300 random date conditions over a seconds and a days epoch column agree with real TaQL.

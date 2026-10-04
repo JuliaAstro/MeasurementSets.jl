@@ -5378,3 +5378,39 @@ end
         end
     end
 end
+
+# Phase 360: a column with an EPOCH measure (MEASINFO `epoch`, unit `s`) is a DATE in real TaQL -- `year(TIME)`, `mjd(TIME)`, `date(TIME)` and
+# `TIME > datetime('...')` / `TIME > mjd('...')` read its seconds as a date (before: seconds were taken as MJD days, so every datetime comparison was
+# silently wrong).  300 random date WHERE conditions over a seconds epoch column and a days epoch column agree with real TaQL.  In a query that uses
+# a date function the epoch column is held in MJD days, so a bare number beside it is days too (real: the column's unit); `mjd('<date string>')` works.
+@testset "TaQL-lite — epoch-measure columns are dates (Phase 360)" begin
+    n = 6; t0 = 59000.0 * 86400
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["TIME" => t0 .+ (0:n-1) .* 3600.0, "TD" => 59000.0 .+ (0:n-1) ./ 24, "K" => Int32.(1:n)]; nrow=n,
+                units=Dict("TIME" => "s", "TD" => "d"),
+                measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"]), "TD" => (; kind=:epoch, ref="UTC", units=["d"])))
+    t = readtable(dir)
+    ks(w) = collect(column(query(t, w), "K")[:])
+    @test isempty(ks("TIME > datetime('2020-05-31/12:00:00')")) && ks("TIME > mjd('2020-05-31')") == 2:6 && ks("TD > mjd('2020-05-31')") == 2:6
+    @test ks("year(TIME) == 2020") == 1:6 && ks("mjd(TIME) > 59000") == 2:6 && ks("date(TIME) == 59000") == 1:6 && ks("TIME < datetime('2020-05-31/02:30:00')") == 1:3
+    @test isempty(ks("TIME > 5.1e9")) && ks("TIME > 59000d") == 2:6                  # without a date function the seconds stay seconds
+    if _HAVE_TAQL
+        rng = MersenneTwister(360)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        mjds = sort(rand(rng, 50000.0:0.0137:62000.0, 12))
+        d2 = joinpath(mktempdir(), "t")
+        write_table(d2, "T", Pair{String,Any}["TIME" => mjds .* 86400, "TD" => mjds, "K" => Int32.(1:12)]; nrow=12, units=Dict("TIME" => "s", "TD" => "d"),
+                    measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"]), "TD" => (; kind=:epoch, ref="UTC", units=["d"])))
+        t2 = readtable(d2)
+        dts() = "'$(rand(rng, 1995:2030))-$(lpad(rand(rng, 1:12), 2, '0'))-$(lpad(rand(rng, 1:28), 2, '0'))/$(lpad(rand(rng, 0:23), 2, '0')):$(lpad(rand(rng, 1:58), 2, '0')):17'"
+        for _ in 1:60
+            c = pick(["TIME", "TD"]); r = rand(rng, 1:8)
+            w = r == 1 ? "$c $(pick([">", "<", ">=", "<="])) datetime($(dts()))" : r == 2 ? "$c $(pick([">", "<"])) mjd($(dts()))" :
+                r == 3 ? "year($c) $(pick(["==", ">", "<="])) $(rand(rng, 1995:2030))" : r == 4 ? "month($c) == $(rand(rng, 1:12))" :
+                r == 5 ? "day($c) $(pick([">", "<"])) $(rand(rng, 1:28))" : r == 6 ? "weekday($c) == $(rand(rng, 1:7))" :
+                r == 7 ? "mjd($c) $(pick([">", "<"])) $(rand(rng, 50000:62000)).37" : "date($c) $(pick([">", "<="])) $(rand(rng, 50000:62000))"
+            r1 = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d2)[:K][:]) catch ex; occursin("Slicer", sprint(showerror, ex)) ? Int32[] : :err end
+            @test r1 !== :err && r1 == collect(column(query(t2, w), "K")[:])
+        end
+    end
+end

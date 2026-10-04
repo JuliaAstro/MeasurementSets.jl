@@ -1240,7 +1240,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "iif" => (_tql_iif, 3:3),
     # --- date/time (MJD-Float days) + angle strings (Phase 69) ---
     "datetime" => (_tql_datetime, 0:1),
-    "mjd" => ((a...) -> isempty(a) ? _tql_now_mjd() : float(a[1]), 0:1),
+    "mjd" => ((a...) -> isempty(a) ? _tql_now_mjd() : a[1] isa AbstractString ? _tql_datetime(a[1]) : float(a[1]), 0:1),
     "mjdtodate" => (x -> float(x), 1:1),
     "date" => ((a...) -> floor(isempty(a) ? _tql_now_mjd() : float(a[1])), 0:1),
     "time" => ((a...) -> (m = isempty(a) ? _tql_now_mjd() : float(a[1]); 2pi * (m - floor(m))), 0:1),
