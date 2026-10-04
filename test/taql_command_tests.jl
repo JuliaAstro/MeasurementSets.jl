@@ -1853,3 +1853,39 @@ end
         end
     end
 end
+
+# Phase 363: date functions on epoch columns and quantity literals through a JOIN (`year(a.TIME)`, `WHERE a.TIME > datetime(..)`, `WHERE b.RL > 1km`) vs real
+# TaQL.  The joined result is a plain GroupedTable: it lost the source columns' units and epoch flags, and `query(::GroupedTable)` evaluated its WHERE on raw
+# columns (so `year(a.TIME) > 2010` kept every row and `WHERE a.LL > 1km` raised a DimensionError).  A GroupedTable now carries per-column units and an epoch
+# set (JOIN / ORDER BY / WHERE filter preserve them) and its WHERE goes through the same column loading as a table's.
+@testset "taql JOIN with date functions and quantity literals vs real TaQL (Phase 363)" begin
+    n = 6; mjds = 55000.0 .+ (0:n-1) .* 211.3
+    dl = joinpath(mktempdir(), "l"); dr = joinpath(mktempdir(), "r")
+    write_table(dl, "L", Pair{String,Any}["TIME" => mjds .* 86400, "LK" => Int32[1, 2, 3, 1, 2, 3], "LL" => Float64.(1:n) .* 400]; nrow=n,
+                units=Dict("TIME" => "s", "LL" => "m"), measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"])))
+    write_table(dr, "R", Pair{String,Any}["RK" => Int32[1, 2, 3], "RT" => (56000.0 .+ (0:2) .* 300) .* 86400, "RL" => [500.0, 1500.0, 2500.0]]; nrow=3,
+                units=Dict("RT" => "s", "RL" => "m"), measures=Dict("RT" => (; kind=:epoch, ref="UTC", units=["s"])))
+    tl = readtable(dl); tr = readtable(dr)
+    col(q, c) = collect(column(taql(tl, q, tr), c)[:])
+    J = "FROM \$1 a JOIN \$2 b ON a.LK == b.RK"
+    @test col("SELECT a.LK AS K, year(a.TIME) AS Y $J", "Y")[1:3] == [2009, 2010, 2010]
+    @test all(2000 .< col("SELECT year(a.TIME) AS Y $J", "Y") .< 2030) && all(2000 .< col("SELECT year(b.RT) AS Y $J", "Y") .< 2030)
+    @test length(col("SELECT a.LK AS K $J WHERE year(a.TIME) > 2010", "K")) < 6 && col("SELECT a.LK AS K $J WHERE a.TIME > datetime('2100-01-01')", "K") |> isempty
+    if Base.get_extension(MSv2, :UnitfulExt) !== nothing
+        @test col("SELECT a.LK AS K $J WHERE a.LL > 1km", "K") == [3, 1, 2, 3]
+    end
+    if _HAVE_TAQL
+        for q in ("SELECT a.LK AS K, year(a.TIME) AS Y $J", "SELECT a.LK AS K $J WHERE year(a.TIME) > 2010", "SELECT a.LK AS K $J WHERE a.TIME > datetime('2011-01-01')",
+                  "SELECT a.LK AS K, year(b.RT) AS Y $J", "SELECT a.LK AS K $J WHERE b.RT > datetime('2012-01-01')", "SELECT a.LK AS K $J WHERE a.LL > 1km",
+                  "SELECT a.LK AS K $J WHERE b.RL > 1km", "SELECT a.LK AS K, mjd(a.TIME) - mjd(b.RT) AS D $J")
+            occursin("km", q) && Base.get_extension(MSv2, :UnitfulExt) === nothing && continue
+            cs = occursin("AS Y", q) ? ["K", "Y"] : occursin("AS D", q) ? ["K", "D"] : ["K"]
+            rt = _taqlcmd(q, dl, dr)
+            g = taql(tl, q, tr)
+            for c in cs
+                a = collect(rt[Symbol(c)][:]); b = col(q, c)
+                @test length(a) == length(b) && all(i -> a[i] == b[i] || isapprox(a[i], b[i]; rtol=1e-9), eachindex(a))
+            end
+        end
+    end
+end

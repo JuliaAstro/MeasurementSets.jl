@@ -581,6 +581,8 @@ function _taql_join_from(target, body::AbstractString, others)
     left = tab(m.captures[1]); la = String(m.captures[2])
     names = String[la * "." * n for n in columnnames(left)]
     cols = AbstractVector[collect(column(left, n)[:]) for n in columnnames(left)]
+    jun = Dict{Symbol,Vector{String}}(); jep = Set{Symbol}()
+    for n in columnnames(left); _join_meta!(jun, jep, left, n, la * "." * n); end
     push!(names, la * ".__rowid"); push!(cols, collect(0:nrow(left)-1))
     pos = m.offset + length(m.match) - length("JOIN")       # start of the first JOIN
     jre = Regex("^JOIN\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+ON\\s+" * _JOIN_SIDE *
@@ -612,6 +614,7 @@ function _taql_join_from(target, body::AbstractString, others)
             rcx = collect(column(right, n)[:])
             T = eltype(rcx)
             push!(names, ra * "." * n)
+            _join_meta!(jun, jep, right, n, ra * "." * n)
             # sentinel-fill unmatched rows; the values are widened (Float32 -> Float64, ...) like real TaQL's result columns either way
             push!(cols, (any(iszero, mr) || T <: Union{Number,AbstractString,AbstractArray}) ?
                         _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) : T[rcx[r] for r in mr])
@@ -620,7 +623,7 @@ function _taql_join_from(target, body::AbstractString, others)
         push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])
         rest = rest[length(jm.match)+1:end]
     end
-    joined = GroupedTable(Symbol.(names), cols)
+    joined = GroupedTable(Symbol.(names), cols, jun, jep)
     body = body[1:m.offset-1] * "FROM __join " * rest
     body = replace(body, r"\b(\w+)\.rowid\(\)" => s"\1.__rowid")
     return joined, body

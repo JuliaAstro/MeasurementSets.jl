@@ -10997,3 +10997,7 @@ Date-function queries on MS-style `TIME` columns in `SELECT … GROUP BY` (compa
 ### Phase 362 — DELETE with date functions / quantity literals
 
 `DELETE FROM t WHERE …` loaded its columns without the parsed condition, so the Phase 360 seconds → days conversion of epoch columns and unit attachment of quantity literals did not apply (`DELETE … WHERE year(TIME) > 2011` deleted every row). Fixed; checked against real TaQL for DELETE and UPDATE with `year` / `month` / `weekday` / `datetime` / `mjd('…')` conditions and for unit-literal conditions.
+
+### Phase 363 — date functions / quantity literals through a JOIN
+
+`SELECT … FROM $1 a JOIN $2 b ON … WHERE year(a.TIME) > 2010` kept every row and `WHERE a.LL > 1km` raised a DimensionError: the joined result is a plain `GroupedTable` that lost its source columns' units and epoch flags, and `query(::GroupedTable)` evaluated its WHERE on raw columns. A `GroupedTable` now carries per-column units and an epoch-column set (kept through JOIN, ORDER BY and WHERE filtering, and reported by `columndesc` as `QuantumUnits`), and its WHERE uses the same column loading (`_tql_cols`) as a table's — unit attachment, epoch-date conversion. Verified against real TaQL for `year` / `datetime` / `mjd` / unit-literal conditions and select expressions over the joined columns.

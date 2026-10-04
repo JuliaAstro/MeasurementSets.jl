@@ -150,7 +150,16 @@ struct GroupedTable <: AbstractTable
     names::Vector{Symbol}
     cols::Vector{AbstractVector}
     units::Dict{Symbol,Vector{String}}      # per-column `QuantumUnits` (Phase 341); persisted by `copytable`
-    GroupedTable(names, cols, units=Dict{Symbol,Vector{String}}()) = new(names, cols, units)
+    epochs::Set{Symbol}                     # columns holding an EPOCH measure in seconds (carried through a JOIN; Phase 363)
+    GroupedTable(names, cols, units=Dict{Symbol,Vector{String}}(), epochs=Set{Symbol}()) = new(names, cols, units, epochs)
+end
+_epoch_seconds_column(t::GroupedTable, n::AbstractString) = Symbol(n) in getfield(t, :epochs)
+# the source column's units / epoch flag recorded for a JOIN output column
+function _join_meta!(units, epochs, src::AbstractTable, srcname::AbstractString, outname)
+    u = _col_units(src, srcname)
+    u === nothing || (units[Symbol(outname)] = String.(u))
+    _epoch_seconds_column(src, srcname) && push!(epochs, Symbol(outname))
+    return nothing
 end
 
 nrow(gt::GroupedTable) = isempty(getfield(gt, :cols)) ? 0 : length(getfield(gt, :cols)[1])
@@ -175,8 +184,10 @@ function columndesc(gt::GroupedTable, name::AbstractString)
     end
     shp = _infer_shape(col)
     isarr = shp isa VariableShape || (shp isa Dims && !isempty(shp))
+    u = get(getfield(gt, :units), Symbol(name), nothing)
+    kw = u === nothing ? Record() : _set_kw(Record(), "QuantumUnits", TpArrayString, String.(u))      # `columnunit` reads this
     return ColumnDesc(String(name), "", "", "", ct, _classname(ct, isarr), shp,
-                      Int32(0), UInt32(0), Record(), nothing, nothing)
+                      Int32(0), UInt32(0), kw, nothing, nothing)
 end
 
 # `.OUTNAME` sugar + display -- not part of the Tables.jl interface
@@ -215,7 +226,11 @@ result's column names; `select` is `outname => source_name` pairs.
 function query(gt::GroupedTable, wherestr::AbstractString;
                select::AbstractVector{<:Pair}=[n => n for n in columnnames(gt)])
     ast, orderby = _taqllite_parse_query(wherestr, Set(columnnames(gt)))
-    cd = Dict{String,AbstractVector}(n => column(gt, n) for n in columnnames(gt))
+    ast === nothing || (ast = _unit_conv(ast, gt))
+    needed = Set{String}()
+    ast === nothing || _tqlrefs!(needed, ast)
+    _orderby_refs!(needed, orderby)
+    cd = _tql_cols(gt, needed, ast)         # unit attachment + epoch-date conversion, like the plain-table query
     nr = nrow(gt)
     keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tql_truthy(_tqleval(ast, cd, i))]
     _orderby_materialize!(cd, orderby, keep, nr)
@@ -576,6 +591,6 @@ function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
         return false
     end)
     alldesc && reverse!(perm)
-    return GroupedTable(copy(gt.names), AbstractVector[c[perm] for c in gt.cols])
+    return GroupedTable(copy(gt.names), AbstractVector[c[perm] for c in gt.cols], copy(getfield(gt, :units)), copy(getfield(gt, :epochs)))
 end
 
