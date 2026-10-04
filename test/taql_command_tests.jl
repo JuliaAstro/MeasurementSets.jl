@@ -1663,7 +1663,8 @@ end
 end
 
 # Phase 357: GROUP BY aggregate RESULT columns (type, scalar/array, values) vs real TaQL's `GIVING` table: 1300 random `g*(col)` / `gs*(arraycol)`
-# (gsum gmean gmin gfirst glast gvariance gstddev grms gmedian gproduct gany gall gntrue gnfalse gsums gmeans gmins gaggr gstack gvariances gmaxs ...)
+# (gsum gmean gmin gfirst glast gvariance gstddev grms gmedian gproduct gany gall gntrue gnfalse gsums gmeans gmins gaggr gstack gvariances ...; not gmax/gmaxs:
+# real casacore returns DBL_MIN for an all-negative group, Phase 284 -- found on Linux CI)
 # over Int/UInt/Short/Float/Double/Complex/Bool/String and array columns: no bug found.  Not copied: real rejects Bool / String aggregates
 # (`gsum(B)`, `gmin(S)`, `grms(C)`) and `gfirst` / `glast` of an ARRAY column; TaQL-lite accepts them.
 @testset "taql GROUP BY aggregate result columns vs real TaQL GIVING (Phase 357)" begin
@@ -1681,7 +1682,7 @@ end
                       (a == b || (a isa Number && b isa Number && (isapprox(a, b; rtol=1e-8, atol=1e-10) || (isnan(a) && isnan(b)))))
         for _ in 1:70
             e = rand(rng) < .5 ? "$(pick(["gsum", "gmean", "gmin", "gfirst", "glast", "gvariance", "gstddev", "gmedian", "gproduct", "gntrue"]))($(pick(["I", "U", "H", "FL", "D"])))" :
-                "$(pick(["gsums", "gmeans", "gmins", "gaggr", "gstack", "gvariances", "gmaxs", "gmedians", "gproducts"]))($(pick(["AF", "AI"])))"
+                "$(pick(["gsums", "gmeans", "gmins", "gaggr", "gstack", "gvariances", "gmedians", "gproducts"]))($(pick(["AF", "AI"])))"
             q = "SELECT G, $e AS X FROM \$1 GROUP BY G"; p1 = joinpath(mktempdir(), "r")
             ok1 = try x = _taqlcmd(q * " GIVING '$p1'", dir); x = nothing; true catch; false end
             ok1 || continue

@@ -10973,3 +10973,7 @@ The Docker run found two guards that depended on platform / Julia version: the P
 ### Phase 357 — GROUP BY aggregate result-column fuzz vs real TaQL (no bug found)
 
 1300 random `g*(col)` / `gs*(arraycol)` aggregates: result column type, scalar/array nature and values compared with real TaQL's `GIVING` table — no divergence. Not copied: real rejects Bool / String aggregates and `gfirst` / `glast` of an array column; TaQL-lite accepts them.
+
+### Phase 357 follow-up — Linux guard fix (test only)
+
+The Docker run found the Phase 357 guard drew a case where `gmaxs` hit real casacore's all-negative-group DBL_MIN bug (Phase 284); `gmaxs` is now left out of the guard.
