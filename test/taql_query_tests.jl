@@ -5281,3 +5281,33 @@ end
         end
     end
 end
+
+# Phase 353: random date / time / angle functions vs real TaQL (1400 evaluations over random MJDs 0..90000, whole and half days, and random angles:
+# year month day week weekday dow cdate ctime cmonth cdow cweekday ctod cdatetime date time mjd mjdtodate hms dms normangle).  Found: `dms` of an
+# angle past 999 degrees prints `***` in the 3-wide degree field.  Not copied: real's off-by-one day / sign for NEGATIVE MJDs (before 1858) and its
+# `24h00m00` for an exact multiple of a full turn; `datetime(<number>)` is an error in real TaQL but passes the number through here.
+@testset "TaQL-lite — date/time/angle functions random fuzz vs real TaQL (Phase 353)" begin
+    @test MSv2._tql_dms(deg2rad(999.0)) == "+999d00m00.000" && MSv2._tql_dms(deg2rad(1000.0)) == "+***d00m00.000"
+    @test MSv2._tql_dms(-deg2rad(1500.0)) == "-***d00m00.000" && MSv2._tql_dms(deg2rad(352.5)) == "+352d30m00.000"
+    if _HAVE_TAQL
+        rng = MersenneTwister(353)
+        n = 12
+        mj = [rand(rng, 0.0:0.001:90000.0) for _ in 1:n]; mj[1:3] = [0.0, 51544.0, 59580.0]
+        ang = [rand(rng, -20.0:0.0001:20.0) for _ in 1:n]; ang[1:3] = [deg2rad(999.0), deg2rad(1000.0), -deg2rad(1500.0)]
+        dir = joinpath(mktempdir(), "t")
+        write_table(dir, "T", Pair{String,Any}["M" => mj, "A" => ang]; nrow=n)
+        t = readtable(dir)
+        for f in ("year", "month", "day", "week", "weekday", "dow", "cdate", "ctime", "cmonth", "cdow", "cweekday", "ctod", "cdatetime", "date", "time",
+                  "mjd", "mjdtodate"), arg in ("M", "M+0.5", "floor(M)")
+            e = "$f($arg)"
+            r1 = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:])
+            r2 = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+            @test all(i -> r1[i] == r2[i] || (r1[i] isa AbstractFloat && isapprox(r1[i], r2[i]; rtol=1e-12, atol=1e-9)), eachindex(r1))
+        end
+        for f in ("hms", "dms", "normangle")
+            r1 = collect(_taqlcmd("SELECT $f(A) AS X FROM \$1", dir)[:X][:])
+            r2 = collect(column(query(t, "TRUE"; select=["X" => "$f(A)"]), "X")[:])
+            @test all(i -> r1[i] == r2[i] || (r1[i] isa AbstractFloat && isapprox(r1[i], r2[i]; atol=1e-12)), eachindex(r1))
+        end
+    end
+end

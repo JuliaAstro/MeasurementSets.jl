@@ -10949,3 +10949,7 @@ Random `SELECT ... FROM [(SELECT ..)] WHERE x [NOT] IN (SELECT ..) / [NOT] EXIST
 ### Phase 352 — complex expression fuzz vs real TaQL (no bug found)
 
 1100 random complex scalar / array expressions compared with real TaQL. No TaQL-lite bug; the handful of differences are floating-point noise in casacore's own complex functions (`sqrt` through the polar form, exact equality of `C**2` and `conj(C)**2`, Inf/NaN intermediates of division by zero), so the guard avoids those forms.
+
+### Phase 353 — date / time / angle function fuzz vs real TaQL
+
+1400 evaluations of the date, time and angle functions over random MJDs and angles compared with real TaQL. Fixed: `dms` of an angle beyond 999 degrees prints `***` in its 3-wide degree field. Not copied: real's one-day error and wrong `time()` sign for negative MJDs (before 1858) and `24h00m00` for exact full-turn multiples in `hms`; `datetime(<number>)` stays lenient (real errors).

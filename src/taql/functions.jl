@@ -423,7 +423,8 @@ function _tql_dms(rad::Real)
     d, r = divrem(tmas, 3_600_000)
     m, r = divrem(r, 60_000)
     sec, ms = divrem(r, 1000)
-    string(sgn, lpad(d, 3, '0'), "d", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
+    deg = d > 999 ? "***" : lpad(d, 3, '0')       # real casacore's degree field is 3 wide: "***" beyond 999
+    string(sgn, deg, "d", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 
 # `hdms(arr)` (`hdmsFUNC`, `ExprFuncNodeArray.cc:2427-2454`) formats an
