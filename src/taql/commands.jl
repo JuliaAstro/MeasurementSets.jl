@@ -1166,7 +1166,11 @@ function taql(target, command::AbstractString, others...)
             # first (WHERE applied at that stage), then grouped on by name
             gt = t; gwhere = wherestr
             if !all(k -> k in vn, gkeys)
-                hidden = Pair{String,String}[n => n for n in columnnames(t)]
+                # the hidden table is a plain GroupedTable (no MEASINFO), so when the command uses a date function its epoch columns are
+                # passed on already converted to MJD days (`mjd(TIME)` is the identity on a column `_tql_cols` has converted; Phase 361)
+                alltext = join(filter(!isnothing, vcat(String.(last.(select)), [wherestr, havingstr, orderstr], gkeys)), " ")
+                datefn = occursin(Regex("\\b(" * join(_TQL_DATE_FUNCS, "|") * ")\\s*\\(", "i"), alltext)
+                hidden = Pair{String,String}[n => (datefn && _epoch_seconds_column(t, n) ? "mjd($n)" : n) for n in columnnames(t)]
                 for (i, k) in enumerate(gkeys)
                     k in vn && continue
                     push!(hidden, "_gk$i" => k)

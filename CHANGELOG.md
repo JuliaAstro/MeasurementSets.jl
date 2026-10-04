@@ -10989,3 +10989,7 @@ The Docker run found the Phase 357 guard drew a case where `gmaxs` hit real casa
 ### Phase 360 — epoch-measure columns are dates (date-function fuzz on MS-style TIME columns)
 
 Real TaQL types a column with an epoch `MEASINFO` (every MS `TIME`) as a date: `year(TIME)`, `mjd(TIME)`, `date(TIME)`, `TIME > datetime('…')` and `TIME > mjd('…')` read its seconds as a date. TaQL-lite took the seconds as MJD days, so every `datetime` comparison on a `TIME` column was silently wrong. Fixed: in a query that uses a date function the epoch columns held in seconds are converted to MJD days (a bare number beside such a column is then days too — a documented difference), and `mjd('<date string>')` parses the string. 300 random date conditions over a seconds and a days epoch column agree with real TaQL.
+
+### Phase 361 — date functions on epoch columns inside GROUP BY
+
+Date-function queries on MS-style `TIME` columns in `SELECT … GROUP BY` (compared with real TaQL, 120 queries): the Phase 360 seconds → MJD days conversion was lost on the expression-key path (the intermediate table has no MEASINFO), so `GROUP BY year(TIME)` gave year 13012392. Fixed: the intermediate table carries the epoch columns already converted when the command uses a date function. Not copied: real TaQL puts every row in one group for `GROUP BY date(<epoch column>)`.

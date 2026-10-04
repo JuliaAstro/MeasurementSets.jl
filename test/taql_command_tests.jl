@@ -1787,3 +1787,40 @@ end
         end
     end
 end
+
+# Phase 361: date functions on EPOCH columns inside GROUP BY (`GROUP BY year(TIME)`, aggregates over `mjd(TIME)` / `day(TIME)`, `WHERE TIME > datetime(..)`)
+# vs real TaQL (120 queries over a seconds and a days epoch column).  The expression-key path evaluates on an intermediate table without MEASINFO, so the
+# Phase 360 seconds -> days conversion was lost there (`GROUP BY year(TIME)` gave year 13012392).  Not copied: real TaQL puts EVERY row in ONE group for
+# `GROUP BY date(<epoch column>)`.
+@testset "taql GROUP BY date functions on epoch columns vs real TaQL (Phase 361)" begin
+    n = 8; mjds = 55000.0 .+ (0:n-1) .* 211.3
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["TIME" => mjds .* 86400, "TD" => mjds, "V" => Float64.(1:n), "K" => Int32[1, 2, 1, 2, 1, 2, 1, 2]]; nrow=n,
+                units=Dict("TIME" => "s", "TD" => "d"),
+                measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"]), "TD" => (; kind=:epoch, ref="UTC", units=["d"])))
+    t = readtable(dir)
+    g = taql(t, "SELECT year(TIME) AS G, gcount() AS N FROM t GROUP BY year(TIME)")
+    want = sort(unique([MSv2.Dates.year(MSv2.Dates.DateTime(1858, 11, 17) + MSv2.Dates.Millisecond(round(Int, m * 86400000))) for m in mjds]))
+    @test sort(collect(column(g, "G")[:])) == want
+    @test all(2000 .< collect(column(g, "G")[:]) .< 2030)
+    g2 = taql(t, "SELECT month(TD) AS G, gmin(mjd(TIME)) AS A FROM t GROUP BY month(TD)")
+    @test all(1 .<= collect(column(g2, "G")[:]) .<= 12) && all(50000 .< collect(column(g2, "A")[:]) .< 60000)
+    if _HAVE_TAQL
+        rng = MersenneTwister(361)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        N = 30; mj = sort(rand(rng, 55000.0:0.37:58000.0, N))
+        d2 = joinpath(mktempdir(), "t")
+        write_table(d2, "T", Pair{String,Any}["TIME" => mj .* 86400, "TD" => mj, "V" => round.(randn(rng, N); digits=2), "K" => Int32.(rand(rng, 1:3, N))]; nrow=N,
+                    units=Dict("TIME" => "s", "TD" => "d"),
+                    measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"]), "TD" => (; kind=:epoch, ref="UTC", units=["d"])))
+        t2 = readtable(d2)
+        for _ in 1:40
+            c = pick(["TIME", "TD"]); key = pick(["year($c)", "month($c)", "weekday($c)", "year($c)*100+month($c)", "cmonth($c)", "cdow($c)"])
+            agg = pick(["gcount()", "gmean(V)", "gmin(mjd($c))", "gfirst(cdate($c))", "glast(day($c))", "gsum(K)", "gmin(V)"])
+            q = "SELECT $key AS G, $agg AS A FROM \$1" * (rand(rng) < .3 ? " WHERE $c > datetime('2011-06-01')" : "") * " GROUP BY $key"
+            r1 = try (rt = _taqlcmd(q, d2); Dict(zip(collect(rt[:G][:]), collect(rt[:A][:])))) catch ex; occursin("Slicer", sprint(showerror, ex)) ? Dict() : :err end
+            g = taql(t2, q); r2 = Dict(zip(collect(column(g, "G")[:]), collect(column(g, "A")[:])))
+            @test r1 !== :err && keys(r1) == keys(r2) && all(k -> r1[k] == r2[k] || (r1[k] isa Number && isapprox(r1[k], r2[k]; rtol=1e-9)), keys(r1))
+        end
+    end
+end
