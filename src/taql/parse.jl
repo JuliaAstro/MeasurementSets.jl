@@ -314,9 +314,21 @@ _tql_near(a::Complex, b::Real, tol::Real = _TQL_NEAR_TOL) = _tql_near(a, complex
 _tql_near(a::Real, b::Complex, tol::Real = _TQL_NEAR_TOL) = _tql_near(complex(a), b, tol)
 _tql_nnear(a, b, tol::Real = _TQL_NEAR_TOL) = !_tql_near(a, b, tol)
 
+# ordering of COMPLEX values is by magnitude, like casacore's norm-based operators (live-verified, Phase 356: `C > 2.5`, `C >= complex(1,1)`)
+_tql_lt(a, b) = a < b
+_tql_le(a, b) = a <= b
+_tql_gt(a, b) = a > b
+_tql_ge(a, b) = a >= b
+for (f, op) in ((:_tql_lt, :<), (:_tql_le, :<=), (:_tql_gt, :>), (:_tql_ge, :>=))
+    @eval begin
+        $f(a::Complex, b::Complex) = $op(abs(a), abs(b))
+        $f(a::Complex, b::Real) = $op(abs(a), abs(b))
+        $f(a::Real, b::Complex) = $op(abs(a), abs(b))
+    end
+end
 const _TQL_CMPOPS = Dict{String,Function}(
     "==" => (==), "=" => (==), "!=" => (!=), "<>" => (!=),
-    "<" => (<), "<=" => (<=), ">" => (>), ">=" => (>=),
+    "<" => _tql_lt, "<=" => _tql_le, ">" => _tql_gt, ">=" => _tql_ge,
     "~=" => _tql_near, "!~=" => _tql_nnear)
 
 # `/` is Julia's `/` (always Float); `%` -> floor-mod, `//` -> floor division (Phase 245, live-verified)

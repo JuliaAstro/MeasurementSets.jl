@@ -638,7 +638,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
                     v = coldata[i][r0 + lr + 1]
                     o = co + lr * ext
                     if nel == 1
-                        _wrbytes!(file, o, J(v), endian)
+                        _wrbytes!(file, o, J(v isa AbstractArray ? first(v) : v), endian)   # a one-element fixed-shape ARRAY cell too
                     else
                         vv = vec(v)
                         for e in 1:nel

@@ -10965,3 +10965,7 @@ The Docker run found two guards that depended on platform / Julia version: the P
 ### Phase 355 — GROUP BY expression keys / ORDER BY / LIMIT fuzz vs real TaQL
 
 550 random grouped queries (expression keys, aggregate expressions, WHERE, HAVING by alias, ORDER BY alias/key/DESC, LIMIT) compared with real TaQL **in order**. Fixed: an all-descending `ORDER BY` of a grouped result is the reversed ascending sort (fully tied groups come out reversed), as for a row `ORDER BY` (Phase 246); mixed directions keep ties in first-seen group order.
+
+### Phase 356 — result-column type fuzz vs real TaQL (`SELECT .. GIVING`)
+
+800 random SELECT expressions: the type and scalar/array nature of the persisted result column compared with real TaQL's `GIVING` table. Fixed: `iif` returns the promoted type of its branches and a scalar beside an array fills the array's shape; complex values order by magnitude in `< <= > >=`; a fixed-shape array column with one element per cell (the result of collapsing the only axis, `sums(AF, 1)`) crashed the StandardStMan writer. Not copied: real's `VariableDims` declaration for computed array columns, its errors for some Float32 / Int16 mixes, and `real(<string>)`.
