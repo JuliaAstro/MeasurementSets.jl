@@ -1324,7 +1324,7 @@ end
 
 # Phase 346: `ALTER TABLE` -- ADD / DROP / RENAME COLUMN and SET / DROP / RENAME KEYWORD (table and `COL::kw` column keywords).
 # 32 commands compared against real TaQL on twin tables (columns, types, shapes, keyword order and types, data): all agree.
-# Real quirks reproduced: setting an existing keyword moves it to the END of the set; integers are stored as Int64 and a mixed
+# Real quirks reproduced: an existing keyword is replaced IN PLACE (Phase 349 correction: the earlier "moves to the end" was a misread of Dict order); integers are stored as Int64 and a mixed
 # `[1.5, 2]` array as Float64; several clauses may follow one `ALTER TABLE`; failures (unknown column, rename onto an existing
 # one) leave the table unchanged.
 @testset "taql ALTER TABLE vs real TaQL (Phase 346)" begin
@@ -1335,7 +1335,7 @@ end
     colnames(t) = [c.name for c in t.desc.columns]
     d = mk()
     taql(d, "ALTER TABLE \$1 SET KEYWORD KW1=7, KW3='z'")
-    @test kwlist(readtable(d)) == ["KW2" => "x", "KW1" => 7, "KW3" => "z"]         # KW1 moved to the end
+    @test kwlist(readtable(d)) == ["KW2" => "x", "KW1" => 7, "KW3" => "z"]         # KW1 replaced in place
     @test readtable(d).desc.public.values[2] isa Int64
     taql(d, "ALTER TABLE \$1 SET KEYWORD KW4=[1.5,2], KW5=(1+2)*3, KW6=true")
     kw = Dict(kwlist(readtable(d)))
@@ -1343,7 +1343,7 @@ end
     taql(d, "ALTER TABLE \$1 DROP KEYWORD KW3")
     @test !haskey(Dict(kwlist(readtable(d))), "KW3")
     taql(d, "ALTER TABLE \$1 RENAME KEYWORD KW1 TO KWX")
-    @test last(kwlist(readtable(d))) == ("KWX" => 7)
+    @test Dict(kwlist(readtable(d)))["KWX"] == 7 && !haskey(Dict(kwlist(readtable(d))), "KW1")      # renamed in place (Phase 349)
     taql(d, "ALTER TABLE \$1 SET KEYWORD A::QuantumUnits=['m'], B::MyKw=3")
     @test columndesc(readtable(d), "A").keywords.values == [["m"]]
     @test_throws KeyError taql(d, "ALTER TABLE \$1 DROP KEYWORD NOSUCH")
@@ -1513,6 +1513,111 @@ end
                 isfile(joinpath(p1, "table.dat")) && break
             end
             @test state(p1) == state(p2)
+        end
+    end
+end
+
+# Phase 349: random ALTER TABLE clauses vs real TaQL (1-2 clauses, ADD/DROP/RENAME COLUMN, SET/DROP/RENAME KEYWORD, `COL::kw`).
+# Found: SET KEYWORD on an existing keyword must keep its data type (Int stays Int, scalar stays scalar; a one-element array
+# literal is a scalar) or real errors; RENAME KEYWORD keeps the keyword's position; RENAME COLUMN X TO X errors.
+@testset "taql ALTER TABLE random clauses vs real TaQL (Phase 349)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["A" => Int32.(1:4), "B" => Float64.(1:4), "S" => ["a", "b", "c", "d"], "K" => Int32.(1:4)];
+                        nrow=4, keywords=Dict("KW1" => 5, "KW2" => "x")); d)
+    kwlist(t) = [(t.desc.public.names[i] => t.desc.public.values[i]) for i in eachindex(t.desc.public.names)]
+    d = mk()
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 SET KEYWORD KW1=1.5")             # Int -> Double
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 SET KEYWORD KW2=7")               # String -> Int
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 SET KEYWORD KW1=[1,2]")           # scalar -> array
+    taql(d, "ALTER TABLE \$1 SET KEYWORD KW2=['q']")                                       # one-element array literal = scalar
+    @test Dict(kwlist(readtable(d)))["KW2"] == "q"
+    d = mk(); names0 = first.(kwlist(readtable(d)))
+    taql(d, "ALTER TABLE \$1 SET KEYWORD KW4=1, $(names0[1])=" * (names0[1] == "KW1" ? "9" : "'w'"))   # replaced in place, KW4 appended
+    @test first.(kwlist(readtable(d))) == [names0; "KW4"]
+    d = mk()
+    taql(d, "ALTER TABLE \$1 RENAME KEYWORD KW1 TO KWX")
+    @test first.(kwlist(readtable(d))) == replace(names0, "KW1" => "KWX")                   # renamed in place
+    taql(d, "ALTER TABLE \$1 RENAME KEYWORD KWX TO KWX"); @test first.(kwlist(readtable(d))) == replace(names0, "KW1" => "KWX")
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 ADD COLUMN N R8")                  # real TaQL needs the DMINFO
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 RENAME KEYWORD KWX TO KW2")
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 RENAME COLUMN A TO A")
+    if _HAVE_TAQL
+        colnames(t) = [c.name for c in t.desc.columns]
+        function state(dd)
+            t = readtable(dd)
+            (colnames(t), [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape)) for c in t.desc.columns], kwlist(t),
+             [collect(column(t, c.name)[:])[1:2] for c in t.desc.columns], [c.keywords.names for c in t.desc.columns])
+        end
+        rng = MersenneTwister(349)
+        cn = ["A", "B", "S", "K", "N1", "N2", "ZZ"]; kn = ["KW1", "KW2", "KW3", "KW4"]
+        vals = ["7", "'z'", "1.5", "[1,2]", "[1.5,2]", "true", "(1+2)*3", "['a','b']", "-3", "2.5e3"]
+        ty = ["I4", "R8", "S", "B", "C8", "U1", "I2", "R4"]
+        dm = " DMINFO [TYPE=\"StandardStMan\", NAME=\"SSM2\"]"
+        function clause()
+            r = rand(rng, 1:8)
+            r == 1 && return "SET KEYWORD " * join(["$(rand(rng, kn))=$(rand(rng, vals))" for _ in 1:rand(rng, 1:2)], ", ")
+            r == 2 && return "DROP KEYWORD " * rand(rng, kn)
+            r == 3 && return "RENAME KEYWORD $(rand(rng, kn)) TO KWR$(rand(rng, 1:10^6))"   # a fresh name: real writes a duplicate key onto an existing one
+            r == 4 && return "RENAME COLUMN $(rand(rng, cn)) TO $(rand(rng, cn))"
+            r == 5 && return "DROP COLUMN " * join(unique([rand(rng, cn) for _ in 1:rand(rng, 1:2)]), ", ")
+            r == 6 && return "SET KEYWORD $(rand(rng, cn))::$(rand(rng, ["QuantumUnits", "MyKw"]))=$(rand(rng, vals))"
+            r == 7 && return "ADD COLUMN $(rand(rng, cn)) $(rand(rng, ty))" * (rand(rng) < .3 ? " [NDIM=$(rand(rng, 0:2))]" : "") * dm
+            return "ADD COLUMN N9 $(rand(rng, ty))" * dm
+        end
+        for _ in 1:30
+            c = join([clause() for _ in 1:rand(rng, 1:2)], " ")
+            d1 = mk(); d2 = mk(); before = state(d1)
+            ok1 = try x = _taqlcmd("ALTER TABLE \$1 $c", d1); x = nothing; true catch; false end
+            ok2 = try taql(d2, "ALTER TABLE \$1 $c"); true catch; false end
+            @test ok1 == ok2
+            ok1 && (for _ in 1:50; GC.gc(); GC.gc(); sleep(0.1); state(d1) != before && break; end)
+            @test state(d1) == state(d2)
+        end
+    end
+end
+
+# Phase 350: random sub-query SELECTs vs real TaQL (IN / NOT IN / EXISTS / NOT EXISTS with WHERE, DISTINCT, ORDER BY, LIMIT, computed columns,
+# FROM (SELECT ..)).  Found: sub-queries in the WHERE of `FROM (SELECT ..)` still name the ORIGINAL table (`$1`), not the inner selection;
+# and `EXISTS (... LIMIT n)` is empty when fewer than n rows match (real errors for the positive form).  Where real errors (a positive
+# EXISTS / IN of an empty sub-query) ours returns no rows.
+@testset "taql SELECT sub-queries random fuzz vs real TaQL (Phase 350)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["G" => Int32[1, 2, 1, 3, 2, 1, 3, 3], "K" => Int32.(1:8), "D" => collect(0.5:1:7.5)]; nrow=8)
+    t = readtable(dir)
+    xs(q) = collect(column(taql(t, q), "X")[:])
+    @test xs("SELECT K AS X FROM (SELECT FROM t WHERE G==1) WHERE EXISTS (SELECT FROM t WHERE G==2)") == [1, 3, 6]
+    @test xs("SELECT K AS X FROM (SELECT FROM t WHERE K<4) WHERE K IN (SELECT K FROM t WHERE K>2)") == [3]
+    @test isempty(xs("SELECT K AS X FROM t WHERE EXISTS (SELECT FROM t WHERE K<2 LIMIT 3)"))
+    @test xs("SELECT K AS X FROM t WHERE NOT EXISTS (SELECT FROM t WHERE K<2 LIMIT 3)") == 1:8
+    @test xs("SELECT K AS X FROM t WHERE EXISTS (SELECT FROM t WHERE K<5 LIMIT 3)") == 1:8
+    if _HAVE_TAQL
+        rng = MersenneTwister(350)
+        cond() = rand(rng, ["K>$(rand(rng, 0:8))", "K<$(rand(rng, 1:9))", "G==$(rand(rng, 1:3))", "G!=$(rand(rng, 1:3))", "D>$(rand(rng, 0:7)).5",
+                            "K%2==$(rand(rng, 0:1))", "G+K>$(rand(rng, 2:10))", "K BETWEEN $(rand(rng, 1:4)) AND $(rand(rng, 4:8))"])
+        function inner(col)
+            s = "SELECT " * (rand(rng) < .2 ? "DISTINCT " : "") * rand(rng, [col, col, "$col+1 AS $col"]) * " FROM \$1"
+            rand(rng) < .8 && (s *= " WHERE " * cond())
+            rand(rng) < .3 && (s *= " ORDER BY K" * rand(rng, ["", " DESC"]))
+            rand(rng) < .2 && (s *= " LIMIT $(rand(rng, 1:4))")
+            s
+        end
+        noproj(q) = replace(q, r"SELECT (DISTINCT )?\S+( AS \w+)? FROM" => "SELECT FROM")
+        function wh()
+            r = rand(rng); r < .35 && return cond()
+            c = rand(rng, ["K", "G"])
+            r < .6 && return "$c IN ($(inner(c)))"
+            r < .75 && return "$c NOT IN ($(inner(c)))"
+            r < .85 && return "EXISTS ($(noproj(inner("K"))))"
+            r < .92 && return "NOT EXISTS ($(noproj(inner("K"))))"
+            return cond() * rand(rng, [" AND ", " OR "]) * "$c IN ($(inner(c)))"
+        end
+        for _ in 1:60
+            q = "SELECT K AS X FROM " * (rand(rng) < .25 ? "(SELECT FROM \$1 WHERE $(cond()))" : "\$1")
+            rand(rng) < .9 && (q *= " WHERE " * wh())
+            rand(rng) < .4 && (q *= " ORDER BY K" * rand(rng, ["", " DESC"]))
+            r1 = try collect(_taqlcmd(q, dir)[:X][:]) catch; :err end
+            r2 = xs(replace(q, "\$1" => "t"))
+            @test r1 === :err ? isempty(r2) : r1 == r2
         end
     end
 end

@@ -626,6 +626,9 @@ function _taql_subst_subqueries(target, body::AbstractString)
         neg = m.captures[1] !== nothing
         if uppercase(m.captures[2]) == "EXISTS"
             v = nrow(r) > 0
+            # real TaQL treats `EXISTS (... LIMIT n)` as empty when fewer than n rows match (a positive one errors)
+            lm = match(r"^(.*)\bLIMIT\s+(\d+)\s*$"is, inner)
+            lm !== nothing && nrow(taql(target, String(lm.captures[1]))) < parse(Int, lm.captures[2]) && (v = false)
             body = body[1:m.offset-1] * (xor(v, neg) ? "TRUE" : "FALSE") * body[close+1:end]
         else
             names = columnnames(r)
@@ -658,7 +661,8 @@ function _taql_preprocess_select(target, body::AbstractString)
     body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
     body = replace(body, r"^SELECT\s+ALL\s+"i => "SELECT ")          # `SELECT ALL` = the default
     body = replace(body, r"\bORDERBY\b"i => "ORDER BY")               # one-word spelling
-    # FROM (SELECT ...) -> the inner result becomes the queried table
+    # FROM (SELECT ...) -> the inner result becomes the queried table (sub-queries in the WHERE still name the original table, `$1`)
+    orig = target
     m = match(r"\bFROM\s*\("i, body)
     if m !== nothing
         open = m.offset + length(m.match) - 1
@@ -668,7 +672,7 @@ function _taql_preprocess_select(target, body::AbstractString)
         target = taql(target, inner)
         body = body[1:m.offset-1] * "FROM __sub" * body[close+1:end]
     end
-    body = _taql_subst_subqueries(target, body)
+    body = _taql_subst_subqueries(orig, body)
     # `FROM name [AS] alias` -> drop the alias and its `alias.` qualifiers
     am = match(r"\bFROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|INTO|GIVING)\b)(\w+)"i, body)
     if am !== nothing
@@ -727,6 +731,67 @@ function _alter_add_column(path::String, item::AbstractString)
     end
 end
 
+# Replay the clauses on the column names and keyword (name => value class) sets only, raising what the real run would raise.
+function _alter_dryrun(path::String, clauses)
+    rd = readtable(path)
+    cols = Set(columnnames(rd))
+    kws = Dict{Union{Nothing,String},Dict{String,String}}(nothing => Dict(String(rd.desc.public.names[i]) => _kw_class(rd.desc.public.types[i]) for i in eachindex(rd.desc.public.names)))
+    function scope(col)
+        col === nothing || col in cols || throw(KeyError(col))
+        get!(kws, col) do
+            col === nothing ? Dict{String,String}() :
+                (k = columndesc(rd, col).keywords; Dict(String(k.names[i]) => _kw_class(k.types[i]) for i in eachindex(k.names)))
+        end
+    end
+    for (kind, rest) in clauses
+        if kind == "ADD COLUMN"
+            body = replace(rest, r"\s+DMINFO\s*\[.*\]\s*$"is => "")
+            for it in _split_commas(body)
+                nm = match(r"^(\w+)", strip(it)); nm === nothing && continue
+                String(nm.captures[1]) in cols && throw(ArgumentError("taql: ALTER TABLE ADD COLUMN: column \"$(nm.captures[1])\" already exists"))
+                push!(cols, String(nm.captures[1]))
+            end
+        elseif kind == "DROP COLUMN"
+            for it in _split_commas(rest)
+                nm = String(strip(it)); nm in cols || throw(KeyError(nm)); delete!(cols, nm)
+            end
+        elseif kind == "RENAME COLUMN"
+            for it in _split_commas(rest)
+                rm = match(r"^(\w+)\s+TO\s+(\w+)$"i, strip(it)); rm === nothing && continue
+                a, b = String(rm.captures[1]), String(rm.captures[2])
+                a in cols || throw(KeyError(a)); b in cols && throw(ArgumentError("taql: ALTER TABLE: the table already has a column \"$b\""))
+                delete!(cols, a); push!(cols, b)
+                haskey(kws, a) && (kws[b] = pop!(kws, a))
+            end
+        elseif kind == "SET KEYWORD"
+            for it in _split_commas(rest)
+                am = match(r"^((?:\w+::)?\w+)\s*=\s*(.+)$"s, strip(it)); am === nothing && continue
+                col, kn = _alter_kwname(am.captures[1]); sc = scope(col)
+                v = _taql_const(String(strip(am.captures[2])))
+                haskey(sc, kn) && !startswith(sc[kn], "array") && v isa AbstractVector && length(v) == 1 && (v = v[1])
+                cls = _kw_class(_kw_value(_kw_normalize(v))[1])
+                haskey(sc, kn) && sc[kn] != cls && throw(ArgumentError("taql: keyword \"$kn\" holds a $(sc[kn]) value; cannot replace it by a $cls one"))
+                sc[kn] = cls
+            end
+        elseif kind == "DROP KEYWORD"
+            for it in _split_commas(rest)
+                col, kn = _alter_kwname(strip(it)); sc = scope(col)
+                haskey(sc, kn) || throw(KeyError(kn)); delete!(sc, kn)
+            end
+        else
+            for it in _split_commas(rest)
+                rm = match(r"^((?:\w+::)?\w+)\s+TO\s+(\w+)$"i, strip(it)); rm === nothing && continue
+                col, kn = _alter_kwname(rm.captures[1]); sc = scope(col); nn = String(rm.captures[2])
+                haskey(sc, kn) || throw(KeyError(kn))
+                kn == nn && continue
+                haskey(sc, nn) && throw(ArgumentError("taql: keyword \"$nn\" already exists"))
+                sc[nn] = pop!(sc, kn)
+            end
+        end
+    end
+    return nothing
+end
+
 function _taql_alter(target, command::AbstractString)
     path = _cmd_path(target)
     m = match(r"^ALTER\s+TABLE\s+(\S+)\s+(.+)$"is, strip(command))
@@ -735,11 +800,17 @@ function _taql_alter(target, command::AbstractString)
     starts = collect(eachmatch(_ALTER_CLAUSE, body))
     isempty(starts) && throw(ArgumentError("taql: ALTER TABLE needs ADD COLUMN / DROP COLUMN / RENAME COLUMN / SET KEYWORD / DROP KEYWORD / RENAME KEYWORD"))
     strip(body[1:starts[1].offset-1]) == "" || throw(ArgumentError("taql: unexpected text before the first ALTER TABLE clause"))
+    clauses = Tuple{String,String}[]
     for (i, cm) in enumerate(starts)
         stop = i < length(starts) ? starts[i+1].offset - 1 : lastindex(body)
-        kind = uppercase(replace(String(cm.match), r"\s+" => " "))
-        rest = String(strip(body[cm.offset+length(cm.match):stop]))
+        push!(clauses, (uppercase(replace(String(cm.match), r"\s+" => " ")), String(strip(body[cm.offset+length(cm.match):stop]))))
+    end
+    _alter_dryrun(path, clauses)       # real TaQL leaves the table untouched when any clause fails: check them all first
+    for (kind, rest) in clauses
         if kind == "ADD COLUMN"
+            # real TaQL needs one `DMINFO [..]` per ADD COLUMN clause (after all its columns); without it, or with several, it fails
+            length(collect(eachmatch(r"\bDMINFO\b"i, rest))) == 1 && occursin(r"\s+DMINFO\s*\[.*\]\s*$"is, rest) ||
+                throw(ArgumentError("taql: ADD COLUMN needs exactly one DMINFO [...] after its column list"))
             rest = String(strip(replace(rest, r"\s+DMINFO\s*\[.*\]\s*$"is => "")))
             foreach(it -> _alter_add_column(path, it), _split_commas(rest))
         elseif kind == "DROP COLUMN"
@@ -776,13 +847,7 @@ function _taql_alter(target, command::AbstractString)
                 rm = match(r"^((?:\w+::)?\w+)\s+TO\s+(\w+)$"i, strip(it))
                 rm === nothing && throw(ArgumentError("taql: malformed RENAME KEYWORD item \"$it\""))
                 col, kwname = _alter_kwname(rm.captures[1])
-                rd = readtable(path)
-                r = col === nothing ? rd.desc.public : columndesc(rd, col).keywords
-                i = findfirst(==(kwname), r.names)
-                i === nothing && throw(KeyError(kwname))
-                val = r.values[i]
-                removekeyword!(path, kwname; column=col)
-                setkeyword!(path, String(rm.captures[2]), val; column=col)
+                renamekeyword!(path, kwname, String(rm.captures[2]); column=col)
             end
         end
     end
@@ -963,8 +1028,7 @@ the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
 string are not supported (use `copytable(dst, groupby(…))`, or
 `insert!(t, groupby(…))`).
 """
-# target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
-taql(command::AbstractString) = taql(nothing, command)
+taql(command::AbstractString) = taql(nothing, command)    # target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
 
 function taql(target, command::AbstractString, others...)
     cmd = strip(command)

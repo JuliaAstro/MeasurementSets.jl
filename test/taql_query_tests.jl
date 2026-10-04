@@ -5197,3 +5197,118 @@ end
         end
     end
 end
+
+# Phase 351: random string / string-array expressions vs real TaQL (630 expressions: case/trim/substr/replace/concat/iif/string/strlength,
+# ==,<,LIKE,~,IN,bool).  Found: `LIKE` / `~` map elementwise over a string-ARRAY cell (were a TypeError), and on an array cell `substr`
+# does not clamp -- a start beyond an element's length is an error (a scalar string never errors).
+@testset "TaQL-lite — string-array LIKE/regex + substr bounds vs real TaQL (Phase 351)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["S" => ["Hello", "", "abc"], "K" => Int32[1, 2, 3], "SA" => [["Hello", "ab"], ["a", ""], ["xyz", "b"]]]; nrow=3)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    @test ev("SA LIKE 'a%'") == [[false, true], [true, false], [false, false]] && ev("SA NOT LIKE '%b'")[1] == [true, false]
+    @test ev("SA ~ p/[ab]*/") == [[false, true], [true, false], [false, true]] && ev("SA !~ p/a*/")[2] == [false, true]
+    @test ev("S LIKE 'a%'") == [false, false, true]                                   # scalars unchanged
+    @test ev("substr(SA, 0, 2)")[1] == ["He", "ab"] && ev("substr(SA, 0, 3)")[1] == ["Hel", "ab"]
+    @test_throws ArgumentError ev("substr(SA, 3, 1)")                                  # start beyond "ab"
+    @test_throws ArgumentError ev("substr(SA, 1, 1)")                                  # "" has length 0
+    @test ev("substr(S, 5, 2)") == ["", "", ""] && ev("substr(S, 9)") == ["", "", ""]   # a scalar never errors
+    if _HAVE_TAQL
+        for e in ("SA LIKE 'a%'", "SA NOT LIKE '%b'", "SA ILIKE 'A%'", "SA ~ p/[ab]*/", "SA !~ p/a*/", "upper(SA) LIKE 'H%'", "substr(SA, 0, 2)", "substr(SA, 0, 3)")
+            r = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:]); m = ev(e)
+            @test all(i -> collect(r[i]) == collect(m[i]), eachindex(r))
+        end
+        @test_throws Exception _taqlcmd("SELECT substr(SA, 3, 1) AS X FROM \$1", dir)
+    end
+end
+
+# Phase 352: random complex scalar / array expressions vs real TaQL (1100 expressions: + - * / ** conj sqrt exp square complex(), real imag abs arg
+# norm, sum mean min max sumsqr, comparisons, isfinite / isnan) -- no bug in TaQL-lite.  The few differences are floating-point noise of casacore's
+# own complex functions (sqrt via polar form ~1e-16 off, `C**2 == conj(C)**2` exact-equality rounding, Inf/NaN intermediates of x/0); the guard below
+# therefore leaves out sqrt, division by a computed value, exact equality of computed complexes and `arg` (+-pi by the sign of a zero imaginary part;
+# found on Linux x86-64 CI).
+@testset "TaQL-lite — complex expressions random fuzz vs real TaQL (Phase 352)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["C" => ComplexF64[1+2im, -2+0.5im, 3-1im, 0.5+0im], "R" => [1.0, -2.0, 3.0, -1.0],
+                "CA" => [ComplexF64[1+1im, 2-1im, -1+0.5im], ComplexF64[0.5im, 3+0im, -2-2im], ComplexF64[-1-1im, 1+0im, 2+3im], ComplexF64[2+0im, -0.5+1im, 1-1im]],
+                "RA" => [[1.0, -2.0, 3.0], [2.0, 2.0, -1.0], [-3.0, 1.0, 1.0], [0.5, -0.5, 2.0]]]; nrow=4)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    @test ev("conj(CA)")[1] == ComplexF64[1-1im, 2+1im, -1-0.5im] && ev("real(C)") == [1.0, -2.0, 3.0, 0.5] && ev("abs(C)")[1] ≈ sqrt(5)
+    @test ev("square(C)")[1] == -3 + 4im && ev("complex(R, 2)")[2] == -2 + 2im && ev("C ** 2")[1] ≈ -3 + 4im
+    @test ev("sum(CA)")[1] == 2 + 0.5im && ev("sumsqr(CA)")[1] == (1 + 1im)^2 + (2 - 1im)^2 + (-1 + 0.5im)^2
+    if _HAVE_TAQL
+        rng = MersenneTwister(352)
+        num() = rand(rng, ["1", "2", "0.5", "3", "-1", "2.5"])
+        cx(d, arr) = begin
+            base = arr ? "CA" : "C"
+            d == 0 && return rand(rng) < .8 ? base : "complex($(num()), $(num()))"
+            r = rand(rng, 1:7)
+            r == 1 && return "(" * cx(d - 1, arr) * rand(rng, [" + ", " - ", " * "]) * (rand(rng) < .5 ? cx(d - 1, false) : rx(d - 1, false)) * ")"
+            r == 2 && return "conj(" * cx(d - 1, arr) * ")"
+            r == 3 && return "(" * cx(d - 1, arr) * " ** 2)"
+            r == 4 && return "exp(" * cx(d - 1, arr) * ")"
+            r == 5 && return "square(" * cx(d - 1, arr) * ")"
+            r == 6 && return "complex(" * rx(d - 1, arr) * ", " * rx(d - 1, arr) * ")"
+            return cx(0, arr)
+        end
+        rx(d, arr) = begin
+            base = arr ? "RA" : "R"
+            d == 0 && return rand(rng) < .7 ? base : num()
+            r = rand(rng, 1:6)
+            r == 1 && return rand(rng, ["real", "imag", "abs", "norm"]) * "(" * cx(d - 1, arr) * ")"      # not `arg`: the sign of a zero imaginary part differs per platform
+            r == 2 && return "(" * rx(d - 1, arr) * rand(rng, [" + ", " - ", " * "]) * rx(d - 1, false) * ")"
+            r == 3 && return rand(rng, ["sum", "mean", "min", "max"]) * "(" * rx(d - 1, true) * ")"
+            r == 4 && return "sum(abs(" * cx(d - 1, true) * "))"
+            r == 5 && return "sumsqr(" * rx(d - 1, true) * ")"
+            return rx(0, arr)
+        end
+        bx(d, arr) = begin
+            r = rand(rng, 1:5)
+            r == 1 && return cx(0, arr) * rand(rng, [" == ", " != "]) * cx(0, false)
+            r == 2 && return rx(d, arr) * rand(rng, [" < ", " <= ", " > "]) * rx(d, false)
+            r == 3 && return "abs(" * cx(d, arr) * ") > " * num()
+            r == 4 && return "isfinite(" * cx(d, arr) * ")"
+            return "isnan(" * cx(d, arr) * ")"
+        end
+        close(a, b) = a isa AbstractArray ? (size(a) == size(b) && all(close.(a, b))) : (a == b || isapprox(a, b; rtol=1e-9, atol=1e-12))
+        for _ in 1:60
+            arr = rand(rng) < .6; d = rand(rng, 1:3)
+            e = rand(rng, [cx(d, arr), rx(d, arr), bx(d - 1, arr)])
+            e in ("RA", "CA") && continue
+            r1 = try collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:]) catch; :err end
+            r2 = ev(e)
+            @test r1 !== :err && all(i -> close(r1[i], r2[i]), eachindex(r2))
+        end
+    end
+end
+
+# Phase 353: random date / time / angle functions vs real TaQL (1400 evaluations over random MJDs 0..90000, whole and half days, and random angles:
+# year month day week weekday dow cdate ctime cmonth cdow cweekday ctod cdatetime date time mjd mjdtodate hms dms normangle).  Found: `dms` of an
+# angle past 999 degrees prints `***` in the 3-wide degree field.  Not copied: real's off-by-one day / sign for NEGATIVE MJDs (before 1858) and its
+# `24h00m00` for an exact multiple of a full turn; `datetime(<number>)` is an error in real TaQL but passes the number through here.
+@testset "TaQL-lite — date/time/angle functions random fuzz vs real TaQL (Phase 353)" begin
+    @test MSv2._tql_dms(deg2rad(999.0)) == "+999d00m00.000" && MSv2._tql_dms(deg2rad(1000.0)) == "+***d00m00.000"
+    @test MSv2._tql_dms(-deg2rad(1500.0)) == "-***d00m00.000" && MSv2._tql_dms(deg2rad(352.5)) == "+352d30m00.000"
+    if _HAVE_TAQL
+        rng = MersenneTwister(353)
+        n = 12
+        mj = [rand(rng, 0.0:0.001:90000.0) for _ in 1:n]; mj[1:3] = [0.0, 51544.0, 59580.0]
+        ang = [rand(rng, -20.0:0.0001:20.0) for _ in 1:n]; ang[1:3] = [deg2rad(999.0), deg2rad(1000.0), -deg2rad(1500.0)]
+        dir = joinpath(mktempdir(), "t")
+        write_table(dir, "T", Pair{String,Any}["M" => mj, "A" => ang]; nrow=n)
+        t = readtable(dir)
+        for f in ("year", "month", "day", "week", "weekday", "dow", "cdate", "ctime", "cmonth", "cdow", "cweekday", "ctod", "cdatetime", "date", "time",
+                  "mjd", "mjdtodate"), arg in ("M", "M+0.5", "floor(M)")
+            e = "$f($arg)"
+            r1 = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:])
+            r2 = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+            @test all(i -> r1[i] == r2[i] || (r1[i] isa AbstractFloat && isapprox(r1[i], r2[i]; rtol=1e-12, atol=1e-9)), eachindex(r1))
+        end
+        for f in ("hms", "dms", "normangle")
+            r1 = collect(_taqlcmd("SELECT $f(A) AS X FROM \$1", dir)[:X][:])
+            r2 = collect(column(query(t, "TRUE"; select=["X" => "$f(A)"]), "X")[:])
+            @test all(i -> r1[i] == r2[i] || (r1[i] isa AbstractFloat && isapprox(r1[i], r2[i]; atol=1e-12)), eachindex(r1))
+        end
+    end
+end

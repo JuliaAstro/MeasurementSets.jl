@@ -375,8 +375,9 @@ _tqleval(e::TQLNeg, cols, i) = _bcast(-, _tqleval(e.a, cols, i))
 _tqleval(e::TQLBitNot, cols, i) = _bcast((~), _tqleval(e.a, cols, i))
 _tqleval(e::TQLMaskOf, cols, i) = (v = _tqleval(e.e, cols, i);
     v isa TQLMArray ? v.mask : _bcast(!isfinite, _unwrap_marray(v)))
-_tqleval(e::TQLMatch, cols, i) =
-    xor(occursin(e.regex, _tqleval(e.lhs, cols, i)::AbstractString), e.negate)
+_tql_match(e::TQLMatch, v::AbstractString) = xor(occursin(e.regex, v), e.negate)
+_tql_match(e::TQLMatch, v::AbstractArray) = map(x -> _tql_match(e, x), v)      # elementwise over a string-array cell
+_tqleval(e::TQLMatch, cols, i) = _tql_match(e, _tqleval(e.lhs, cols, i))
 _tqleval(e::TQLFunc, cols, i) =
     e.fn(ntuple(k -> _tqleval(e.args[k], cols, i), length(e.args))...)
 _tqleval(::TQLRowNum, cols, i) = i

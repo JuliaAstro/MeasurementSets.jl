@@ -10933,3 +10933,27 @@ here). Also: `write_table` gained `shapes=` and `comments=` keywords. `COUNT` re
 ### Phase 348 — `CREATE TABLE` random-spec fuzz vs real TaQL
 
 60 random `CREATE TABLE` specs (12 types, `NDIM`/`SHAPE`, `UNIT`, `COMMENT`, `LIMIT` incl. 0/absent, `DMINFO`) compared with real TaQL. Fixed one bug: a variable- or fixed-shape array column with no rows (`[A R4 [NDIM=2]]` without `LIMIT`, or `LIMIT 0`) had element type `Any` and failed to write. Also probed `meas.jmean/jtrue/jnat/bmean/btrue/mecliptic/tecliptic`: real TaQL's `meas.*` does not expose those frames at all, so they are not a TaQL gap (only reachable through casatools measures).
+
+### Phase 349 — `ALTER TABLE` random-clause fuzz vs real TaQL
+
+Random 1–2 clause `ALTER TABLE` commands (columns and table/column keywords) compared with real TaQL, outcome and resulting table. Fixed: `SET KEYWORD` replaces an existing keyword **in place** (the Phase 346 "moves to the end" claim was a misread of `Dict` order) and refuses a value of another data type (Int→Double, String→Int, scalar→array; a one-element array replacing a scalar is that scalar); `RENAME KEYWORD` keeps the keyword's position (new exported `renamekeyword!`); `RENAME COLUMN X TO X` is an error; each `ADD COLUMN` clause needs its own `DMINFO [..]`; and a command whose later clause fails leaves the table untouched (all clauses are checked on the column/keyword names first, `_alter_dryrun`). Also listed the Phase 346 verbs in the API docs. Real TaQL's `RENAME KEYWORD a TO b` onto an existing `b` writes a duplicate key; not copied (error).
+
+### Phase 350 — sub-query random fuzz vs real TaQL (+ docs CI fix)
+
+Random `SELECT ... FROM [(SELECT ..)] WHERE x [NOT] IN (SELECT ..) / [NOT] EXISTS (SELECT ..)` queries compared with real TaQL (640 queries over 32 tables). Fixed: sub-queries in the WHERE of a `FROM (SELECT ..)` query name the original table, not the inner selection; `EXISTS (... LIMIT n)` is false when fewer than `n` rows match (real errors for the positive form). Also fixed the `taql` docstring, which a Phase 347 comment had detached from its method — that broke the Documenter build (`no docs found for 'taql'`) in CI on main.
+
+### Phase 351 — string / string-array expression fuzz vs real TaQL
+
+630 random expressions over a string column and a string-array column (`upper`/`lower`/`trim`/`capitalize`/`sreverse`/`substr`/`replace`/`+`/`iif`/`string`/`strlength`, `==`/`<`/`LIKE`/`~`/`IN`/`bool`) compared with real TaQL. Fixed: `LIKE` / `ILIKE` / `~` / `!~` map elementwise over a string-array cell (they raised a TypeError), and on an array cell `substr` does not clamp — a start beyond an element's length is an error, as in real TaQL (a scalar string never errors).
+
+### Phase 352 — complex expression fuzz vs real TaQL (no bug found)
+
+1100 random complex scalar / array expressions compared with real TaQL. No TaQL-lite bug; the handful of differences are floating-point noise in casacore's own complex functions (`sqrt` through the polar form, exact equality of `C**2` and `conj(C)**2`, Inf/NaN intermediates of division by zero), so the guard avoids those forms.
+
+### Phase 353 — date / time / angle function fuzz vs real TaQL
+
+1400 evaluations of the date, time and angle functions over random MJDs and angles compared with real TaQL. Fixed: `dms` of an angle beyond 999 degrees prints `***` in its 3-wide degree field. Not copied: real's one-day error and wrong `time()` sign for negative MJDs (before 1858) and `24h00m00` for exact full-turn multiples in `hms`; `datetime(<number>)` stays lenient (real errors).
+
+### Phase 353 follow-up — Linux x86-64 guard fixes (test only)
+
+The Docker run found two guards that depended on platform / Julia version: the Phase 349 `ALTER TABLE` fuzz could rename a keyword onto an existing one (real TaQL writes a duplicate key; not copied), so renames now target fresh names; and the Phase 352 fuzz compared `arg()` of complex values, whose ±π depends on the sign of a zero imaginary part, so it is left out.

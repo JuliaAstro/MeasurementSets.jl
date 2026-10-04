@@ -423,7 +423,8 @@ function _tql_dms(rad::Real)
     d, r = divrem(tmas, 3_600_000)
     m, r = divrem(r, 60_000)
     sec, ms = divrem(r, 1000)
-    string(sgn, lpad(d, 3, '0'), "d", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
+    deg = d > 999 ? "***" : lpad(d, 3, '0')       # real casacore's degree field is 3 wide: "***" beyond 999
+    string(sgn, deg, "d", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 
 # `hdms(arr)` (`hdmsFUNC`, `ExprFuncNodeArray.cc:2427-2454`) formats an
@@ -922,6 +923,13 @@ function _tql_substr(s::AbstractString, start::Real, len::Real=typemax(Int))
     (len <= 0 || st >= n) && return ""
     return String(bs[st+1:min(n, st + Int(min(len, n)))])
 end
+# on a string ARRAY cell real TaQL does not clamp: a start beyond an element's length throws (live-probed, Phase 351)
+_tql_substr_any(x::AbstractArray, start::Real, len::Real=typemax(Int)) = map(x) do e
+    n = ncodeunits(e); st = Int(start); st < 0 && (st = max(0, st + n))
+    st > n && throw(ArgumentError("substr: start $start is beyond the end of the string \"$e\""))
+    _tql_substr(e, start, len)
+end
+_tql_substr_any(x, a...) = _tql_substr(x, a...)
 # `replace(s, pat, rep)`: literal (not regex) replace-all; empty pattern = no-op.
 _tql_replace(s::AbstractString, pat::AbstractString, rep::AbstractString) =
     isempty(pat) ? String(s) : replace(String(s), pat => rep)
@@ -1203,7 +1211,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "to_lower" => (_sew(_tql_lower), 1:1),
     "capitalize" => (_sew(_tql_capitalize), 1:1),
     "string" => (_sew(_tql_str), 1:2), "str" => (_sew(_tql_str), 1:2),
-    "substr" => (_sew(_tql_substr), 2:3), "substring" => (_sew(_tql_substr), 2:3),
+    "substr" => (_tql_substr_any, 2:3), "substring" => (_tql_substr_any, 2:3),
     "replace" => (_sew(_tql_replace), 3:3),
     "bool" => (_tql_bool, 1:1), "boolean" => (_tql_bool, 1:1),
     "reversestring" => (_sew(_tql_sreverse), 1:1), "sreverse" => (_sew(_tql_sreverse), 1:1),
