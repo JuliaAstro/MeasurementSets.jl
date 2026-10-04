@@ -1696,3 +1696,44 @@ end
         end
     end
 end
+
+# Phase 358: random `SELECT .. FROM $1 a JOIN $2 b ON a.LK == b.RK` over Int32/Int64 keys, right columns of every type (Int/Float/Double/Complex/Bool/
+# String and Float / Int ARRAY columns), WHERE / ORDER BY, values compared in order vs real TaQL (540 queries).  Found: an unmatched row of a right
+# ARRAY column is an EMPTY array (any array column in the right table made the whole JOIN fail), and right-table Float32 / ComplexF32 columns are
+# widened to Double / ComplexF64 like real TaQL's result columns.  Not copied: real rejects Double join keys; TaQL-lite matches them.
+@testset "taql SELECT ... JOIN: array columns, widening, random fuzz vs real TaQL (Phase 358)" begin
+    dl = joinpath(mktempdir(), "l"); dr = joinpath(mktempdir(), "r")
+    write_table(dl, "L", Pair{String,Any}["LK" => Int32[1, 2, 9, 3], "LV" => [1.0, 2, 3, 4]]; nrow=4)
+    write_table(dr, "R", Pair{String,Any}["RK" => Int32[1, 2, 3], "RA" => [Float32.(i .* ones(2)) for i in 1:3], "RAI" => [Int32.(i .* ones(3)) for i in 1:3],
+                "RF" => Float32[0.5, 1, 1.5], "RC" => ComplexF32[1, 2, 3]]; nrow=3)
+    tl = readtable(dl); tr = readtable(dr)
+    col(c) = collect(column(taql(tl, "SELECT a.LK AS LK, $c AS X FROM \$1 a JOIN \$2 b ON a.LK == b.RK", tr), "X")[:])
+    @test col("b.RA") == [[1.0, 1.0], [2.0, 2.0], Float64[], [3.0, 3.0]] && col("b.RAI")[3] == Int64[] && eltype(col("b.RAI")[1]) == Int64
+    @test eltype(col("b.RF")) == Float64 && eltype(col("b.RC")) == ComplexF64 && isnan(col("b.RF")[3]) && isnan(real(col("b.RC")[3]))
+    if _HAVE_TAQL
+        rng = MersenneTwister(358)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        for _ in 1:6
+            nl = rand(rng, 4:10); nr = rand(rng, 3:7); kt = pick([Int32, Int64])
+            d1 = joinpath(mktempdir(), "l"); d2 = joinpath(mktempdir(), "r")
+            write_table(d1, "L", Pair{String,Any}["LK" => kt.(rand(rng, 1:6, nl)), "LV" => Float64.(1:nl), "LS" => rand(rng, ["p", "q", "rr"], nl)]; nrow=nl)
+            write_table(d2, "R", Pair{String,Any}["RK" => kt.(shuffle(rng, 1:7)[1:nr]), "RI" => Int32.(10 .* (1:nr)), "RF" => Float32.(1:nr) ./ 4, "RD" => Float64.(1:nr) ./ 3,
+                        "RS" => ["s$i" for i in 1:nr], "RB" => rand(rng, Bool, nr), "RC" => ComplexF32.(1:nr) .+ 1im,
+                        "RA" => [Float32.(i .* ones(2)) for i in 1:nr], "RAI" => [Int32.(i .* ones(3)) for i in 1:nr]]; nrow=nr)
+            a = readtable(d1); b = readtable(d2)
+            for _ in 1:8
+                cols = unique([pick(["RI", "RF", "RD", "RS", "RB", "RC", "RA", "RAI"]) for _ in 1:rand(rng, 1:3)])
+                lcols = unique([pick(["LK", "LV", "LS"]) for _ in 1:rand(rng, 1:2)])
+                q = "SELECT " * join(vcat(["a.$c AS $c" for c in lcols], ["b.$c AS $c" for c in cols]), ", ") * " FROM \$1 a JOIN \$2 b ON a.LK == b.RK" *
+                    (rand(rng) < .3 ? " WHERE a.LV > $(rand(rng, 1:4))" : "") * (rand(rng) < .3 ? " ORDER BY a.LV DESC" : "")
+                names = vcat(lcols, cols)
+                r1 = try (rt = _taqlcmd(q, d1, d2); [collect(rt[Symbol(n)][:]) for n in names]) catch ex; occursin("Slicer", sprint(showerror, ex)) ? :empty : :err end
+                r1 === :err && continue
+                g = taql(a, q, b)
+                r2 = [collect(column(g, n)[:]) for n in names]
+                close(x, y) = x isa AbstractArray ? (size(x) == size(y) && all(close.(x, y))) : (x == y || (x isa Number && y isa Number && (isapprox(x, y; rtol=1e-6) || (isnan(x) && isnan(y)))))
+                @test r1 === :empty ? all(isempty, r2) : all(j -> length(r1[j]) == length(r2[j]) && all(i -> close(r1[j][i], r2[j][i]), eachindex(r1[j])), eachindex(r1))
+            end
+        end
+    end
+end

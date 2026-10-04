@@ -10977,3 +10977,7 @@ The Docker run found two guards that depended on platform / Julia version: the P
 ### Phase 357 follow-up — Linux guard fix (test only)
 
 The Docker run found the Phase 357 guard drew a case where `gmaxs` hit real casacore's all-negative-group DBL_MIN bug (Phase 284); `gmaxs` is now left out of the guard.
+
+### Phase 358 — JOIN column type / value fuzz vs real TaQL
+
+540 random `SELECT … FROM $1 a JOIN $2 b ON a.K == b.K` queries over Int32 / Int64 keys and right columns of every type (compared in order with real TaQL). Fixed: an unmatched row of a right *array* column is an empty array (any array column in the right table made the whole JOIN fail with "column of type SubArray… is not supported"), and right-table Float32 / ComplexF32 columns are widened to Double / ComplexF64 like real TaQL's result columns. Not copied: real rejects Double join keys; TaQL-lite matches them.

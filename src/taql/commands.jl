@@ -521,9 +521,14 @@ function _taql_sentinel(c::AbstractVector)
     T = nonmissingtype(eltype(c))
     T <: Bool && return Bool[ismissing(x) ? false : x for x in c]
     T <: Integer && return Int64[ismissing(x) ? typemax(Int64) : Int64(x) for x in c]
-    T <: AbstractFloat && return T[ismissing(x) ? T(NaN) : x for x in c]
-    T <: Complex && return T[ismissing(x) ? T(NaN, NaN) : x for x in c]
+    T <: AbstractFloat && return Float64[ismissing(x) ? NaN : Float64(x) for x in c]      # widened like real TaQL's computed columns
+    T <: Complex && return ComplexF64[ismissing(x) ? ComplexF64(NaN, NaN) : ComplexF64(x) for x in c]
     T <: AbstractString && return String[ismissing(x) ? "none" : String(x) for x in c]
+    if T <: AbstractArray      # an unmatched row is an EMPTY array; elements are widened like a plain column's (real TaQL, Phase 358)
+        E = eltype(T); N = ndims(T)
+        W = E <: Bool ? Bool : E <: Integer ? Int64 : E <: AbstractFloat ? Float64 : E <: Complex ? ComplexF64 : E <: AbstractString ? String : E
+        return Array{W,N}[ismissing(x) ? Array{W,N}(undef, ntuple(_ -> 0, N)...) : Array{W,N}(x) for x in c]
+    end
     throw(ArgumentError("taql: JOIN of a column of type $T is not supported"))
 end
 
@@ -574,8 +579,9 @@ function _taql_join_from(target, body::AbstractString, others)
             rcx = collect(column(right, n)[:])
             T = eltype(rcx)
             push!(names, ra * "." * n)
-            push!(cols, any(iszero, mr) ? _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) :
-                                         T[rcx[r] for r in mr])
+            # sentinel-fill unmatched rows; the values are widened (Float32 -> Float64, ...) like real TaQL's result columns either way
+            push!(cols, (any(iszero, mr) || T <: Union{Number,AbstractString,AbstractArray}) ?
+                        _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) : T[rcx[r] for r in mr])
         end
         push!(names, ra * ".__rowid")
         push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])
