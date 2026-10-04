@@ -1621,3 +1621,43 @@ end
         end
     end
 end
+
+# Phase 355: random GROUP BY with expression keys (K+1, K%2, upper(S), strlength(S), (I>0), floor(D/2), ...), aggregate expressions, WHERE,
+# HAVING (also by alias), ORDER BY (alias / key / DESC) and LIMIT vs real TaQL, compared IN ORDER (550 queries; `gmax` left out: upstream bug,
+# Phase 284).  Found: an all-DESC ORDER BY of a grouped result is the reversed ascending sort (fully-tied groups come out reversed), like a
+# row ORDER BY (Phase 246); mixed directions keep ties in first-seen group order.
+@testset "taql GROUP BY expression keys + ORDER BY / LIMIT vs real TaQL (Phase 355)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["K" => Int32[3, 1, 2, 0, 3, 1, 2, 0], "D" => [2.5, -1.0, 0.5, 3.0, -2.0, 1.0, 0.0, 4.0]]; nrow=8)
+    t = readtable(dir)
+    col(q, n) = collect(column(taql(t, q), n)[:])
+    @test col("SELECT K, gcount() AS N FROM t GROUP BY K", "K") == [3, 1, 2, 0]                      # first-seen group order
+    @test col("SELECT K, gcount() AS N FROM t GROUP BY K ORDER BY N DESC", "K") == [0, 2, 1, 3]     # all tied, DESC = reversed
+    @test col("SELECT K, gcount() AS N FROM t GROUP BY K ORDER BY K DESC", "K") == [3, 2, 1, 0]
+    @test col("SELECT K%2 AS P, K, gcount() AS N FROM t GROUP BY K%2, K ORDER BY P DESC, K", "K") == [1, 3, 0, 2]   # mixed: ties keep order
+    if _HAVE_TAQL
+        N = 40; r0 = MersenneTwister(3)
+        d2 = joinpath(mktempdir(), "t")
+        write_table(d2, "T", Pair{String,Any}["K" => Int32.(rand(r0, 0:3, N)), "I" => Int32.(rand(r0, -5:5, N)), "D" => round.(randn(r0, N) .* 3; digits=1),
+                    "S" => rand(r0, ["ab", "abc", "b", "z"], N)]; nrow=N)
+        t2 = readtable(d2)
+        rng = MersenneTwister(355)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        keyexprs = ["K", "K+1", "K%2", "I%3", "S", "upper(S)", "strlength(S)", "(I>0)", "floor(D/2)", "K*2+I%2"]
+        aggs = ["gcount()", "gsum(I)", "gmean(D)", "gmin(I)", "gfirst(D)", "glast(S)", "gsum(I)+gcount()", "gmean(I)*2"]
+        for _ in 1:60
+            ks = unique([pick(keyexprs) for _ in 1:rand(rng, 1:2)])
+            ags = ["$(pick(aggs)) AS A$i" for i in 1:rand(rng, 1:2)]
+            q = "SELECT " * join(vcat(["$k AS G$i" for (i, k) in enumerate(ks)], ags), ", ") * " FROM \$1" * (rand(rng) < .3 ? " WHERE I > $(rand(rng, -3:3))" : "") *
+                " GROUP BY " * join(ks, ", ")
+            rand(rng) < .3 && (q *= " HAVING " * pick(["gcount() > 2", "A1 > 0", "gsum(I) <= 5", "gcount() < 8"]))
+            rand(rng) < .6 && (q *= " ORDER BY " * pick(["G1", "A1", "G1 DESC", "A1 DESC, G1"]))
+            rand(rng) < .2 && (q *= " LIMIT $(rand(rng, 1:4))")
+            names = ["G$i" for i in 1:length(ks)]; append!(names, ["A$i" for i in 1:length(ags)])
+            r1 = try (rt = _taqlcmd(q, d2); [collect(rt[Symbol(n)][:]) for n in names]) catch ex; occursin("Slicer", sprint(showerror, ex)) ? :empty : :err end    # a lazy "Slicer error" = an empty result
+            r2 = try (g = taql(t2, replace(q, "\$1" => "t")); [collect(column(g, n)[:]) for n in names]) catch; :err end
+            @test (r1 === :err && r2 === :err) || (r1 === :empty && r2 !== :err && all(isempty, r2)) || (r1 !== :err && r1 !== :empty && r2 !== :err && all(j -> length(r1[j]) == length(r2[j]) &&
+                  all(i -> r1[j][i] == r2[j][i] || (r1[j][i] isa Real && isapprox(r1[j][i], r2[j][i]; rtol=1e-9, atol=1e-12)), eachindex(r1[j])), eachindex(r1)))
+        end
+    end
+end

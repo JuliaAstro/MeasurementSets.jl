@@ -10961,3 +10961,7 @@ The Docker run found two guards that depended on platform / Julia version: the P
 ### Phase 354 — quantity-literal fuzz vs real TaQL (no bug found)
 
 800 random `col op N<unit>` / arithmetic / `BETWEEN` / `IN` conditions over length and angle columns with literals in other units agree with real TaQL. Not copied: real TaQL rejects a time- or frequency-unit literal (`s`, `h`, `Hz`, …) against a numeric column; TaQL-lite compares them after unit conversion.
+
+### Phase 355 — GROUP BY expression keys / ORDER BY / LIMIT fuzz vs real TaQL
+
+550 random grouped queries (expression keys, aggregate expressions, WHERE, HAVING by alias, ORDER BY alias/key/DESC, LIMIT) compared with real TaQL **in order**. Fixed: an all-descending `ORDER BY` of a grouped result is the reversed ascending sort (fully tied groups come out reversed), as for a row `ORDER BY` (Phase 246); mixed directions keep ties in first-seen group order.
