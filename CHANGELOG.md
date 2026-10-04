@@ -10993,3 +10993,7 @@ Real TaQL types a column with an epoch `MEASINFO` (every MS `TIME`) as a date: `
 ### Phase 361 — date functions on epoch columns inside GROUP BY
 
 Date-function queries on MS-style `TIME` columns in `SELECT … GROUP BY` (compared with real TaQL, 120 queries): the Phase 360 seconds → MJD days conversion was lost on the expression-key path (the intermediate table has no MEASINFO), so `GROUP BY year(TIME)` gave year 13012392. Fixed: the intermediate table carries the epoch columns already converted when the command uses a date function. Not copied: real TaQL puts every row in one group for `GROUP BY date(<epoch column>)`.
+
+### Phase 362 — DELETE with date functions / quantity literals
+
+`DELETE FROM t WHERE …` loaded its columns without the parsed condition, so the Phase 360 seconds → days conversion of epoch columns and unit attachment of quantity literals did not apply (`DELETE … WHERE year(TIME) > 2011` deleted every row). Fixed; checked against real TaQL for DELETE and UPDATE with `year` / `month` / `weekday` / `datetime` / `mjd('…')` conditions and for unit-literal conditions.

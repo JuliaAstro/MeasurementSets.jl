@@ -343,7 +343,8 @@ function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing
         where isa AbstractString ? collect(_tql_where_refs(where, rd)) :
         String[]
     names = union(names, (k.name for k in orderkeys))
-    cols = _tql_cols(rd, names)
+    # the parsed WHERE decides unit attachment / epoch-date conversion in `_tql_cols` (a quantity literal or date function in a DELETE condition)
+    cols = _tql_cols(rd, names, where isa AbstractString ? _taqllite_parse(String(where), Set(columnnames(rd))) : nothing)
     rows = _where_rows(rd, where, cols)
     isempty(rows) && return 0
     rows = _apply_orderby(rows, orderkeys, cols)

@@ -1824,3 +1824,32 @@ end
         end
     end
 end
+
+# Phase 362: DELETE with a DATE function / DATETIME comparison on an epoch column, and with a quantity literal (`WHERE L > 1km`), vs real TaQL.
+# `delete!` loaded its columns without the parsed condition, so neither the Phase 360 seconds -> days conversion nor unit attachment applied
+# (`DELETE ... WHERE year(TIME) > 2011` deleted every row).  UPDATE / SELECT / GROUP BY were already right.
+@testset "taql DELETE with date functions and quantity literals vs real TaQL (Phase 362)" begin
+    n = 8; mjds = 55000.0 .+ (0:n-1) .* 211.3
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["TIME" => mjds .* 86400, "L" => Float64.(1:n) .* 400, "A" => Float64.(1:n) .* 0.3, "K" => Int32.(1:n)]; nrow=n,
+                        units=Dict("TIME" => "s", "L" => "m", "A" => "rad"), measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"]))); d)
+    ks(d) = collect(column(readtable(d), "K")[:])
+    d = mk(); taql(d, "DELETE FROM t WHERE year(TIME) > 2011"); @test ks(d) == 1:5
+    d = mk(); taql(d, "DELETE FROM t WHERE TIME > datetime('2011-01-01')"); @test ks(d) == 1:3
+    _HAVE_UNITFUL = Base.get_extension(MSv2, :UnitfulExt) !== nothing
+    if _HAVE_UNITFUL
+        d = mk(); taql(d, "DELETE FROM t WHERE L > 1km"); @test ks(d) == 1:2
+        d = mk(); taql(d, "DELETE FROM t WHERE A < 1rad"); @test ks(d) == 4:8
+    end
+    if _HAVE_TAQL
+        for cmd in ("DELETE FROM \$1 WHERE year(TIME) > 2011", "DELETE FROM \$1 WHERE TIME > datetime('2011-01-01')", "DELETE FROM \$1 WHERE month(TIME) < 6",
+                    "DELETE FROM \$1 WHERE weekday(TIME) == 3", "DELETE FROM \$1 WHERE TIME > mjd('2011-06-01')",
+                    "UPDATE \$1 SET K = 0 WHERE year(TIME) < 2012", "UPDATE \$1 SET K = day(TIME)")
+            d1 = mk(); d2 = mk(); b = ks(d1)
+            x = _taqlcmd(cmd, d1); x = nothing
+            for _ in 1:40; GC.gc(); GC.gc(); sleep(0.05); ks(d1) != b && break; end
+            taql(d2, cmd, d2)
+            @test ks(d1) == ks(d2)
+        end
+    end
+end
