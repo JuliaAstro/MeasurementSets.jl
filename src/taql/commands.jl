@@ -1024,8 +1024,7 @@ the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
 string are not supported (use `copytable(dst, groupby(…))`, or
 `insert!(t, groupby(…))`).
 """
-# target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
-taql(command::AbstractString) = taql(nothing, command)
+taql(command::AbstractString) = taql(nothing, command)    # target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
 
 function taql(target, command::AbstractString, others...)
     cmd = strip(command)
