@@ -179,7 +179,7 @@ conversions on ordinary expressions:
 `azel` / `hadec` / `itrf` — or `meas.<frame>('COLNAME', mjd[, x, y, z])`
 to take the source frame from column `COLNAME`'s own `MEASINFO`
 instead of a literal `'SRC'` (fixed `Ref` only); `meas.epoch('TAI',
-mjd)` converts a time scale; `meas.last(mjd, x, y, z)` is the local
+secs[, 'SRC'[, pos]])` converts a time scale (seconds since MJD 0 in and out, like a `TIME` column; also the sidereal scales `GMST1`/`GAST`/`LMST`/`LAST`); `meas.last(mjd, x, y, z)` is the local
 apparent sidereal time.
 `meas.freq('TOPO', 'LSRK', freq, mjd, x, y, z, ra, dec)` /
 `meas.rv('TOPO', 'LSRK', v, mjd, x, y, z, ra, dec)` convert a

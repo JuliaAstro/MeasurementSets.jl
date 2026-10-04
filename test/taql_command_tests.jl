@@ -1321,3 +1321,198 @@ if _HAVE_TAQL
     end
 end
 end
+
+# Phase 346: `ALTER TABLE` -- ADD / DROP / RENAME COLUMN and SET / DROP / RENAME KEYWORD (table and `COL::kw` column keywords).
+# 32 commands compared against real TaQL on twin tables (columns, types, shapes, keyword order and types, data): all agree.
+# Real quirks reproduced: setting an existing keyword moves it to the END of the set; integers are stored as Int64 and a mixed
+# `[1.5, 2]` array as Float64; several clauses may follow one `ALTER TABLE`; failures (unknown column, rename onto an existing
+# one) leave the table unchanged.
+@testset "taql ALTER TABLE vs real TaQL (Phase 346)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["A" => Int32.(1:4), "B" => Float64.(1:4), "S" => ["a", "b", "c", "d"], "K" => Int32.(1:4)];
+                        nrow=4, keywords=Dict("KW1" => 5, "KW2" => "x")); d)
+    kwlist(t) = [(t.desc.public.names[i] => t.desc.public.values[i]) for i in eachindex(t.desc.public.names)]
+    colnames(t) = [c.name for c in t.desc.columns]
+    d = mk()
+    taql(d, "ALTER TABLE \$1 SET KEYWORD KW1=7, KW3='z'")
+    @test kwlist(readtable(d)) == ["KW2" => "x", "KW1" => 7, "KW3" => "z"]         # KW1 moved to the end
+    @test readtable(d).desc.public.values[2] isa Int64
+    taql(d, "ALTER TABLE \$1 SET KEYWORD KW4=[1.5,2], KW5=(1+2)*3, KW6=true")
+    kw = Dict(kwlist(readtable(d)))
+    @test kw["KW4"] == [1.5, 2.0] && kw["KW5"] == 9 && kw["KW6"] === true
+    taql(d, "ALTER TABLE \$1 DROP KEYWORD KW3")
+    @test !haskey(Dict(kwlist(readtable(d))), "KW3")
+    taql(d, "ALTER TABLE \$1 RENAME KEYWORD KW1 TO KWX")
+    @test last(kwlist(readtable(d))) == ("KWX" => 7)
+    taql(d, "ALTER TABLE \$1 SET KEYWORD A::QuantumUnits=['m'], B::MyKw=3")
+    @test columndesc(readtable(d), "A").keywords.values == [["m"]]
+    @test_throws KeyError taql(d, "ALTER TABLE \$1 DROP KEYWORD NOSUCH")
+    # columns
+    d = mk()
+    taql(d, "ALTER TABLE \$1 RENAME COLUMN A TO AA, B TO BB")
+    @test colnames(readtable(d)) == ["AA", "BB", "S", "K"] && collect(column(readtable(d), "AA")) == Int32.(1:4)
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 RENAME COLUMN AA TO BB")      # already exists
+    @test_throws KeyError taql(d, "ALTER TABLE \$1 DROP COLUMN NOSUCH")
+    @test colnames(readtable(d)) == ["AA", "BB", "S", "K"]                             # unchanged by the failures
+    taql(d, "ALTER TABLE \$1 DROP COLUMN BB RENAME COLUMN AA TO A")                   # several clauses
+    @test colnames(readtable(d)) == ["A", "S", "K"]
+    taql(d, "ALTER TABLE \$1 ADD COLUMN N1 R8, N2 I4, N3 S DMINFO [TYPE=\"StandardStMan\", NAME=\"SSM2\"]")
+    t = readtable(d)
+    @test colnames(t) == ["A", "S", "K", "N1", "N2", "N3"]
+    @test eltype(column(t, "N1")) == Float64 && eltype(column(t, "N2")) == Int32 && eltype(column(t, "N3")) == String
+    @test collect(column(t, "N1")) == zeros(4) && collect(column(t, "N3")) == fill("", 4)
+    taql(d, "ALTER TABLE \$1 ADD COLUMN V R8 [NDIM=1], W B DMINFO [TYPE=\"StandardStMan\", NAME=\"SSM3\"]")
+    t = readtable(d)
+    @test columndesc(t, "V").shape == MSv2.VariableShape(1) && columndesc(t, "W").type == MSv2.TpBool
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 ADD COLUMN Q ZZ")             # unknown type
+    # a renamed column keeps its data, units and the engine links that name it
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["F" => Float64.(1:4)]; nrow=4, units=Dict("F" => "Hz"))
+    renamecolumn!(d, "F", "FREQ")
+    @test get(columndesc(readtable(d), "FREQ").keywords, "QuantumUnits", nothing) == ["Hz"]
+    d2 = joinpath(mktempdir(), "t")
+    write_table(d2, "T", Pair{String,Any}["V" => [Float32.(i .* ones(2, 2)) for i in 1:3]]; nrow=3,
+                engines=Dict("V" => (; kind=MSv2.CompressFloat(), scale=0.01, offset=0.0)))
+    renamecolumn!(d2, "V_COMPRESSED", "VC")
+    @test collect(column(readtable(d2), "V"))[2] ≈ Float32.(2 .* ones(2, 2)) atol = 0.01    # the engine follows its stored column
+    if _HAVE_TAQL
+        function state(dd)
+            t = readtable(dd)
+            (colnames(t), [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape)) for c in t.desc.columns], kwlist(t),
+             [collect(column(t, c.name)[:])[1:2] for c in t.desc.columns if !(c.name in ("N4",))])
+        end
+        dm = " DMINFO [TYPE=\"StandardStMan\", NAME=\"SSM2\"]"
+        for c in ["SET KEYWORD KW1=7, KW3=2", "DROP KEYWORD KW1", "RENAME KEYWORD KW1 TO KW9", "RENAME COLUMN A TO AA, B TO BB",
+                  "DROP COLUMN A, B", "RENAME COLUMN A TO AA DROP COLUMN B", "SET KEYWORD KW6=(1+2)*3", "SET KEYWORD KW8=[1.5,2]",
+                  "SET KEYWORD KW8=true", "SET KEYWORD KW8=['a','b']", "ADD COLUMN N1 R8, N2 I4" * dm, "ADD COLUMN N1 S" * dm,
+                  "ADD COLUMN N1 R8 [NDIM=1]" * dm, "ADD COLUMN N1 B" * dm, "ADD COLUMN N1 C8" * dm, "ADD COLUMN N1 U1" * dm,
+                  "ADD COLUMN N1 R8 [NDIM=0]" * dm, "ADD COLUMN N1 R8 [NDIM=2]" * dm]
+            d1 = mk(); d2 = mk()
+            before = state(d1)
+            x = _taqlcmd("ALTER TABLE \$1 $c", d1); x = nothing      # drop the handle so casacore flushes the table
+            taql(d2, "ALTER TABLE \$1 $c")
+            for _ in 1:50                          # casacore flushes the altered table when its handle is finalised
+                GC.gc(); GC.gc(); sleep(0.1)
+                state(d1) != before && break
+            end
+            @test state(d1) == state(d2)
+        end
+        for c in ["DROP COLUMN NOSUCH", "RENAME COLUMN A TO B", "DROP KEYWORD NOSUCH", "ADD COLUMN K R8" * dm]
+            d1 = mk(); d2 = mk()
+            @test_throws Exception _taqlcmd("ALTER TABLE \$1 $c", d1)
+            @test_throws Exception taql(d2, "ALTER TABLE \$1 $c")
+        end
+    end
+end
+
+# Phase 347: `CREATE TABLE` and `DROP TABLE` as target-less commands, `taql("CREATE TABLE ...")`.  24 CREATE forms compared against
+# real TaQL (column names / types / shapes / units / comments / data managers / default rows).  Real casacore leaves the cells of a
+# fixed-shape array column uninitialised (garbage) and lists the DMINFO data manager first; neither is copied.  (Real
+# `CREATE TABLE ... LIMIT -1` crashes casacore, so it can't be an oracle; here a negative LIMIT is an error.)
+@testset "taql CREATE TABLE / DROP TABLE vs real TaQL (Phase 347)" begin
+    newpath() = joinpath(mktempdir(), "n")
+    cols(t) = [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape), c.comment, c.keywords.names, c.keywords.values) for c in t.desc.columns]
+    p = newpath()
+    taql("CREATE TABLE '$p' [A I4, B R8, S S, F B, C C8, V R8 [NDIM=1], M R4 [NDIM=2, SHAPE=[2,3]], Q U1] LIMIT 3")
+    t = readtable(p)
+    @test nrow(t) == 3 && columnnames(t) == ["A", "B", "S", "F", "C", "V", "M", "Q"]
+    @test collect(column(t, "A")) == Int32[0, 0, 0] && collect(column(t, "S")) == fill("", 3) && collect(column(t, "F")) == falses(3)
+    @test eltype(column(t, "C")) == ComplexF64 && eltype(column(t, "Q")) == UInt8
+    @test columndesc(t, "V").shape == MSv2.VariableShape(1) && columndesc(t, "M").shape == (2, 3)
+    @test all(isempty, column(t, "V")[:]) && all(==(zeros(Float32, 2, 3)), column(t, "M")[:])
+    p = newpath(); taql("CREATE TABLE '$p' [A I4 [UNIT=\"m\", COMMENT=\"c\"], a r8] LIMIT 2+1")    # types are case-insensitive, names keep case
+    t = readtable(p)
+    @test nrow(t) == 3 && columnnames(t) == ["A", "a"] && columndesc(t, "A").comment == "c"
+    @test columndesc(t, "A").keywords["QuantumUnits"] == ["m"]
+    p = newpath(); taql("CREATE TABLE '$p' [] LIMIT 2"); @test nrow(readtable(p)) == 2 && isempty(columnnames(readtable(p)))
+    p = newpath(); taql("CREATE TABLE '$p' [A I4]"); @test nrow(readtable(p)) == 0
+    p = newpath(); taql("CREATE TABLE '$p' [A I4, B R8] LIMIT 4 DMINFO [TYPE=\"IncrementalStMan\", NAME=\"ISM\", COLUMNS=[\"A\"]]")
+    @test sort([m.name for m in readtable(p).managers]) == ["IncrementalStMan", "StandardStMan"]
+    p = newpath(); taql("CREATE TABLE '$p' AS [storage=\"multifile\", blocksize=1024] [A I4] LIMIT 2")
+    @test readtable(p).container isa MSv2.MultiFileContainer
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A I4, A R8] LIMIT 1")             # duplicate column
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A ZZ] LIMIT 1")                   # unknown type
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A I4 [NDIM=1, SHAPE=[2,3]]] LIMIT 1")
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A I4] LIMIT -1")
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A I4 [DEFAULT=7]] LIMIT 1")
+    @test_throws ArgumentError taql("CREATE TABLE '$(newpath())' [A,B] LIMIT 1")
+    @test_throws ArgumentError taql("CREATE TABLE '$p' [A I4] LIMIT 1")                              # exists
+    # DROP TABLE
+    p = newpath(); taql("CREATE TABLE '$p' [A I4] LIMIT 2")
+    @test isdir(p)
+    taql("DROP TABLE '$p'")
+    @test !ispath(p)
+    p = newpath(); taql("CREATE TABLE '$p' [A I4] LIMIT 2")
+    taql(p, "DROP TABLE \$1"); @test !ispath(p)
+    @test_throws ArgumentError taql("DROP TABLE '$(mktempdir())'")                                 # not a table: nothing is deleted
+    if _HAVE_TAQL
+        function state(pp)
+            t = readtable(pp)
+            (nrow(t), [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape), c.comment, c.keywords.names, c.keywords.values) for c in t.desc.columns],
+             sort([m.name for m in t.managers]),
+             # real leaves a fixed-shape array column's cells uninitialised, so compare the other columns' first rows only
+             [map(v -> v isa AbstractArray ? Array(v) : v, collect(column(t, c.name)[:])[1:min(end, 2)])
+              for c in t.desc.columns if !(c.shape isa Tuple && !isempty(c.shape))])
+        end
+        for c in ["[A I4, B R8] LIMIT 5", "[A I4, B R8, S S] LIMIT 3", "[A I4 [NDIM=1]] LIMIT 3", "[A I4 [SHAPE=[2,3]]] LIMIT 3", "[A I4, B R8]",
+                  "[A I4] LIMIT 0", "[A I4, B R8] LIMIT 4 DMINFO [TYPE=\"IncrementalStMan\", NAME=\"ISM\", COLUMNS=[\"A\"]]",
+                  "[A C8, B B, C U1] LIMIT 2", "[A I4 [UNIT=\"m\"]] LIMIT 2", "[A I4 [COMMENT=\"hi\"]] LIMIT 2", "[A I4 [UNIT=\"m\", COMMENT=\"c\"]] LIMIT 1",
+                  "[A I4 [UNIT=[\"m\"]]] LIMIT 1", "[] LIMIT 2", "[A I4] LIMIT 2+1", "[a i4] LIMIT 1", "[A R8 [NDIM=0]] LIMIT 2", "[A R8 [NDIM=2]] LIMIT 2"]
+            p1 = newpath(); p2 = newpath()
+            x = _taqlcmd("CREATE TABLE '$p1' $c"); x = nothing
+            taql("CREATE TABLE '$p2' $c")
+            for _ in 1:50                                  # casacore finalises (flushes) the new table when its handle is collected
+                GC.gc(); GC.gc(); sleep(0.1)
+                isfile(joinpath(p1, "table.dat")) && break
+            end
+            @test state(p1) == state(p2)
+        end
+    end
+end
+
+# Phase 348: random CREATE TABLE specs vs real TaQL (types, NDIM/SHAPE, UNIT, COMMENT, LIMIT incl. 0 / absent, DMINFO).  Found: a column with
+# no rows and a variable / fixed array shape (NDIM, or LIMIT 0 + SHAPE) had no element type and could not be written.
+@testset "taql CREATE TABLE random specs vs real TaQL (Phase 348)" begin
+    newpath() = joinpath(mktempdir(), "n")
+    for ty in ("R4", "U1"), spec in ("[NDIM=2]", "[SHAPE=[3,1,2]]", "[NDIM=0]")      # zero rows keep their element type
+        p = newpath(); taql("CREATE TABLE '$p' [A $ty $spec] LIMIT 0")
+        @test nrow(readtable(p)) == 0 && columndesc(readtable(p), "A").type == (ty == "R4" ? MSv2.TpFloat : MSv2.TpUChar)
+    end
+    if _HAVE_TAQL
+        function state(pp)
+            t = readtable(pp)
+            (nrow(t), [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape), c.comment, c.keywords.names, c.keywords.values) for c in t.desc.columns],
+             sort([m.name for m in t.managers]),
+             [map(v -> v isa AbstractArray ? Array(v) : v, collect(column(t, c.name)[:])[1:min(end, 2)])
+              for c in t.desc.columns if !(c.shape isa Tuple && !isempty(c.shape))])
+        end
+        rng = MersenneTwister(348)
+        types = ["I2", "I4", "R4", "R8", "S", "B", "C8", "C16", "U1", "U2", "U4", "I8"]
+        function gen()
+            nc = rand(rng, 0:4); names = ["C$i" for i in 1:nc]; specs = String[]
+            for nm in names
+                opts = String[]; r = rand(rng)
+                r < .25 ? push!(opts, "NDIM=$(rand(rng, 0:3))") : r < .4 && push!(opts, "SHAPE=[" * join(rand(rng, 1:4, rand(rng, 1:3)), ",") * "]")
+                rand(rng) < .25 && push!(opts, "UNIT=\"" * rand(rng, ["m", "Hz", "s", "Jy"]) * "\"")
+                rand(rng) < .25 && push!(opts, "COMMENT=\"c$(rand(rng, 1:99))\"")
+                push!(specs, nm * " " * rand(rng, types) * (isempty(opts) ? "" : " [" * join(opts, ", ") * "]"))
+            end
+            s = "[" * join(specs, ", ") * "]"
+            rand(rng) < .8 && (s *= " LIMIT $(rand(rng, 0:6))")
+            nc >= 2 && rand(rng) < .3 && (s *= " DMINFO [TYPE=\"IncrementalStMan\", NAME=\"ISM\", COLUMNS=[\"$(names[1])\"]]")
+            s
+        end
+        for _ in 1:25
+            c = gen(); p1 = newpath(); p2 = newpath()
+            ok1 = try x = _taqlcmd("CREATE TABLE '$p1' $c"); x = nothing; true catch; false end   # real rejects e.g. C16
+            ok2 = try taql("CREATE TABLE '$p2' $c"); true catch; false end
+            @test ok1 == ok2
+            (ok1 && ok2) || continue
+            for _ in 1:50
+                GC.gc(); GC.gc(); sleep(0.1)
+                isfile(joinpath(p1, "table.dat")) && break
+            end
+            @test state(p1) == state(p2)
+        end
+    end
+end

@@ -2981,9 +2981,9 @@ end
         "meas.azel(RA, DEC, TIME/86400.0, -1601185.0, -5041977.0, 3554876.0)[2]"])
     @test all(x -> -pi/2 <= x <= pi/2, collect(az.el))
 
-    # meas.epoch: TAI − UTC ≈ 37 s
-    e = query(t, "TIME > 0"; select = ["tai" => "meas.epoch('TAI', TIME/86400.0)"])
-    @test collect(e.tai)[1] - 60454.42 ≈ 37 / 86400 atol = 1e-6
+    # meas.epoch: TAI − UTC ≈ 37 s; value and result are SECONDS since MJD 0 (like a TIME column), Phase 344
+    e = query(t, "TIME > 0"; select = ["tai" => "meas.epoch('TAI', TIME)", "t" => "TIME"])
+    @test collect(e.tai)[1] - collect(e.t)[1] ≈ 37 atol = 1e-3
 
     # meas.last returns a sidereal angle in [0, 2π)
     l = query(t, "TIME > 0"; select = ["last" =>
@@ -4171,18 +4171,18 @@ end
         @test ev("meas.b1950([1.2, 0.5], 'B1950')") ≈ [1.2, 0.5] atol = 1e-9
         @test ev("meas.b1950([-1.2, 0.5])")[1] < 0                       # (-pi, pi]
         pos = "[2225061.164, -5440057.370, -2481681.150]"
-        @test ev("meas.azel([1.2, 0.5], 'J2000', 60454.0, $pos)") ≈
+        @test ev("meas.azel([1.2, 0.5], 'J2000', 60454.0*86400, $pos)") ≈
               [-1.1757889104253296, -0.4100691887135492] atol = 5e-5
-        @test ev("meas.azel([1.2, 0.5], 'J2000', 60454.0, 'VLA')") ≈
+        @test ev("meas.azel([1.2, 0.5], 'J2000', 60454.0*86400, 'VLA')") ≈
               [-1.331572240150506, 0.6084838427316985] atol = 5e-5
-        @test ev("meas.hadec([1.2, 0.5], 'J2000', 60454.0, 'VLA')") ≈
+        @test ev("meas.hadec([1.2, 0.5], 'J2000', 60454.0*86400, 'VLA')") ≈
               [1.1403562674454237, 0.5008768338038833] atol = 5e-5
-        @test ev("meas.app([1.2, 0.5], 'J2000', 60454.0)") ≈
+        @test ev("meas.app([1.2, 0.5], 'J2000', 60454.0*86400)") ≈
               [1.2065198712116731, 0.5008743973860424] atol = 5e-5
-        @test ev("meas.app([1.2, 0.5], 'J2000', 60454.0, 'VLA')") ≈ ev("meas.app([1.2, 0.5], 'J2000', 60454.0)")
-        @test ev("meas.j2000([1.2, 0.5], 'AZEL', 60454.0, 'VLA')") ≈       # source frame needs epoch+pos
+        @test ev("meas.app([1.2, 0.5], 'J2000', 60454.0*86400, 'VLA')") ≈ ev("meas.app([1.2, 0.5], 'J2000', 60454.0*86400)")
+        @test ev("meas.j2000([1.2, 0.5], 'AZEL', 60454.0*86400, 'VLA')") ≈       # source frame needs epoch+pos
               [-2.633725693988767, 0.5622498577253711] atol = 5e-5
-        @test ev("meas.last(60454.0, 'VLA')") ≈ 32271.87519581057 atol = 1e-2   # seconds
+        @test ev("meas.last(60454.0*86400, 'VLA')") ≈ 32271.87519581057 atol = 1e-2   # seconds
     end
 
     if _HAVE_TAQL && Base.get_extension(MSv2, :SOFAExt) !== nothing
@@ -5047,6 +5047,153 @@ end
         for w in ["X > KM", "KM < X", "X >= 2*KM", "R > DEG", "X BETWEEN KM AND KM*3", "KM BETWEEN X AND X*2", "X IN [KM, 1000]"]
             r = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", d)[:K][:]) catch; Int32[] end   # empty = lazy Slicer error
             @test rows(w) == r
+        end
+    end
+end
+
+# Phase 343: random `meas.<frame>([lon,lat], 'SRC', epoch, 'OBS')` conversions vs real TaQL (369 conversions over 13 frames).
+# Found: real reads a plain-number epoch as SECONDS since MJD 0 (the unit of a TIME column; `60454d` is days) -- the value-first
+# forms assumed MJD days; and `AZELGEO` / `AZELSW` / `AZELSWGEO` / `SUPERGAL` were not accepted by the `meas.*` functions.
+# Numeric agreement is within the usual SOFA-vs-casacore residual (observer frames ~arcsec, others sub-arcsec).
+@testset "meas.* epoch is seconds; more direction frames; random conversions vs real TaQL (Phase 343)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", ["A" => Int32[1]]; nrow=1)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["V" => e]), "V")[:])[1]
+    if Base.get_extension(MSv2, :SOFAExt) !== nothing
+        # a plain epoch is seconds: 60454.0 s is the year-1858 answer, `*86400` the 2024 one
+        a = ev("meas.app([1.2, 0.5], 'J2000', 60454.0*86400)")
+        @test a ≈ [1.2065195, 0.5008743] atol = 1e-4
+        @test ev("meas.app([1.2, 0.5], 'J2000', 5223225600.0)") ≈ a atol = 1e-9          # the same epoch in plain seconds
+        @test_throws Exception ev("meas.app([1.2, 0.5], 'J2000', 60454.0)")              # 60454 s is MJD 0.7 -- before UTC begins
+        if _HAVE_UNITFUL
+            @test ev("meas.app([1.2, 0.5], 'J2000', 60454d)") ≈ a atol = 1e-9          # `d` quantity = days
+            @test ev("meas.app([1.2, 0.5], 'J2000', 60454.0d)") ≈ a atol = 1e-9
+        end
+        pos = "'VLA'"
+        for f in ["azelgeo", "azelsw", "azelswgeo", "supergal"]
+            @test length(ev("meas.$f([1.2, 0.5], 'J2000', 5.2e9, $pos)")) == 2
+        end
+        # AZELSW is AZEL with azimuth + 180 deg; SUPERGAL round-trips through GALACTIC
+        az = ev("meas.azel([1.2, 0.5], 'J2000', 5.2e9, $pos)"); sw = ev("meas.azelsw([1.2, 0.5], 'J2000', 5.2e9, $pos)")
+        @test mod(sw[1] - az[1], 2pi) ≈ pi atol = 1e-9
+        @test sw[2] ≈ az[2]
+    end
+    if _HAVE_TAQL && Base.get_extension(MSv2, :SOFAExt) !== nothing
+        cref(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])[1]
+        rng = MersenneTwister(343)
+        frames = ["J2000", "B1950", "GALACTIC", "ECLIPTIC", "ICRS", "AZEL", "HADEC", "APP", "AZELGEO", "ITRF", "SUPERGAL", "AZELSW", "AZELSWGEO"]
+        observer = Set(["APP", "AZEL", "HADEC", "AZELGEO", "ITRF", "AZELSW", "AZELSWGEO"])
+        nbad = 0; ncmp = 0
+        for _ in 1:60
+            src = rand(rng, frames); dst = rand(rng, frames); src == dst && continue
+            lon = rand(rng) * 2pi - pi; lat = asin(2rand(rng) - 1) * 0.95
+            ep = round(55000 + 6000rand(rng), digits=3) * 86400
+            e = "meas.$(lowercase(dst))([$lon, $lat], '$src', $ep, '$(rand(rng, ["VLA", "ALMA", "GBT", "ATCA", "WSRT"]))')"
+            r = try cref(e) catch; nothing end
+            r === nothing && continue                      # real TaQL rejects some conversions (e.g. to ITRF)
+            m = try ev(e) catch; nothing end
+            ncmp += 1
+            m === nothing && (nbad += 1; continue)
+            sep = hypot(abs(mod(m[1] - r[1] + pi, 2pi) - pi) * cos(r[2]), m[2] - r[2])
+            sep <= ((src in observer || dst in observer) ? 4e-4 : 1e-5) || (nbad += 1)
+        end
+        @test ncmp > 10
+        @test nbad == 0
+    end
+end
+
+# Phase 344: `meas.epoch('TARGET', value [, 'SOURCE' [, pos]])` as real casacore has it -- seconds in / seconds out, a source
+# scale, and the sidereal scales GMST1 / GAST / LMST / LAST (seconds of the sidereal day).  200 random conversions over
+# UTC / TAI / TT / TDB / UT1 sources and 10 targets agreed with real TaQL (a day-valued `meas.epoch('TAI', mjd)` used to be
+# the only form).
+@testset "meas.epoch: seconds, source scale, sidereal scales vs real TaQL (Phase 344)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", ["A" => Int32[1]]; nrow=1)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["V" => e]), "V")[:])[1]
+    p(e) = MSv2._taqllite_parse(e, Set(["A"]))
+    @test p("meas.epoch('TAI', 5.2e9)") isa MSv2.TQLFunc
+    @test p("meas.epoch('TAI', 5.2e9, 'UTC', 'VLA')") isa MSv2.TQLFunc
+    @test_throws ArgumentError p("meas.epoch('BOGUS', 5.2e9)")
+    @test_throws ArgumentError p("meas.epoch('TAI', 5.2e9, 'BOGUS')")
+    @test_throws ArgumentError p("meas.epoch('LAST', 5.2e9)")             # needs a position
+    if Base.get_extension(MSv2, :SOFAExt) !== nothing
+        @test ev("meas.epoch('TAI', 5.2e9)") ≈ 5.2e9 + 37 atol = 1e-3
+        @test ev("meas.epoch('TT', 5.2e9)") ≈ 5.2e9 + 69.184 atol = 1e-3
+        @test ev("meas.epoch('UTC', 5.2e9 + 37, 'TAI')") ≈ 5.2e9 atol = 1e-3       # source scale
+        @test 0 <= ev("meas.epoch('LAST', 5.2e9, 'UTC', 'VLA')") < 86400
+        @test ev("meas.epoch('LAST', 5.2e9, 'UTC', 'VLA')") != ev("meas.epoch('GAST', 5.2e9)")
+        # the local sidereal time differs from the Greenwich one by the observatory longitude (in seconds of sidereal day)
+        @test ev("meas.epoch('GMST1', 5.2e9)") ≈ ev("meas.epoch('LMST', 5.2e9, 'UTC', [6378137.0, 0.0, 0.0])") atol = 1e-6
+        if _HAVE_TAQL
+            cref(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])[1]
+            rng = MersenneTwister(344)
+            scales = ["UTC", "TAI", "TT", "TDT", "TDB", "UT1", "GMST1", "GAST", "LMST", "LAST"]
+            nbad = 0; ncmp = 0
+            for _ in 1:40
+                tg = rand(rng, scales); sc = rand(rng, ["UTC", "TAI", "TT", "TDB", "UT1"])
+                ep = round((55000 + 6000rand(rng)) * 86400, digits=3)
+                e = "meas.epoch('$tg', $ep, '$sc'" * (rand(rng) < 0.6 || tg in ("LMST", "LAST") ? ", '$(rand(rng, ["VLA", "ALMA", "GBT"]))')" : ")")
+                r = try cref(e) catch; nothing end
+                r === nothing && continue
+                ncmp += 1
+                m = try ev(e) catch; nothing end
+                sidereal = tg in ("GMST1", "GAST", "LMST", "LAST")
+                (m !== nothing && (sidereal ? abs(mod(m - r + 43200, 86400) - 43200) <= 0.1 : abs(m - r) <= 1e-2)) || (nbad += 1)
+            end
+            @test ncmp > 10
+            @test nbad == 0
+        end
+    end
+end
+
+# Phase 345: the real-casacore value-first `meas.freq` / `meas.rv` / `meas.riseset` / `meas.pos('ITRF', name)` forms:
+# `meas.freq('TARGET', value [, 'SRC'] [, [ra, dec]] [, epoch] [, pos])` (epoch in seconds, plain frequency Hz, plain radial
+# velocity **km/s**), `meas.riseset([ra, dec], epoch, 'OBS')` -> [rise, set] MJD days.  300 random frequency / radial-velocity
+# conversions over 8 frames agreed with real TaQL; before, only the all-scalar `meas.freq('S', 'T', f, mjd, x, y, z, ra, dec)`
+# form existed.
+@testset "meas.freq / meas.rv / meas.riseset value-first forms vs real TaQL (Phase 345)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", ["A" => Int32[1]]; nrow=1)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["V" => e]), "V")[:])[1]
+    p(e) = MSv2._taqllite_parse(e, Set(["A"]))
+    @test p("meas.freq('LSRK', 1.4e9, 'TOPO', [1.2, 0.5], 5.2e9, 'VLA')") isa MSv2.TQLFunc
+    @test p("meas.rv('BARY', 1000.0, 'LSRK', [1.2, 0.5])") isa MSv2.TQLFunc
+    @test p("meas.freq('TOPO', 'LSRK', 1.4e9, 60454.4, 1.0, 2.0, 3.0, 1.2, 0.5)") isa MSv2.TQLFunc    # the older scalar form still parses
+    @test_throws ArgumentError p("meas.freq('BOGUS', 1.4e9)")
+    @test ev("meas.freq('LSRK', 1.4e9)") == 1.4e9                                  # no source frame: already in TARGET
+    @test ev("meas.pos('ITRF', 'VLA')") ≈ [-1601185.365, -5041977.547, 3554875.870] atol = 1.0
+    @test ev("meas.itrfxyz('VLA')") ≈ ev("meas.pos('ITRF', 'VLA')")
+    if Base.get_extension(MSv2, :SOFAExt) !== nothing
+        # frame-only conversions need just the direction; TOPO needs epoch and position too
+        @test ev("meas.freq('BARY', 1.4e9, 'LSRK', [1.2, 0.5])") ≈ 1.399956676e9 rtol = 3e-9
+        @test ev("meas.rv('BARY', 1000.0, 'LSRK', [1.2, 0.5])") ≈ 1009.277228 atol = 1e-3          # km/s
+        @test_throws Exception ev("meas.freq('LSRK', 1.4e9, 'TOPO', [1.2, 0.5])")
+        @test ev("meas.freq('LSRK', 1.4e9, 'TOPO', [1.2, 0.5], 5.2e9, 'VLA')") ≈ 1.399906067e9 rtol = 3e-9
+        rs = ev("meas.riseset([1.2, 0.5], 5.2e9, 'VLA')")
+        @test rs ≈ [60185.2444, 60185.8626] atol = 2e-3
+        @test ev("meas.riseset([1.2, 0.5], 'J2000', 5.2e9, 'VLA')") ≈ rs
+        if _HAVE_TAQL
+            cref(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])[1]
+            rng = MersenneTwister(345)
+            frames = ["TOPO", "GEO", "BARY", "LSRK", "LSRD", "GALACTO", "LGROUP", "CMB"]
+            nbad = 0; ncmp = 0
+            for _ in 1:40
+                kind = rand(rng, ["freq", "rv"]); tg = rand(rng, frames); sc = rand(rng, frames)
+                val = kind == "freq" ? round(1e9 + 1e10rand(rng), digits=1) : round(-300 + 600rand(rng), digits=3)
+                e = "meas.$kind('$tg', $val, '$sc', [$(rand(rng) * 2pi), $(asin(2rand(rng) - 1) * 0.95)], " *
+                    "$(round((55000 + 6000rand(rng)) * 86400, digits=3)), '$(rand(rng, ["VLA", "ALMA", "GBT"]))')"
+                r = try cref(e) catch; nothing end
+                r === nothing && continue
+                ncmp += 1
+                m = try ev(e) catch; nothing end
+                (m !== nothing && abs(m - r) <= (kind == "freq" ? 3e-9 * val : 1e-3)) || (nbad += 1)
+            end
+            @test ncmp > 10
+            @test nbad == 0
+            @test ev("meas.riseset([1.2, 0.5], 5.2e9, 'VLA')") ≈ cref("meas.riseset([1.2, 0.5], 5.2e9, 'VLA')") atol = 2e-3
         end
     end
 end

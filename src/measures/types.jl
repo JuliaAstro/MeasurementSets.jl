@@ -361,6 +361,9 @@ east longitude.  Real method in `ext/SOFAExt.jl`.
 _lst(args...) = error(
     "MeasurementSets: local sidereal time needs SOFA.jl — run `import SOFA`")
 
+# Greenwich / local, mean / apparent sidereal time in radians (`kind` is :gmst, :gast, :lmst or :last); Phase 344
+_sidereal(args...) = error("MeasurementSets: sidereal time needs SOFA.jl -- run `import SOFA`")
+
 """
     _riseset(ra, dec, mjd, x, y, z, elev0=0.0) -> (rise_mjd, set_mjd)
 

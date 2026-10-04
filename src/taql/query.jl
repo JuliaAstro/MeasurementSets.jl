@@ -463,7 +463,7 @@ Row-filter `t` with a small TaQL-like WHERE expression:
   `Ref` only — a per-row `VarRefCol` column errors, use `measure(t,
   col, row)` directly; disambiguated from `'SRC'` at parse time: the
   string is a colname iff it is *not* a recognized frame name) — /
-  `meas.epoch('TAI', mjd)` / `meas.last(mjd, x, y, z)` /
+  `meas.epoch('TAI', secs[, 'SRC'[, pos]])` (real form, seconds) / `meas.last(mjd, x, y, z)` /
   `meas.freq('SSCALE', 'TSCALE', freq, mjd, x, y, z, ra, dec)` /
   `meas.rv('SSCALE', 'TSCALE', v, mjd, x, y, z, ra, dec)` (frequency /
   radial-velocity frame conversion, SSCALE/TSCALE ∈ topo/geo/bary/

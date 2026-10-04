@@ -74,6 +74,7 @@ include("schema.jl")
 include("tables/interface.jl")
 include("tables/create.jl")
 include("tables/edit.jl")
+include("tables/alter.jl")
 include("tables/refedit.jl")
 include("tables/concatedit.jl")
 include("tables/resync.jl")
@@ -108,7 +109,7 @@ export doppler, frequency, radialvelocity, restfrequency, shiftfreq
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 export write_table, write_ms, copyms, create_ms
 export write_reftable, write_concattable, copytable, reference_copy
-export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!
+export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!, renamecolumn!, setkeyword!, removekeyword!
 export resync, is_stale, is_multiused
 export query, groupby, GroupedTable
 export update!, taql

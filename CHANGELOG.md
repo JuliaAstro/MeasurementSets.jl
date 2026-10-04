@@ -10862,3 +10862,74 @@ GitHub Actions (Linux x86-64, Julia 1.10) failed the Phase 335 random pattern gu
 (`~ m/../`, `~ f/../`) forms the generator built with stacked quantifiers such as `?*` and `**`. Real casacore on Linux
 accepts those, while PCRE (and casacore on macOS) rejects them, so the two engines disagreed only on invalid patterns.
 Reproduced in an x86-64 Linux container; the test now collapses stacked quantifiers in the regex forms. No package change.
+
+### Phase 343 — `meas.*` epochs are seconds; more direction frames (random conversion fuzz vs real TaQL)
+
+A random fuzz of `meas.<frame>([lon,lat], 'SRC', epoch, 'OBS')` over 13 frames, epochs and observatories against real
+TaQL's `meas` UDFs found that real casacore reads a **plain-number epoch as seconds since MJD 0** (the unit of a `TIME`
+column) — `meas.app(d,'J2000',60454.0)` is the year-1858 answer, `60454d` or `60454.0*86400` the 2024 one. The Phase 249
+value-first forms assumed MJD days (that held only for the `d` forms), so any observer-dependent conversion given an epoch
+was wrong by an epoch error. Plain epochs are now seconds, unit quantities (`60454d`, `30deg`, `5 m`) are converted by the
+Unitful extension, and the older source-first numeric forms (`meas.azel('J2000', lon, lat, mjd, x, y, z)`) keep MJD days;
+`datetime()` / `mjd()` values are days here, so multiply by 86400 to use one as an epoch. Also added `azelgeo`, `azelsw`,
+`azelswgeo` and `supergal` to the `meas.*` direction frames (and `AZELGEO`/`AZELSW`/`AZELSWGEO` as epoch/position-needing
+sources). After the fix 369 random conversions agree with real TaQL within the usual SOFA-vs-casacore residual (observer
+frames ~arcsec; B1950↔`AZELSW` up to ~4″). Still unsupported: the mean/true/natural frames `JMEAN`, `JTRUE`, `JNAT`, `BMEAN`,
+`BTRUE`, `MECLIPTIC`, `TECLIPTIC`. New testset with a seeded real-TaQL cross-check.
+
+### Phase 344 — `meas.epoch` as real casacore has it: seconds, source scale, sidereal scales (random fuzz vs real TaQL)
+
+Following Phase 343, probing the other `meas.*` families against real TaQL showed `meas.epoch('TARGET', value [, 'SOURCE'
+[, pos]])` takes and returns **seconds since MJD 0** (so `meas.epoch('TAI', TIME)` works on a `TIME` column directly), accepts a
+source scale, and also converts to the sidereal scales `GMST1`/`GAST`/`LMST`/`LAST` (seconds of the sidereal day; the local
+ones need a position). TaQL-lite only had the day-valued `meas.epoch('TAI', mjd)`. It is now the real form (the old
+day-valued call is gone: use `meas.epoch('TAI', TIME)` instead of `meas.epoch('TAI', TIME/86400.0)`); the
+sidereal scales use a new `_sidereal` helper (SOFA `gmst06` / `gst06a`). 200 random conversions over UTC/TAI/TT/TDB/UT1 sources
+and ten targets agree with real TaQL (scales to ~ms, sidereal to ~50 ms). Left alone: `meas.freq` / `meas.rv` / `meas.pos` /
+`meas.itrfxyz` / `meas.riseset` use different calling conventions in real casacore (value-first, positions as `[x,y,z]`,
+`itrfxyz` an identity on xyz, `riseset(dir, epoch, pos)` returning MJD days) and are a later phase. New testset with a seeded
+real-TaQL cross-check.
+
+### Phase 345 — real-casacore value-first `meas.freq` / `meas.rv` / `meas.riseset` / `meas.pos` (random fuzz vs real TaQL)
+
+Real TaQL's spectral conversions are value-first, like the direction and epoch forms of Phases 343–344:
+`meas.freq('TARGET', value [, 'SRC'] [, [ra, dec]] [, epoch] [, pos])` (also `meas.frequency`; `meas.rv` /
+`meas.radialvelocity` likewise), with the optional pieces told apart by type and no SRC meaning the value is already in TARGET.
+TaQL-lite only had the all-scalar `meas.freq('S', 'T', f, mjd, x, y, z, ra, dec)`. Live probing also found that real's plain
+radial-velocity unit is **km/s** (LSRK→BARY shifts 1000 by 9.277, not 9277) and that its plain epoch is seconds. Added the
+real forms (the scalar forms are unchanged and still m/s with MJD days), plus `meas.riseset([ra, dec] [, 'J2000'], epoch, pos
+[, elev0])` → `[rise, set]` MJD days (agrees with real to ~2 min) and `meas.pos('ITRF', 'OBS')` / `meas.itrfxyz('OBS')` → ITRF
+xyz of an observatory. 300 random frequency / radial-velocity conversions over TOPO, GEO, BARY, LSRK, LSRD, GALACTO, LGROUP,
+CMB agree with real TaQL (frequency to 3e-9 relative, velocity to 1 m/s). Not copied: real's `meas.wgs`, `meas.restfreq`,
+and the odd `meas.rv('LSRK', v)` with no source. New testset with a seeded real-TaQL cross-check.
+
+### Phase 346 — `ALTER TABLE` (probed and cross-checked against real TaQL)
+
+TaQL-lite had no way to change a table's structure from a command. `taql(table, "ALTER TABLE \$1 clause ...")` now does what
+real `ALTER TABLE` does (32 commands compared on twin tables): `ADD COLUMN name type [[NDIM=n, SHAPE=[..]]] [, ...]
+[DMINFO ...]` (types `B U1 I2 U2 I4 U4 I8 R4 R8 C4 C8 S` and the long names; zeros / empty strings / `false`, undefined cells for an
+NDIM-only array column), `DROP COLUMN a[, b]`, `RENAME COLUMN a TO b[, ...]`, `SET KEYWORD k=expr[, ...]` (a constant
+expression; `COL::k` for a column keyword), `DROP KEYWORD`, `RENAME KEYWORD a TO b`, several clauses per command. Real quirks
+reproduced: setting an existing keyword moves it to the end of the set, integers are `Int64` and a mixed `[1.5, 2]` is
+`Float64`, failures leave the table unchanged. The metadata operations are also Julia functions — `renamecolumn!(path, old, new)`,
+`setkeyword!(path, name, value; column)`, `removekeyword!(path, name; column)` — implemented as a `table.dat` rewrite that reuses
+the storage-manager blocks verbatim (a data manager addresses its columns by position, so no data file is touched; a virtual
+engine's stored-column link and `Hypercolumn_*` lists follow a rename). Not copied: real leaves an uninitialised fixed-shape
+column's cells as garbage (zeros here). New testset with a real-TaQL cross-check.
+
+### Phase 347 — `CREATE TABLE` / `DROP TABLE` as TaQL commands (cross-checked against real TaQL)
+
+Continuing the TaQL command set after Phase 346's `ALTER TABLE`: `taql("CREATE TABLE 'path' [A I4, B R8 [NDIM=1], C R4 [SHAPE=[2,3],
+UNIT=\"m\", COMMENT=\"..\"], ...] [LIMIT n] [DMINFO ...]")` creates a table of default-valued rows (zeros, empty strings, `false`;
+undefined cells for an NDIM-only array column), with `AS [storage="multifile", blocksize=n]` and an `IncrementalStMan` DMINFO,
+and `DROP TABLE 'path'` / `taql(path, "DROP TABLE \$1")` deletes a table (never a directory that is not a table). Both work
+without a target table (`taql("CREATE ...")`). 24 CREATE forms compared with real TaQL: column types, shapes, units, comments,
+data managers and default rows agree; types are case-insensitive, names keep their case, `LIMIT` takes a constant expression,
+duplicate columns / unknown types / `NDIM` vs `SHAPE` disagreement / unsupported attributes are errors. Not copied: real
+leaves a fixed-shape array column's cells uninitialised, lists the `DMINFO` manager first, and segfaults on `LIMIT -1` (an error
+here). Also: `write_table` gained `shapes=` and `comments=` keywords. `COUNT` results cannot be read back through Casacore.jl, so
+`COUNT` stays unimplemented.
+
+### Phase 348 — `CREATE TABLE` random-spec fuzz vs real TaQL
+
+60 random `CREATE TABLE` specs (12 types, `NDIM`/`SHAPE`, `UNIT`, `COMMENT`, `LIMIT` incl. 0/absent, `DMINFO`) compared with real TaQL. Fixed one bug: a variable- or fixed-shape array column with no rows (`[A R4 [NDIM=2]]` without `LIMIT`, or `LIMIT 0`) had element type `Any` and failed to write. Also probed `meas.jmean/jtrue/jnat/bmean/btrue/mecliptic/tecliptic`: real TaQL's `meas.*` does not expose those frames at all, so they are not a TaQL gap (only reachable through casatools measures).
