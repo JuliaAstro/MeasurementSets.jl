@@ -5225,7 +5225,8 @@ end
 # Phase 352: random complex scalar / array expressions vs real TaQL (1100 expressions: + - * / ** conj sqrt exp square complex(), real imag abs arg
 # norm, sum mean min max sumsqr, comparisons, isfinite / isnan) -- no bug in TaQL-lite.  The few differences are floating-point noise of casacore's
 # own complex functions (sqrt via polar form ~1e-16 off, `C**2 == conj(C)**2` exact-equality rounding, Inf/NaN intermediates of x/0); the guard below
-# therefore leaves out sqrt, division by a computed value and exact equality of computed complexes.
+# therefore leaves out sqrt, division by a computed value, exact equality of computed complexes and `arg` (+-pi by the sign of a zero imaginary part;
+# found on Linux x86-64 CI).
 @testset "TaQL-lite — complex expressions random fuzz vs real TaQL (Phase 352)" begin
     dir = joinpath(mktempdir(), "t")
     write_table(dir, "T", Pair{String,Any}["C" => ComplexF64[1+2im, -2+0.5im, 3-1im, 0.5+0im], "R" => [1.0, -2.0, 3.0, -1.0],
@@ -5255,7 +5256,7 @@ end
             base = arr ? "RA" : "R"
             d == 0 && return rand(rng) < .7 ? base : num()
             r = rand(rng, 1:6)
-            r == 1 && return rand(rng, ["real", "imag", "abs", "arg", "norm"]) * "(" * cx(d - 1, arr) * ")"
+            r == 1 && return rand(rng, ["real", "imag", "abs", "norm"]) * "(" * cx(d - 1, arr) * ")"      # not `arg`: the sign of a zero imaginary part differs per platform
             r == 2 && return "(" * rx(d - 1, arr) * rand(rng, [" + ", " - ", " * "]) * rx(d - 1, false) * ")"
             r == 3 && return rand(rng, ["sum", "mean", "min", "max"]) * "(" * rx(d - 1, true) * ")"
             r == 4 && return "sum(abs(" * cx(d - 1, true) * "))"

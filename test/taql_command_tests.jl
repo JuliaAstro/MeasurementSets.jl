@@ -1557,7 +1557,7 @@ end
             r = rand(rng, 1:8)
             r == 1 && return "SET KEYWORD " * join(["$(rand(rng, kn))=$(rand(rng, vals))" for _ in 1:rand(rng, 1:2)], ", ")
             r == 2 && return "DROP KEYWORD " * rand(rng, kn)
-            r == 3 && return "RENAME KEYWORD $(rand(rng, kn)) TO $(rand(rng, kn))"
+            r == 3 && return "RENAME KEYWORD $(rand(rng, kn)) TO KWR$(rand(rng, 1:10^6))"   # a fresh name: real writes a duplicate key onto an existing one
             r == 4 && return "RENAME COLUMN $(rand(rng, cn)) TO $(rand(rng, cn))"
             r == 5 && return "DROP COLUMN " * join(unique([rand(rng, cn) for _ in 1:rand(rng, 1:2)]), ", ")
             r == 6 && return "SET KEYWORD $(rand(rng, cn))::$(rand(rng, ["QuantumUnits", "MyKw"]))=$(rand(rng, vals))"

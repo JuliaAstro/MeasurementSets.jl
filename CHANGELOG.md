@@ -10953,3 +10953,7 @@ Random `SELECT ... FROM [(SELECT ..)] WHERE x [NOT] IN (SELECT ..) / [NOT] EXIST
 ### Phase 353 — date / time / angle function fuzz vs real TaQL
 
 1400 evaluations of the date, time and angle functions over random MJDs and angles compared with real TaQL. Fixed: `dms` of an angle beyond 999 degrees prints `***` in its 3-wide degree field. Not copied: real's one-day error and wrong `time()` sign for negative MJDs (before 1858) and `24h00m00` for exact full-turn multiples in `hms`; `datetime(<number>)` stays lenient (real errors).
+
+### Phase 353 follow-up — Linux x86-64 guard fixes (test only)
+
+The Docker run found two guards that depended on platform / Julia version: the Phase 349 `ALTER TABLE` fuzz could rename a keyword onto an existing one (real TaQL writes a duplicate key; not copied), so renames now target fresh names; and the Phase 352 fuzz compared `arg()` of complex values, whose ±π depends on the sign of a zero imaginary part, so it is left out.
