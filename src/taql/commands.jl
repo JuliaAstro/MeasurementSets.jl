@@ -24,8 +24,10 @@ end
 # Writing a floating value into an integer column (Phase 247, live-verified vs
 # real TaQL): truncate toward zero, saturate at the type's limits (`1e12` ->
 # typemax, `Inf` -> typemax), `NaN` -> 0. Anything else is unchanged.
+# an integer into a NARROWER integer column wraps (two's complement, live-verified Phase 359: `INSERT .. SET H=40000` -> -25536 in an Int16 column)
 _tql_coerce(::Type{J}, v) where {J<:Integer} = v isa AbstractFloat ?
-    (isnan(v) ? zero(J) : v >= typemax(J) ? typemax(J) : v <= typemin(J) ? typemin(J) : trunc(J, v)) : v
+    (isnan(v) ? zero(J) : v >= typemax(J) ? typemax(J) : v <= typemin(J) ? typemin(J) : trunc(J, v)) :
+    (v isa Integer && !(v isa Bool) ? v % J : v)
 _tql_coerce(::Type{Bool}, v) = v
 _tql_coerce(::Type, v) = v
 
@@ -198,6 +200,22 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
         haskey(fullcols, c) ? fullcols[c][i] : cols[c][i]
     end
 
+    # a scalar written into an ARRAY column fills the cell's current shape; an array into a FIXED-shape column must have exactly that shape
+    # (real TaQL, live-verified Phase 359 -- it used to be silently truncated here)
+    function fit_cell(c, i, x)
+        cd = columndesc(rd, c)
+        isarr = !(cd.shape isa Dims && isempty(cd.shape))
+        isarr || return x
+        fs = cd.shape isa Dims ? cd.shape : nothing
+        if x isa AbstractArray
+            fs !== nothing && size(x) != fs && throw(ArgumentError("update!: column \"$c\" has the fixed shape $fs, got an array of size $(size(x))"))
+            return x
+        elseif x isa Number || x isa AbstractString
+            cur = _curbase(c, i)
+            return fill(x, cur isa AbstractArray ? size(cur) : fs === nothing ? (1,) : fs)
+        end
+        return x
+    end
     edit(path) do t
         for (c, levels, a) in specs
             u = colunit(c)
@@ -205,7 +223,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
             Jc = juliatype(columndesc(rd, c).type)
             if levels === nothing
                 if where === nothing && !limited
-                    vals = [_tql_coerce(Jc, _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u)) for i in 1:nr]
+                    vals = [fit_cell(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u))) for i in 1:nr]
                     ec[:] = vals
                     for i in 1:nr
                         cols[c][i] = vals[i]
@@ -213,7 +231,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
                     end
                 else
                     for i in rows
-                        val = _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u))
+                        val = fit_cell(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u)))
                         ec[i] = val
                         cols[c][i] = val
                         curval[(c, i)] = val
@@ -372,11 +390,25 @@ function Base.insert!(target::Union{AbstractString,AbstractTable}; values,
     J = Dict(n => juliatype(columndesc(rd, n).type) for n in vn)
     sc = Dict(n => (columndesc(rd, n).shape isa Dims && isempty(columndesc(rd, n).shape))
               for n in vn)
+    fixed = Dict(n => (cd = columndesc(rd, n); cd.shape isa Dims && !isempty(cd.shape) ? cd.shape : nothing) for n in vn)
     old = nrow(rd)
+    # a FIXED-shape array column takes a scalar (broadcast to every element) or an array of exactly its shape (real TaQL, Phase 359)
+    function cell(c, v)
+        sc[c] && v isa Number && return convert(J[c], _tql_coerce(J[c], v))
+        fs = fixed[c]
+        fs === nothing && return v
+        v isa Number && return fill(convert(J[c], _tql_coerce(J[c], v)), fs)
+        (v isa AbstractString && J[c] === String) && return fill(String(v), fs)
+        v isa AbstractArray && (size(v) == fs || throw(ArgumentError("insert!: column \"$c\" has the fixed shape $fs, got an array of size $(size(v))")))
+        return v
+    end
+    for r in rows, (c, v) in r
+        cell(c, v)                      # validate every cell before any row is added
+    end
     edit(path) do t
         addrows!(t, k)
         for (ri, r) in enumerate(rows), (c, v) in r
-            t[c][old + ri] = (sc[c] && v isa Number) ? convert(J[c], _tql_coerce(J[c], v)) : v
+            t[c][old + ri] = cell(c, v)
         end
     end
     return k
@@ -521,9 +553,14 @@ function _taql_sentinel(c::AbstractVector)
     T = nonmissingtype(eltype(c))
     T <: Bool && return Bool[ismissing(x) ? false : x for x in c]
     T <: Integer && return Int64[ismissing(x) ? typemax(Int64) : Int64(x) for x in c]
-    T <: AbstractFloat && return T[ismissing(x) ? T(NaN) : x for x in c]
-    T <: Complex && return T[ismissing(x) ? T(NaN, NaN) : x for x in c]
+    T <: AbstractFloat && return Float64[ismissing(x) ? NaN : Float64(x) for x in c]      # widened like real TaQL's computed columns
+    T <: Complex && return ComplexF64[ismissing(x) ? ComplexF64(NaN, NaN) : ComplexF64(x) for x in c]
     T <: AbstractString && return String[ismissing(x) ? "none" : String(x) for x in c]
+    if T <: AbstractArray      # an unmatched row is an EMPTY array; elements are widened like a plain column's (real TaQL, Phase 358)
+        E = eltype(T); N = ndims(T)
+        W = E <: Bool ? Bool : E <: Integer ? Int64 : E <: AbstractFloat ? Float64 : E <: Complex ? ComplexF64 : E <: AbstractString ? String : E
+        return Array{W,N}[ismissing(x) ? Array{W,N}(undef, ntuple(_ -> 0, N)...) : Array{W,N}(x) for x in c]
+    end
     throw(ArgumentError("taql: JOIN of a column of type $T is not supported"))
 end
 
@@ -574,8 +611,9 @@ function _taql_join_from(target, body::AbstractString, others)
             rcx = collect(column(right, n)[:])
             T = eltype(rcx)
             push!(names, ra * "." * n)
-            push!(cols, any(iszero, mr) ? _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) :
-                                         T[rcx[r] for r in mr])
+            # sentinel-fill unmatched rows; the values are widened (Float32 -> Float64, ...) like real TaQL's result columns either way
+            push!(cols, (any(iszero, mr) || T <: Union{Number,AbstractString,AbstractArray}) ?
+                        _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) : T[rcx[r] for r in mr])
         end
         push!(names, ra * ".__rowid")
         push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])

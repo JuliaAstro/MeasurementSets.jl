@@ -160,7 +160,32 @@ end
 # Unitful -- a bare-number column vs a unit literal then raises a
 # DimensionError (casacore's "units do not conform"). `asts` entries may
 # be `nothing`, a `TQLExpr`, or an iterable of those.
+# Real TaQL types a column with an EPOCH measure (MEASINFO `epoch`) as a DATE: `year(TIME)`, `mjd(TIME)`, `TIME > datetime('...')` read its seconds as a
+# date (live-verified, Phase 360).  TaQL-lite's date values are MJD days, so in a query that uses a date function the epoch columns held in seconds are
+# converted to days (a bare number beside such a column is then in days too -- a documented difference).
+const _TQL_DATE_FUNCS = ("year", "month", "day", "week", "weekday", "dow", "cdate", "ctime", "cmonth", "cdow", "cweekday", "ctod", "cdatetime",
+                         "date", "time", "mjd", "mjdtodate", "datetime")
+function _ast_any(f, e)
+    f(e) && return true
+    if e isa TQLExpr
+        for fn in fieldnames(typeof(e))
+            _ast_any(f, getfield(e, fn)) && return true
+        end
+    elseif e isa AbstractVector
+        any(x -> _ast_any(f, x), e) && return true
+    elseif e isa NamedTuple
+        any(x -> _ast_any(f, x), values(e)) && return true
+    end
+    return false
+end
+_has_datefn(a) = a === nothing ? false : a isa TQLExpr ? _ast_any(x -> x isa TQLFunc && x.name in _TQL_DATE_FUNCS, a) : any(_has_datefn, a)
+function _epoch_seconds_column(t::AbstractTable, n::AbstractString)
+    mi = try measinfo(t, n) catch; nothing end
+    return mi !== nothing && mi.kind === :epoch && !isempty(mi.units) && lowercase(mi.units[1]) in ("s", "sec")
+end
+
 function _tql_cols(t::AbstractTable, names, asts...)
+    datefn = any(_has_datefn, asts)
     need = any(asts) do a
         a === nothing ? false :
         a isa TQLExpr ? _has_qty(a) :
@@ -174,6 +199,11 @@ function _tql_cols(t::AbstractTable, names, asts...)
     d = Dict{String,AbstractVector}(
         n => (c = _load_col(column(t, n; precision=:full)); need ? _tql_unit_attach(c, columnunit(t, n)) : c)
         for n in plain)
+    if datefn
+        for n in plain
+            _epoch_seconds_column(t, n) && (d[n] = AbstractVector[[x / 86400 for x in d[n]]][1])
+        end
+    end
     isempty(mscal) || merge!(d, _mscal_columns(t, mscal))
     isempty(stokes) || merge!(d, _stokes_setups(t, stokes))
     isempty(mssel) || merge!(d, _mssel_columns(t, mssel))

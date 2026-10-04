@@ -1696,3 +1696,94 @@ end
         end
     end
 end
+
+# Phase 358: random `SELECT .. FROM $1 a JOIN $2 b ON a.LK == b.RK` over Int32/Int64 keys, right columns of every type (Int/Float/Double/Complex/Bool/
+# String and Float / Int ARRAY columns), WHERE / ORDER BY, values compared in order vs real TaQL (540 queries).  Found: an unmatched row of a right
+# ARRAY column is an EMPTY array (any array column in the right table made the whole JOIN fail), and right-table Float32 / ComplexF32 columns are
+# widened to Double / ComplexF64 like real TaQL's result columns.  Not copied: real rejects Double join keys; TaQL-lite matches them.
+@testset "taql SELECT ... JOIN: array columns, widening, random fuzz vs real TaQL (Phase 358)" begin
+    dl = joinpath(mktempdir(), "l"); dr = joinpath(mktempdir(), "r")
+    write_table(dl, "L", Pair{String,Any}["LK" => Int32[1, 2, 9, 3], "LV" => [1.0, 2, 3, 4]]; nrow=4)
+    write_table(dr, "R", Pair{String,Any}["RK" => Int32[1, 2, 3], "RA" => [Float32.(i .* ones(2)) for i in 1:3], "RAI" => [Int32.(i .* ones(3)) for i in 1:3],
+                "RF" => Float32[0.5, 1, 1.5], "RC" => ComplexF32[1, 2, 3]]; nrow=3)
+    tl = readtable(dl); tr = readtable(dr)
+    col(c) = collect(column(taql(tl, "SELECT a.LK AS LK, $c AS X FROM \$1 a JOIN \$2 b ON a.LK == b.RK", tr), "X")[:])
+    @test col("b.RA") == [[1.0, 1.0], [2.0, 2.0], Float64[], [3.0, 3.0]] && col("b.RAI")[3] == Int64[] && eltype(col("b.RAI")[1]) == Int64
+    @test eltype(col("b.RF")) == Float64 && eltype(col("b.RC")) == ComplexF64 && isnan(col("b.RF")[3]) && isnan(real(col("b.RC")[3]))
+    if _HAVE_TAQL
+        rng = MersenneTwister(358)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        for _ in 1:6
+            nl = rand(rng, 4:10); nr = rand(rng, 3:7); kt = pick([Int32, Int64])
+            d1 = joinpath(mktempdir(), "l"); d2 = joinpath(mktempdir(), "r")
+            write_table(d1, "L", Pair{String,Any}["LK" => kt.(rand(rng, 1:6, nl)), "LV" => Float64.(1:nl), "LS" => rand(rng, ["p", "q", "rr"], nl)]; nrow=nl)
+            write_table(d2, "R", Pair{String,Any}["RK" => kt.(shuffle(rng, 1:7)[1:nr]), "RI" => Int32.(10 .* (1:nr)), "RF" => Float32.(1:nr) ./ 4, "RD" => Float64.(1:nr) ./ 3,
+                        "RS" => ["s$i" for i in 1:nr], "RB" => rand(rng, Bool, nr), "RC" => ComplexF32.(1:nr) .+ 1im,
+                        "RA" => [Float32.(i .* ones(2)) for i in 1:nr], "RAI" => [Int32.(i .* ones(3)) for i in 1:nr]]; nrow=nr)
+            a = readtable(d1); b = readtable(d2)
+            for _ in 1:8
+                cols = unique([pick(["RI", "RF", "RD", "RS", "RB", "RC", "RA", "RAI"]) for _ in 1:rand(rng, 1:3)])
+                lcols = unique([pick(["LK", "LV", "LS"]) for _ in 1:rand(rng, 1:2)])
+                q = "SELECT " * join(vcat(["a.$c AS $c" for c in lcols], ["b.$c AS $c" for c in cols]), ", ") * " FROM \$1 a JOIN \$2 b ON a.LK == b.RK" *
+                    (rand(rng) < .3 ? " WHERE a.LV > $(rand(rng, 1:4))" : "") * (rand(rng) < .3 ? " ORDER BY a.LV DESC" : "")
+                names = vcat(lcols, cols)
+                r1 = try (rt = _taqlcmd(q, d1, d2); [collect(rt[Symbol(n)][:]) for n in names]) catch ex; occursin("Slicer", sprint(showerror, ex)) ? :empty : :err end
+                r1 === :err && continue
+                g = taql(a, q, b)
+                r2 = [collect(column(g, n)[:]) for n in names]
+                close(x, y) = x isa AbstractArray ? (size(x) == size(y) && all(close.(x, y))) : (x == y || (x isa Number && y isa Number && (isapprox(x, y; rtol=1e-6) || (isnan(x) && isnan(y)))))
+                @test r1 === :empty ? all(isempty, r2) : all(j -> length(r1[j]) == length(r2[j]) && all(i -> close(r1[j][i], r2[j][i]), eachindex(r1[j])), eachindex(r1))
+            end
+        end
+    end
+end
+
+# Phase 359: random INSERT (VALUES / SET / LIMIT; ints, floats, strings, arrays into every column type) vs real TaQL on twin tables, all cells and
+# column types compared (550 commands).  Found: an integer into a NARROWER integer column wraps (`SET H=40000` -> -25536 in Int16, `U=-1` -> 255);
+# a FIXED-shape array column takes a scalar (broadcast) or an array of exactly its shape -- a wrong-sized array was silently TRUNCATED by UPDATE and
+# accepted by INSERT; an UPDATE scalar fills the cell's current shape (also in variable-shape columns).  Not copied: real rejects Bool into numeric
+# columns and strings / numbers into the wrong kind; TaQL-lite is more lenient.
+@testset "taql INSERT / UPDATE integer wrap + fixed-shape array cells vs real TaQL (Phase 359)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["I" => Int32.(1:2), "H" => Int16.(1:2), "U" => UInt8.(1:2), "AF" => [Float64.(i .* ones(2)) for i in 1:2],
+                        "VF" => [Float64.(1:i) for i in 1:2], "AT" => [["x", "y"] for _ in 1:2]]; nrow=2); d)
+    col(d, c) = collect(column(readtable(d), c)[:])
+    d = mk(); taql(d, "INSERT INTO t SET H=40000, U=-1, I=5000000000, AF=3, AT='s'")
+    @test col(d, "H")[3] == -25536 && col(d, "U")[3] == 255 && col(d, "I")[3] == 705032704 && collect(col(d, "AF")[3]) == [3.0, 3.0] && collect(col(d, "AT")[3]) == ["s", "s"]
+    @test_throws ArgumentError taql(d, "INSERT INTO t SET AF=[1,2,3]")
+    @test_throws ArgumentError taql(d, "INSERT INTO t SET AF=[1]")
+    @test nrow(readtable(d)) == 3                                                      # the failed commands added no rows
+    d = mk(); taql(d, "UPDATE t SET AF=3, VF=7, H=40000, U=300 WHERE I==2")
+    @test collect(col(d, "AF")[2]) == [3.0, 3.0] && col(d, "VF") == [[1.0], [7.0, 7.0]] && col(d, "H") == [1, -25536] && col(d, "U") == [1, 44]
+    @test_throws ArgumentError taql(d, "UPDATE t SET AF=[1,2,3]")
+    @test collect(col(d, "AF")[1]) == [1.0, 1.0]                                      # unchanged by the failure
+    if _HAVE_TAQL
+        rng = MersenneTwister(359)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        mk2() = (d = joinpath(mktempdir(), "t");
+                 write_table(d, "T", Pair{String,Any}["I" => Int32.(1:3), "H" => Int16.(1:3), "U" => UInt8.(1:3), "FL" => Float32.(1:3), "D" => Float64.(1:3),
+                            "B" => [true, false, true], "S" => ["a", "b", "c"], "C" => ComplexF64.(1:3), "AF" => [Float64.(i .* ones(2)) for i in 1:3],
+                            "AT" => [["x", "y"] for _ in 1:3]]; nrow=3); d)
+        # only forms real TaQL accepts for the column kind (no Bool into numbers, no string into numbers)
+        vals = Dict("I" => ["7", "-3", "2.7", "1e3", "3+4"], "H" => ["7", "-3", "2.7", "40000"], "U" => ["7", "300", "-1", "2.5"], "FL" => ["1.5", "3", "1e10"],
+                    "D" => ["2.5", "7", "-1e-3", "(1+2)/4"], "B" => ["true", "false"], "S" => ["'z'", "''"], "C" => ["3", "2.5", "(1+2)", "complex(1,2)"],
+                    "AF" => ["[1,2]", "[1.5,2.5]", "[1,2,3]", "3"], "AT" => ["['p','q']", "['p']", "'s'"])
+        cn = collect(keys(vals)); sort!(cn)
+        state(dd) = (t = readtable(dd); (nrow(t), [(c.name, c.type) for c in t.desc.columns], [map(v -> v isa AbstractArray ? Array(v) : v, collect(column(t, c.name)[:])) for c in t.desc.columns]))
+        close(a, b) = a isa AbstractArray ? (size(a) == size(b) && all(close.(a, b))) : (a == b || (a isa AbstractFloat && b isa AbstractFloat && (isapprox(a, b; rtol=1e-6) || isnan(a) && isnan(b))))
+        for _ in 1:60
+            cs = unique([pick(cn) for _ in 1:rand(rng, 1:4)])
+            rows = join(["(" * join([pick(vals[c]) for c in cs], ", ") * ")" for _ in 1:rand(rng, 1:2)], ", ")
+            cmd = rand(rng, 1:3) == 1 ? "INSERT INTO \$1 SET " * join(["$c=$(pick(vals[c]))" for c in cs], ", ") :
+                  "INSERT INTO \$1 ($(join(cs, ", "))) VALUES $rows" * (rand(rng) < .3 ? " LIMIT $(rand(rng, 1:3))" : "")
+            d1 = mk2(); d2 = mk2(); b = state(d1)
+            ok1 = try x = _taqlcmd(cmd, d1); x = nothing; true catch; false end
+            ok2 = try taql(d2, cmd, d2); true catch; false end
+            @test ok1 == ok2
+            (ok1 && ok2) || continue
+            for _ in 1:40; GC.gc(); GC.gc(); sleep(0.05); state(d1) != b && break; end
+            s1 = state(d1); s2 = state(d2)
+            @test s1[1] == s2[1] && s1[2] == s2[2] && all(j -> all(i -> close(s1[3][j][i], s2[3][j][i]), eachindex(s1[3][j])), eachindex(s1[3]))
+        end
+    end
+end
