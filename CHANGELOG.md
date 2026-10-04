@@ -10957,3 +10957,23 @@ Random `SELECT ... FROM [(SELECT ..)] WHERE x [NOT] IN (SELECT ..) / [NOT] EXIST
 ### Phase 353 follow-up — Linux x86-64 guard fixes (test only)
 
 The Docker run found two guards that depended on platform / Julia version: the Phase 349 `ALTER TABLE` fuzz could rename a keyword onto an existing one (real TaQL writes a duplicate key; not copied), so renames now target fresh names; and the Phase 352 fuzz compared `arg()` of complex values, whose ±π depends on the sign of a zero imaginary part, so it is left out.
+
+### Phase 354 — quantity-literal fuzz vs real TaQL (no bug found)
+
+800 random `col op N<unit>` / arithmetic / `BETWEEN` / `IN` conditions over length and angle columns with literals in other units agree with real TaQL. Not copied: real TaQL rejects a time- or frequency-unit literal (`s`, `h`, `Hz`, …) against a numeric column; TaQL-lite compares them after unit conversion.
+
+### Phase 355 — GROUP BY expression keys / ORDER BY / LIMIT fuzz vs real TaQL
+
+550 random grouped queries (expression keys, aggregate expressions, WHERE, HAVING by alias, ORDER BY alias/key/DESC, LIMIT) compared with real TaQL **in order**. Fixed: an all-descending `ORDER BY` of a grouped result is the reversed ascending sort (fully tied groups come out reversed), as for a row `ORDER BY` (Phase 246); mixed directions keep ties in first-seen group order.
+
+### Phase 356 — result-column type fuzz vs real TaQL (`SELECT .. GIVING`)
+
+800 random SELECT expressions: the type and scalar/array nature of the persisted result column compared with real TaQL's `GIVING` table. Fixed: `iif` returns the promoted type of its branches and a scalar beside an array fills the array's shape; complex values order by magnitude in `< <= > >=`; a fixed-shape array column with one element per cell (the result of collapsing the only axis, `sums(AF, 1)`) crashed the StandardStMan writer. Not copied: real's `VariableDims` declaration for computed array columns, its errors for some Float32 / Int16 mixes, and `real(<string>)`.
+
+### Phase 357 — GROUP BY aggregate result-column fuzz vs real TaQL (no bug found)
+
+1300 random `g*(col)` / `gs*(arraycol)` aggregates: result column type, scalar/array nature and values compared with real TaQL's `GIVING` table — no divergence. Not copied: real rejects Bool / String aggregates and `gfirst` / `glast` of an array column; TaQL-lite accepts them.
+
+### Phase 357 follow-up — Linux guard fix (test only)
+
+The Docker run found the Phase 357 guard drew a case where `gmaxs` hit real casacore's all-negative-group DBL_MIN bug (Phase 284); `gmaxs` is now left out of the guard.

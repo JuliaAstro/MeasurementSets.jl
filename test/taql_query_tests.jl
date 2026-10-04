@@ -29,8 +29,8 @@ import Tables
 
     # comparison operator spellings
     for (s, op) in [("A == 1", ==), ("A = 1", ==), ("A != 1", !=),
-                    ("A <> 1", !=), ("A < 1", <), ("A <= 1", <=),
-                    ("A > 1", >), ("A >= 1", >=)]
+                    ("A <> 1", !=), ("A < 1", MSv2._tql_lt), ("A <= 1", MSv2._tql_le),
+                    ("A > 1", MSv2._tql_gt), ("A >= 1", MSv2._tql_ge)]      # ordering ops are complex-aware (Phase 356)
         e3 = parse(s)
         @test e3 isa MSv2.TQLCmp
         @test e3.op === op
@@ -5309,6 +5309,72 @@ end
             r1 = collect(_taqlcmd("SELECT $f(A) AS X FROM \$1", dir)[:X][:])
             r2 = collect(column(query(t, "TRUE"; select=["X" => "$f(A)"]), "X")[:])
             @test all(i -> r1[i] == r2[i] || (r1[i] isa AbstractFloat && isapprox(r1[i], r2[i]; atol=1e-12)), eachindex(r1))
+        end
+    end
+end
+
+# Phase 354: random quantity-literal WHERE conditions vs real TaQL (800 queries: `col op N<unit>`, `+ - *`, abs, BETWEEN, IN over length (m/km/cm/mm)
+# and angle (rad/deg/arcmin/arcsec) columns, literals in other units): no bug found.  Not copied: real TaQL rejects a TIME- or FREQUENCY-unit
+# literal (s/min/h/d, Hz...) against a numeric column ("cannot combine Double and Date"); TaQL-lite compares them after unit conversion.
+@testset "TaQL-lite — quantity literals random fuzz vs real TaQL (Phase 354)" begin
+    _HAVE_UNITFUL || return
+    n = 10
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["L" => Float64.(1:n) .* 250.0, "A" => Float64.(1:n) .* 0.2, "K" => Int32.(1:n), "KM" => Float64.(1:n) ./ 3];
+                nrow=n, units=Dict("L" => "m", "A" => "rad", "KM" => "km"))
+    t = readtable(dir)
+    @test collect(column(query(t, "L > 1.5km"), "K")[:]) == 7:10 && collect(column(query(t, "L BETWEEN 30000mm AND 1km"), "K")[:]) == 1:4
+    @test collect(column(query(t, "A < 30deg"), "K")[:]) == 1:2 && collect(column(query(t, "KM * 3 > 2000m"), "K")[:]) == 3:10
+    if _HAVE_TAQL
+        rng = MersenneTwister(354)
+        ln = ["m", "km", "cm", "mm"]; an = ["rad", "deg", "arcmin", "arcsec"]
+        q(u) = "$(rand(rng, [1, 2, 5, 10, 50, 100, 0.5, 2.5, 0.37, 7.3]))$(rand(rng, u))"
+        function ex()
+            c, u = rand(rng, [("L", ln), ("L", ln), ("A", an), ("A", an), ("KM", ln)])
+            r = rand(rng, 1:5)
+            r == 1 && return ("($c + $(q(u)))", u); r == 2 && return ("($c - $(q(u)))", u); r == 3 && return ("($c * 2)", u)
+            r == 4 && return ("abs($c - $(q(u)))", u)
+            return (c, u)
+        end
+        for _ in 1:80
+            e, u = ex(); r = rand(rng)
+            w = r < .7 ? "$e $(rand(rng, [">", "<", ">=", "<=", "==", "!="])) $(q(u))" : r < .85 ? "$e BETWEEN $(q(u)) AND $(q(u))" : "$e IN [$(q(u)), $(q(u)), $(q(u))]"
+            r1 = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", dir)[:K][:]) catch ex_
+                occursin("Slicer", sprint(showerror, ex_)) ? Int32[] : :err end      # a lazy "Slicer error" = an empty result
+            @test r1 !== :err && r1 == collect(column(query(t, w), "K")[:])
+        end
+    end
+end
+
+# Phase 356: result-column TYPES of random SELECT expressions vs real TaQL (`SELECT expr AS X ... GIVING`, 800 expressions over Int/UInt/Short/Float/
+# Double/Complex/Bool/String columns and Int/Float/Bool/Complex array columns).  Found: `iif` returns the PROMOTED type of its branches (a scalar
+# beside an array fills the array's shape: `iif(B, C, 3)` is complex, `iif(I>1, AI, 7)` is `[7,7,7]`); COMPLEX values order by magnitude in
+# `< <= > >=` (`C > 2.5`); and a fixed-shape array column with ONE element per cell (`sums(AF, 1)`) crashed the StandardStMan writer.  Not copied:
+# real's declared `VariableDims` for computed array columns, its errors for Float32 / Int16 columns in some mixed operations, and `real(<string>)`.
+@testset "TaQL-lite — iif promotion, complex ordering, one-element array cells (Phase 356)" begin
+    n = 4
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["I" => Int32.(1:n), "FF" => Float32.(1:n) ./ 2, "C" => ComplexF32[1+1im, 3, -2+1im, 4im], "B" => [true, false, true, false],
+                "AI" => [Int32.(i .* ones(3)) for i in 1:n], "AF" => [Float32.(i .* ones(2)) for i in 1:n], "AC" => [ComplexF32.(i .* ones(2)) for i in 1:n]]; nrow=n)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    @test eltype(ev("iif(B, C, 3)")) == ComplexF64 && ev("iif(B, C, 3)")[2] == 3 + 0im && eltype(ev("iif(B, I, FF)")) == Float64
+    @test ev("iif(I>1, AI, 7)") == [[7, 7, 7], [2, 2, 2], [3, 3, 3], [4, 4, 4]] && eltype(ev("iif(I>1, AI, FF)")[1]) == Float64
+    @test eltype(ev("iif(B, AC, I)")[1]) == ComplexF64 && ev("iif(B, AF, AI)")[2] == [2.0, 2.0, 2.0]
+    @test ev("C > 2.5") == [false, true, false, true] && ev("C >= complex(1,1)") == [true, true, true, true] && ev("C < 2") == [true, false, false, false]
+    # one-element fixed-shape array cells (the result of collapsing the only axis) write and read back
+    p = joinpath(mktempdir(), "o"); copytable(p, query(t, "TRUE"; select=["X" => "sums(AF, 1)"]))
+    @test collect(column(readtable(p), "X")[:]) == [[2.0], [4.0], [6.0], [8.0]]
+    if _HAVE_TAQL
+        pick(rng, xs) = xs[rand(rng, 1:length(xs))]
+        for e in ("iif(B, C, 3)", "iif(B, I, FF)", "iif(B, C, FF)", "iif(I>1, AI, FF)", "iif(B, AC, I)", "iif(I>1, AI, 7)", "iif(B, AF, AI)", "iif(B, AF, 2)",
+                  "sums(AI, 1)", "means(AF, 1)", "C > 2.5", "C >= 3", "C < complex(2,0)")
+            p1 = joinpath(mktempdir(), "r")
+            x = _taqlcmd("SELECT $e AS X FROM \$1 GIVING '$p1'", dir); x = nothing
+            for _ in 1:40; GC.gc(); GC.gc(); sleep(0.05); isfile(joinpath(p1, "table.dat")) && break; end
+            real = readtable(p1); ours = query(t, "TRUE"; select=["X" => e])
+            @test MSv2.columndesc(real, "X").type == MSv2._casatype_of(eltype(first(ev(e))))
+            @test all(i -> collect(column(real, "X")[i]) == collect(ev(e)[i]), 1:n)
         end
     end
 end

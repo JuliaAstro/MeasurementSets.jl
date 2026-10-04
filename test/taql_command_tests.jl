@@ -1621,3 +1621,78 @@ end
         end
     end
 end
+
+# Phase 355: random GROUP BY with expression keys (K+1, K%2, upper(S), strlength(S), (I>0), floor(D/2), ...), aggregate expressions, WHERE,
+# HAVING (also by alias), ORDER BY (alias / key / DESC) and LIMIT vs real TaQL, compared IN ORDER (550 queries; `gmax` left out: upstream bug,
+# Phase 284).  Found: an all-DESC ORDER BY of a grouped result is the reversed ascending sort (fully-tied groups come out reversed), like a
+# row ORDER BY (Phase 246); mixed directions keep ties in first-seen group order.
+@testset "taql GROUP BY expression keys + ORDER BY / LIMIT vs real TaQL (Phase 355)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["K" => Int32[3, 1, 2, 0, 3, 1, 2, 0], "D" => [2.5, -1.0, 0.5, 3.0, -2.0, 1.0, 0.0, 4.0]]; nrow=8)
+    t = readtable(dir)
+    col(q, n) = collect(column(taql(t, q), n)[:])
+    @test col("SELECT K, gcount() AS N FROM t GROUP BY K", "K") == [3, 1, 2, 0]                      # first-seen group order
+    @test col("SELECT K, gcount() AS N FROM t GROUP BY K ORDER BY N DESC", "K") == [0, 2, 1, 3]     # all tied, DESC = reversed
+    @test col("SELECT K, gcount() AS N FROM t GROUP BY K ORDER BY K DESC", "K") == [3, 2, 1, 0]
+    @test col("SELECT K%2 AS P, K, gcount() AS N FROM t GROUP BY K%2, K ORDER BY P DESC, K", "K") == [1, 3, 0, 2]   # mixed: ties keep order
+    if _HAVE_TAQL
+        N = 40; r0 = MersenneTwister(3)
+        d2 = joinpath(mktempdir(), "t")
+        write_table(d2, "T", Pair{String,Any}["K" => Int32.(rand(r0, 0:3, N)), "I" => Int32.(rand(r0, -5:5, N)), "D" => round.(randn(r0, N) .* 3; digits=1),
+                    "S" => rand(r0, ["ab", "abc", "b", "z"], N)]; nrow=N)
+        t2 = readtable(d2)
+        rng = MersenneTwister(355)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        keyexprs = ["K", "K+1", "K%2", "I%3", "S", "upper(S)", "strlength(S)", "(I>0)", "floor(D/2)", "K*2+I%2"]
+        aggs = ["gcount()", "gsum(I)", "gmean(D)", "gmin(I)", "gfirst(D)", "glast(S)", "gsum(I)+gcount()", "gmean(I)*2"]
+        for _ in 1:60
+            ks = unique([pick(keyexprs) for _ in 1:rand(rng, 1:2)])
+            ags = ["$(pick(aggs)) AS A$i" for i in 1:rand(rng, 1:2)]
+            q = "SELECT " * join(vcat(["$k AS G$i" for (i, k) in enumerate(ks)], ags), ", ") * " FROM \$1" * (rand(rng) < .3 ? " WHERE I > $(rand(rng, -3:3))" : "") *
+                " GROUP BY " * join(ks, ", ")
+            rand(rng) < .3 && (q *= " HAVING " * pick(["gcount() > 2", "A1 > 0", "gsum(I) <= 5", "gcount() < 8"]))
+            rand(rng) < .6 && (q *= " ORDER BY " * pick(["G1", "A1", "G1 DESC", "A1 DESC, G1"]))
+            rand(rng) < .2 && (q *= " LIMIT $(rand(rng, 1:4))")
+            names = ["G$i" for i in 1:length(ks)]; append!(names, ["A$i" for i in 1:length(ags)])
+            r1 = try (rt = _taqlcmd(q, d2); [collect(rt[Symbol(n)][:]) for n in names]) catch ex; occursin("Slicer", sprint(showerror, ex)) ? :empty : :err end    # a lazy "Slicer error" = an empty result
+            r2 = try (g = taql(t2, replace(q, "\$1" => "t")); [collect(column(g, n)[:]) for n in names]) catch; :err end
+            @test (r1 === :err && r2 === :err) || (r1 === :empty && r2 !== :err && all(isempty, r2)) || (r1 !== :err && r1 !== :empty && r2 !== :err && all(j -> length(r1[j]) == length(r2[j]) &&
+                  all(i -> r1[j][i] == r2[j][i] || (r1[j][i] isa Real && isapprox(r1[j][i], r2[j][i]; rtol=1e-9, atol=1e-12)), eachindex(r1[j])), eachindex(r1)))
+        end
+    end
+end
+
+# Phase 357: GROUP BY aggregate RESULT columns (type, scalar/array, values) vs real TaQL's `GIVING` table: 1300 random `g*(col)` / `gs*(arraycol)`
+# (gsum gmean gmin gfirst glast gvariance gstddev grms gmedian gproduct gany gall gntrue gnfalse gsums gmeans gmins gaggr gstack gvariances ...; not gmax/gmaxs:
+# real casacore returns DBL_MIN for an all-negative group, Phase 284 -- found on Linux CI)
+# over Int/UInt/Short/Float/Double/Complex/Bool/String and array columns: no bug found.  Not copied: real rejects Bool / String aggregates
+# (`gsum(B)`, `gmin(S)`, `grms(C)`) and `gfirst` / `glast` of an ARRAY column; TaQL-lite accepts them.
+@testset "taql GROUP BY aggregate result columns vs real TaQL GIVING (Phase 357)" begin
+    if _HAVE_TAQL
+        rng = MersenneTwister(357)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        n = 12
+        dir = joinpath(mktempdir(), "t")
+        write_table(dir, "T", Pair{String,Any}["G" => Int32.(rand(rng, 1:3, n)), "I" => Int32.(rand(rng, -3:5, n)), "U" => UInt8.(rand(rng, 0:9, n)),
+            "H" => Int16.(rand(rng, -3:5, n)), "FL" => Float32.(rand(rng, -3:5, n)) ./ 2, "D" => Float64.(rand(rng, -3:5, n)) ./ 3,
+            "C" => ComplexF32.(rand(rng, -3:3, n)) .+ 1im, "AF" => [Float32.(rand(rng, -3:5, 2)) for _ in 1:n], "AI" => [Int32.(rand(rng, -3:5, 3)) for _ in 1:n],
+            "AC" => [ComplexF32.(rand(rng, -3:3, 2)) for _ in 1:n]]; nrow=n)
+        t = readtable(dir)
+        close(a, b) = a isa AbstractArray ? (size(a) == size(b) && all(close.(a, b))) :
+                      (a == b || (a isa Number && b isa Number && (isapprox(a, b; rtol=1e-8, atol=1e-10) || (isnan(a) && isnan(b)))))
+        for _ in 1:70
+            e = rand(rng) < .5 ? "$(pick(["gsum", "gmean", "gmin", "gfirst", "glast", "gvariance", "gstddev", "gmedian", "gproduct", "gntrue"]))($(pick(["I", "U", "H", "FL", "D"])))" :
+                "$(pick(["gsums", "gmeans", "gmins", "gaggr", "gstack", "gvariances", "gmedians", "gproducts"]))($(pick(["AF", "AI"])))"
+            q = "SELECT G, $e AS X FROM \$1 GROUP BY G"; p1 = joinpath(mktempdir(), "r")
+            ok1 = try x = _taqlcmd(q * " GIVING '$p1'", dir); x = nothing; true catch; false end
+            ok1 || continue
+            g = taql(t, replace(q, "\$1" => "t"))
+            for _ in 1:40; GC.gc(); GC.gc(); sleep(0.05); isfile(joinpath(p1, "table.dat")) && break; end
+            r1 = readtable(p1)
+            k1 = collect(column(r1, "G")[:]); v1 = collect(column(r1, "X")[:]); k2 = collect(column(g, "G")[:]); v2 = collect(column(g, "X")[:])
+            o1 = sortperm(k1); o2 = sortperm(k2)
+            @test k1[o1] == k2[o2] && all(i -> close(v1[o1[i]], v2[o2[i]]), eachindex(v1))
+            @test (MSv2.columndesc(r1, "X").type == MSv2._casatype_of(eltype(first(v2) isa AbstractArray ? eltype(first(v2)) : typeof(first(v2)))))
+        end
+    end
+end

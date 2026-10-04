@@ -896,8 +896,28 @@ _boxed_sstd(x, w) = (a = _require_array(x);
 # END` is NULL -- `iif` propagates `missing` the same way, matching the
 # 3-valued-logic convention used throughout the rest of the WHERE/HAVING/
 # JOIN evaluation (`_tql_and`/`_tql_or`/`_tql_truthy`, `ast.jl`).
-_tql_iif(cond, a, b) = cond === missing ? missing : ifelse(cond, a, b)
-_tql_iif(cond::AbstractArray, a, b) = ifelse.(cond, a, b)      # elementwise (Phase 285)
+# Real TaQL's `iif` result has the PROMOTED type of both branches, and a scalar branch beside an array one fills that array's shape
+# (live-verified, Phase 356: `iif(B, C, 3)` is complex, `iif(I>1, AI, 7)` is `[7,7,7]` on the other rows).  Numbers only.
+_iif_elt(x) = x isa AbstractArray ? eltype(x) : typeof(x)
+function _tql_iif_pick(chosen, other)
+    (_iif_elt(chosen) <: Number && _iif_elt(other) <: Number && !(_iif_elt(chosen) <: Bool && _iif_elt(other) <: Bool)) || return chosen
+    T = promote_type(_iif_elt(chosen), _iif_elt(other))
+    if chosen isa AbstractArray
+        return eltype(chosen) === T ? chosen : convert(AbstractArray{T}, chosen)
+    elseif other isa AbstractArray
+        return fill(convert(T, chosen), size(other))
+    end
+    return convert(T, chosen)
+end
+_tql_iif(cond, a, b) = cond === missing ? missing : (cond ? _tql_iif_pick(a, b) : _tql_iif_pick(b, a))
+function _tql_iif(cond::AbstractArray, a, b)                    # elementwise (Phase 285), numbers promoted to one type
+    ea, eb = _iif_elt(a), _iif_elt(b)
+    if ea <: Number && eb <: Number && !(ea <: Bool && eb <: Bool)
+        T = promote_type(ea, eb)
+        return ifelse.(cond, a isa AbstractArray ? convert(AbstractArray{T}, a) : convert(T, a), b isa AbstractArray ? convert(AbstractArray{T}, b) : convert(T, b))
+    end
+    return ifelse.(cond, a, b)
+end
 
 # name => (callable-over-arg-values, allowed arg count).  `min`/`max` and
 # `angdist` are arity-overloaded and handled in `_make_func`, not here.
