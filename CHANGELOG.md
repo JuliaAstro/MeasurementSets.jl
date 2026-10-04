@@ -10945,3 +10945,7 @@ Random `SELECT ... FROM [(SELECT ..)] WHERE x [NOT] IN (SELECT ..) / [NOT] EXIST
 ### Phase 351 — string / string-array expression fuzz vs real TaQL
 
 630 random expressions over a string column and a string-array column (`upper`/`lower`/`trim`/`capitalize`/`sreverse`/`substr`/`replace`/`+`/`iif`/`string`/`strlength`, `==`/`<`/`LIKE`/`~`/`IN`/`bool`) compared with real TaQL. Fixed: `LIKE` / `ILIKE` / `~` / `!~` map elementwise over a string-array cell (they raised a TypeError), and on an array cell `substr` does not clamp — a start beyond an element's length is an error, as in real TaQL (a scalar string never errors).
+
+### Phase 352 — complex expression fuzz vs real TaQL (no bug found)
+
+1100 random complex scalar / array expressions compared with real TaQL. No TaQL-lite bug; the handful of differences are floating-point noise in casacore's own complex functions (`sqrt` through the polar form, exact equality of `C**2` and `conj(C)**2`, Inf/NaN intermediates of division by zero), so the guard avoids those forms.
