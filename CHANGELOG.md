@@ -10969,3 +10969,7 @@ The Docker run found two guards that depended on platform / Julia version: the P
 ### Phase 356 — result-column type fuzz vs real TaQL (`SELECT .. GIVING`)
 
 800 random SELECT expressions: the type and scalar/array nature of the persisted result column compared with real TaQL's `GIVING` table. Fixed: `iif` returns the promoted type of its branches and a scalar beside an array fills the array's shape; complex values order by magnitude in `< <= > >=`; a fixed-shape array column with one element per cell (the result of collapsing the only axis, `sums(AF, 1)`) crashed the StandardStMan writer. Not copied: real's `VariableDims` declaration for computed array columns, its errors for some Float32 / Int16 mixes, and `real(<string>)`.
+
+### Phase 357 — GROUP BY aggregate result-column fuzz vs real TaQL (no bug found)
+
+1300 random `g*(col)` / `gs*(arraycol)` aggregates: result column type, scalar/array nature and values compared with real TaQL's `GIVING` table — no divergence. Not copied: real rejects Bool / String aggregates and `gfirst` / `glast` of an array column; TaQL-lite accepts them.

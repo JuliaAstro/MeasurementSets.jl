@@ -1661,3 +1661,37 @@ end
         end
     end
 end
+
+# Phase 357: GROUP BY aggregate RESULT columns (type, scalar/array, values) vs real TaQL's `GIVING` table: 1300 random `g*(col)` / `gs*(arraycol)`
+# (gsum gmean gmin gfirst glast gvariance gstddev grms gmedian gproduct gany gall gntrue gnfalse gsums gmeans gmins gaggr gstack gvariances gmaxs ...)
+# over Int/UInt/Short/Float/Double/Complex/Bool/String and array columns: no bug found.  Not copied: real rejects Bool / String aggregates
+# (`gsum(B)`, `gmin(S)`, `grms(C)`) and `gfirst` / `glast` of an ARRAY column; TaQL-lite accepts them.
+@testset "taql GROUP BY aggregate result columns vs real TaQL GIVING (Phase 357)" begin
+    if _HAVE_TAQL
+        rng = MersenneTwister(357)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        n = 12
+        dir = joinpath(mktempdir(), "t")
+        write_table(dir, "T", Pair{String,Any}["G" => Int32.(rand(rng, 1:3, n)), "I" => Int32.(rand(rng, -3:5, n)), "U" => UInt8.(rand(rng, 0:9, n)),
+            "H" => Int16.(rand(rng, -3:5, n)), "FL" => Float32.(rand(rng, -3:5, n)) ./ 2, "D" => Float64.(rand(rng, -3:5, n)) ./ 3,
+            "C" => ComplexF32.(rand(rng, -3:3, n)) .+ 1im, "AF" => [Float32.(rand(rng, -3:5, 2)) for _ in 1:n], "AI" => [Int32.(rand(rng, -3:5, 3)) for _ in 1:n],
+            "AC" => [ComplexF32.(rand(rng, -3:3, 2)) for _ in 1:n]]; nrow=n)
+        t = readtable(dir)
+        close(a, b) = a isa AbstractArray ? (size(a) == size(b) && all(close.(a, b))) :
+                      (a == b || (a isa Number && b isa Number && (isapprox(a, b; rtol=1e-8, atol=1e-10) || (isnan(a) && isnan(b)))))
+        for _ in 1:70
+            e = rand(rng) < .5 ? "$(pick(["gsum", "gmean", "gmin", "gfirst", "glast", "gvariance", "gstddev", "gmedian", "gproduct", "gntrue"]))($(pick(["I", "U", "H", "FL", "D"])))" :
+                "$(pick(["gsums", "gmeans", "gmins", "gaggr", "gstack", "gvariances", "gmaxs", "gmedians", "gproducts"]))($(pick(["AF", "AI"])))"
+            q = "SELECT G, $e AS X FROM \$1 GROUP BY G"; p1 = joinpath(mktempdir(), "r")
+            ok1 = try x = _taqlcmd(q * " GIVING '$p1'", dir); x = nothing; true catch; false end
+            ok1 || continue
+            g = taql(t, replace(q, "\$1" => "t"))
+            for _ in 1:40; GC.gc(); GC.gc(); sleep(0.05); isfile(joinpath(p1, "table.dat")) && break; end
+            r1 = readtable(p1)
+            k1 = collect(column(r1, "G")[:]); v1 = collect(column(r1, "X")[:]); k2 = collect(column(g, "G")[:]); v2 = collect(column(g, "X")[:])
+            o1 = sortperm(k1); o2 = sortperm(k2)
+            @test k1[o1] == k2[o2] && all(i -> close(v1[o1[i]], v2[o2[i]]), eachindex(v1))
+            @test (MSv2.columndesc(r1, "X").type == MSv2._casatype_of(eltype(first(v2) isa AbstractArray ? eltype(first(v2)) : typeof(first(v2)))))
+        end
+    end
+end
