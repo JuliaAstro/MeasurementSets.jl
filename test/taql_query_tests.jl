@@ -5197,3 +5197,27 @@ end
         end
     end
 end
+
+# Phase 351: random string / string-array expressions vs real TaQL (630 expressions: case/trim/substr/replace/concat/iif/string/strlength,
+# ==,<,LIKE,~,IN,bool).  Found: `LIKE` / `~` map elementwise over a string-ARRAY cell (were a TypeError), and on an array cell `substr`
+# does not clamp -- a start beyond an element's length is an error (a scalar string never errors).
+@testset "TaQL-lite — string-array LIKE/regex + substr bounds vs real TaQL (Phase 351)" begin
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["S" => ["Hello", "", "abc"], "K" => Int32[1, 2, 3], "SA" => [["Hello", "ab"], ["a", ""], ["xyz", "b"]]]; nrow=3)
+    t = readtable(dir)
+    ev(e) = collect(column(query(t, "TRUE"; select=["X" => e]), "X")[:])
+    @test ev("SA LIKE 'a%'") == [[false, true], [true, false], [false, false]] && ev("SA NOT LIKE '%b'")[1] == [true, false]
+    @test ev("SA ~ p/[ab]*/") == [[false, true], [true, false], [false, true]] && ev("SA !~ p/a*/")[2] == [false, true]
+    @test ev("S LIKE 'a%'") == [false, false, true]                                   # scalars unchanged
+    @test ev("substr(SA, 0, 2)")[1] == ["He", "ab"] && ev("substr(SA, 0, 3)")[1] == ["Hel", "ab"]
+    @test_throws ArgumentError ev("substr(SA, 3, 1)")                                  # start beyond "ab"
+    @test_throws ArgumentError ev("substr(SA, 1, 1)")                                  # "" has length 0
+    @test ev("substr(S, 5, 2)") == ["", "", ""] && ev("substr(S, 9)") == ["", "", ""]   # a scalar never errors
+    if _HAVE_TAQL
+        for e in ("SA LIKE 'a%'", "SA NOT LIKE '%b'", "SA ILIKE 'A%'", "SA ~ p/[ab]*/", "SA !~ p/a*/", "upper(SA) LIKE 'H%'", "substr(SA, 0, 2)", "substr(SA, 0, 3)")
+            r = collect(_taqlcmd("SELECT $e AS X FROM \$1", dir)[:X][:]); m = ev(e)
+            @test all(i -> collect(r[i]) == collect(m[i]), eachindex(r))
+        end
+        @test_throws Exception _taqlcmd("SELECT substr(SA, 3, 1) AS X FROM \$1", dir)
+    end
+end

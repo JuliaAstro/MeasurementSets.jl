@@ -10941,3 +10941,7 @@ Random 1–2 clause `ALTER TABLE` commands (columns and table/column keywords) c
 ### Phase 350 — sub-query random fuzz vs real TaQL (+ docs CI fix)
 
 Random `SELECT ... FROM [(SELECT ..)] WHERE x [NOT] IN (SELECT ..) / [NOT] EXISTS (SELECT ..)` queries compared with real TaQL (640 queries over 32 tables). Fixed: sub-queries in the WHERE of a `FROM (SELECT ..)` query name the original table, not the inner selection; `EXISTS (... LIMIT n)` is false when fewer than `n` rows match (real errors for the positive form). Also fixed the `taql` docstring, which a Phase 347 comment had detached from its method — that broke the Documenter build (`no docs found for 'taql'`) in CI on main.
+
+### Phase 351 — string / string-array expression fuzz vs real TaQL
+
+630 random expressions over a string column and a string-array column (`upper`/`lower`/`trim`/`capitalize`/`sreverse`/`substr`/`replace`/`+`/`iif`/`string`/`strlength`, `==`/`<`/`LIKE`/`~`/`IN`/`bool`) compared with real TaQL. Fixed: `LIKE` / `ILIKE` / `~` / `!~` map elementwise over a string-array cell (they raised a TypeError), and on an array cell `substr` does not clamp — a start beyond an element's length is an error, as in real TaQL (a scalar string never errors).
