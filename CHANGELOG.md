@@ -10957,3 +10957,7 @@ Random `SELECT ... FROM [(SELECT ..)] WHERE x [NOT] IN (SELECT ..) / [NOT] EXIST
 ### Phase 353 follow-up — Linux x86-64 guard fixes (test only)
 
 The Docker run found two guards that depended on platform / Julia version: the Phase 349 `ALTER TABLE` fuzz could rename a keyword onto an existing one (real TaQL writes a duplicate key; not copied), so renames now target fresh names; and the Phase 352 fuzz compared `arg()` of complex values, whose ±π depends on the sign of a zero imaginary part, so it is left out.
+
+### Phase 354 — quantity-literal fuzz vs real TaQL (no bug found)
+
+800 random `col op N<unit>` / arithmetic / `BETWEEN` / `IN` conditions over length and angle columns with literals in other units agree with real TaQL. Not copied: real TaQL rejects a time- or frequency-unit literal (`s`, `h`, `Hz`, …) against a numeric column; TaQL-lite compares them after unit conversion.

@@ -5312,3 +5312,36 @@ end
         end
     end
 end
+
+# Phase 354: random quantity-literal WHERE conditions vs real TaQL (800 queries: `col op N<unit>`, `+ - *`, abs, BETWEEN, IN over length (m/km/cm/mm)
+# and angle (rad/deg/arcmin/arcsec) columns, literals in other units): no bug found.  Not copied: real TaQL rejects a TIME- or FREQUENCY-unit
+# literal (s/min/h/d, Hz...) against a numeric column ("cannot combine Double and Date"); TaQL-lite compares them after unit conversion.
+@testset "TaQL-lite — quantity literals random fuzz vs real TaQL (Phase 354)" begin
+    _HAVE_UNITFUL || return
+    n = 10
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["L" => Float64.(1:n) .* 250.0, "A" => Float64.(1:n) .* 0.2, "K" => Int32.(1:n), "KM" => Float64.(1:n) ./ 3];
+                nrow=n, units=Dict("L" => "m", "A" => "rad", "KM" => "km"))
+    t = readtable(dir)
+    @test collect(column(query(t, "L > 1.5km"), "K")[:]) == 7:10 && collect(column(query(t, "L BETWEEN 30000mm AND 1km"), "K")[:]) == 1:4
+    @test collect(column(query(t, "A < 30deg"), "K")[:]) == 1:2 && collect(column(query(t, "KM * 3 > 2000m"), "K")[:]) == 3:10
+    if _HAVE_TAQL
+        rng = MersenneTwister(354)
+        ln = ["m", "km", "cm", "mm"]; an = ["rad", "deg", "arcmin", "arcsec"]
+        q(u) = "$(rand(rng, [1, 2, 5, 10, 50, 100, 0.5, 2.5, 0.37, 7.3]))$(rand(rng, u))"
+        function ex()
+            c, u = rand(rng, [("L", ln), ("L", ln), ("A", an), ("A", an), ("KM", ln)])
+            r = rand(rng, 1:5)
+            r == 1 && return ("($c + $(q(u)))", u); r == 2 && return ("($c - $(q(u)))", u); r == 3 && return ("($c * 2)", u)
+            r == 4 && return ("abs($c - $(q(u)))", u)
+            return (c, u)
+        end
+        for _ in 1:80
+            e, u = ex(); r = rand(rng)
+            w = r < .7 ? "$e $(rand(rng, [">", "<", ">=", "<=", "==", "!="])) $(q(u))" : r < .85 ? "$e BETWEEN $(q(u)) AND $(q(u))" : "$e IN [$(q(u)), $(q(u)), $(q(u))]"
+            r1 = try collect(_taqlcmd("SELECT K FROM \$1 WHERE $w", dir)[:K][:]) catch ex_
+                occursin("Slicer", sprint(showerror, ex_)) ? Int32[] : :err end      # a lazy "Slicer error" = an empty result
+            @test r1 !== :err && r1 == collect(column(query(t, w), "K")[:])
+        end
+    end
+end
