@@ -35,6 +35,10 @@ addcolumn!
 removecolumn!
 setcell!
 setcolumn!
+renamecolumn!
+setkeyword!
+removekeyword!
+renamekeyword!
 ```
 
 ## Concurrency

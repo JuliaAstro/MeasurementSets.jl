@@ -109,7 +109,7 @@ export doppler, frequency, radialvelocity, restfrequency, shiftfreq
 export StdColumn, StdTable, SCHEMAVER2, stdtable, stdcolumns, validate
 export write_table, write_ms, copyms, create_ms
 export write_reftable, write_concattable, copytable, reference_copy
-export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!, renamecolumn!, setkeyword!, removekeyword!
+export edit, addrows!, removerows!, addcolumn!, removecolumn!, setcell!, setcolumn!, renamecolumn!, setkeyword!, removekeyword!, renamekeyword!
 export resync, is_stale, is_multiused
 export query, groupby, GroupedTable
 export update!, taql

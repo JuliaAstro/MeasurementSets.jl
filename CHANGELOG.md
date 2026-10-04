@@ -10933,3 +10933,7 @@ here). Also: `write_table` gained `shapes=` and `comments=` keywords. `COUNT` re
 ### Phase 348 — `CREATE TABLE` random-spec fuzz vs real TaQL
 
 60 random `CREATE TABLE` specs (12 types, `NDIM`/`SHAPE`, `UNIT`, `COMMENT`, `LIMIT` incl. 0/absent, `DMINFO`) compared with real TaQL. Fixed one bug: a variable- or fixed-shape array column with no rows (`[A R4 [NDIM=2]]` without `LIMIT`, or `LIMIT 0`) had element type `Any` and failed to write. Also probed `meas.jmean/jtrue/jnat/bmean/btrue/mecliptic/tecliptic`: real TaQL's `meas.*` does not expose those frames at all, so they are not a TaQL gap (only reachable through casatools measures).
+
+### Phase 349 — `ALTER TABLE` random-clause fuzz vs real TaQL
+
+Random 1–2 clause `ALTER TABLE` commands (columns and table/column keywords) compared with real TaQL, outcome and resulting table. Fixed: `SET KEYWORD` replaces an existing keyword **in place** (the Phase 346 "moves to the end" claim was a misread of `Dict` order) and refuses a value of another data type (Int→Double, String→Int, scalar→array; a one-element array replacing a scalar is that scalar); `RENAME KEYWORD` keeps the keyword's position (new exported `renamekeyword!`); `RENAME COLUMN X TO X` is an error; each `ADD COLUMN` clause needs its own `DMINFO [..]`; and a command whose later clause fails leaves the table untouched (all clauses are checked on the column/keyword names first, `_alter_dryrun`). Also listed the Phase 346 verbs in the API docs. Real TaQL's `RENAME KEYWORD a TO b` onto an existing `b` writes a duplicate key; not copied (error).

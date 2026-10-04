@@ -1324,7 +1324,7 @@ end
 
 # Phase 346: `ALTER TABLE` -- ADD / DROP / RENAME COLUMN and SET / DROP / RENAME KEYWORD (table and `COL::kw` column keywords).
 # 32 commands compared against real TaQL on twin tables (columns, types, shapes, keyword order and types, data): all agree.
-# Real quirks reproduced: setting an existing keyword moves it to the END of the set; integers are stored as Int64 and a mixed
+# Real quirks reproduced: an existing keyword is replaced IN PLACE (Phase 349 correction: the earlier "moves to the end" was a misread of Dict order); integers are stored as Int64 and a mixed
 # `[1.5, 2]` array as Float64; several clauses may follow one `ALTER TABLE`; failures (unknown column, rename onto an existing
 # one) leave the table unchanged.
 @testset "taql ALTER TABLE vs real TaQL (Phase 346)" begin
@@ -1335,7 +1335,7 @@ end
     colnames(t) = [c.name for c in t.desc.columns]
     d = mk()
     taql(d, "ALTER TABLE \$1 SET KEYWORD KW1=7, KW3='z'")
-    @test kwlist(readtable(d)) == ["KW2" => "x", "KW1" => 7, "KW3" => "z"]         # KW1 moved to the end
+    @test kwlist(readtable(d)) == ["KW2" => "x", "KW1" => 7, "KW3" => "z"]         # KW1 replaced in place
     @test readtable(d).desc.public.values[2] isa Int64
     taql(d, "ALTER TABLE \$1 SET KEYWORD KW4=[1.5,2], KW5=(1+2)*3, KW6=true")
     kw = Dict(kwlist(readtable(d)))
@@ -1343,7 +1343,7 @@ end
     taql(d, "ALTER TABLE \$1 DROP KEYWORD KW3")
     @test !haskey(Dict(kwlist(readtable(d))), "KW3")
     taql(d, "ALTER TABLE \$1 RENAME KEYWORD KW1 TO KWX")
-    @test last(kwlist(readtable(d))) == ("KWX" => 7)
+    @test Dict(kwlist(readtable(d)))["KWX"] == 7 && !haskey(Dict(kwlist(readtable(d))), "KW1")      # renamed in place (Phase 349)
     taql(d, "ALTER TABLE \$1 SET KEYWORD A::QuantumUnits=['m'], B::MyKw=3")
     @test columndesc(readtable(d), "A").keywords.values == [["m"]]
     @test_throws KeyError taql(d, "ALTER TABLE \$1 DROP KEYWORD NOSUCH")
@@ -1513,6 +1513,65 @@ end
                 isfile(joinpath(p1, "table.dat")) && break
             end
             @test state(p1) == state(p2)
+        end
+    end
+end
+
+# Phase 349: random ALTER TABLE clauses vs real TaQL (1-2 clauses, ADD/DROP/RENAME COLUMN, SET/DROP/RENAME KEYWORD, `COL::kw`).
+# Found: SET KEYWORD on an existing keyword must keep its data type (Int stays Int, scalar stays scalar; a one-element array
+# literal is a scalar) or real errors; RENAME KEYWORD keeps the keyword's position; RENAME COLUMN X TO X errors.
+@testset "taql ALTER TABLE random clauses vs real TaQL (Phase 349)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["A" => Int32.(1:4), "B" => Float64.(1:4), "S" => ["a", "b", "c", "d"], "K" => Int32.(1:4)];
+                        nrow=4, keywords=Dict("KW1" => 5, "KW2" => "x")); d)
+    kwlist(t) = [(t.desc.public.names[i] => t.desc.public.values[i]) for i in eachindex(t.desc.public.names)]
+    d = mk()
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 SET KEYWORD KW1=1.5")             # Int -> Double
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 SET KEYWORD KW2=7")               # String -> Int
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 SET KEYWORD KW1=[1,2]")           # scalar -> array
+    taql(d, "ALTER TABLE \$1 SET KEYWORD KW2=['q']")                                       # one-element array literal = scalar
+    @test Dict(kwlist(readtable(d)))["KW2"] == "q"
+    d = mk(); names0 = first.(kwlist(readtable(d)))
+    taql(d, "ALTER TABLE \$1 SET KEYWORD KW4=1, $(names0[1])=" * (names0[1] == "KW1" ? "9" : "'w'"))   # replaced in place, KW4 appended
+    @test first.(kwlist(readtable(d))) == [names0; "KW4"]
+    d = mk()
+    taql(d, "ALTER TABLE \$1 RENAME KEYWORD KW1 TO KWX")
+    @test first.(kwlist(readtable(d))) == replace(names0, "KW1" => "KWX")                   # renamed in place
+    taql(d, "ALTER TABLE \$1 RENAME KEYWORD KWX TO KWX"); @test first.(kwlist(readtable(d))) == replace(names0, "KW1" => "KWX")
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 ADD COLUMN N R8")                  # real TaQL needs the DMINFO
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 RENAME KEYWORD KWX TO KW2")
+    @test_throws ArgumentError taql(d, "ALTER TABLE \$1 RENAME COLUMN A TO A")
+    if _HAVE_TAQL
+        colnames(t) = [c.name for c in t.desc.columns]
+        function state(dd)
+            t = readtable(dd)
+            (colnames(t), [(c.name, c.type, c.shape isa Tuple ? c.shape : typeof(c.shape)) for c in t.desc.columns], kwlist(t),
+             [collect(column(t, c.name)[:])[1:2] for c in t.desc.columns], [c.keywords.names for c in t.desc.columns])
+        end
+        rng = MersenneTwister(349)
+        cn = ["A", "B", "S", "K", "N1", "N2", "ZZ"]; kn = ["KW1", "KW2", "KW3", "KW4"]
+        vals = ["7", "'z'", "1.5", "[1,2]", "[1.5,2]", "true", "(1+2)*3", "['a','b']", "-3", "2.5e3"]
+        ty = ["I4", "R8", "S", "B", "C8", "U1", "I2", "R4"]
+        dm = " DMINFO [TYPE=\"StandardStMan\", NAME=\"SSM2\"]"
+        function clause()
+            r = rand(rng, 1:8)
+            r == 1 && return "SET KEYWORD " * join(["$(rand(rng, kn))=$(rand(rng, vals))" for _ in 1:rand(rng, 1:2)], ", ")
+            r == 2 && return "DROP KEYWORD " * rand(rng, kn)
+            r == 3 && return "RENAME KEYWORD $(rand(rng, kn)) TO $(rand(rng, kn))"
+            r == 4 && return "RENAME COLUMN $(rand(rng, cn)) TO $(rand(rng, cn))"
+            r == 5 && return "DROP COLUMN " * join(unique([rand(rng, cn) for _ in 1:rand(rng, 1:2)]), ", ")
+            r == 6 && return "SET KEYWORD $(rand(rng, cn))::$(rand(rng, ["QuantumUnits", "MyKw"]))=$(rand(rng, vals))"
+            r == 7 && return "ADD COLUMN $(rand(rng, cn)) $(rand(rng, ty))" * (rand(rng) < .3 ? " [NDIM=$(rand(rng, 0:2))]" : "") * dm
+            return "ADD COLUMN N9 $(rand(rng, ty))" * dm
+        end
+        for _ in 1:30
+            c = join([clause() for _ in 1:rand(rng, 1:2)], " ")
+            d1 = mk(); d2 = mk(); before = state(d1)
+            ok1 = try x = _taqlcmd("ALTER TABLE \$1 $c", d1); x = nothing; true catch; false end
+            ok2 = try taql(d2, "ALTER TABLE \$1 $c"); true catch; false end
+            @test ok1 == ok2
+            ok1 && (for _ in 1:50; GC.gc(); GC.gc(); sleep(0.1); state(d1) != before && break; end)
+            @test state(d1) == state(d2)
         end
     end
 end

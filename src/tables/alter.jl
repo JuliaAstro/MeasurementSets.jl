@@ -37,10 +37,10 @@ other keywords hold to a renamed column -- a virtual engine's stored-column name
 A column forwarded to another table by a `ForwardColumnEngine` cannot be renamed.
 """
 function renamecolumn!(path::AbstractString, old::AbstractString, new::AbstractString)
-    old == new && return String(path)
     _rewrite_desc!(path, td -> begin
         names = [c.name for c in td.columns]
         old in names || throw(KeyError(old))
+        old == new && throw(ArgumentError("renamecolumn!: the table already has a column \"$new\""))
         new in names && throw(ArgumentError("renamecolumn!: the table already has a column \"$new\""))
         cols = ColumnDesc[]
         for c in td.columns
@@ -72,13 +72,45 @@ end
     setkeyword!(path, name, value; column=nothing) -> path
 
 Set (add or replace) keyword `name` of the plain table at `path` -- or of column `column` -- to `value`: a number, `Bool`,
-string, array of those, or a `Dict` / `Record`. Integers are stored as `Int64` and floats as `Float64`, and an existing keyword moves to the end of the set, like real
+string, array of those, or a `Dict` / `Record`. Integers are stored as `Int64` and floats as `Float64`, and an existing keyword is replaced in place (a new one is appended) and must keep its data type, like real
 TaQL's `ALTER TABLE ... SET KEYWORD`. A metadata-only change.
 """
 function setkeyword!(path::AbstractString, name::AbstractString, value; column::Union{Nothing,AbstractString}=nothing)
-    t, v = _kw_value(_kw_normalize(value))
-    # real TaQL moves an existing keyword to the END of the set when it is set again
-    _rewrite_desc!(path, td -> _alter_keywords(td, column, r -> _set_kw(_kw_without(r, String(name)), String(name), t, v)))
+    # real TaQL replaces an existing keyword in place (and refuses a value of another type)
+    _rewrite_desc!(path, td -> _alter_keywords(td, column, r -> begin
+        i = findfirst(==(String(name)), r.names)
+        val = value   # a one-element array replacing an existing scalar keyword is that scalar (real TaQL)
+        i !== nothing && !startswith(_kw_class(r.types[i]), "array") && val isa AbstractVector && length(val) == 1 && (val = val[1])
+        t, v = _kw_value(_kw_normalize(val))
+        i !== nothing && _kw_class(r.types[i]) != _kw_class(t) && throw(ArgumentError(
+            "setkeyword!: keyword \"$name\" holds a $(_kw_class(r.types[i])) value; cannot replace it by a $(_kw_class(t)) one"))
+        _set_kw(r, String(name), t, v)     # an existing keyword is replaced in place, a new one appended
+    end))
+end
+
+# data-type class of a keyword value: integers share one (Int / Int64 / ...), likewise floats; scalar and array differ
+function _kw_class(t::CasaType)
+    s = String(Symbol(t)); arr = startswith(s, "TpArray"); b = arr ? s[8:end] : s[3:end]
+    k = b in ("Int", "Int64", "Short", "UInt", "UShort", "UChar", "Char") ? "integer" :
+        b in ("Float", "Double") ? "real" : b in ("Complex", "DComplex") ? "complex" : lowercase(b)
+    return arr ? "array of $k" : k
+end
+
+"""
+    renamekeyword!(path, old, new; column=nothing) -> path
+
+Rename keyword `old` (in place -- it keeps its position) of the plain table at `path` or of column `column`. An absent `old` is
+a `KeyError`, an existing `new` an `ArgumentError`; `old == new` changes nothing.
+"""
+function renamekeyword!(path::AbstractString, old::AbstractString, new::AbstractString; column::Union{Nothing,AbstractString}=nothing)
+    _rewrite_desc!(path, td -> _alter_keywords(td, column, r -> begin
+        i = findfirst(==(String(old)), r.names)
+        i === nothing && throw(KeyError(old))
+        old == new && return r
+        new in r.names && throw(ArgumentError("renamekeyword!: keyword \"$new\" already exists"))
+        names = copy(r.names); names[i] = String(new)
+        Record(names, r.types, r.values, r.comments, r.rectype)
+    end))
 end
 
 # integers -> Int64, floats -> Float64 (a mixed `[1.5, 2]` literal array is all Float64, as in real TaQL)
