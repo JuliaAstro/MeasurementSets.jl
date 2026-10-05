@@ -234,7 +234,7 @@ function _result_filter(gt::GroupedTable, where)
             throw(ArgumentError("join: `where` must not contain aggregate functions"))
         [i for i in 1:n if _tql_truthy(_tqleval(ast, cd, i))]
     end
-    return GroupedTable(copy(gt.names), AbstractVector[c[keep] for c in gt.cols])
+    return GroupedTable(copy(gt.names), AbstractVector[c[keep] for c in gt.cols], copy(getfield(gt, :units)), copy(getfield(gt, :epochs)))
 end
 
 """
@@ -328,7 +328,10 @@ function Base.join(left::AbstractTable, right::AbstractTable; on,
         push!(cols, _side(column(right, s), rrows))
     end
 
-    gt = GroupedTable(Symbol.(outnames), cols)
+    jun = Dict{Symbol,Vector{String}}(); jep = Set{Symbol}()
+    for (o, s) in lpairs; _join_meta!(jun, jep, left, s, o); end
+    for (o, s) in rpairs; _join_meta!(jun, jep, right, s, o); end
+    gt = GroupedTable(Symbol.(outnames), cols, jun, jep)
     where === nothing || (gt = _result_filter(gt, where))
     orderby === nothing ? gt : _gt_sort(gt, orderby)
 end

@@ -1787,3 +1787,105 @@ end
         end
     end
 end
+
+# Phase 361: date functions on EPOCH columns inside GROUP BY (`GROUP BY year(TIME)`, aggregates over `mjd(TIME)` / `day(TIME)`, `WHERE TIME > datetime(..)`)
+# vs real TaQL (120 queries over a seconds and a days epoch column).  The expression-key path evaluates on an intermediate table without MEASINFO, so the
+# Phase 360 seconds -> days conversion was lost there (`GROUP BY year(TIME)` gave year 13012392).  Not copied: real TaQL puts EVERY row in ONE group for
+# `GROUP BY date(<epoch column>)`.
+@testset "taql GROUP BY date functions on epoch columns vs real TaQL (Phase 361)" begin
+    n = 8; mjds = 55000.0 .+ (0:n-1) .* 211.3
+    dir = joinpath(mktempdir(), "t")
+    write_table(dir, "T", Pair{String,Any}["TIME" => mjds .* 86400, "TD" => mjds, "V" => Float64.(1:n), "K" => Int32[1, 2, 1, 2, 1, 2, 1, 2]]; nrow=n,
+                units=Dict("TIME" => "s", "TD" => "d"),
+                measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"]), "TD" => (; kind=:epoch, ref="UTC", units=["d"])))
+    t = readtable(dir)
+    g = taql(t, "SELECT year(TIME) AS G, gcount() AS N FROM t GROUP BY year(TIME)")
+    want = sort(unique([MSv2.Dates.year(MSv2.Dates.DateTime(1858, 11, 17) + MSv2.Dates.Millisecond(round(Int, m * 86400000))) for m in mjds]))
+    @test sort(collect(column(g, "G")[:])) == want
+    @test all(2000 .< collect(column(g, "G")[:]) .< 2030)
+    g2 = taql(t, "SELECT month(TD) AS G, gmin(mjd(TIME)) AS A FROM t GROUP BY month(TD)")
+    @test all(1 .<= collect(column(g2, "G")[:]) .<= 12) && all(50000 .< collect(column(g2, "A")[:]) .< 60000)
+    if _HAVE_TAQL
+        rng = MersenneTwister(361)
+        pick(xs) = xs[rand(rng, 1:length(xs))]
+        N = 30; mj = sort(rand(rng, 55000.0:0.37:58000.0, N))
+        d2 = joinpath(mktempdir(), "t")
+        write_table(d2, "T", Pair{String,Any}["TIME" => mj .* 86400, "TD" => mj, "V" => round.(randn(rng, N); digits=2), "K" => Int32.(rand(rng, 1:3, N))]; nrow=N,
+                    units=Dict("TIME" => "s", "TD" => "d"),
+                    measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"]), "TD" => (; kind=:epoch, ref="UTC", units=["d"])))
+        t2 = readtable(d2)
+        for _ in 1:40
+            c = pick(["TIME", "TD"]); key = pick(["year($c)", "month($c)", "weekday($c)", "year($c)*100+month($c)", "cmonth($c)", "cdow($c)"])
+            agg = pick(["gcount()", "gmean(V)", "gmin(mjd($c))", "gfirst(cdate($c))", "glast(day($c))", "gsum(K)", "gmin(V)"])
+            q = "SELECT $key AS G, $agg AS A FROM \$1" * (rand(rng) < .3 ? " WHERE $c > datetime('2011-06-01')" : "") * " GROUP BY $key"
+            r1 = try (rt = _taqlcmd(q, d2); Dict(zip(collect(rt[:G][:]), collect(rt[:A][:])))) catch ex; occursin("Slicer", sprint(showerror, ex)) ? Dict() : :err end
+            g = taql(t2, q); r2 = Dict(zip(collect(column(g, "G")[:]), collect(column(g, "A")[:])))
+            @test r1 !== :err && keys(r1) == keys(r2) && all(k -> r1[k] == r2[k] || (r1[k] isa Number && isapprox(r1[k], r2[k]; rtol=1e-9)), keys(r1))
+        end
+    end
+end
+
+# Phase 362: DELETE with a DATE function / DATETIME comparison on an epoch column, and with a quantity literal (`WHERE L > 1km`), vs real TaQL.
+# `delete!` loaded its columns without the parsed condition, so neither the Phase 360 seconds -> days conversion nor unit attachment applied
+# (`DELETE ... WHERE year(TIME) > 2011` deleted every row).  UPDATE / SELECT / GROUP BY were already right.
+@testset "taql DELETE with date functions and quantity literals vs real TaQL (Phase 362)" begin
+    n = 8; mjds = 55000.0 .+ (0:n-1) .* 211.3
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["TIME" => mjds .* 86400, "L" => Float64.(1:n) .* 400, "A" => Float64.(1:n) .* 0.3, "K" => Int32.(1:n)]; nrow=n,
+                        units=Dict("TIME" => "s", "L" => "m", "A" => "rad"), measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"]))); d)
+    ks(d) = collect(column(readtable(d), "K")[:])
+    d = mk(); taql(d, "DELETE FROM t WHERE year(TIME) > 2011"); @test ks(d) == 1:5
+    d = mk(); taql(d, "DELETE FROM t WHERE TIME > datetime('2011-01-01')"); @test ks(d) == 1:3
+    _HAVE_UNITFUL = Base.get_extension(MSv2, :UnitfulExt) !== nothing
+    if _HAVE_UNITFUL
+        d = mk(); taql(d, "DELETE FROM t WHERE L > 1km"); @test ks(d) == 1:2
+        d = mk(); taql(d, "DELETE FROM t WHERE A < 1rad"); @test ks(d) == 4:8
+    end
+    if _HAVE_TAQL
+        for cmd in ("DELETE FROM \$1 WHERE year(TIME) > 2011", "DELETE FROM \$1 WHERE TIME > datetime('2011-01-01')", "DELETE FROM \$1 WHERE month(TIME) < 6",
+                    "DELETE FROM \$1 WHERE weekday(TIME) == 3", "DELETE FROM \$1 WHERE TIME > mjd('2011-06-01')",
+                    "UPDATE \$1 SET K = 0 WHERE year(TIME) < 2012", "UPDATE \$1 SET K = day(TIME)")
+            d1 = mk(); d2 = mk(); b = ks(d1)
+            x = _taqlcmd(cmd, d1); x = nothing
+            for _ in 1:40; GC.gc(); GC.gc(); sleep(0.05); ks(d1) != b && break; end
+            taql(d2, cmd, d2)
+            @test ks(d1) == ks(d2)
+        end
+    end
+end
+
+# Phase 363: date functions on epoch columns and quantity literals through a JOIN (`year(a.TIME)`, `WHERE a.TIME > datetime(..)`, `WHERE b.RL > 1km`) vs real
+# TaQL.  The joined result is a plain GroupedTable: it lost the source columns' units and epoch flags, and `query(::GroupedTable)` evaluated its WHERE on raw
+# columns (so `year(a.TIME) > 2010` kept every row and `WHERE a.LL > 1km` raised a DimensionError).  A GroupedTable now carries per-column units and an epoch
+# set (JOIN / ORDER BY / WHERE filter preserve them) and its WHERE goes through the same column loading as a table's.
+@testset "taql JOIN with date functions and quantity literals vs real TaQL (Phase 363)" begin
+    n = 6; mjds = 55000.0 .+ (0:n-1) .* 211.3
+    dl = joinpath(mktempdir(), "l"); dr = joinpath(mktempdir(), "r")
+    write_table(dl, "L", Pair{String,Any}["TIME" => mjds .* 86400, "LK" => Int32[1, 2, 3, 1, 2, 3], "LL" => Float64.(1:n) .* 400]; nrow=n,
+                units=Dict("TIME" => "s", "LL" => "m"), measures=Dict("TIME" => (; kind=:epoch, ref="UTC", units=["s"])))
+    write_table(dr, "R", Pair{String,Any}["RK" => Int32[1, 2, 3], "RT" => (56000.0 .+ (0:2) .* 300) .* 86400, "RL" => [500.0, 1500.0, 2500.0]]; nrow=3,
+                units=Dict("RT" => "s", "RL" => "m"), measures=Dict("RT" => (; kind=:epoch, ref="UTC", units=["s"])))
+    tl = readtable(dl); tr = readtable(dr)
+    col(q, c) = collect(column(taql(tl, q, tr), c)[:])
+    J = "FROM \$1 a JOIN \$2 b ON a.LK == b.RK"
+    @test col("SELECT a.LK AS K, year(a.TIME) AS Y $J", "Y")[1:3] == [2009, 2010, 2010]
+    @test all(2000 .< col("SELECT year(a.TIME) AS Y $J", "Y") .< 2030) && all(2000 .< col("SELECT year(b.RT) AS Y $J", "Y") .< 2030)
+    @test length(col("SELECT a.LK AS K $J WHERE year(a.TIME) > 2010", "K")) < 6 && col("SELECT a.LK AS K $J WHERE a.TIME > datetime('2100-01-01')", "K") |> isempty
+    if Base.get_extension(MSv2, :UnitfulExt) !== nothing
+        @test col("SELECT a.LK AS K $J WHERE a.LL > 1km", "K") == [3, 1, 2, 3]
+    end
+    if _HAVE_TAQL
+        for q in ("SELECT a.LK AS K, year(a.TIME) AS Y $J", "SELECT a.LK AS K $J WHERE year(a.TIME) > 2010", "SELECT a.LK AS K $J WHERE a.TIME > datetime('2011-01-01')",
+                  "SELECT a.LK AS K, year(b.RT) AS Y $J", "SELECT a.LK AS K $J WHERE b.RT > datetime('2012-01-01')", "SELECT a.LK AS K $J WHERE a.LL > 1km",
+                  "SELECT a.LK AS K $J WHERE b.RL > 1km", "SELECT a.LK AS K, mjd(a.TIME) - mjd(b.RT) AS D $J")
+            occursin("km", q) && Base.get_extension(MSv2, :UnitfulExt) === nothing && continue
+            cs = occursin("AS Y", q) ? ["K", "Y"] : occursin("AS D", q) ? ["K", "D"] : ["K"]
+            rt = _taqlcmd(q, dl, dr)
+            g = taql(tl, q, tr)
+            for c in cs
+                a = collect(rt[Symbol(c)][:]); b = col(q, c)
+                @test length(a) == length(b) && all(i -> a[i] == b[i] || isapprox(a[i], b[i]; rtol=1e-9), eachindex(a))
+            end
+        end
+    end
+end

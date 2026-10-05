@@ -343,7 +343,8 @@ function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing
         where isa AbstractString ? collect(_tql_where_refs(where, rd)) :
         String[]
     names = union(names, (k.name for k in orderkeys))
-    cols = _tql_cols(rd, names)
+    # the parsed WHERE decides unit attachment / epoch-date conversion in `_tql_cols` (a quantity literal or date function in a DELETE condition)
+    cols = _tql_cols(rd, names, where isa AbstractString ? _taqllite_parse(String(where), Set(columnnames(rd))) : nothing)
     rows = _where_rows(rd, where, cols)
     isempty(rows) && return 0
     rows = _apply_orderby(rows, orderkeys, cols)
@@ -580,6 +581,8 @@ function _taql_join_from(target, body::AbstractString, others)
     left = tab(m.captures[1]); la = String(m.captures[2])
     names = String[la * "." * n for n in columnnames(left)]
     cols = AbstractVector[collect(column(left, n)[:]) for n in columnnames(left)]
+    jun = Dict{Symbol,Vector{String}}(); jep = Set{Symbol}()
+    for n in columnnames(left); _join_meta!(jun, jep, left, n, la * "." * n); end
     push!(names, la * ".__rowid"); push!(cols, collect(0:nrow(left)-1))
     pos = m.offset + length(m.match) - length("JOIN")       # start of the first JOIN
     jre = Regex("^JOIN\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+ON\\s+" * _JOIN_SIDE *
@@ -611,6 +614,7 @@ function _taql_join_from(target, body::AbstractString, others)
             rcx = collect(column(right, n)[:])
             T = eltype(rcx)
             push!(names, ra * "." * n)
+            _join_meta!(jun, jep, right, n, ra * "." * n)
             # sentinel-fill unmatched rows; the values are widened (Float32 -> Float64, ...) like real TaQL's result columns either way
             push!(cols, (any(iszero, mr) || T <: Union{Number,AbstractString,AbstractArray}) ?
                         _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) : T[rcx[r] for r in mr])
@@ -619,7 +623,7 @@ function _taql_join_from(target, body::AbstractString, others)
         push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])
         rest = rest[length(jm.match)+1:end]
     end
-    joined = GroupedTable(Symbol.(names), cols)
+    joined = GroupedTable(Symbol.(names), cols, jun, jep)
     body = body[1:m.offset-1] * "FROM __join " * rest
     body = replace(body, r"\b(\w+)\.rowid\(\)" => s"\1.__rowid")
     return joined, body
@@ -1166,7 +1170,11 @@ function taql(target, command::AbstractString, others...)
             # first (WHERE applied at that stage), then grouped on by name
             gt = t; gwhere = wherestr
             if !all(k -> k in vn, gkeys)
-                hidden = Pair{String,String}[n => n for n in columnnames(t)]
+                # the hidden table is a plain GroupedTable (no MEASINFO), so when the command uses a date function its epoch columns are
+                # passed on already converted to MJD days (`mjd(TIME)` is the identity on a column `_tql_cols` has converted; Phase 361)
+                alltext = join(filter(!isnothing, vcat(String.(last.(select)), [wherestr, havingstr, orderstr], gkeys)), " ")
+                datefn = occursin(Regex("\\b(" * join(_TQL_DATE_FUNCS, "|") * ")\\s*\\(", "i"), alltext)
+                hidden = Pair{String,String}[n => (datefn && _epoch_seconds_column(t, n) ? "mjd($n)" : n) for n in columnnames(t)]
                 for (i, k) in enumerate(gkeys)
                     k in vn && continue
                     push!(hidden, "_gk$i" => k)

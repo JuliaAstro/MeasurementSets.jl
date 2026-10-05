@@ -10989,3 +10989,15 @@ The Docker run found the Phase 357 guard drew a case where `gmaxs` hit real casa
 ### Phase 360 — epoch-measure columns are dates (date-function fuzz on MS-style TIME columns)
 
 Real TaQL types a column with an epoch `MEASINFO` (every MS `TIME`) as a date: `year(TIME)`, `mjd(TIME)`, `date(TIME)`, `TIME > datetime('…')` and `TIME > mjd('…')` read its seconds as a date. TaQL-lite took the seconds as MJD days, so every `datetime` comparison on a `TIME` column was silently wrong. Fixed: in a query that uses a date function the epoch columns held in seconds are converted to MJD days (a bare number beside such a column is then days too — a documented difference), and `mjd('<date string>')` parses the string. 300 random date conditions over a seconds and a days epoch column agree with real TaQL.
+
+### Phase 361 — date functions on epoch columns inside GROUP BY
+
+Date-function queries on MS-style `TIME` columns in `SELECT … GROUP BY` (compared with real TaQL, 120 queries): the Phase 360 seconds → MJD days conversion was lost on the expression-key path (the intermediate table has no MEASINFO), so `GROUP BY year(TIME)` gave year 13012392. Fixed: the intermediate table carries the epoch columns already converted when the command uses a date function. Not copied: real TaQL puts every row in one group for `GROUP BY date(<epoch column>)`.
+
+### Phase 362 — DELETE with date functions / quantity literals
+
+`DELETE FROM t WHERE …` loaded its columns without the parsed condition, so the Phase 360 seconds → days conversion of epoch columns and unit attachment of quantity literals did not apply (`DELETE … WHERE year(TIME) > 2011` deleted every row). Fixed; checked against real TaQL for DELETE and UPDATE with `year` / `month` / `weekday` / `datetime` / `mjd('…')` conditions and for unit-literal conditions.
+
+### Phase 363 — date functions / quantity literals through a JOIN
+
+`SELECT … FROM $1 a JOIN $2 b ON … WHERE year(a.TIME) > 2010` kept every row and `WHERE a.LL > 1km` raised a DimensionError: the joined result is a plain `GroupedTable` that lost its source columns' units and epoch flags, and `query(::GroupedTable)` evaluated its WHERE on raw columns. A `GroupedTable` now carries per-column units and an epoch-column set (kept through JOIN, ORDER BY and WHERE filtering, and reported by `columndesc` as `QuantumUnits`), and its WHERE uses the same column loading (`_tql_cols`) as a table's — unit attachment, epoch-date conversion. Verified against real TaQL for `year` / `datetime` / `mjd` / unit-literal conditions and select expressions over the joined columns.
