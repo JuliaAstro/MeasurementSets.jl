@@ -11029,3 +11029,7 @@ Column descriptions (type, shape, option, comment, keywords) of random real-casa
 ### Phase 370 — table-level metadata survives every rewrite
 
 Table keywords (scalars, arrays, nested records, set by us or by real casacore `ALTER TABLE … SET KEYWORD`), type / subtype / readme, table name and comment and column order are identical after `edit` regeneration, `addcolumn!` + `removecolumn!` and `copytable` with and without a row selection (70 tables, SSM / ISM) — no bug; kept as a test. (Harness note: a real-casacore handle still alive in the creating frame stops a following `ALTER` from flushing; create tables in a helper function.)
+
+### Phase 371 — reference tables in non-ASCII directory names
+
+Path handling swept across readers, `edit`, `copytable`, persisted RefTable / ConcatTable, `reference_copy`, `copyms` and moved directory trees, with plain, spaced, quoted, `#`, accented and CJK directory names, relative / `..` / trailing-slash / symlinked paths. One bug: `_strip_directory` sliced the stored relative path with a character count used as a byte index, so under a non-ASCII directory `write_reftable`, `write_concattable` and `reference_copy` stored e.g. `./é/t` instead of `./t` and the result could not be reopened. Fixed (`ncodeunits`).
