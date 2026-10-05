@@ -72,12 +72,18 @@ instead) — "update the N oldest/newest rows matching a condition", e.g.
 `LIMIT 3` give byte-identical results on the same data; `T`'s values
 play no role). This package's `orderby`/`limit` do a genuine
 sort-then-limit instead. Returns the number of rows changed.
+
+`target` may also be a `RefTable` or `ConcatTable` (an object, or the path of a persisted one): the
+new values are written through to the real table(s), like `UPDATE` on a selection in casacore.
 """
 function update!(target; set::AbstractVector{<:Pair}, where=nothing,
                  orderby::Union{Nothing,AbstractVector}=nothing,
                  limit::Union{Nothing,Integer}=nothing)
-    path = _cmd_path(target)
-    rd = readtable(path)
+    # Phase 375: a RefTable / ConcatTable (an object, or the path of a persisted one) is a valid target:
+    # the new values are written through to the real table(s), like `UPDATE` on a selection in casacore
+    rd = target isa Union{RefTable,ConcatTable} ? target : readtable(_cmd_path(target))
+    plain = rd isa Table
+    path = plain ? _cmd_path(target) : ""
     vn = Set(columnnames(rd))
     isempty(set) && throw(ArgumentError("update!: `set` must not be empty"))
 
@@ -146,7 +152,8 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
     sliced = Set(s[1] for s in specs if s[2] !== nothing)
     fullcols = Dict{String,AbstractVector}()
     if !isempty(sliced)
-        rdf = readtable(path; precision=:full)
+        rdf = plain ? readtable(path; precision=:full) :
+              (hasproperty(rd, :path) && !isempty(rd.path) ? readtable(rd.path; precision=:full) : rd)
         for c in sliced
             fullcols[c] = column(rdf, c)
         end
@@ -216,7 +223,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
         end
         return x
     end
-    edit(path) do t
+    edit(plain ? path : rd) do t
         for (c, levels, a) in specs
             u = colunit(c)
             ec = t[c]
@@ -323,7 +330,7 @@ end
 """
     delete!(target; where=nothing, orderby=nothing, limit=nothing) -> Int
 
-Remove rows from the CTDS table at `target` (a path or an open `Table`).
+Remove rows from the CTDS table at `target` (a path or an open `Table`). On a persisted `RefTable` (its path or the object) the rows are removed from the reference only, the real table is untouched; a `ConcatTable` cannot lose rows.
 `where` is a TaQL-lite WHERE string, a `row -> Bool` closure, or
 `nothing` (**every row** — leaves a 0-row table). `orderby`/`limit` — see
 [`update!`](@ref) — sort the matched rows then keep only `limit` of them
@@ -335,8 +342,11 @@ number of rows removed. Extends `Base.delete!`.
 function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing,
                       orderby::Union{Nothing,AbstractVector}=nothing,
                       limit::Union{Nothing,Integer}=nothing)
-    path = _cmd_path(target)
-    rd = readtable(path)
+    # Phase 375: `DELETE` on a persisted RefTable removes the rows from the REFERENCE only (the real
+    # table is untouched), like casacore; a ConcatTable cannot lose rows (casacore refuses too)
+    rd = target isa Union{RefTable,ConcatTable} ? target : readtable(_cmd_path(target))
+    rd isa ConcatTable && throw(ArgumentError("delete!: rows cannot be removed from a ConcatTable"))
+    path = rd isa Table ? _cmd_path(target) : ""
     orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(rd, o) for o in orderby]
     names =
         where isa Function ? columnnames(rd) :
@@ -350,10 +360,29 @@ function Base.delete!(target::Union{AbstractString,AbstractTable}; where=nothing
     rows = _apply_orderby(rows, orderkeys, cols)
     limit === nothing || (rows = _apply_limit(rows, limit))
     isempty(rows) && return 0
-    edit(path) do t
-        removerows!(t, rows)
+    if rd isa RefTable
+        _reftable_remove_rows!(rd, rows)
+    else
+        edit(path) do t
+            removerows!(t, rows)
+        end
     end
     return length(rows)
+end
+
+# rewrite a persisted RefTable's `table.dat` without the given (1-based, reference) rows
+function _reftable_remove_rows!(rt::RefTable, rows)
+    isempty(rt.path) && throw(ArgumentError(
+        "delete!: this RefTable is an in-memory query result with no directory; persist it with write_reftable first"))
+    keep = setdiff(1:length(rt.rows), rows)
+    tmp = rt.path * ".rm" * string(rand(UInt32); base=16)
+    try
+        write_reftable(tmp, rt.parent, rt.rows[keep]; select=[nm => rt.namemap[nm] for nm in rt.order])
+        mv(joinpath(tmp, "table.dat"), joinpath(rt.path, "table.dat"); force=true)
+    finally
+        ispath(tmp) && rm(tmp; recursive=true, force=true)
+    end
+    return nothing
 end
 
 """

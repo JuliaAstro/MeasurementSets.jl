@@ -1914,3 +1914,40 @@ end
         end
     end
 end
+
+# Phase 375: `UPDATE` / `DELETE` on a RefTable.  Like casacore, UPDATE writes through to the real
+# table(s) (a RefTable object or the path of a persisted one; also a ConcatTable) and DELETE removes
+# rows from the REFERENCE only; a ConcatTable cannot lose rows, and INSERT is not supported.
+@testset "UPDATE / DELETE on a RefTable (Phase 375)" begin
+    function setup(rows=[2, 4, 6, 8])
+        d = joinpath(mktempdir(), "t"); N = 8
+        write_table(d, "T", Pair{String,Any}["A" => Int32.(1:N), "B" => collect(1.0:N), "S" => ["s$i" for i in 1:N], "V" => [fill(1.0i, 2) for i in 1:N]]; nrow=N, tsm=[["V"]])
+        r = joinpath(mktempdir(), "r"); write_reftable(r, readtable(d), rows)
+        d, r
+    end
+    state(d, r) = (column(readtable(d), "B")[:], column(readtable(d), "S")[:], [Array(v) for v in column(readtable(d), "V")[:]], MSv2.nrow(readtable(d)), column(readtable(r), "A")[:])
+    d, r = setup()
+    @test taql(r, "UPDATE t SET B = B * 10") == 4
+    @test column(readtable(d), "B")[:] == [1.0, 20.0, 3.0, 40.0, 5.0, 60.0, 7.0, 80.0]
+    @test taql(r, "DELETE FROM t WHERE A > 4") == 2
+    @test column(readtable(r), "A")[:] == Int32[2, 4] && MSv2.nrow(readtable(d)) == 8
+    d, _ = setup(); t = readtable(d)
+    @test MSv2.update!(query(t, "A > 5"); set=["B" => "B * 100"]) == 3
+    @test column(readtable(d), "B")[:] == [1.0, 2, 3, 4, 5, 600, 700, 800]
+    @test_throws ArgumentError MSv2.delete!(query(t, "A > 5"); where="A == 7")    # no directory to rewrite
+    d1, _ = setup(); d2, _ = setup(); cc = joinpath(mktempdir(), "c"); write_concattable(cc, [readtable(d1), readtable(d2)])
+    @test MSv2.update!(readtable(cc); set=["B" => "B + 1000"], where="A == 3 OR A == 8") == 4
+    @test column(readtable(d1), "B")[[3, 8]] == [1003.0, 1008.0] && column(readtable(d2), "B")[[3, 8]] == [1003.0, 1008.0]
+    @test_throws ArgumentError MSv2.delete!(readtable(cc); where="A == 1")
+    @test_throws ErrorException MSv2.insert!(readtable(cc); values=["A" => 1])
+    if _HAVE_TAQL
+        for c in ["UPDATE \$1 SET B = B * 10", "UPDATE \$1 SET B = -1 WHERE A > 4", "UPDATE \$1 SET S = S + 'x' WHERE A IN [2,6]",
+                  "UPDATE \$1 SET B = A + B ORDER BY A DESC LIMIT 2", "UPDATE \$1 SET V[1] = 0.5 WHERE A > 4",
+                  "UPDATE \$1 SET V = array(A*1.0, [2])", "DELETE FROM \$1 WHERE A > 4", "DELETE FROM \$1 WHERE A == 2", "DELETE FROM \$1"]
+            d1, r1 = setup(); d2, r2 = setup()
+            taql(r1, replace(c, "\$1" => "t"))
+            x = _taqlcmd(c, r2); x = nothing; for _ in 1:20; GC.gc(); sleep(0.03); end
+            @test state(d1, r1) == state(d2, r2)
+        end
+    end
+end
