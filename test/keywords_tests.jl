@@ -163,3 +163,53 @@ end
     end
     @test nbad == 0
 end
+
+# Phase 370: table-level metadata (keywords incl. nested records, type / subtype / readme, table
+# name and comment, column order) is unchanged by `edit` regeneration, `addcolumn!` +
+# `removecolumn!` and `copytable` (with and without a row selection), for tables written by us
+# and for casacore-made tables with keywords set by real TaQL `ALTER TABLE`: sweep, no bug found.
+@testset "table metadata survives rewrites (Phase 370)" begin
+    rng = MSv2.Random.MersenneTwister(370)
+    nrm(x::MSv2.Record) = Dict(n => nrm(v) for (n, v) in zip(x.names, x.values))
+    nrm(x) = x
+    tstate(t) = (MSv2.columnnames(t), t.type, t.subtype, t.readme, MSv2.keywords(t).names, nrm.(MSv2.keywords(t).values), t.desc.name, t.desc.comment)
+    function roundtrip(d, s0)
+        nbad = 0
+        edit(e -> (MSv2.removerows!(e, [1]); MSv2.addrows!(e, 2)), d)
+        nbad += tstate(readtable(d)) != s0
+        edit(e -> MSv2.addcolumn!(e, "ZZ", fill(1.0, MSv2.nrow(readtable(d)))), d)
+        edit(e -> MSv2.removecolumn!(e, "ZZ"), d)
+        nbad += tstate(readtable(d)) != s0
+        for rows in (nothing, 2:3)
+            d2 = joinpath(mktempdir(), "c"); rows === nothing ? copytable(d2, readtable(d)) : copytable(d2, readtable(d); rows)
+            nbad += tstate(readtable(d2)) != s0
+        end
+        nbad
+    end
+    nbad = 0
+    for k in 1:8
+        N = rand(rng, 4:30); d = joinpath(mktempdir(), "t")
+        write_table(d, "T$k", Pair{String,Any}["A" => Int32.(1:N), "B" => rand(rng, N), "V" => [rand(rng, rand(rng, 1:3)) for _ in 1:N]]; nrow=N,
+            type="Ty$k", subtype="Sub$k", readme="line1\nline2 é$k\n",
+            keywords=Dict{String,Any}("X" => Int32(k), "S" => "s$k", "R" => Dict("a" => 1.5, "b" => ["x", "y"])),
+            (rand(rng, Bool) ? (; ism=["B"]) : (;))...)
+        nbad += roundtrip(d, tstate(readtable(d)))
+    end
+    @test nbad == 0
+    if _HAVE_TAQL
+        lits = ["-7", "3.25", "'str5'", "T", "F", "[1,2,3]", "[1.5,2.5]", "['a','bb']"]
+        for k in 1:8
+            d = joinpath(mktempdir(), "t")
+            dm = rand(rng, Bool) ? " DMINFO [TYPE=\"IncrementalStMan\", NAME=\"IS\", COLUMNS=[\"C1\"]]" : ""
+            # (helper functions: a casacore handle left alive in this frame would stop the ALTER flushing)
+            mk(q) = (tc = _taql_create(q); CCT.flush(tc); nothing)
+            alt(j, lit) = (r = _taqlcmd("ALTER TABLE \$1 SET KEYWORD K$j = $lit", d); r = nothing; nothing)
+            mk("CREATE TABLE $d [C1 I4, C2 R8, C3 S] LIMIT $(rand(rng, 5:20))$dm")
+            for _ in 1:20; GC.gc(); sleep(0.05); end
+            for j in 1:rand(rng, 1:4); alt(j, rand(rng, lits)); for _ in 1:20; GC.gc(); sleep(0.05); end; end
+            @test length(MSv2.keywords(readtable(d)).names) >= 1
+            nbad += roundtrip(d, tstate(readtable(d)))
+        end
+        @test nbad == 0
+    end
+end

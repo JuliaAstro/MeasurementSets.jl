@@ -11025,3 +11025,7 @@ Random column keywords (Int / Double / String / Bool scalars, string, numeric an
 ### Phase 369 — casacore-made fixed-shape arrays stay indirect through a rewrite
 
 Column descriptions (type, shape, option, comment, keywords) of random real-casacore-created tables (SSM / ISM, scalar / fixed / variable columns, units, comments) were compared before and after our `edit` regeneration and `copytable` (40 tables). The only drift: a casacore-made fixed-shape numeric array column is stored indirect (option 4, FixedShape without Direct) and we rewrote it as a direct column (option 5). `_normalize_desc` now keeps the indirect storage; descriptions are identical afterwards and the rewritten data reads identically in Casacore.jl (checked for 8 element types × SSM / ISM × 3 shapes).
+
+### Phase 370 — table-level metadata survives every rewrite
+
+Table keywords (scalars, arrays, nested records, set by us or by real casacore `ALTER TABLE … SET KEYWORD`), type / subtype / readme, table name and comment and column order are identical after `edit` regeneration, `addcolumn!` + `removecolumn!` and `copytable` with and without a row selection (70 tables, SSM / ISM) — no bug; kept as a test. (Harness note: a real-casacore handle still alive in the creating frame stops a following `ALTER` from flushing; create tables in a helper function.)
