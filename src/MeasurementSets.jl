@@ -79,6 +79,7 @@ include("tables/refedit.jl")
 include("tables/concatedit.jl")
 include("tables/resync.jl")
 include("taql/commands.jl")
+include("msforward.jl")
 include("beam/beam.jl")
 
 export AbstractTable, Table, RefTable, ConcatTable

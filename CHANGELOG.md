@@ -11041,3 +11041,7 @@ Non-ASCII string literals and values in TaQL (`WHERE`, `UPDATE`, `INSERT`, `DELE
 ### Phase 373 — backslash-escaped column names in TaQL
 
 Real TaQL lets any character in a name be escaped with a backslash (`a\ b`, `a\-b`, `x\:y`), the only way to reference a column whose name is not a plain identifier; TaQL-lite rejected the backslash everywhere. The tokenizer now accepts escaped names, and the `taql()` command parsers unescape them in SELECT / INSERT column lists and `SET` pairs and in ALTER TABLE `ADD` / `DROP` / `RENAME COLUMN` and `SET` / `DROP` / `RENAME KEYWORD` (including `COL::kw`). 27 SELECT / UPDATE / INSERT / DELETE forms and 10 ALTER forms with `a\ b`, `a\-b`, `x\:y` agree with real TaQL. (Real TaQL rejects non-ASCII names and a bare keyword such as `select`; ours stays lenient.)
+
+### Phase 374 — a `MeasurementSet` acts as its MAIN table
+
+`nrow(ms)` did not exist, and neither did most other table verbs on a `MeasurementSet` (only `ms[:COL]`, `ms.SUBTABLE` and Tables.jl worked). An audit of 22 verbs found 17 raising `MethodError`. `nrow`, `columnnames`, `columndesc` and `keywords` now describe the MAIN table, and `column` / `getcolumn` / `getcell` / `query` (string and closure) / `groupby` / `join` / `copytable` / `write_reftable` / `measure` / `measinfo` / `columnunit` / `qcolumn` / `rawblock` / `subtables` / `update!` / `delete!` / `insert!` / `taql` / `edit` accept a `MeasurementSet` and act on its MAIN table (`src/msforward.jl`). The three-argument subtable forms (`column(ms, "ANTENNA", "NAME")`, …) are unchanged.
