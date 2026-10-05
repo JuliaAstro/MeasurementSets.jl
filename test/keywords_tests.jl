@@ -125,3 +125,41 @@ end
         @test readtable(c).readme == readme
     end
 end
+
+# Phase 368: column keywords survive every table rewrite (edit regeneration, addcolumn!,
+# removecolumn!, renamecolumn!, copytable with and without a row selection): sweep, no bug found.
+@testset "column keywords survive rewrites (Phase 368)" begin
+    rng = MSv2.Random.MersenneTwister(368)
+    kv() = rand(rng, Any[() -> Int32(rand(rng, -9:9)), () -> rand(rng), () -> "s" * string(rand(rng, 1:99)), () -> rand(rng, Bool),
+          () -> ["a", "bb", "ccc"][1:rand(rng, 1:3)], () -> rand(rng, rand(rng, 1:4)), () -> rand(rng, Bool, rand(rng, 1:5))])()
+    kws(t, c) = (cd = MSv2.columndesc(t, c); Dict(String(k) => v for (k, v) in zip(cd.keywords.names, cd.keywords.values)))
+    nbad = 0
+    for _ in 1:12
+        N = rand(rng, 5:40)
+        cols = Pair{String,Any}["A" => Int32.(1:N), "B" => rand(rng, N), "S" => ["s$i" for i in 1:N], "V" => [rand(rng, rand(rng, 1:3)) for _ in 1:N]]
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", cols; nrow=N, (rand(rng, Bool) ? (; ism=["B"]) : (;))...)
+        want = Dict{String,Dict{String,Any}}()
+        for c in ("A", "B", "S", "V"), j in 1:rand(rng, 0:3)
+            v = kv(); MSv2.setkeyword!(d, "KW$j", v; column=c); get!(want, c, Dict{String,Any}())["KW$j"] = v
+        end
+        chk(path, mp=identity) = begin
+            t = readtable(path)
+            for (c, m) in want
+                cn = mp(c); cn in MSv2.columnnames(t) || continue
+                got = kws(t, cn)
+                for (n, v) in m
+                    (haskey(got, n) && got[n] == v) || (nbad += 1)
+                end
+            end
+        end
+        chk(d)
+        edit(d) do e; MSv2.removerows!(e, [1, 3]); MSv2.addrows!(e, 2); end; chk(d)
+        edit(d) do e; MSv2.addcolumn!(e, "Z", fill(1.5, MSv2.nrow(readtable(d)))); end; chk(d)
+        d2 = joinpath(mktempdir(), "c"); copytable(d2, readtable(d)); chk(d2)
+        d3 = joinpath(mktempdir(), "c"); copytable(d3, readtable(d); rows=2:4); chk(d3)
+        MSv2.renamecolumn!(d, "B", "B2"); chk(d, c -> c == "B" ? "B2" : c)
+        edit(d) do e; MSv2.removecolumn!(e, "S"); end; chk(d)
+    end
+    @test nbad == 0
+end

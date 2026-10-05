@@ -11017,3 +11017,7 @@ Casacore.jl cannot read variable-shape tiled columns, so those were checked ours
 ### Phase 367 — extreme values round-trip bit-exactly
 
 NaN, ±Inf, −0.0, subnormal / maximal floats and integer limits written through StandardStMan and IncrementalStMan (scalar, fixed and variable arrays; both byte orders; ISM with long runs) read back bit-identically in our reader and Casacore.jl (132 combinations) — no bug; kept as a test.
+
+### Phase 368 — column keywords survive every table rewrite
+
+Random column keywords (Int / Double / String / Bool scalars, string, numeric and Bool arrays) on SSM / ISM / variable-array columns stay intact through `edit` regeneration (`removerows!` + `addrows!`), `addcolumn!`, `removecolumn!`, `renamecolumn!` and `copytable` with and without a row selection (40 random tables) — no bug; kept as a test.
