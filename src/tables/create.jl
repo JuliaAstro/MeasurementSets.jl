@@ -104,8 +104,11 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
             c.maxlength, c.keywords, c.default, c.sequ)
     end
     cls = arr ? _classname(c.type, true) : _classname(c.type, false)
+    # Phase 369: a casacore-made fixed-shape array (option FixedShape without Direct) is stored
+    # INDIRECT; keep it that way on a rewrite instead of silently turning it into a direct one.
+    indirect = (c.option & COLOPT_FIXEDSHAPE) != 0 && (c.option & COLOPT_DIRECT) == 0 && c.shape isa Dims && !isempty(c.shape)
     opt = (arr && c.shape isa Dims && !isempty(c.shape)) ?
-          ((c.type == TpString ? c.option & ~COLOPT_DIRECT : c.option | COLOPT_DIRECT) | COLOPT_FIXEDSHAPE) : Int32(0)   # strings are written indirect, whatever the source did
+          ((c.type == TpString || indirect ? c.option & ~COLOPT_DIRECT : c.option | COLOPT_DIRECT) | COLOPT_FIXEDSHAPE) : Int32(0)   # strings are written indirect, whatever the source did
     mgr = kind === :ism ? "IncrementalStMan" : "StandardStMan"
     return ColumnDesc(c.name, c.comment, mgr, mgr,
         c.type, cls, c.shape, opt, c.maxlength, c.keywords, c.default, c.sequ)

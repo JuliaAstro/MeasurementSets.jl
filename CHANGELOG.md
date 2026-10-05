@@ -11021,3 +11021,7 @@ NaN, ±Inf, −0.0, subnormal / maximal floats and integer limits written throug
 ### Phase 368 — column keywords survive every table rewrite
 
 Random column keywords (Int / Double / String / Bool scalars, string, numeric and Bool arrays) on SSM / ISM / variable-array columns stay intact through `edit` regeneration (`removerows!` + `addrows!`), `addcolumn!`, `removecolumn!`, `renamecolumn!` and `copytable` with and without a row selection (40 random tables) — no bug; kept as a test.
+
+### Phase 369 — casacore-made fixed-shape arrays stay indirect through a rewrite
+
+Column descriptions (type, shape, option, comment, keywords) of random real-casacore-created tables (SSM / ISM, scalar / fixed / variable columns, units, comments) were compared before and after our `edit` regeneration and `copytable` (40 tables). The only drift: a casacore-made fixed-shape numeric array column is stored indirect (option 4, FixedShape without Direct) and we rewrote it as a direct column (option 5). `_normalize_desc` now keeps the indirect storage; descriptions are identical afterwards and the rewritten data reads identically in Casacore.jl (checked for 8 element types × SSM / ISM × 3 shapes).
