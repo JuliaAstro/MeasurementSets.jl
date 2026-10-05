@@ -76,9 +76,14 @@ _withsequ(c::ColumnDesc, s) = ColumnDesc(c.name, c.comment, c.manager, c.group,
 # writer will actually bind it to (`:ssm` / `:ism` / `:tsm` / `:tcm` / `:tcell`).
 function _normalize_desc(c::ColumnDesc, kind::Symbol)
     arr = _is_tsm(c.shape) || (c.shape isa Dims && !isempty(c.shape))
+    # Phase 364: a fixed-shape column keeps its FixedShape bit when bound to a tiled
+    # shape/cell manager (real casacore writes option 4 there, never Direct); we used to
+    # force option 0, so an `edit` regeneration (removerows!, ...) turned a casacore-made
+    # fixed-shape tiled column into a declared-variable one (Casacore.jl then types it 1-D).
+    fixedopt = (c.shape isa Dims && !isempty(c.shape)) ? Int32(COLOPT_FIXEDSHAPE) : Int32(0)
     if kind === :tsm
         return ColumnDesc(c.name, c.comment, "TiledShapeStMan", "TSM" * c.name,
-            c.type, _classname(c.type, true), c.shape, Int32(0),
+            c.type, _classname(c.type, true), c.shape, fixedopt,
             c.maxlength, c.keywords, c.default, c.sequ)
     end
     if kind === :tcm     # TiledColumnStMan — fixed cell shape, direct
@@ -89,7 +94,7 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
     end
     if kind === :tcell   # TiledCellStMan — per-row hypercube
         return ColumnDesc(c.name, c.comment, "TiledCellStMan", "TSM" * c.name,
-            c.type, _classname(c.type, true), c.shape, Int32(0),
+            c.type, _classname(c.type, true), c.shape, fixedopt,
             c.maxlength, c.keywords, c.default, c.sequ)
     end
     if kind === :dysco   # DyscoStMan — fixed cell shape, direct (like :tcm)
@@ -99,8 +104,11 @@ function _normalize_desc(c::ColumnDesc, kind::Symbol)
             c.maxlength, c.keywords, c.default, c.sequ)
     end
     cls = arr ? _classname(c.type, true) : _classname(c.type, false)
+    # Phase 369: a casacore-made fixed-shape array (option FixedShape without Direct) is stored
+    # INDIRECT; keep it that way on a rewrite instead of silently turning it into a direct one.
+    indirect = (c.option & COLOPT_FIXEDSHAPE) != 0 && (c.option & COLOPT_DIRECT) == 0 && c.shape isa Dims && !isempty(c.shape)
     opt = (arr && c.shape isa Dims && !isempty(c.shape)) ?
-          ((c.type == TpString ? c.option & ~COLOPT_DIRECT : c.option | COLOPT_DIRECT) | COLOPT_FIXEDSHAPE) : Int32(0)   # strings are written indirect, whatever the source did
+          ((c.type == TpString || indirect ? c.option & ~COLOPT_DIRECT : c.option | COLOPT_DIRECT) | COLOPT_FIXEDSHAPE) : Int32(0)   # strings are written indirect, whatever the source did
     mgr = kind === :ism ? "IncrementalStMan" : "StandardStMan"
     return ColumnDesc(c.name, c.comment, mgr, mgr,
         c.type, cls, c.shape, opt, c.maxlength, c.keywords, c.default, c.sequ)

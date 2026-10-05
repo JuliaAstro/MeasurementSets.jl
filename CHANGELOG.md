@@ -11001,3 +11001,27 @@ Date-function queries on MS-style `TIME` columns in `SELECT … GROUP BY` (compa
 ### Phase 363 — date functions / quantity literals through a JOIN
 
 `SELECT … FROM $1 a JOIN $2 b ON … WHERE year(a.TIME) > 2010` kept every row and `WHERE a.LL > 1km` raised a DimensionError: the joined result is a plain `GroupedTable` that lost its source columns' units and epoch flags, and `query(::GroupedTable)` evaluated its WHERE on raw columns. A `GroupedTable` now carries per-column units and an epoch-column set (kept through JOIN, ORDER BY and WHERE filtering, and reported by `columndesc` as `QuantumUnits`), and its WHERE uses the same column loading (`_tql_cols`) as a table's — unit attachment, epoch-date conversion. Verified against real TaQL for `year` / `datetime` / `mjd` / unit-literal conditions and select expressions over the joined columns.
+
+### Phase 364 — tiled fixed-shape columns keep their FixedShape option on rewrite
+
+Random-parameter sweep of real-casacore-created tables (random column mixes, StandardStMan `BUCKETSIZE`/`BUCKETROWS`/`PERSCACHESIZE`, IncrementalStMan bucket/cache sizes, TiledShapeStMan tile shapes and cache sizes, 1–3000 rows, mutated by TaQL `UPDATE`/`INSERT`/`DELETE`, then edited by us), ours vs Casacore.jl: values agree everywhere (75 cases). One schema bug found: `_normalize_desc` wrote option 0 for every column bound to a tiled shape / cell manager, so a casacore-made fixed-shape tiled column (option 4) turned into a declared-variable one whenever `edit` regenerated it (`removerows!`, …), and our own uniform tiled columns were written that way too — Casacore.jl then typed the column as 1-D and could not size it. The FixedShape bit is now kept for a fixed `Dims` shape. (Real casacore refuses `DELETE` on any table with a tiled column — not copied.)
+
+### Phase 365 — our tiled fixed-shape columns vs Casacore.jl across every type and shape
+
+Follow-up to Phase 364: the type matrix had never compared `tsm=` columns with Casacore.jl (its declared-variable shape made them unreadable there). With the FixedShape option kept, 132 combinations (11 element types × 4 fixed shapes × `tsm`/`tcm`/`tcell`) written by us read identically in Casacore.jl — no bug; the type matrix now includes the fixed-shape `tsm` cross-check.
+
+### Phase 366 — variable-shape arrays (incl. tiled) written by us, read by real TaQL
+
+Casacore.jl cannot read variable-shape tiled columns, so those were checked ours-only. Real TaQL can: 216 combinations (9 element types × 1–3 dims × `tsm`/`tcell`/`ssm`/`ism`) written by us give identical `nelements` / `ndim` / `sum` per row in real TaQL — no bug; a 7-type × 3-dim × 4-manager version is kept as a test.
+
+### Phase 367 — extreme values round-trip bit-exactly
+
+NaN, ±Inf, −0.0, subnormal / maximal floats and integer limits written through StandardStMan and IncrementalStMan (scalar, fixed and variable arrays; both byte orders; ISM with long runs) read back bit-identically in our reader and Casacore.jl (132 combinations) — no bug; kept as a test.
+
+### Phase 368 — column keywords survive every table rewrite
+
+Random column keywords (Int / Double / String / Bool scalars, string, numeric and Bool arrays) on SSM / ISM / variable-array columns stay intact through `edit` regeneration (`removerows!` + `addrows!`), `addcolumn!`, `removecolumn!`, `renamecolumn!` and `copytable` with and without a row selection (40 random tables) — no bug; kept as a test.
+
+### Phase 369 — casacore-made fixed-shape arrays stay indirect through a rewrite
+
+Column descriptions (type, shape, option, comment, keywords) of random real-casacore-created tables (SSM / ISM, scalar / fixed / variable columns, units, comments) were compared before and after our `edit` regeneration and `copytable` (40 tables). The only drift: a casacore-made fixed-shape numeric array column is stored indirect (option 4, FixedShape without Direct) and we rewrote it as a direct column (option 5). `_normalize_desc` now keeps the indirect storage; descriptions are identical afterwards and the rewritten data reads identically in Casacore.jl (checked for 8 element types × SSM / ISM × 3 shapes).
