@@ -86,3 +86,30 @@
         @test rfail == 0
     end
 end
+
+# Phase 366: variable-shape arrays (including the tiled managers, which Casacore.jl cannot
+# read) written by us, read back by REAL TaQL (nelements / ndim / sum): sweep, no bug found.
+@testset "variable-shape arrays read by real TaQL (Phase 366)" begin
+    if _HAVE_TAQL
+        rng = MSv2.Random.MersenneTwister(366)
+        gen(::Type{Bool}) = rand(rng, Bool)
+        gen(T::Type{<:Integer}) = T(rand(rng, 0:100))
+        gen(T::Type{<:AbstractFloat}) = T(rand(rng) * 100)
+        gen(::Type{Complex{T}}) where {T} = Complex{T}(rand(rng) * 10, rand(rng) * 10)
+        nfail = 0
+        for T in (Bool, UInt8, Int16, Int32, Float32, Float64, ComplexF32), nd in 1:3, m in (:tsm, :tcell, :ssm, :ism)
+            N = rand(rng, 1:40)
+            col = [reshape([gen(T) for _ in 1:prod(sz)], sz...) for sz in (Tuple(rand(rng, 1:4, nd)) for _ in 1:N)]
+            d = joinpath(mktempdir(), "t")
+            kw = m === :tsm ? (; tsm=[["X"]]) : m === :tcell ? (; tcell=[["X"]]) : m === :ism ? (; ism=["X"]) : (;)
+            write_table(d, "T", Pair{String,Any}["X" => col]; nrow=N, kw...)
+            se = T <: Bool ? "ntrue(X)" : T <: Complex ? "sum(abs(X))" : "sum(X)"
+            r = _taqlcmd("SELECT nelements(X) AS NE, ndim(X) AS ND, $se AS S FROM \$1", d)
+            ws = T <: Bool ? count.(col) : T <: Complex ? [sum(abs.(Complex{Float64}.(c))) for c in col] : [sum(Float64.(c)) for c in col]
+            ok = [r[:NE][i] for i in 1:N] == length.(col) && all(i -> r[:ND][i] == nd, 1:N) &&
+                 all(i -> isapprox(r[:S][i], ws[i]; rtol=1e-4), 1:N)
+            ok || (nfail += 1; @info "variable-shape TaQL read failed" T nd m)
+        end
+        @test nfail == 0
+    end
+end

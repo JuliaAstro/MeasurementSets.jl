@@ -11009,3 +11009,7 @@ Random-parameter sweep of real-casacore-created tables (random column mixes, Sta
 ### Phase 365 — our tiled fixed-shape columns vs Casacore.jl across every type and shape
 
 Follow-up to Phase 364: the type matrix had never compared `tsm=` columns with Casacore.jl (its declared-variable shape made them unreadable there). With the FixedShape option kept, 132 combinations (11 element types × 4 fixed shapes × `tsm`/`tcm`/`tcell`) written by us read identically in Casacore.jl — no bug; the type matrix now includes the fixed-shape `tsm` cross-check.
+
+### Phase 366 — variable-shape arrays (incl. tiled) written by us, read by real TaQL
+
+Casacore.jl cannot read variable-shape tiled columns, so those were checked ours-only. Real TaQL can: 216 combinations (9 element types × 1–3 dims × `tsm`/`tcell`/`ssm`/`ism`) written by us give identical `nelements` / `ndim` / `sum` per row in real TaQL — no bug; a 7-type × 3-dim × 4-manager version is kept as a test.
