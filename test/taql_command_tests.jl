@@ -1889,3 +1889,28 @@ end
         end
     end
 end
+
+# Phase 373: a TaQL name may escape any character with a backslash (`a\ b`, `a\-b`, `x\:y`), the
+# only way to reference a column whose name is not a plain identifier.  The tokenizer, SELECT /
+# INSERT / UPDATE / ALTER TABLE name handling now unescape like real TaQL.
+@testset "backslash-escaped column names (Phase 373)" begin
+    mk(nm) = (d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}[nm => Int32.(1:6), "K" => Int32.(1:6)]; nrow=6); d)
+    esc(nm) = replace(nm, r"([^A-Za-z0-9_])" => s"\\\1")
+    for nm in ("a b", "a-b", "x:y")
+        E = esc(nm); d = mk(nm); t = readtable(d)
+        @test column(query(t, "$E > 3"), "K")[:] == Int32[4, 5, 6]
+        @test column(query(t, "$E BETWEEN 2 AND 3"), "K")[:] == Int32[2, 3]
+        r = taql(d, "SELECT K, $E FROM t WHERE $E > 2 ORDER BY $E DESC")
+        @test MSv2.columnnames(r) == ["K", nm] && column(r, nm)[:] == Int32[6, 5, 4, 3]
+        taql(d, "UPDATE t SET $E = $E + 10 WHERE K > 4"); @test column(readtable(d), nm)[:] == Int32[1, 2, 3, 4, 15, 16]
+        taql(d, "INSERT INTO t ($E, K) VALUES (77, 8)"); @test column(readtable(d), nm)[end] == 77
+        taql(d, "ALTER TABLE t RENAME COLUMN $E TO ZZ"); @test "ZZ" in MSv2.columnnames(readtable(d))
+        taql(d, "ALTER TABLE t DROP COLUMN ZZ"); @test MSv2.columnnames(readtable(d)) == ["K"]
+        d2 = mk(nm); taql(d2, "ALTER TABLE t SET KEYWORD $E\\k = 3"); @test MSv2.keywords(readtable(d2)).names == [nm * "k"]
+        if _HAVE_TAQL
+            d3 = mk(nm); rt = _taqlcmd("SELECT K, $E FROM \$1 WHERE $E > 2 ORDER BY $E DESC", d3)
+            @test [rt[Symbol(nm)][i] for i in 1:size(rt, 1)] == Int32[6, 5, 4, 3]
+            for _ in 1:2; GC.gc(); end
+        end
+    end
+end

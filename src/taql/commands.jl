@@ -738,9 +738,9 @@ const _ALTER_TYPES = Dict{String,DataType}("B" => Bool, "BOOL" => Bool, "BOOLEAN
     "C4" => ComplexF32, "COMPLEX" => ComplexF32, "C8" => ComplexF64, "DCOMPLEX" => ComplexF64, "S" => String, "STRING" => String)
 
 function _alter_add_column(path::String, item::AbstractString)
-    m = match(r"^(\w+)\s+(\w+)\s*(?:\[(.*)\])?\s*$"s, strip(item))
+    m = match(r"^((?:\w|\\.)+)\s+(\w+)\s*(?:\[(.*)\])?\s*$"s, strip(item))
     m === nothing && throw(ArgumentError("taql: malformed ADD COLUMN item \"$item\""))
-    name = String(m.captures[1]); T = get(_ALTER_TYPES, uppercase(m.captures[2]), nothing)
+    name = _taql_unescape(m.captures[1]); T = get(_ALTER_TYPES, uppercase(m.captures[2]), nothing)
     T === nothing && throw(ArgumentError("taql: unknown column type \"$(m.captures[2])\" in ALTER TABLE ADD COLUMN"))
     ndim = nothing; shp = nothing
     if m.captures[3] !== nothing
@@ -789,25 +789,25 @@ function _alter_dryrun(path::String, clauses)
         if kind == "ADD COLUMN"
             body = replace(rest, r"\s+DMINFO\s*\[.*\]\s*$"is => "")
             for it in _split_commas(body)
-                nm = match(r"^(\w+)", strip(it)); nm === nothing && continue
-                String(nm.captures[1]) in cols && throw(ArgumentError("taql: ALTER TABLE ADD COLUMN: column \"$(nm.captures[1])\" already exists"))
-                push!(cols, String(nm.captures[1]))
+                nm = match(r"^((?:\w|\\.)+)", strip(it)); nm === nothing && continue
+                _taql_unescape(nm.captures[1]) in cols && throw(ArgumentError("taql: ALTER TABLE ADD COLUMN: column \"$(_taql_unescape(nm.captures[1]))\" already exists"))
+                push!(cols, _taql_unescape(nm.captures[1]))
             end
         elseif kind == "DROP COLUMN"
             for it in _split_commas(rest)
-                nm = String(strip(it)); nm in cols || throw(KeyError(nm)); delete!(cols, nm)
+                nm = _taql_unescape(strip(it)); nm in cols || throw(KeyError(nm)); delete!(cols, nm)
             end
         elseif kind == "RENAME COLUMN"
             for it in _split_commas(rest)
-                rm = match(r"^(\w+)\s+TO\s+(\w+)$"i, strip(it)); rm === nothing && continue
-                a, b = String(rm.captures[1]), String(rm.captures[2])
+                rm = match(r"^((?:\w|\\.)+)\s+TO\s+((?:\w|\\.)+)$"i, strip(it)); rm === nothing && continue
+                a, b = _taql_unescape(rm.captures[1]), _taql_unescape(rm.captures[2])
                 a in cols || throw(KeyError(a)); b in cols && throw(ArgumentError("taql: ALTER TABLE: the table already has a column \"$b\""))
                 delete!(cols, a); push!(cols, b)
                 haskey(kws, a) && (kws[b] = pop!(kws, a))
             end
         elseif kind == "SET KEYWORD"
             for it in _split_commas(rest)
-                am = match(r"^((?:\w+::)?\w+)\s*=\s*(.+)$"s, strip(it)); am === nothing && continue
+                am = match(r"^((?:(?:\w|\\.)+::)?(?:\w|\\.)+)\s*=\s*(.+)$"s, strip(it)); am === nothing && continue
                 col, kn = _alter_kwname(am.captures[1]); sc = scope(col)
                 v = _taql_const(String(strip(am.captures[2])))
                 haskey(sc, kn) && !startswith(sc[kn], "array") && v isa AbstractVector && length(v) == 1 && (v = v[1])
@@ -822,8 +822,8 @@ function _alter_dryrun(path::String, clauses)
             end
         else
             for it in _split_commas(rest)
-                rm = match(r"^((?:\w+::)?\w+)\s+TO\s+(\w+)$"i, strip(it)); rm === nothing && continue
-                col, kn = _alter_kwname(rm.captures[1]); sc = scope(col); nn = String(rm.captures[2])
+                rm = match(r"^((?:(?:\w|\\.)+::)?(?:\w|\\.)+)\s+TO\s+((?:\w|\\.)+)$"i, strip(it)); rm === nothing && continue
+                col, kn = _alter_kwname(rm.captures[1]); sc = scope(col); nn = _taql_unescape(rm.captures[2])
                 haskey(sc, kn) || throw(KeyError(kn))
                 kn == nn && continue
                 haskey(sc, nn) && throw(ArgumentError("taql: keyword \"$nn\" already exists"))
@@ -856,7 +856,7 @@ function _taql_alter(target, command::AbstractString)
             rest = String(strip(replace(rest, r"\s+DMINFO\s*\[.*\]\s*$"is => "")))
             foreach(it -> _alter_add_column(path, it), _split_commas(rest))
         elseif kind == "DROP COLUMN"
-            names = String[String(strip(s)) for s in _split_commas(rest)]
+            names = String[_taql_unescape(strip(s)) for s in _split_commas(rest)]
             rd = readtable(path)
             for nm in names
                 nm in columnnames(rd) || throw(KeyError(nm))
@@ -868,13 +868,13 @@ function _taql_alter(target, command::AbstractString)
             end
         elseif kind == "RENAME COLUMN"
             for it in _split_commas(rest)
-                rm = match(r"^(\w+)\s+TO\s+(\w+)$"i, strip(it))
+                rm = match(r"^((?:\w|\\.)+)\s+TO\s+((?:\w|\\.)+)$"i, strip(it))
                 rm === nothing && throw(ArgumentError("taql: malformed RENAME COLUMN item \"$it\""))
-                renamecolumn!(path, String(rm.captures[1]), String(rm.captures[2]))
+                renamecolumn!(path, _taql_unescape(rm.captures[1]), _taql_unescape(rm.captures[2]))
             end
         elseif kind == "SET KEYWORD"
             for it in _split_commas(rest)
-                am = match(r"^((?:\w+::)?\w+)\s*=\s*(.+)$"s, strip(it))
+                am = match(r"^((?:(?:\w|\\.)+::)?(?:\w|\\.)+)\s*=\s*(.+)$"s, strip(it))
                 am === nothing && throw(ArgumentError("taql: malformed SET KEYWORD item \"$it\""))
                 col, kwname = _alter_kwname(am.captures[1])
                 setkeyword!(path, kwname, _taql_const(String(strip(am.captures[2]))); column=col)
@@ -886,10 +886,10 @@ function _taql_alter(target, command::AbstractString)
             end
         else   # RENAME KEYWORD a TO b
             for it in _split_commas(rest)
-                rm = match(r"^((?:\w+::)?\w+)\s+TO\s+(\w+)$"i, strip(it))
+                rm = match(r"^((?:(?:\w|\\.)+::)?(?:\w|\\.)+)\s+TO\s+((?:\w|\\.)+)$"i, strip(it))
                 rm === nothing && throw(ArgumentError("taql: malformed RENAME KEYWORD item \"$it\""))
                 col, kwname = _alter_kwname(rm.captures[1])
-                renamekeyword!(path, kwname, String(rm.captures[2]); column=col)
+                renamekeyword!(path, kwname, _taql_unescape(rm.captures[2]); column=col)
             end
         end
     end
@@ -898,9 +898,9 @@ end
 function _alter_kwname(s)
     if occursin("::", s)
         a, b = split(s, "::"; limit=2)
-        return (String(a), String(b))
+        return (_taql_unescape(a), _taql_unescape(b))
     end
-    return (nothing, String(s))
+    return (nothing, _taql_unescape(s))
 end
 
 
@@ -1147,9 +1147,9 @@ function taql(target, command::AbstractString, others...)
                 src = String(strip(cm.captures[1]))
                 alias = cm.captures[2]
                 if alias === nothing
-                    occursin(r"^\w+$", src) ||
+                    occursin(_TAQL_NAME_RE, src) ||
                         throw(ArgumentError("taql: computed SELECT column \"$src\" needs an AS alias"))
-                    push!(select, src => src)
+                    push!(select, _taql_unescape(src) => src)
                 else
                     push!(select, String(alias) => src)
                 end
@@ -1277,6 +1277,11 @@ function _nest_to_array(v::AbstractVector)
     all(x -> x isa AbstractArray, ev) && allequal(size.(ev)) ? stack(ev) : ev
 end
 
+# a TaQL name may escape any character with a backslash (`a\ b`, `a\-b`, `x\:y`); the column is the
+# unescaped text
+_taql_unescape(s::AbstractString) = String(replace(s, r"\\(.)"s => s"\1"))
+const _TAQL_NAME_RE = r"^(?:\w|\\.)+$"s
+
 # evaluate a single TaQL-lite expression with no columns in scope
 function _taql_const(exprstr::AbstractString)
     ast = try
@@ -1308,7 +1313,7 @@ function _taql_insert(target, cmd::AbstractString)
     msel = match(r"^INSERT\s+INTO\s+\S+\s*(?:\(([^)]*)\)\s*)?SELECT\s+(.*?)\s+FROM\s+(?:'([^']+)'|(\w+))\s*" *
                 r"(?:WHERE\s+(.+))?\s*$"is, cmd)
     if msel !== nothing
-        tcols = msel.captures[1] === nothing ? nothing : String.(strip.(split(msel.captures[1], ',')))
+        tcols = msel.captures[1] === nothing ? nothing : _taql_unescape.(strip.(split(msel.captures[1], ',')))
         collist = String(strip(msel.captures[2]))
         # `FROM 'path'` reads another table; a bare `FROM name` is the target itself
         # (real TaQL's `INSERT INTO t SELECT ... FROM t`; Phase 247)
@@ -1339,7 +1344,7 @@ function _taql_insert(target, cmd::AbstractString)
     if mv !== nothing
         cols = mv.captures[1] === nothing ?
                columnnames(target isa AbstractTable ? target : readtable(_cmd_path(target))) :
-               String.(strip.(split(mv.captures[1], ',')))
+               _taql_unescape.(strip.(split(mv.captures[1], ',')))
         groups = _paren_groups(mv.captures[2])
         isempty(groups) &&
             throw(ArgumentError("taql: INSERT ... VALUES has no value tuples"))
@@ -1356,10 +1361,10 @@ function _taql_insert(target, cmd::AbstractString)
     if ms !== nothing
         row = Pair{String,Any}[]
         for piece in _split_commas(ms.captures[1])
-            am = match(r"^(\w+)\s*=\s*(.+)$"s, piece)
+            am = match(r"^((?:\w|\\.)+)\s*=\s*(.+)$"s, piece)
             am === nothing &&
                 throw(ArgumentError("taql: malformed SET assignment \"$piece\""))
-            push!(row, String(am.captures[1]) => _taql_const(am.captures[2]))
+            push!(row, _taql_unescape(am.captures[1]) => _taql_const(am.captures[2]))
         end
         return insert!(target; values=row, limit)
     end

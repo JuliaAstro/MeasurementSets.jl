@@ -11037,3 +11037,7 @@ Path handling swept across readers, `edit`, `copytable`, persisted RefTable / Co
 ### Phase 372 — LIKE / glob / regex match bytes, like casacore
 
 Non-ASCII string literals and values in TaQL (`WHERE`, `UPDATE`, `INSERT`, `DELETE`; comparisons, `IN`, `BETWEEN`, string functions, `LIKE` / `ILIKE`, glob and regex forms) compared with real TaQL on random accented / CJK / emoji strings (3 seeds × 60 tables × 17 conditions + write commands). Everything agreed except that casacore's `_` (LIKE), `?` (glob) and `.` / `[..]` (regex) match one BYTE while ours matched one character (`'ß' LIKE '__'`, `'ßñ' LIKE '_ñ%'`). Patterns and subjects are now viewed bytewise (`_bview`), consistent with the byte-oriented string functions of Phase 334.
+
+### Phase 373 — backslash-escaped column names in TaQL
+
+Real TaQL lets any character in a name be escaped with a backslash (`a\ b`, `a\-b`, `x\:y`), the only way to reference a column whose name is not a plain identifier; TaQL-lite rejected the backslash everywhere. The tokenizer now accepts escaped names, and the `taql()` command parsers unescape them in SELECT / INSERT column lists and `SET` pairs and in ALTER TABLE `ADD` / `DROP` / `RENAME COLUMN` and `SET` / `DROP` / `RENAME KEYWORD` (including `COL::kw`). 27 SELECT / UPDATE / INSERT / DELETE forms and 10 ALTER forms with `a\ b`, `a\-b`, `x\:y` agree with real TaQL. (Real TaQL rejects non-ASCII names and a bare keyword such as `select`; ours stays lenient.)

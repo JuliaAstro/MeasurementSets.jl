@@ -125,20 +125,29 @@ function _taqllite_tokenize(s::AbstractString)
                 push!(toks, TQLToken(:num, text, val))
             end
             i = j
-        elseif isletter(c) || c == '_'
-            j = i
-            while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_')
-                j += 1
+        elseif isletter(c) || c == '_' || (c == '\\' && i < n)
+            # a name: letters / digits / `_`, and a backslash makes the next character literal
+            # (`a\ b`, `a\-b`, `x\:y`, like real TaQL); the backslashes are dropped from the name
+            name = Char[]
+            scan(j) = begin
+                while j <= n
+                    if cs[j] == '\\' && j < n
+                        push!(name, cs[j+1]); j += 2
+                    elseif isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_'
+                        push!(name, cs[j]); j += 1
+                    else
+                        break
+                    end
+                end
+                j
             end
+            j = scan(i)
             # one optional `.suffix` -> a table-qualified column (`L.TIME`),
             # only when a letter/`_` immediately follows the dot
             if j < n && cs[j] == '.' && (isletter(cs[j+1]) || cs[j+1] == '_')
-                j += 1
-                while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_')
-                    j += 1
-                end
+                push!(name, '.'); j = scan(j + 1)
             end
-            push!(toks, TQLToken(:ident, join(cs[i:j-1]), nothing))
+            push!(toks, TQLToken(:ident, String(name), nothing))
             i = j
         elseif c in _TQL_OPCHARS
             j = i
