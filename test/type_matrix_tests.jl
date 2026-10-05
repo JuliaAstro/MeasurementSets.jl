@@ -113,3 +113,38 @@ end
         @test nfail == 0
     end
 end
+
+# Phase 367: extreme values (NaN, +-Inf, -0.0, subnormal / max floats, integer limits) round-trip
+# bit-exactly through StandardStMan / IncrementalStMan (scalar, fixed and variable arrays, both
+# byte orders), in our reader and Casacore.jl: sweep, no bug found.
+@testset "extreme values round-trip (Phase 367)" begin
+    rng = MSv2.Random.MersenneTwister(367)
+    special(::Type{T}) where {T<:AbstractFloat} = T[NaN, Inf, -Inf, 0, -0.0, floatmin(T), floatmax(T), -floatmax(T), nextfloat(T(0)), T(1) / 3]
+    special(::Type{Complex{T}}) where {T} = vec([Complex{T}(a, b) for a in special(T)[1:6], b in special(T)[[1, 2, 5, 10]]])
+    special(::Type{T}) where {T<:Integer} = T[typemin(T), typemax(T), 0, 1, T(typemax(T) ÷ 2)]
+    special(::Type{Bool}) = [true, false]
+    isame(a, b) = a isa AbstractFloat ? (isnan(a) ? isnan(b) : (a == b && signbit(a) == signbit(b))) :
+                  a isa Complex ? isame(real(a), real(b)) && isame(imag(a), imag(b)) : isequal(a, b)
+    nfail = 0
+    for T in (Bool, UInt8, Int16, Int32, UInt32, Int64, Float32, Float64, ComplexF32, ComplexF64),
+        m in (:ssm, :ism), endian in (:little, :big), shape in (:scalar, :fixed, :var)
+        sp = special(T); N = rand(rng, 20:120); mk() = rand(rng, sp)
+        col = shape === :scalar ? [mk() for _ in 1:N] :
+              shape === :fixed ? [reshape([mk() for _ in 1:4], 2, 2) for _ in 1:N] :
+              [[mk() for _ in 1:rand(rng, 1:4)] for _ in 1:N]
+        shape === :scalar && m === :ism && (col = [col[(i ÷ 7) + 1] for i in 0:N-1])
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["X" => col]; nrow=N, endian, (m === :ism ? (; ism=["X"]) : (;))...)
+        got = column(readtable(d), "X")[:]
+        ok = all(i -> got[i] isa AbstractArray ? all(isame.(got[i], col[i])) : isame(got[i], col[i]), 1:N)
+        if ok && _HAVE_CASACORE
+            cc = CCT.Table(d)[:X]; nd = ndims(cc)
+            cv = shape === :scalar ? [cc[i] for i in 1:N] :
+                 shape === :var ? [vec(collect(cc[i])) for i in 1:N] :
+                 (arr = cc[ntuple(_ -> Colon(), nd)...]; [Array(selectdim(arr, nd, i)) for i in 1:N])
+            ok = all(i -> cv[i] isa AbstractArray ? (length(cv[i]) == length(col[i]) && all(isame.(vec(cv[i]), vec(col[i])))) : isame(cv[i], col[i]), 1:N)
+        end
+        ok || (nfail += 1; @info "extreme value round trip failed" T m endian shape)
+    end
+    @test nfail == 0
+end

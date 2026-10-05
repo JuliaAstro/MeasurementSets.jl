@@ -11013,3 +11013,7 @@ Follow-up to Phase 364: the type matrix had never compared `tsm=` columns with C
 ### Phase 366 — variable-shape arrays (incl. tiled) written by us, read by real TaQL
 
 Casacore.jl cannot read variable-shape tiled columns, so those were checked ours-only. Real TaQL can: 216 combinations (9 element types × 1–3 dims × `tsm`/`tcell`/`ssm`/`ism`) written by us give identical `nelements` / `ndim` / `sum` per row in real TaQL — no bug; a 7-type × 3-dim × 4-manager version is kept as a test.
+
+### Phase 367 — extreme values round-trip bit-exactly
+
+NaN, ±Inf, −0.0, subnormal / maximal floats and integer limits written through StandardStMan and IncrementalStMan (scalar, fixed and variable arrays; both byte orders; ISM with long runs) read back bit-identically in our reader and Casacore.jl (132 combinations) — no bug; kept as a test.
