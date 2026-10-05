@@ -18,8 +18,22 @@ function _dm_instance(t::Table, sequ::Int)
     T = _dmtype(dm.name)
     T === nothing && error("data manager \"$(dm.name)\" not yet supported (column data)")
     inst = open(T, t, dm)
+    _check_rows(inst, t.rows)
     cache[sequ] = inst
     return inst
+end
+
+# a manager's own row count must agree with the table's (like casacore's "mismatch in #row"); a corrupt
+# count would otherwise make whole-column reads allocate gigabytes
+_check_rows(::Any, ::Int) = nothing
+_check_rows(ism::IncrementalStMan, nrow::Int) = ism.index.rows[ism.index.used+1] - 1 == nrow ||
+    error("IncrementalStMan: mismatch in #row (index $(ism.index.rows[ism.index.used+1] - 1), table $nrow)")
+function _check_rows(ssm::StandardStMan, nrow::Int)
+    for ix in ssm.indices
+        ix.used > 0 && ix.last[ix.used] != nrow &&
+            error("StandardStMan: mismatch in #row (index $(ix.last[ix.used]), table $nrow)")
+    end
+    return nothing
 end
 
 # (1-based position of `c` among columns bound to its DM instance, count bound)

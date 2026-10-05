@@ -147,6 +147,7 @@ function read_tabledesc(a::AipsIO)
     private = tvers != 1 ? read_record(a) : Record()
 
     ncol = Int(read_u32(a))
+    _check_count(a, ncol, "column")
     cols = ColumnDesc[read_columndesc(a) for _ in 1:ncol]
     getend(a)
     return TableDesc(name, version, comment, public, private, cols)
@@ -562,6 +563,7 @@ function _read_concattable(a::AipsIO, dir::String, tp, st, readme, precision)
     cver = Int(getstart(a, "ConcatTable"))
     cver == 0 || error("ConcatTable version $cver not supported")
     nrtab = Int(read_u32(a))
+    _check_count(a, nrtab, "table")
     names = [read_string(a) for _ in 1:nrtab]
     subs = read_block(a, String)
     getend(a)

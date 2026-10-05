@@ -67,6 +67,7 @@ function _af_shape(af::ArrayFile, offset::Integer)
     p = Int(offset)
     af.version >= 1 && (p += AF_INT)                  # skip refCount
     ndim = Int(_af_get(af, UInt32, p)); p += AF_INT
+    0 <= ndim <= 64 || error("StManArrayFile: corrupt array with $ndim axes")
     dims = ntuple(k -> Int(_af_get(af, Int32, p + AF_INT * (k - 1))), ndim)
     return dims, p + AF_INT * ndim
 end
@@ -81,6 +82,8 @@ function af_read(af::ArrayFile, t::CasaType, offset::Integer)
     n = prod(dims; init=1)
     J = juliatype(t)
     big = af.endian === :big
+    _chk_count(n, 1, 8 * length(af.data), "array shape")             # even a bit-packed Bool needs a bit per element
+    t == TpBool || _chk_count(n, t == TpString ? 4 : sizeof(J), length(af.data), "array shape")
 
     if t == TpBool
         # `_rd_bits!` (`datamanagers/bytes.jl`) -- the bulk, pinned-pointer

@@ -25,6 +25,11 @@ _hostconv(z::Complex, big::Bool) = Complex(_hostconv(real(z), big), _hostconv(im
 # These loads go through raw pointers, so a bad offset (a corrupt file, or a layout we
 # misread) would read outside the array and crash the whole process (Phase 268: a casacore
 # ISM string array did exactly that) -- every entry point checks its byte range first.
+# An element count taken from a (possibly corrupt) file must fit the bytes that exist -- check it BEFORE
+# allocating the output, or one bad word makes a read allocate (and zero) gigabytes.
+@noinline _toobig(n, what) = error("corrupt $what: $n elements cannot fit the data")
+@inline _chk_count(n::Int, elbytes::Int, nbytes::Int, what) = (0 <= n && n * elbytes <= nbytes) || _toobig(n, what)
+
 @noinline _oob(bytes, lo, hi) = throw(BoundsError(bytes, lo:hi))
 @inline _chk(bytes, off::Int, nbytes::Int) =
     (off >= 0 && nbytes >= 0 && off + nbytes <= length(bytes)) || _oob(bytes, off + 1, off + nbytes)

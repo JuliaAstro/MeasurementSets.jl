@@ -178,6 +178,9 @@ end
 
 @inline function _ism_colindex_of(ism::IncrementalStMan, rowp::Int, nr::Int, database::Int,
                                   ::Type{RT}, big::Bool) where {RT}
+    # Phase 376: `nr` comes from the file -- a corrupt count must not allocate gigabytes
+    (0 <= nr && nr * (sizeof(RT) + ISM_UINT) <= length(ism.data) - rowp) ||
+        error("IncrementalStMan: corrupt index (entry count $nr exceeds the bucket)")
     rr = Vector{Int}(undef, nr)
     p = rowp
     @inbounds for j in 1:nr
@@ -311,9 +314,7 @@ function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
             r0 = bstart + rownrs[k]                                  # 1-based
             r1 = k < length(rownrs) ? bstart + rownrs[k+1] : bend    # exclusive
             v = _ism_decode(ism, c, database + offsets[k])
-            @inbounds for r in r0:r1-1
-                out[r] = v
-            end
+            _ism_fill!(out, r0, r1, v)
         end
     end
     astype === nothing && return out
@@ -336,6 +337,17 @@ end
 # re-boxing on every row (`isbool` stays a plain `Bool` field, not part
 # of the barrier -- it's a compile-time-resolved `D === Bool` check
 # inlined below, not a second axis of runtime dispatch).
+# fill `out[r0:r1-1]` with `v`; the row range comes from the file, so check it (an unchecked write
+# on a corrupt index used to corrupt the heap)
+@inline function _ism_fill!(out, r0::Int, r1::Int, v)
+    (r0 >= 1 && r1 - 1 <= length(out)) ||
+        error("IncrementalStMan: corrupt index (rows $r0:$(r1 - 1) outside 1:$(length(out)))")
+    @inbounds for r in r0:r1-1
+        out[r] = v
+    end
+    return nothing
+end
+
 function _ism_getcolumn_scalar!(out::Vector{J}, ism::IncrementalStMan, colnr::Int,
                                 isbool::Bool, nrow::Int, ncol::Int, ::Type{D}) where {J,D}
     ix = ism.index
@@ -344,14 +356,12 @@ function _ism_getcolumn_scalar!(out::Vector{J}, ism::IncrementalStMan, colnr::In
         bstart = ix.rows[bi]                 # 1-based first row of the bucket
         bend = ix.rows[bi+1]                 # 1-based, exclusive
         rownrs, offsets, database = _ism_colindex(ism, ix.bucket[bi], colnr, ncol)
-        @inbounds for k in 1:length(rownrs)
+        for k in 1:length(rownrs)
             r0 = bstart + rownrs[k]                                  # 1-based
             r1 = k < length(rownrs) ? bstart + rownrs[k+1] : bend    # exclusive
             dataoff = database + offsets[k]
             v = isbool ? (ism.data[dataoff + 1] & 0x01 == 0x01) : _ld(D, ism.data, dataoff, big)
-            for r in r0:r1-1
-                out[r] = v
-            end
+            _ism_fill!(out, r0, r1, v)
         end
     end
     return out
