@@ -42,7 +42,7 @@
             false
         end
         ok || (nfail += 1; @info "type matrix (ours→ours) failed" T sn m)
-        if ok && _HAVE_CASACORE && m !== :tsm
+        if ok && _HAVE_CASACORE && !(m === :tsm && sh === nothing)   # Phase 365: fixed-shape tiled columns are cross-checked too
             cc = CCT.Table(dir)[:X]; nd = ndims(cc)
             cok = if sh === ()
                 all(i -> isequal(cc[i], col[i]), 1:N)

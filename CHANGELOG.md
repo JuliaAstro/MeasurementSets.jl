@@ -11005,3 +11005,7 @@ Date-function queries on MS-style `TIME` columns in `SELECT … GROUP BY` (compa
 ### Phase 364 — tiled fixed-shape columns keep their FixedShape option on rewrite
 
 Random-parameter sweep of real-casacore-created tables (random column mixes, StandardStMan `BUCKETSIZE`/`BUCKETROWS`/`PERSCACHESIZE`, IncrementalStMan bucket/cache sizes, TiledShapeStMan tile shapes and cache sizes, 1–3000 rows, mutated by TaQL `UPDATE`/`INSERT`/`DELETE`, then edited by us), ours vs Casacore.jl: values agree everywhere (75 cases). One schema bug found: `_normalize_desc` wrote option 0 for every column bound to a tiled shape / cell manager, so a casacore-made fixed-shape tiled column (option 4) turned into a declared-variable one whenever `edit` regenerated it (`removerows!`, …), and our own uniform tiled columns were written that way too — Casacore.jl then typed the column as 1-D and could not size it. The FixedShape bit is now kept for a fixed `Dims` shape. (Real casacore refuses `DELETE` on any table with a tiled column — not copied.)
+
+### Phase 365 — our tiled fixed-shape columns vs Casacore.jl across every type and shape
+
+Follow-up to Phase 364: the type matrix had never compared `tsm=` columns with Casacore.jl (its declared-variable shape made them unreadable there). With the FixedShape option kept, 132 combinations (11 element types × 4 fixed shapes × `tsm`/`tcm`/`tcell`) written by us read identically in Casacore.jl — no bug; the type matrix now includes the fixed-shape `tsm` cross-check.
