@@ -699,6 +699,12 @@ end
 
 const _TQL_RE_SPECIAL = Set("^\$.|?*+()[]{}\\")
 
+# casacore strings are BYTES (see the string functions): `_`, `?`, `.`, `[..]` match one byte, not
+# one Unicode character.  Patterns and the strings they are matched against are viewed bytewise
+# (each byte -> the character U+0000..U+00FF) so the regex engine counts bytes.
+_bview(s::AbstractString) = isascii(s) ? String(s) : String(Char.(codeunits(s)))
+_tql_occursin(re::Regex, s::AbstractString) = occursin(re, _bview(s))
+
 # compile a pattern, surfacing a bad one as an ArgumentError (like every other
 # TaQL-lite parse failure) rather than a raw PCRE ErrorException
 function _tql_compile(src::AbstractString, flags::AbstractString, what::AbstractString)
@@ -714,7 +720,7 @@ end
 function _sqlpattern_regex(pat::AbstractString, icase::Bool)
     io = IOBuffer()
     print(io, '^')
-    for c in pat
+    for c in _bview(pat)
         if c == '%'
             print(io, ".*")
         elseif c == '_'
@@ -793,7 +799,7 @@ end
 function _glob_regex(pat::AbstractString, icase::Bool)
     io = IOBuffer()
     print(io, '^')
-    _glob_body!(io, collect(pat), 1, false)
+    _glob_body!(io, collect(_bview(pat)), 1, false)
     print(io, '$')
     return _tql_compile(String(take!(io)), icase ? "i" : "", "glob")
 end
@@ -802,8 +808,8 @@ end
 function _patlit_regex(v)
     flags = v.icase ? "i" : ""
     v.flavor === :glob && return _glob_regex(v.pattern, v.icase)
-    v.flavor === :partial && return _tql_compile(v.pattern, flags, "regex")   # occursin anywhere
-    return _tql_compile("^(?:" * v.pattern * ")\$", flags, "regex")           # :full -> anchored
+    v.flavor === :partial && return _tql_compile(_bview(v.pattern), flags, "regex")   # occursin anywhere
+    return _tql_compile("^(?:" * _bview(v.pattern) * ")\$", flags, "regex")           # :full -> anchored
 end
 
 # ----------------------------------------------------------------------
@@ -816,8 +822,8 @@ struct TQLPatternVal
     re::Regex
 end
 Base.broadcastable(p::TQLPatternVal) = Ref(p)
-Base.:(==)(s::AbstractString, p::TQLPatternVal) = occursin(p.re, s)
-Base.:(==)(p::TQLPatternVal, s::AbstractString) = occursin(p.re, s)
+Base.:(==)(s::AbstractString, p::TQLPatternVal) = _tql_occursin(p.re, s)
+Base.:(==)(p::TQLPatternVal, s::AbstractString) = _tql_occursin(p.re, s)
 
 const _TQL_PATTERN_CACHE = Dict{Tuple{Symbol,String},TQLPatternVal}()
 
@@ -828,7 +834,7 @@ function _tql_pattern(kind::Symbol, s)
     v = get(_TQL_PATTERN_CACHE, key, nothing)
     v === nothing || return v
     re = try
-        kind === :regex ? _tql_compile("^(?:" * String(s) * ")\$", "", "regex") :
+        kind === :regex ? _tql_compile("^(?:" * _bview(String(s)) * ")\$", "", "regex") :
         kind === :pattern ? _glob_regex(s, false) : _sqlpattern_regex(s, false)
     catch err
         err isa ArgumentError && rethrow()

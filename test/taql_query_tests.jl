@@ -5414,3 +5414,37 @@ end
         end
     end
 end
+
+# Phase 372: casacore strings are bytes, so LIKE / ILIKE `_`, glob `?` and regex `.` / `[..]` match
+# one BYTE, not one Unicode character (`'ß' LIKE '__'` is true, `'ßñ' LIKE '_ñ%'` is not).
+@testset "pattern matching is bytewise (Phase 372)" begin
+    d = joinpath(mktempdir(), "t")
+    vals = ["ß", "ßñ", "ab", "é", "日本", "a", "ñb"]
+    write_table(d, "T", Pair{String,Any}["S" => vals, "K" => Int32.(1:length(vals))]; nrow=length(vals))
+    rows(c) = column(query(readtable(d), c), "K")[:]
+    @test rows("S LIKE '__'") == [1, 3, 4]               # ß, ab, é (2 bytes each)
+    @test rows("S LIKE '_ñ%'") == Int32[]                # ß is two bytes, so `_ñ` needs a one-byte prefix
+    @test rows("S LIKE '__ñ%'") == [2]
+    @test rows("S ~ p/??/") == [1, 3, 4]
+    @test rows("S ~ m/^.\$/") == [6]
+    @test rows("S LIKE '___'") == [7]                      # ñb = 3 bytes
+    if _HAVE_TAQL
+        rng = MSv2.Random.MersenneTwister(372)
+        pool = ["é", "ü", "日", "🚀", "ñ", "a", "b", " ", "ß", "ø"]
+        rstr() = join(rand(rng, pool, rand(rng, 0:6)))
+        nbad = 0
+        for _ in 1:12
+            vs = [rstr() for _ in 1:rand(rng, 4:10)]
+            dd = joinpath(mktempdir(), "t")
+            write_table(dd, "T", Pair{String,Any}["S" => vs, "K" => Int32.(1:length(vs))]; nrow=length(vs))
+            x() = rand(rng, pool)
+            for c in ["S LIKE '_$(x())%'", "S ILIKE '%$(x())_'", "S ~ p/?$(x())*/", "S ~ m/^.$(x())/", "S ~ f/.$(x()).*/", "S ~ p/[$(x())$(x())]*/"]
+                ro = Int32[column(query(readtable(dd), c), "K")[i] for i in 1:MSv2.nrow(query(readtable(dd), c))]
+                rt = _taqlcmd("SELECT K FROM \$1 WHERE $c", dd)
+                rr = Int32[rt[:K][i] for i in 1:size(rt, 1)]
+                ro == rr || (nbad += 1; @info "bytewise pattern mismatch" c vs ro rr)
+            end
+        end
+        @test nbad == 0
+    end
+end

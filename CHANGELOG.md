@@ -11033,3 +11033,7 @@ Table keywords (scalars, arrays, nested records, set by us or by real casacore `
 ### Phase 371 — reference tables in non-ASCII directory names
 
 Path handling swept across readers, `edit`, `copytable`, persisted RefTable / ConcatTable, `reference_copy`, `copyms` and moved directory trees, with plain, spaced, quoted, `#`, accented and CJK directory names, relative / `..` / trailing-slash / symlinked paths. One bug: `_strip_directory` sliced the stored relative path with a character count used as a byte index, so under a non-ASCII directory `write_reftable`, `write_concattable` and `reference_copy` stored e.g. `./é/t` instead of `./t` and the result could not be reopened. Fixed (`ncodeunits`).
+
+### Phase 372 — LIKE / glob / regex match bytes, like casacore
+
+Non-ASCII string literals and values in TaQL (`WHERE`, `UPDATE`, `INSERT`, `DELETE`; comparisons, `IN`, `BETWEEN`, string functions, `LIKE` / `ILIKE`, glob and regex forms) compared with real TaQL on random accented / CJK / emoji strings (3 seeds × 60 tables × 17 conditions + write commands). Everything agreed except that casacore's `_` (LIKE), `?` (glob) and `.` / `[..]` (regex) match one BYTE while ours matched one character (`'ß' LIKE '__'`, `'ßñ' LIKE '_ñ%'`). Patterns and subjects are now viewed bytewise (`_bview`), consistent with the byte-oriented string functions of Phase 334.
