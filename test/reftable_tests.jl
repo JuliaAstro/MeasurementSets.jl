@@ -779,3 +779,27 @@ if _HAVE_CASACORE
     end
 end
 end
+
+# Phase 371: persisted RefTable / ConcatTable / ForwardColumnEngine references in directories with
+# non-ASCII names, spaces and other odd characters.  `_strip_directory` sliced the relative path
+# with a character count used as a byte index, so under a non-ASCII directory the stored path
+# was wrong ("./é/t" instead of "./t") and the table could not be reopened.
+@testset "reference tables in non-ASCII / odd directory names (Phase 371)" begin
+    root = mktempdir()
+    for dname in ("plain", "with space", "ünï-é", "日本語", "a'b", "x#y")
+        base = joinpath(root, dname); mkpath(base)
+        d = joinpath(base, "t"); N = 9
+        write_table(d, "T", Pair{String,Any}["A" => Int32.(1:N), "V" => [fill(1.0 * i, 3) for i in 1:N]]; nrow=N)
+        r = joinpath(base, "ref"); write_reftable(r, readtable(d), [1, 3])
+        @test column(readtable(r), "A")[:] == Int32[1, 3]
+        d2 = joinpath(base, "copy"); copytable(d2, readtable(d))
+        c = joinpath(base, "cc"); write_concattable(c, [readtable(d), readtable(d2)])
+        @test MSv2.nrow(readtable(c)) == 2N
+        f = joinpath(base, "fwd"); MSv2.reference_copy(f, readtable(d))
+        @test column(readtable(f), "A")[:] == Int32.(1:N)
+        b2 = joinpath(root, "moved " * dname); cp(base, b2)
+        @test column(readtable(joinpath(b2, "ref")), "A")[:] == Int32[1, 3]
+        @test MSv2._strip_directory(d, r) == "./t"
+        @test MSv2._strip_directory(joinpath(r, "x"), r) == "././x"
+    end
+end

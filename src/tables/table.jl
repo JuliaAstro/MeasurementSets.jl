@@ -399,9 +399,9 @@ end
 function _strip_directory(name::AbstractString, selfdir::AbstractString)
     dir = rstrip(abspath(String(selfdir)), '/') * "/"
     aname = abspath(String(name))
-    startswith(aname, dir) && return "././" * aname[length(dir)+1:end]
+    startswith(aname, dir) && return "././" * aname[ncodeunits(dir)+1:end]
     pdir = rstrip(dirname(dir[1:end-1]), '/') * "/"
-    startswith(aname, pdir) && return "./" * aname[length(pdir)+1:end]
+    startswith(aname, pdir) && return "./" * aname[ncodeunits(pdir)+1:end]
     return aname
 end
 

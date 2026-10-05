@@ -11025,3 +11025,27 @@ Random column keywords (Int / Double / String / Bool scalars, string, numeric an
 ### Phase 369 — casacore-made fixed-shape arrays stay indirect through a rewrite
 
 Column descriptions (type, shape, option, comment, keywords) of random real-casacore-created tables (SSM / ISM, scalar / fixed / variable columns, units, comments) were compared before and after our `edit` regeneration and `copytable` (40 tables). The only drift: a casacore-made fixed-shape numeric array column is stored indirect (option 4, FixedShape without Direct) and we rewrote it as a direct column (option 5). `_normalize_desc` now keeps the indirect storage; descriptions are identical afterwards and the rewritten data reads identically in Casacore.jl (checked for 8 element types × SSM / ISM × 3 shapes).
+
+### Phase 370 — table-level metadata survives every rewrite
+
+Table keywords (scalars, arrays, nested records, set by us or by real casacore `ALTER TABLE … SET KEYWORD`), type / subtype / readme, table name and comment and column order are identical after `edit` regeneration, `addcolumn!` + `removecolumn!` and `copytable` with and without a row selection (70 tables, SSM / ISM) — no bug; kept as a test. (Harness note: a real-casacore handle still alive in the creating frame stops a following `ALTER` from flushing; create tables in a helper function.)
+
+### Phase 371 — reference tables in non-ASCII directory names
+
+Path handling swept across readers, `edit`, `copytable`, persisted RefTable / ConcatTable, `reference_copy`, `copyms` and moved directory trees, with plain, spaced, quoted, `#`, accented and CJK directory names, relative / `..` / trailing-slash / symlinked paths. One bug: `_strip_directory` sliced the stored relative path with a character count used as a byte index, so under a non-ASCII directory `write_reftable`, `write_concattable` and `reference_copy` stored e.g. `./é/t` instead of `./t` and the result could not be reopened. Fixed (`ncodeunits`).
+
+### Phase 372 — LIKE / glob / regex match bytes, like casacore
+
+Non-ASCII string literals and values in TaQL (`WHERE`, `UPDATE`, `INSERT`, `DELETE`; comparisons, `IN`, `BETWEEN`, string functions, `LIKE` / `ILIKE`, glob and regex forms) compared with real TaQL on random accented / CJK / emoji strings (3 seeds × 60 tables × 17 conditions + write commands). Everything agreed except that casacore's `_` (LIKE), `?` (glob) and `.` / `[..]` (regex) match one BYTE while ours matched one character (`'ß' LIKE '__'`, `'ßñ' LIKE '_ñ%'`). Patterns and subjects are now viewed bytewise (`_bview`), consistent with the byte-oriented string functions of Phase 334.
+
+### Phase 373 — backslash-escaped column names in TaQL
+
+Real TaQL lets any character in a name be escaped with a backslash (`a\ b`, `a\-b`, `x\:y`), the only way to reference a column whose name is not a plain identifier; TaQL-lite rejected the backslash everywhere. The tokenizer now accepts escaped names, and the `taql()` command parsers unescape them in SELECT / INSERT column lists and `SET` pairs and in ALTER TABLE `ADD` / `DROP` / `RENAME COLUMN` and `SET` / `DROP` / `RENAME KEYWORD` (including `COL::kw`). 27 SELECT / UPDATE / INSERT / DELETE forms and 10 ALTER forms with `a\ b`, `a\-b`, `x\:y` agree with real TaQL. (Real TaQL rejects non-ASCII names and a bare keyword such as `select`; ours stays lenient.)
+
+### Phase 374 — a `MeasurementSet` acts as its MAIN table
+
+`nrow(ms)` did not exist, and neither did most other table verbs on a `MeasurementSet` (only `ms[:COL]`, `ms.SUBTABLE` and Tables.jl worked). An audit of 22 verbs found 17 raising `MethodError`. `nrow`, `columnnames`, `columndesc` and `keywords` now describe the MAIN table, and `column` / `getcolumn` / `getcell` / `query` (string and closure) / `groupby` / `join` / `copytable` / `write_reftable` / `measure` / `measinfo` / `columnunit` / `qcolumn` / `rawblock` / `subtables` / `update!` / `delete!` / `insert!` / `taql` / `edit` accept a `MeasurementSet` and act on its MAIN table (`src/msforward.jl`). The three-argument subtable forms (`column(ms, "ANTENNA", "NAME")`, …) are unchanged.
+
+### Phase 375 — UPDATE / DELETE on a RefTable or ConcatTable
+
+An API-symmetry audit of 28 verbs across Table / RefTable / ConcatTable / GroupedTable found the read verbs uniform; the write commands were not. Real TaQL (checked on persisted RefTables) writes `UPDATE` through to the parent rows, applies `DELETE` to the reference only and rejects `INSERT`. `update!` / `taql("UPDATE …")` now accept a `RefTable` or `ConcatTable` (object or the path of a persisted one) and write through the edit views; `delete!` / `taql("DELETE …")` on a persisted `RefTable` rewrites its row list (a ConcatTable cannot lose rows, an in-memory query result has no directory). Nine UPDATE / DELETE forms (ORDER BY … LIMIT, slice assignment, array columns, `IN`) agree with real TaQL.

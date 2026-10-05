@@ -1127,7 +1127,7 @@ function _mssel_resolve(term::AbstractString, allids, n2i::AbstractDict;
     end
     if occursin(r"[*?\[\]]", term)
         re = _glob_regex(term, false)
-        s = Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
+        s = Set{Int}(reduce(vcat, (v for (k, v) in n2i if _tql_occursin(re, k)); init = Int[]))
         return _mssel_notflagged(s, flagged)
     end
     s = haskey(n2i, term) ? Set{Int}(n2i[term]) : Set{Int}()

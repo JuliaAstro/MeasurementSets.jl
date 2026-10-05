@@ -125,20 +125,29 @@ function _taqllite_tokenize(s::AbstractString)
                 push!(toks, TQLToken(:num, text, val))
             end
             i = j
-        elseif isletter(c) || c == '_'
-            j = i
-            while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_')
-                j += 1
+        elseif isletter(c) || c == '_' || (c == '\\' && i < n)
+            # a name: letters / digits / `_`, and a backslash makes the next character literal
+            # (`a\ b`, `a\-b`, `x\:y`, like real TaQL); the backslashes are dropped from the name
+            name = Char[]
+            scan(j) = begin
+                while j <= n
+                    if cs[j] == '\\' && j < n
+                        push!(name, cs[j+1]); j += 2
+                    elseif isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_'
+                        push!(name, cs[j]); j += 1
+                    else
+                        break
+                    end
+                end
+                j
             end
+            j = scan(i)
             # one optional `.suffix` -> a table-qualified column (`L.TIME`),
             # only when a letter/`_` immediately follows the dot
             if j < n && cs[j] == '.' && (isletter(cs[j+1]) || cs[j+1] == '_')
-                j += 1
-                while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '_')
-                    j += 1
-                end
+                push!(name, '.'); j = scan(j + 1)
             end
-            push!(toks, TQLToken(:ident, join(cs[i:j-1]), nothing))
+            push!(toks, TQLToken(:ident, String(name), nothing))
             i = j
         elseif c in _TQL_OPCHARS
             j = i
@@ -699,6 +708,12 @@ end
 
 const _TQL_RE_SPECIAL = Set("^\$.|?*+()[]{}\\")
 
+# casacore strings are BYTES (see the string functions): `_`, `?`, `.`, `[..]` match one byte, not
+# one Unicode character.  Patterns and the strings they are matched against are viewed bytewise
+# (each byte -> the character U+0000..U+00FF) so the regex engine counts bytes.
+_bview(s::AbstractString) = isascii(s) ? String(s) : String(Char.(codeunits(s)))
+_tql_occursin(re::Regex, s::AbstractString) = occursin(re, _bview(s))
+
 # compile a pattern, surfacing a bad one as an ArgumentError (like every other
 # TaQL-lite parse failure) rather than a raw PCRE ErrorException
 function _tql_compile(src::AbstractString, flags::AbstractString, what::AbstractString)
@@ -714,7 +729,7 @@ end
 function _sqlpattern_regex(pat::AbstractString, icase::Bool)
     io = IOBuffer()
     print(io, '^')
-    for c in pat
+    for c in _bview(pat)
         if c == '%'
             print(io, ".*")
         elseif c == '_'
@@ -793,7 +808,7 @@ end
 function _glob_regex(pat::AbstractString, icase::Bool)
     io = IOBuffer()
     print(io, '^')
-    _glob_body!(io, collect(pat), 1, false)
+    _glob_body!(io, collect(_bview(pat)), 1, false)
     print(io, '$')
     return _tql_compile(String(take!(io)), icase ? "i" : "", "glob")
 end
@@ -802,8 +817,8 @@ end
 function _patlit_regex(v)
     flags = v.icase ? "i" : ""
     v.flavor === :glob && return _glob_regex(v.pattern, v.icase)
-    v.flavor === :partial && return _tql_compile(v.pattern, flags, "regex")   # occursin anywhere
-    return _tql_compile("^(?:" * v.pattern * ")\$", flags, "regex")           # :full -> anchored
+    v.flavor === :partial && return _tql_compile(_bview(v.pattern), flags, "regex")   # occursin anywhere
+    return _tql_compile("^(?:" * _bview(v.pattern) * ")\$", flags, "regex")           # :full -> anchored
 end
 
 # ----------------------------------------------------------------------
@@ -816,8 +831,8 @@ struct TQLPatternVal
     re::Regex
 end
 Base.broadcastable(p::TQLPatternVal) = Ref(p)
-Base.:(==)(s::AbstractString, p::TQLPatternVal) = occursin(p.re, s)
-Base.:(==)(p::TQLPatternVal, s::AbstractString) = occursin(p.re, s)
+Base.:(==)(s::AbstractString, p::TQLPatternVal) = _tql_occursin(p.re, s)
+Base.:(==)(p::TQLPatternVal, s::AbstractString) = _tql_occursin(p.re, s)
 
 const _TQL_PATTERN_CACHE = Dict{Tuple{Symbol,String},TQLPatternVal}()
 
@@ -828,7 +843,7 @@ function _tql_pattern(kind::Symbol, s)
     v = get(_TQL_PATTERN_CACHE, key, nothing)
     v === nothing || return v
     re = try
-        kind === :regex ? _tql_compile("^(?:" * String(s) * ")\$", "", "regex") :
+        kind === :regex ? _tql_compile("^(?:" * _bview(String(s)) * ")\$", "", "regex") :
         kind === :pattern ? _glob_regex(s, false) : _sqlpattern_regex(s, false)
     catch err
         err isa ArgumentError && rethrow()

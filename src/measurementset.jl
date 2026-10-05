@@ -87,8 +87,14 @@ subtablenames(ms::MeasurementSet) = first.(subtables(getfield(ms, :data)))
 Base.getindex(ms::MeasurementSet, name::AbstractString) = getfield(ms, :data)[name]
 Base.getindex(ms::MeasurementSet, name::Symbol) = getfield(ms, :data)[name]
 
+# the table-level accessors act on the MAIN table: `nrow(ms)` is the number of MAIN rows
+nrow(ms::MeasurementSet) = nrow(getfield(ms, :data))
+columnnames(ms::MeasurementSet) = columnnames(getfield(ms, :data))
+columndesc(ms::MeasurementSet, name::AbstractString) = columndesc(getfield(ms, :data), name)
+keywords(ms::MeasurementSet) = keywords(getfield(ms, :data))
+
 function Base.show(io::IO, ms::MeasurementSet)
     print(io, "MeasurementSet(\"", basename(getfield(ms, :path)), "\", ",
-          nrow(getfield(ms, :data)), " rows, ",
+          nrow(ms), " rows, ",
           length(subtablenames(ms)), " subtables)")
 end
