@@ -160,3 +160,46 @@ end
         end
     end
 end
+
+# Phase 380: API misuse.  A fuzz of the Julia API with invalid arguments (out-of-range / non-integer / huge row numbers
+# and counts, unknown columns, wrong value types) found: addrows!(t, 2^40) and create_ms(nrow=2^40) got the process
+# killed (out of memory); copytable(rows=[out of range]) wrote a table with NO columns and only a warning;
+# removerows!(Inf), assigning Inf / 1.5 / 3e9 to an Int32 cell, and insert! of a range into a scalar column surfaced as
+# InexactError from the writer.  All are ordinary ArgumentErrors now.
+@testset "API misuse raises ordinary errors (Phase 380)" begin
+    N = 6
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["I" => Int32.(1:N), "S" => string.(1:N), "B" => isodd.(1:N)]; nrow=N); d)
+    d = mk(); t = readtable(d)
+    # copy rows must be integers within 1:nrow
+    for rows in (Int[N + 1], [0], 1:N+3, -1:2, [1.5], "x")
+        @test_throws ArgumentError copytable(joinpath(mktempdir(), "c"), t; rows)
+    end
+    @test MSv2.nrow(readtable(copytable(joinpath(mktempdir(), "c"), t; rows=[3, 3, 1]))) == 3
+    @test MSv2.nrow(readtable(copytable(joinpath(mktempdir(), "c"), t; rows=Int[]))) == 0
+    # absurd row counts are refused up front
+    edit(d) do e
+        @test_throws ArgumentError addrows!(e, 2^40)
+        @test_throws ArgumentError addrows!(e, typemax(Int))
+        @test_throws ArgumentError removerows!(e, [Inf])
+        @test_throws ArgumentError removerows!(e, [NaN])
+        @test_throws ArgumentError removerows!(e, ["1"])
+        @test_throws ArgumentError e["I"][1] = Inf
+        @test_throws ArgumentError e["I"][1] = 1.5
+        @test_throws ArgumentError e["I"][1] = 3_000_000_000
+        e["I"][1] = 7.0                                            # whole-valued floats are fine
+        removerows!(e, [N])
+    end
+    @test column(readtable(d), "I")[:] == Int32[7, 2, 3, 4, 5] && MSv2.nrow(readtable(d)) == N - 1
+    for kw in ((nrow=2^40,), (nrow=-1,), (nchan=0,), (ncorr=0,), (nant=-2,), (nchan=2^40,))
+        p = joinpath(mktempdir(), "ms")
+        @test_throws ArgumentError create_ms(p; kw...)
+        @test !ispath(p)
+    end
+    # insert! of a non-scalar / unconvertible value into a scalar column
+    d = mk()
+    @test_throws ArgumentError insert!(d; values=["I" => 1:3])
+    @test_throws ArgumentError insert!(d; values=["B" => typemin(Int)])
+    @test_throws ArgumentError insert!(d; values=["S" => 5])
+    @test MSv2.nrow(readtable(d)) == N                          # nothing was added
+end

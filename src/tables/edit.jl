@@ -214,9 +214,25 @@ function Base.getindex(c::EditColumn, i::Int)
 end
 Base.getindex(c::EditColumn, ::Colon) = [c[i] for i in 1:length(c.tab.rowmap)]
 
+# A number that cannot be stored in a scalar numeric column (`Inf` or 1.5 into an Int32 column, 3e9 into Int32) used to
+# surface only at flush, as a bare InexactError from the writer; refuse it where it is assigned.
+function _check_scalar_cell(desc::ColumnDesc, v)
+    v isa Number || return nothing
+    desc.shape isa Dims && isempty(desc.shape) || return nothing
+    J = try juliatype(desc.type) catch; return nothing end
+    (J <: Number && !(J <: Complex && v isa Real)) || return nothing
+    try convert(J, v)
+    catch e
+        e isa Union{InexactError,OverflowError} || rethrow()
+        throw(ArgumentError("cannot store $(repr(v)) in column \"$(desc.name)\" of type $J"))
+    end
+    return nothing
+end
+
 function Base.setindex!(c::EditColumn, v, i::Int)
     @boundscheck 1 <= i <= length(c.tab.rowmap) || throw(BoundsError(c, i))
     t = c.tab; n = c.desc.name
+    _check_scalar_cell(c.desc, v)
     a = _added(t, n)
     if a !== nothing
         a[3][i] = v
@@ -336,9 +352,18 @@ This is uniform across storage managers.  Real casacore differs for an
 row's value (the "store on change" file simply has no entry for them) --
 write the values you want rather than relying on either default.
 """
+# A row count that cannot possibly fit in memory is refused up front (adding 2^40 rows used to get the process killed).
+# `perrow` = bytes held per row (row map + one default cell per touched column, estimated).
+function _check_row_budget(n::Integer, perrow::Integer, what::AbstractString)
+    n <= typemax(Int32) * 4 && Int128(n) * perrow <= Sys.total_memory() ÷ 2 && return nothing
+    throw(ArgumentError("$what: $n rows would need about $(round(n * perrow / 2^30; digits=1)) GiB of memory " *
+                        "(machine has $(round(Sys.total_memory() / 2^30; digits=1)) GiB)"))
+end
+
 function addrows!(t::EditTable, n::Integer)
     n >= 0 || error("addrows!: n must be >= 0")
     n == 0 && return t
+    _check_row_budget(n, 8 * (1 + length(t.override) + length(t.addcols)), "addrows!")
     append!(t.rowmap, zeros(Int, Int(n)))
     for (name, v) in t.override
         c = columndesc(t.reader, name)
@@ -357,7 +382,8 @@ Delete `rows` (1-based indices into the current row set).  Forces the
 regen persist path on flush.
 """
 function removerows!(t::EditTable, rows)
-    idx = sort!(unique(Int[Int(r) for r in rows]))
+    idx = sort!(unique(Int[(r isa Integer || (r isa AbstractFloat && isfinite(r) && isinteger(r) && abs(r) < 2.0^62)) ? Int(r) :
+                           throw(ArgumentError("removerows!: row numbers must be integers, got $(repr(r))")) for r in rows]))
     isempty(idx) && return t
     (idx[1] >= 1 && idx[end] <= length(t.rowmap)) ||
         throw(BoundsError(t, idx))

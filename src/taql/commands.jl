@@ -423,11 +423,18 @@ function Base.insert!(target::Union{AbstractString,AbstractTable}; values,
     fixed = Dict(n => (cd = columndesc(rd, n); cd.shape isa Dims && !isempty(cd.shape) ? cd.shape : nothing) for n in vn)
     old = nrow(rd)
     # a FIXED-shape array column takes a scalar (broadcast to every element) or an array of exactly its shape (real TaQL, Phase 359)
+    conv(c, v) = try convert(J[c], _tql_coerce(J[c], v))
+                 catch e
+                     e isa Union{InexactError,OverflowError,MethodError} || rethrow()
+                     throw(ArgumentError("insert!: cannot store $(repr(v)) in column \"$c\" of type $(J[c])"))
+                 end
     function cell(c, v)
-        sc[c] && v isa Number && return convert(J[c], _tql_coerce(J[c], v))
+        sc[c] && v isa Number && return conv(c, v)
+        sc[c] && !(J[c] === String ? v isa AbstractString : v isa Number) && throw(ArgumentError(
+            "insert!: column \"$c\" (type $(J[c])) takes a scalar, got $(typeof(v))"))
         fs = fixed[c]
         fs === nothing && return v
-        v isa Number && return fill(convert(J[c], _tql_coerce(J[c], v)), fs)
+        v isa Number && return fill(conv(c, v), fs)
         (v isa AbstractString && J[c] === String) && return fill(String(v), fs)
         v isa AbstractArray && (size(v) == fs || throw(ArgumentError("insert!: column \"$c\" has the fixed shape $fs, got an array of size $(size(v))")))
         return v
