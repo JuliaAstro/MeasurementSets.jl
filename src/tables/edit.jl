@@ -341,6 +341,14 @@ end
 
 # --- row operations -------------------------------------------
 
+# A row count that cannot possibly fit in memory is refused up front (adding 2^40 rows used to get the process killed).
+# `perrow` = bytes held per row (row map + one default cell per touched column, estimated).
+function _check_row_budget(n::Integer, perrow::Integer, what::AbstractString)
+    n <= typemax(Int32) * 4 && Int128(n) * perrow <= Sys.total_memory() ÷ 2 && return nothing
+    throw(ArgumentError("$what: $n rows would need about $(round(n * perrow / 2^30; digits=1)) GiB of memory " *
+                        "(machine has $(round(Sys.total_memory() / 2^30; digits=1)) GiB)"))
+end
+
 """
     addrows!(t, n)
 
@@ -352,14 +360,6 @@ This is uniform across storage managers.  Real casacore differs for an
 row's value (the "store on change" file simply has no entry for them) --
 write the values you want rather than relying on either default.
 """
-# A row count that cannot possibly fit in memory is refused up front (adding 2^40 rows used to get the process killed).
-# `perrow` = bytes held per row (row map + one default cell per touched column, estimated).
-function _check_row_budget(n::Integer, perrow::Integer, what::AbstractString)
-    n <= typemax(Int32) * 4 && Int128(n) * perrow <= Sys.total_memory() ÷ 2 && return nothing
-    throw(ArgumentError("$what: $n rows would need about $(round(n * perrow / 2^30; digits=1)) GiB of memory " *
-                        "(machine has $(round(Sys.total_memory() / 2^30; digits=1)) GiB)"))
-end
-
 function addrows!(t::EditTable, n::Integer)
     n >= 0 || error("addrows!: n must be >= 0")
     n == 0 && return t
