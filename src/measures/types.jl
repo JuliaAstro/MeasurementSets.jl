@@ -344,7 +344,14 @@ function measconvert(m::Measure, R::Type{<:RefFrame}; frame::MeasFrame=MeasFrame
         v === nothing || _all_finite(v) || throw(ArgumentError(
             "measconvert: frame.$nm ($(typeof(v))) has a non-finite (NaN/±Inf) value — cannot convert"))
     end
-    _mconv(m, R, frame)
+    try
+        return _mconv(m, R, frame)
+    catch e
+        # SOFA.jl asserts on dates outside its tables ("UTC date is out of range [1960-present]")
+        e isa AssertionError && throw(ArgumentError("measconvert: $(typeof(m)) / frame is outside SOFA's valid range: " *
+                                                    first(something(e.msg, "assertion failed"), 120)))
+        rethrow()
+    end
 end
 
 _mconv(m::Measure, ::Type{<:RefFrame}, ::MeasFrame) = error(

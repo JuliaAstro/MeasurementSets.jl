@@ -224,7 +224,7 @@ _tql_mjd_of(dt::Dates.DateTime) = (dt - MJD_EPOCH) / Dates.Millisecond(MSEC_PER_
 # matching the one casacore answer (`cdate`'s) that's actually
 # self-consistent, and giving every date/time function a single,
 # predictable, crash-free answer for a NaN/Inf input.
-_tql_dt_of(m::Real) = isfinite(m) ?
+_tql_dt_of(m::Real) = _tql_sane(m, 1e10) ?
     MJD_EPOCH + Dates.Millisecond(round(Int, float(m) * MSEC_PER_DAY)) : MJD_EPOCH
 
 const _TQL_DT_FORMATS = (
@@ -409,7 +409,7 @@ _pad2(n) = lpad(n, 2, '0')
 # as all-zero (`"00h00m00.000"` / `"+000d00m00.000"`), crash-free and
 # predictable.
 function _tql_hms(rad::Real)
-    isfinite(rad) || return "00h00m00.000"
+    _tql_sane(rad, 1e9) || return "00h00m00.000"
     tms = mod(round(Int, mod(float(rad) * (12 / pi), 24) * 3_600_000), 24 * 3_600_000)
     h, r = divrem(tms, 3_600_000)
     m, r = divrem(r, 60_000)
@@ -417,7 +417,7 @@ function _tql_hms(rad::Real)
     string(_pad2(h), "h", _pad2(m), "m", _pad2(sec), ".", lpad(ms, 3, '0'))
 end
 function _tql_dms(rad::Real)
-    isfinite(rad) || return "+000d00m00.000"
+    _tql_sane(rad, 1e9) || return "+000d00m00.000"
     sgn = signbit(float(rad)) ? "-" : "+"
     tmas = round(Int, abs(float(rad)) * (180 / pi) * 3_600_000)
     d, r = divrem(tmas, 3_600_000)
@@ -454,7 +454,7 @@ _tql_hdms(v::AbstractArray) = [isodd(i) ? _tql_hms(v[i]) : _tql_dms(v[i]) for i 
 # non-finite `mjd` -- same Phase 193 finding as `_tql_hms`/`_tql_dms`
 # above -- degrades to the all-zero time rather than throwing.
 function _tql_time_of_day_str(mjd::Real)
-    isfinite(mjd) || return "00:00:00.000"
+    _tql_sane(mjd, 1e10) || return "00:00:00.000"
     frac = mod(float(mjd), 1.0)
     tms = mod(round(Int, frac * 24 * 3_600_000), 24 * 3_600_000)
     h, r = divrem(tms, 3_600_000)
@@ -496,6 +496,7 @@ end
 # great-circle angular distance between two `[lon, lat]` radian points
 # (SOFA `seps` -- the atan2 form, numerically stable near 0 and π).
 function _tql_angdist(lon1::Real, lat1::Real, lon2::Real, lat2::Real)
+    (isfinite(lon1) && isfinite(lat1) && isfinite(lon2) && isfinite(lat2)) || return NaN      # sin(Inf) throws in Julia, is NaN in C++
     dlon = lon2 - lon1
     x = cos(lat2) * sin(dlon)
     y = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dlon)
@@ -538,7 +539,7 @@ _require_array(x) = (x isa AbstractArray || x isa TQLMArray) ? x : throw(Argumen
 # `pad` (0 half-width = no window for `running*`, 1 = unit bins for
 # `boxed*`) and a longer one is truncated.
 function _tql_window_widths(w, nd::Int, pad::Int)
-    ws = w isa AbstractArray ? Int.(vec(w)) : Int[Int(w)]
+    ws = w isa AbstractArray ? Int[_tql_toint(v, "window width") for v in vec(w)] : Int[_tql_toint(w, "window width")]
     length(ws) >= nd ? ws[1:nd] : vcat(ws, fill(pad, nd - length(ws)))
 end
 
@@ -637,7 +638,8 @@ end
 # genuinely different convention from plain `median()` above). Live-
 # verified: `gmedian` of the 4-row group `[1,2,3,4]` is `2.0` in real
 # casacore, not `2.5`.
-_tql_fractile(v, frac::Real) = (s = sort!(vec(collect(v))); n = length(s);
+_tql_fractile(v, frac::Real) = (isfinite(frac) && 0 <= frac <= 1 || throw(ArgumentError("TaQL-lite: a fractile must lie in [0, 1], got $frac"));
+    s = sort!(vec(collect(v))); n = length(s);
     n == 0 ? throw(ArgumentError("TaQL-lite: fractile of an empty array")) :
     float(s[Int(floor((n - 1) * frac + 0.01)) + 1]))
 _tql_median_lo(v) = _tql_fractile(v, 0.5)
@@ -939,13 +941,13 @@ end
 # `substr(s, start[, len])`: 0-based start, negative start counts from the end
 # (clamped at 0), negative/zero len gives "", no len = rest of the string.
 function _tql_substr(s::AbstractString, start::Real, len::Real=typemax(Int))
-    bs = codeunits(s); n = length(bs); st = Int(start); st < 0 && (st = max(0, st + n))
+    bs = codeunits(s); n = length(bs); st = _tql_toint(start, "substr"); st < 0 && (st = max(0, st + n))
     (len <= 0 || st >= n) && return ""
-    return String(bs[st+1:min(n, st + Int(min(len, n)))])
+    return String(bs[st+1:min(n, st + _tql_toint(min(len, n), "substr"))])
 end
 # on a string ARRAY cell real TaQL does not clamp: a start beyond an element's length throws (live-probed, Phase 351)
 _tql_substr_any(x::AbstractArray, start::Real, len::Real=typemax(Int)) = map(x) do e
-    n = ncodeunits(e); st = Int(start); st < 0 && (st = max(0, st + n))
+    n = ncodeunits(e); st = _tql_toint(start, "substr"); st < 0 && (st = max(0, st + n))
     st > n && throw(ArgumentError("substr: start $start is beyond the end of the string \"$e\""))
     _tql_substr(e, start, len)
 end
@@ -1042,13 +1044,26 @@ _tql_boolaxfn(name, f; emp) = (g = _tql_axfn(f; emp); (x, axes...) -> g(_tql_boo
 # -> shape (n, rest...); `nullarray(arr)` an empty array; `isdefined`/`isnull`.
 _tql_arr(x, who) = x isa AbstractArray ? x :
     throw(ArgumentError("TaQL-lite: `$who` needs an array cell"))
+# Finite AND small enough for the integer millisecond / arc-second arithmetic of the date and angle formatters
+# (`year(1e18)`, `dms(99999999999)` overflowed Int64: Phase 381).  Out-of-range values degrade like NaN (Phase 193).
+_tql_sane(x::Real, lim) = isfinite(x) && abs(x) < lim
+
+# Integer arguments of array / string functions: whole numbers only, saturated to +-2^62 so later `+ 1` cannot overflow
+# (`substr('abc', 1e308)`, `running mean widths of 0.5` were bare InexactErrors).
+function _tql_toint(v, who)
+    v isa Integer && !(v isa Bool) && return Int(clamp(v, -(Int128(1) << 62), Int128(1) << 62))
+    v isa AbstractFloat && isfinite(v) && isinteger(v) && return Int(clamp(v, -2.0^62, 2.0^62))
+    isinf(v) && v isa AbstractFloat && return v > 0 ? 1 << 62 : -(1 << 62)
+    throw(ArgumentError("TaQL-lite: `$who` needs integer arguments, got $(repr(v))"))
+end
+
 function _tql_intlist(args, who; min=0)
     out = Int[]
     for a in args
         if a isa Integer
-            push!(out, Int(a))
+            push!(out, _tql_toint(a, who))
         elseif a isa AbstractArray && all(v -> v isa Integer, a)
-            append!(out, Int.(vec(a)))
+            append!(out, [_tql_toint(v, who) for v in vec(a)])
         else
             throw(ArgumentError("TaQL-lite: `$who` needs integer arguments"))
         end
@@ -1074,12 +1089,21 @@ end
 # flattening a masked array keeps only its UNMASKED elements (live-verified)
 _tql_flatten(x::TQLMArray) = _mvalid(x)
 _tql_flatten(x) = vec(collect(_tql_arr(x, "flatten")))
+# an array shape asking for more elements than fit in memory (`array(1.0, 99999999999)` got the process killed);
+# a single TaQL array may use at most an eighth of the machine's memory (8 bytes per element assumed)
+function _tql_check_elems(sh, what::AbstractString)
+    n = prod(Int128.(sh); init=Int128(1))
+    n * 8 <= Sys.total_memory() ÷ 8 && return nothing
+    throw(ArgumentError("TaQL-lite: `$what`: a shape of $(join(sh, " x ")) = $n elements does not fit in memory"))
+end
+
 function _tql_array(v, shape...)
     # the shape is EITHER one array `[2,3]` OR several scalars `2, 3` (not mixed)
     (length(shape) <= 1 || all(x -> x isa Integer, shape)) || throw(ArgumentError(
         "TaQL-lite: `array`: give the shape as one array or as separate integers"))
     sh = _tql_intlist(shape, "array"; min=0)
     isempty(sh) && throw(ArgumentError("TaQL-lite: `array(value, shape...)` needs a shape"))
+    _tql_check_elems(sh, "array")
     n = prod(sh)
     v isa AbstractArray || return fill(v, sh...)
     d = vec(collect(v))
@@ -1096,6 +1120,7 @@ function _tql_resize(x, shape...)
         "TaQL-lite: `resize(arr, shape)` takes the shape as one integer array"))
     sh = _tql_intlist(shape, "resize"; min=0)
     isempty(sh) && throw(ArgumentError("TaQL-lite: `resize(arr, shape)` needs a shape"))
+    _tql_check_elems(sh, "resize")
     out = zeros(eltype(a), sh...)
     nd = ndims(a); k = length(sh)
     rng = [1:min(sh[d], d <= nd ? size(a, d) : 1) for d in 1:k]     # overlap, per target axis

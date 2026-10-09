@@ -872,12 +872,23 @@ schema name).  `rows` selects/reorders rows (1-based into `t`);
 `table.mfh5` -- see `_write_table_core`.  This is "SELECT ...
 INTO" for any query result.
 """
+# `rows=` of a copy: integer row numbers within 1:n.  An out-of-range row used to make every column "unreadable"
+# (a warning, then a table with no columns); a non-integer one a raw error from deep inside the writer.
+function _check_copy_rows(r, n::Integer, what::AbstractString)
+    (r isa AbstractVector && eltype(r) <: Integer) || throw(ArgumentError(
+        "$what: rows must be a vector or range of integers (or Colon()), got $(typeof(r))"))
+    isempty(r) && return r
+    lo, hi = extrema(r)
+    (1 <= lo && hi <= n) || throw(ArgumentError("$what: row $(lo < 1 ? lo : hi) is outside 1:$n"))
+    return r
+end
+
 function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
                    name::AbstractString="TABLE",
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dst = String(rstrip(dst, '/'))
     ispath(dst) && error("$dst already exists")
-    r = rows === Colon() ? (1:nrow(t)) : rows
+    r = rows === Colon() ? (1:nrow(t)) : _check_copy_rows(rows, nrow(t), "copytable")
     t isa GroupedTable ? _copy_table(dst, t, r; name) :
         _copy_table(dst, t, r; storage, blocksize)
     return dst
@@ -1028,7 +1039,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
     # this point means the whole `dir` this call created should go.
     try
         main = main0
-        mrows = rows === Colon() ? (1:nrow(main)) : rows
+        mrows = rows === Colon() ? (1:nrow(main)) : _check_copy_rows(rows, nrow(main), "write_ms")
         want(kw) = subtables === Colon() || kw in subtables
 
         # write subtables, remember which ones succeeded
@@ -1043,6 +1054,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
             try
                 srows = get(subtable_rows, kw, 1:nrow(sub))
                 srows === Colon() && (srows = 1:nrow(sub))
+                _check_copy_rows(srows, nrow(sub), "write_ms subtable $kw")
                 _copy_table(joinpath(dir, kw), sub, srows; storage, blocksize)
                 push!(written, kw)
             catch e
@@ -1211,6 +1223,12 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     _check_storage(storage)
     _check_blocksize(blocksize)
+    # sizes: positive and small enough to hold in memory (nrow = 2^40 used to get the process killed)
+    for (nm, v) in (("nrow", nrow), ("nchan", nchan), ("ncorr", ncorr), ("nant", nant), ("nrec", nrec))
+        v >= (nm == "nrow" ? 0 : 1) || throw(ArgumentError("create_ms: $nm must be $(nm == "nrow" ? ">= 0" : ">= 1"), got $v"))
+    end
+    # DATA (8 B) + FLAG (1) + WEIGHT_SPECTRUM (4) per correlation x channel, plus ~300 B of scalars per row
+    _check_row_budget(Int128(nrow), Int128(13) * ncorr * nchan + 300, "create_ms")
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     mkpath(dir)
