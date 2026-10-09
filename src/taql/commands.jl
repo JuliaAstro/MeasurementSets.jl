@@ -96,7 +96,7 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
     specs = Tuple{String,Any,Any}[]
     for (lhskey, rv) in flat
         lhs = _taqllite_parse(lhskey, vn)
-        rhs = rv isa TQLExpr ? rv : _taqllite_parse(String(rv), vn)
+        rhs = rv isa TQLExpr ? rv : _taqllite_parse(_tql_name(rv, "update!: SET expression"), vn)
         !_has_aggr(rhs) ||
             throw(ArgumentError("update!: SET expression \"$(rv)\" must not aggregate"))
         tcol = lhs isa TQLCol ? lhs.name : (fl0 = _flatten_lhs(lhs); fl0 === nothing ? nothing : fl0[1])
@@ -282,18 +282,18 @@ function _expand_set_pairs(set, vn)
     for p in set
         lk, rv = first(p), last(p)
         names = lk isa Tuple ?
-            (length(lk) == 2 ? (String(lk[1]), String(lk[2])) :
+            (length(lk) == 2 ? (_tql_name(lk[1], "update!: SET target"), _tql_name(lk[2], "update!: SET target")) :
              throw(ArgumentError("update!: a (col, maskcol) target takes exactly two names"))) :
             (lk isa AbstractString ? _pair_split(lk) : nothing)
         if names === nothing
             rv isa Tuple && throw(ArgumentError(
                 "update!: a (dexpr, mexpr) RHS needs a (col, maskcol) target"))
-            push!(out, String(lk) => rv)
+            push!(out, _tql_name(lk, "update!: SET target") => rv)
             continue
         end
         dn, mn = names
         de, me = rv isa Tuple ?
-            (length(rv) == 2 ? (String(rv[1]), String(rv[2])) :
+            (length(rv) == 2 ? (_tql_name(rv[1], "update!: SET expression"), _tql_name(rv[2], "update!: SET expression")) :
              throw(ArgumentError("update!: a (dexpr, mexpr) RHS takes exactly two expressions"))) :
             (rv isa AbstractString ?
              (x = _pair_split(rv); x === nothing ? (String(rv), nothing) : x) :
@@ -454,9 +454,9 @@ end
 Base.insert!(target::Union{AbstractString,AbstractTable}, source) =
     insert!(target; values=source)
 
-_ins_row(x::NamedTuple) = Dict{String,Any}(String(k) => v for (k, v) in pairs(x))
+_ins_row(x::NamedTuple) = Dict{String,Any}(_tql_name(k, "insert!: column name") => v for (k, v) in pairs(x))
 _ins_row(x::AbstractVector{<:Pair}) =
-    Dict{String,Any}(String(first(p)) => last(p) for p in x)
+    Dict{String,Any}(_tql_name(first(p), "insert!: column name") => last(p) for p in x)
 
 function _norm_ins_rows(values)
     values isa NamedTuple &&

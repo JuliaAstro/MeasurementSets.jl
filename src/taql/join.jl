@@ -18,7 +18,7 @@ _mapcol(c::AbstractVector, rows::Vector{Int}) =
 # column selectors: `"NAME"` or `"NAME" => "ANT_NAME"` (source => output,
 # DataFrames-style).  Normalised to `output => source` pairs internally.
 _norm_pairs(xs) = Pair{String,String}[
-    x isa Pair ? (String(last(x)) => String(first(x))) : (String(x) => String(x))
+    x isa Pair ? (_tql_name(last(x), "join: column") => _tql_name(first(x), "join: column")) : (_tql_name(x, "join: column") => _tql_name(x, "join: column"))
     for x in xs]
 
 # left row -> right row (1-based), or 0 for no match
@@ -141,8 +141,8 @@ function _join_pairs_pred(left::AbstractTable, right::AbstractTable, pred::Funct
         "join: `unmatched` must be :error, :drop, :missing/:left, :right or :full"))
     keepL = unmatched in (:missing, :left, :full)
     keepR = unmatched in (:right, :full)
-    lnames = oncols === nothing ? columnnames(left) : String.(oncols[1])
-    rnames = oncols === nothing ? columnnames(right) : String.(oncols[2])
+    lnames = oncols === nothing ? columnnames(left) : _gb_names(oncols[1])
+    rnames = oncols === nothing ? columnnames(right) : _gb_names(oncols[2])
     lrws = CTDSRows(AbstractVector[column(left, n) for n in lnames], Symbol.(lnames), nrow(left))
     rrws = CTDSRows(AbstractVector[column(right, n) for n in rnames], Symbol.(rnames), nrow(right))
     rrows_v = collect(rrws)

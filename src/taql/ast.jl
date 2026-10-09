@@ -679,3 +679,15 @@ _has_qty(e::TQLIndex) = _has_qty(e.base) || any(e.axes) do ax
     _has_qty(ax)
 end
 
+
+
+# Argument-type guards for the user-facing verbs (query/groupby/join/update!/
+# delete!/insert!): a name or expression of the wrong Julia type is an
+# ordinary ArgumentError naming the argument, never a MethodError from a
+# `String(x)` deep inside.
+_tql_name(x::Union{AbstractString,Symbol}, ::AbstractString) = String(x)
+_tql_name(x, what::AbstractString) = throw(ArgumentError(
+    "$what must be a string or Symbol, got $(typeof(x))"))
+_tql_check_cond(x::Union{Nothing,AbstractString,Function}, ::AbstractString) = x
+_tql_check_cond(x, what::AbstractString) = throw(ArgumentError(
+    "$what must be nothing, a TaQL-lite string or a function, got $(typeof(x))"))
