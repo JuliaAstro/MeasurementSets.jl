@@ -637,7 +637,9 @@ dir)` / `valexpr * mscal.pbresponse(spec, dir)` — usable as an
 Deliberately a *subset* of real TaQL's grammar, not a look-alike: no
 boolean-mask array subscripts.
 Supported: 1-based array element/slice indexing (`DATA[1,1]`,
-`V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`), array literals `[a, b, ...]`,
+`V[1:4,1]`, `UVW[-1]`, `V[end-2:end,1]`; as in real TaQL `0` and `-1` both mean the last
+element, other negatives count from the end, and an out-of-range index, a range ending before
+its start or a non-integer subscript is an error), array literals `[a, b, ...]`,
 `BETWEEN` / `NOT BETWEEN` (inclusive), bitwise `& | ^ ~` (`^` is xor --
 use `**` for exponentiation), `~=` / `!~=` approximate equality
 (casacore's `near`, relative tolerance `1e-5`), scientific-notation

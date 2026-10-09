@@ -35,6 +35,15 @@ end
 AipsIO(io::IO; endian::Symbol=:big) = AipsIO(io, endian, 0, Int[])
 AipsIO(data::Vector{UInt8}; kw...) = AipsIO(IOBuffer(data); kw...)
 
+# An element count read from a (possibly corrupt) file must be possible: each element takes at least
+# one byte, so a count above the bytes left would only make a comprehension preallocate gigabytes
+# (or a tuple of millions of elements be compiled) before the read finally failed.
+_avail(a::AipsIO) = try bytesavailable(a.io) catch; typemax(Int) end
+function _check_count(a::AipsIO, n::Integer, what::AbstractString; perbyte::Int=1)   # `perbyte` = 8 for bit-packed Bool
+    0 <= n <= perbyte * _avail(a) || error("AipsIO: corrupt $what count $n (only $(_avail(a)) bytes left)")
+    return Int(n)
+end
+
 Base.position(a::AipsIO) = position(a.io)
 Base.seek(a::AipsIO, n::Integer) = seek(a.io, n)
 Base.eof(a::AipsIO) = eof(a.io)
@@ -98,7 +107,8 @@ end
 
 function read_iposition(a::AipsIO)::Dims
     v = getstart(a, "IPosition")
-    nel = Int(read_u32(a))
+    nel = _check_count(a, read_u32(a), "IPosition")
+    nel <= 64 || error("AipsIO: corrupt IPosition with $nel axes")
     T = v == 1 ? Int32 : Int64
     shape = Tuple(Int(read_scalar(a, T)) for _ in 1:nel)
     getend(a)
@@ -107,7 +117,7 @@ end
 
 function read_block(a::AipsIO, ::Type{T}) where {T}
     getstart(a, "Block")
-    n = Int(read_u32(a))
+    n = _check_count(a, read_u32(a), "Block")
     out = T[read_element(a, T) for _ in 1:n]
     getend(a)
     return out
@@ -119,7 +129,7 @@ read_element(a::AipsIO, ::Type{T}) where {T} = read_scalar(a, T)
 function read_map(a::AipsIO, ::Type{K}, ::Type{V}) where {K,V}
     getstart(a, "SimpleOrderedMap")
     read_element(a, V)                       # obsolete default value
-    nr = Int(read_u32(a))
+    nr = _check_count(a, read_u32(a), "map")
     read_u32(a)                              # obsolete increment
     out = Pair{K,V}[read_element(a, K) => read_element(a, V) for _ in 1:nr]
     getend(a)
@@ -130,6 +140,7 @@ end
 # `AipsIO::get(n, ptr)` / `put(n, ptr, False)`), returned as 1-based `Int`s.
 # Used for a RefTable's parent row numbers (0-based on disk).
 function _read_rownrs(a::AipsIO, ::Type{T}, n::Integer) where {T}
+    _check_count(a, Int(n) * sizeof(T), "row number")
     buf = Vector{T}(undef, Int(n))
     read!(a.io, buf)
     out = Vector{Int}(undef, Int(n))
@@ -148,8 +159,9 @@ function read_array(a::AipsIO, ::Type{T}) where {T}
     if version < 3          # discard the obsolete origin
         for _ in 1:ndim; read_i32(a); end
     end
+    0 <= ndim <= 64 || error("AipsIO: corrupt Array with $ndim axes")
     shape = Tuple(Int(read_u32(a)) for _ in 1:ndim)::Dims
-    nwritten = Int(read_u32(a))
+    nwritten = _check_count(a, read_u32(a), "Array element"; perbyte = T === Bool ? 8 : 1)
     data = if T === Bool                    # casacore stores Bool arrays as bits, LSB first
         packed = read(a.io, cld(nwritten, 8))
         Bool[(packed[(i - 1) >> 3 + 1] >> ((i - 1) & 7)) & 0x01 != 0 for i in 1:nwritten]

@@ -2107,3 +2107,43 @@ end
         @test_throws ArgumentError MSv2._parse_stokes_types(bad)
     end
 end
+
+# Phase 378: garbage MSSelection specs.  Ids beyond the machine range saturate instead of raising OverflowError,
+# `0~99999999999` no longer materialises every integer (OutOfMemoryError), an out-of-range `mscal.time` field is an
+# ordinary error; a seeded mutation fuzz of every selection function's spec asserts only ordinary errors escape.
+@testset "mscal selection specs: huge ids, ranges and garbage (Phase 378)" begin
+    t = readtable(SAMPLE_MS)
+    nm(spec) = MSv2.nrow(query(t, spec))
+    N = MSv2.nrow(t)
+    for fn in ("field", "spw", "state", "scan", "array", "obs", "baseline", "feed")
+        @test nm("mscal.$fn('0~99999999999999999999')") >= 0
+        @test nm("mscal.$fn('>99999999999999999999')") == 0
+        @test nm("mscal.$fn('0~199999999')") >= 0
+    end
+    @test nm("mscal.field('-99999999999999999999')") == 0
+    @test nm("mscal.scan('0~99999999999999999999')") == N
+    @test_throws ArgumentError nm("mscal.time('2024/05/2/10:00:00~2024/05/20/11:00:00999999999999999999999')")
+    rng = MSv2.Random.MersenneTwister(378)
+    corp = Dict("baseline" => ["0", "0~3", "DA4*", "DA41&DV01", "!0", "0&&1", ">100m", ";0&1;2&3"], "field" => ["0", "0~1", "<2", "J*"],
+                "spw" => ["0", "0:5~20", "0:5~20^2", "0:1.4~1.5GHz"], "scan" => ["1", "1~3", ">2"], "state" => ["0", "*CAL*"],
+                "time" => ["2024/05/20/10:00:00~2024/05/20/11:00:00", "<10:00:00", "60454.4"], "uvdist" => ["<100m", "50:10%", ">1klambda"],
+                "corr" => ["RR", "RR,LL"], "feed" => ["0", "0&1"], "chan" => ["0:5~20"], "array" => ["0"], "obs" => ["0"])
+    alpha = collect("éß日()[]{},.:;\"+-*/%&|^~!=<>_ @#\$?0123456789eEabcxyz")
+    forbidden = String[]
+    for _ in 1:150
+        fn = rand(rng, collect(keys(corp))); cs = collect(rand(rng, corp[fn]))
+        for _ in 1:rand(rng, 1:3)
+            isempty(cs) && break
+            i = rand(rng, 1:length(cs)); k = rand(rng, 1:5)
+            k == 1 ? deleteat!(cs, i) : k == 2 ? insert!(cs, i, rand(rng, alpha)) : k == 3 ? (cs[i] = rand(rng, alpha)) :
+            k == 4 ? (cs = cs[1:i]) : append!(cs, collect(rand(rng, ("99999999999999999999", "1e999", "~~", "::", ",,"))))
+        end
+        spec = replace(String(cs), "'" => "")
+        try; MSv2.nrow(query(t, "mscal.$fn('$spec') OR FALSE"))
+        catch e
+            e isa Union{ArgumentError,ErrorException} || push!(forbidden, "$fn '$spec': $(typeof(e))")
+        end
+    end
+    @test isempty(forbidden)
+    isempty(forbidden) || println(forbidden)
+end

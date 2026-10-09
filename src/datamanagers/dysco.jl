@@ -318,7 +318,27 @@ function Base.open(::Type{DyscoStMan}, t::Table, dm::DataManagerInfo)
                   "got $(c.shape) (DyscoStMan only supports direct, fixed-shape columns)")
         colShape[i] = (c.shape[1], c.shape[2])
         colKind[i]  = c.name == "WEIGHT_SPECTRUM" ? :weight : :data
+        # The stored per-column block size is fixed by the cell shape, bit widths and normalization.  A corrupt
+        # shape in table.dat (e.g. 9764866 x 4) otherwise decodes into multi-gigabyte zero-filled cells.
+        npol, nchan = colShape[i]
+        (npol >= 1 && nchan >= 1) || error("DyscoStMan column \"$(c.name)\": invalid cell shape $(c.shape)")
+        want = colKind[i] === :weight ? 4 + cld(rowsPerBlock * nchan * weightBitCount, 8) :
+               4 * _dysco_metacount(normalization, npol, nchan, rowsPerBlock, antennaCount) +
+               cld(rowsPerBlock * nchan * npol * 2 * dataBitCount, 8)
+        want == colBlockSize || error("DyscoStMan column \"$(c.name)\": cell shape $(c.shape) does not match the " *
+                                      "stored block size ($colBlockSize bytes, expected $want) -- corrupt table description?")
         cp += chsize
+    end
+
+    # A weight cell holds one value per channel, so its block size does not pin the polarization count; tie it to the
+    # DATA column of the same instance (an MS's WEIGHT_SPECTRUM always has DATA's shape) rather than trust table.dat.
+    di = findfirst(==(:data), colKind)
+    if di !== nothing
+        for i in eachindex(colKind)
+            colKind[i] === :weight && colShape[i] != colShape[di] &&
+                error("DyscoStMan column \"$(cols[i].name)\": cell shape $(cols[i].shape) differs from \"$(cols[di].name)\" " *
+                      "$(cols[di].shape) -- corrupt table description?")
+        end
     end
 
     nBlocksInFile = blockSize == 0 ? 0 : max(0, (length(data) - headerSize) ÷ blockSize)

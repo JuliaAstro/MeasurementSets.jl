@@ -138,12 +138,17 @@ function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::Table)
     version = getstart(a, "TiledStMan")
     version >= 2 && read_scalar(a, Bool)                   # bigEndian flag
     tsm.sequ = Int(read_u32(a))
-    version >= 3 ? read_scalar(a, UInt64) : read_u32(a)    # nrrow
+    nrrow = Int(version >= 3 ? read_scalar(a, UInt64) : read_u32(a))
+    # casacore refuses a table whose manager disagrees with `table.dat` ("mismatch in #row"); so do we
+    # (a corrupt row count otherwise makes every whole-column read allocate gigabytes)
+    nrrow == t.rows || error("TiledStMan: mismatch in #row (manager $nrrow, table $(t.rows))")
     ncol = Int(read_u32(a))
+    _check_count(a, ncol, "TiledStMan column")
     tsm.types = CasaType[casatype(read_i32(a)) for _ in 1:ncol]
     tsm.hyper = read_string(a)
     version >= 3 ? read_scalar(a, UInt64) : read_u32(a)    # persMaxCacheSize
     tsm.dims = Int(read_u32(a))
+    1 <= tsm.dims <= 64 || error("TiledStMan: corrupt hypercube dimensionality $(tsm.dims)")
 
     nrfile = Int(version >= 3 ? read_scalar(a, UInt64) : read_u32(a))
     for _ in 0:nrfile-1
@@ -156,6 +161,7 @@ function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::Table)
     end
 
     nrcube = Int(version >= 3 ? read_scalar(a, UInt64) : read_u32(a))
+    _check_count(a, nrcube, "TiledStMan hypercube")
     tsm.cubes = TSMCube[_read_tsmcube(a) for _ in 1:nrcube]
     getend(a)                                       # close "TiledStMan"
     return version

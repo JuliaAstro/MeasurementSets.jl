@@ -1108,18 +1108,26 @@ _mssel_notflagged(s, ::Nothing) = s
 _mssel_notflagged(s, flagged::AbstractVector{Bool}) =
     Set{Int}(i for i in s if !(1 <= i + 1 <= length(flagged) && flagged[i + 1]))
 
+# A numeric range keeps the ids the caller passed plus (for a small range) the ones in between, so a
+# selection naming ids the table does not have still matches nothing rather than erroring downstream.
+_mssel_notflagged_none(s, lo, hi) = (hi - lo <= 100_000 ? union!(s, lo:hi) : s)
+
 function _mssel_resolve(term::AbstractString, allids, n2i::AbstractDict;
                         flagged::Union{Nothing,AbstractVector{Bool}} = nothing)
     m = match(r"^(\d+)\s*~\s*(\d+)$", term)
-    m !== nothing && return Set{Int}(parse(Int, m[1]):parse(Int, m[2]))
+    if m !== nothing
+        # expand against the ids that exist: `0~99999999999` used to materialise every integer (OutOfMemoryError)
+        lo, hi = _mssel_int(m[1]), _mssel_int(m[2])
+        return _mssel_notflagged_none(Set{Int}(i for i in allids if lo <= i <= hi), lo, hi)
+    end
     m = match(r"^(>=|<=|>|<)\s*(-?\d+)$", term)
     if m !== nothing
-        v = parse(Int, m[2]); op = m[1]
+        v = _mssel_int(m[2]); op = m[1]
         s = Set{Int}(i for i in allids if op == ">" ? i > v :
                         op == ">=" ? i >= v : op == "<" ? i < v : i <= v)
         return _mssel_notflagged(s, flagged)
     end
-    occursin(r"^-?\d+$", term) && return Set{Int}([parse(Int, term)])
+    occursin(r"^-?\d+$", term) && return Set{Int}([_mssel_int(term)])
     if length(term) >= 2 && startswith(term, "/") && endswith(term, "/")
         re = Regex(term[2:end-1])
         s = Set{Int}(reduce(vcat, (v for (k, v) in n2i if occursin(re, k)); init = Int[]))
@@ -1650,10 +1658,23 @@ end
 # `_mstime_incl_hi`'s own `lo_secs` guard. `!isfinite` catches it the
 # same way a wildcard is caught, falling back to `def` (always finite --
 # it only ever holds real `Dates.year`/etc. components).
+# MSSelection ids beyond the machine range saturate (like TaQL's own integer literals, Phase 377) instead of
+# raising OverflowError; the clamp leaves room for the `+ 1` / `- 1` of `>` / `<` bounds.
+function _mssel_int(s::AbstractString)
+    lim = typemax(Int) ÷ 4
+    v = tryparse(Int, s)
+    v === nothing ? (startswith(strip(s), "-") ? -lim : lim) : clamp(v, -lim, lim)
+end
+
 function _mstime_secs(fields, def)
     f = ntuple(k -> (fields[k] < 0 || !isfinite(fields[k])) ? def[k] : fields[k], 6)
-    dt = Dates.DateTime(Int(f[1]), Int(f[2]), Int(f[3]), Int(f[4]), Int(f[5]),
-                        Int(floor(f[6])), Int(round((f[6] - floor(f[6])) * 1000)))
+    dt = try
+        Dates.DateTime(Int(f[1]), Int(f[2]), Int(f[3]), Int(f[4]), Int(f[5]),
+                       Int(floor(f[6])), Int(round((f[6] - floor(f[6])) * 1000)))
+    catch e
+        e isa Union{InexactError,OverflowError} || rethrow()
+        throw(ArgumentError("mscal.time: a date/time field is out of range"))
+    end
     ((dt - MJD_EPOCH) / Dates.Millisecond(1)) / 1000
 end
 
@@ -1862,13 +1883,13 @@ function _parse_chan_elem(s::AbstractString)
         return (:freq, num(m[1]), num(m[2]))
     end
     m = match(r"^(\d+)\s*~\s*(\d+)(?:\s*\^\s*(\d+))?$", s)
-    m !== nothing && return (:idx, parse(Int, m[1]), parse(Int, m[2]),
-                             m[3] === nothing ? 1 : parse(Int, m[3]))
+    m !== nothing && return (:idx, _mssel_int(m[1]), _mssel_int(m[2]),
+                             m[3] === nothing ? 1 : _mssel_int(m[3]))
     # a step with no range (`0:^2`): every channel, stride N (Phase 248, real casacore)
-    (sm = match(r"^\^\s*(\d+)$", s)) !== nothing && return (:idx, 0, typemax(Int) ÷ 2, parse(Int, sm[1]))
-    startswith(s, ">") && return (:idx, parse(Int, strip(s[2:end])) + 1, typemax(Int) ÷ 2, 1)
-    startswith(s, "<") && return (:idx, 0, parse(Int, strip(s[2:end])) - 1, 1)
-    occursin(r"^\d+$", s) && return (:idx, parse(Int, s), parse(Int, s), 1)
+    (sm = match(r"^\^\s*(\d+)$", s)) !== nothing && return (:idx, 0, typemax(Int) ÷ 2, _mssel_int(sm[1]))
+    startswith(s, ">") && return (:idx, _mssel_int(strip(s[2:end])) + 1, typemax(Int) ÷ 2, 1)
+    startswith(s, "<") && return (:idx, 0, _mssel_int(strip(s[2:end])) - 1, 1)
+    occursin(r"^\d+$", s) && return (:idx, _mssel_int(s), _mssel_int(s), 1)
     throw(ArgumentError("mscal channel selection: bad selector \"$s\""))
 end
 
@@ -1995,7 +2016,7 @@ function _parse_corr_types(spec::AbstractString)
         if haskey(_STOKES_NAMES, up)
             push!(out, _STOKES_NAMES[up])
         elseif occursin(r"^\d+$", term)
-            push!(out, parse(Int, term))
+            push!(out, _mssel_int(term))
         else
             throw(ArgumentError("mscal.corr: unknown correlation \"$term\""))
         end

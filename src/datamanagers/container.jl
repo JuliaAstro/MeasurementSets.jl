@@ -280,6 +280,9 @@ function open_multifile(path::AbstractString)
     headerSize = Int(_mf_get(lead, Int64, 32))
     blocksize  = Int(_mf_get(lead, Int64, 40))
     useCRC     = lead[57] != 0x00
+    fsz = filesize(path)
+    (0 < blocksize <= fsz && 0 <= headerSize <= fsz) ||
+        error("MultiFile: corrupt header (block size $blocksize, header size $headerSize, file size $fsz; \"$path\")")
 
     # Assemble the full (possibly multi-block) header buffer -- block 0 in
     # full (up to `blocksize` bytes; `headerSize` may be smaller), plus
@@ -330,6 +333,7 @@ function open_multifile(path::AbstractString)
     entries = Dict{String,MultiFileEntry}()
     for info in infos
         sz = Int(ntoh(read(rd, Int64)))
+        0 <= sz <= bytesavailable(rd) ÷ 8 || error("MultiFile: corrupt block index (count $sz)")
         packed = Int64[ntoh(read(rd, Int64)) for _ in 1:sz]
         isempty(info.name) && continue
         entries[info.name] = MultiFileEntry(info.fsize, _mf_unpack_index(packed))
@@ -350,6 +354,8 @@ end
 
 function container_read(c::MultiFileContainer, name::AbstractString)
     e = _mf_entry(c, name)
+    0 <= e.fsize <= length(e.blocknrs) * c.blocksize ||
+        error("MultiFile: corrupt size $(e.fsize) for \"$name\"")
     out = Vector{UInt8}(undef, e.fsize)
     bs = Int(c.blocksize)
     io = open(c.path, "r")

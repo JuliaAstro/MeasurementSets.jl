@@ -613,7 +613,7 @@ function _taql_join_from(target, body::AbstractString, others)
     jun = Dict{Symbol,Vector{String}}(); jep = Set{Symbol}()
     for n in columnnames(left); _join_meta!(jun, jep, left, n, la * "." * n); end
     push!(names, la * ".__rowid"); push!(cols, collect(0:nrow(left)-1))
-    pos = m.offset + length(m.match) - length("JOIN")       # start of the first JOIN
+    pos = m.offset + ncodeunits(m.match) - length("JOIN")       # start of the first JOIN
     jre = Regex("^JOIN\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+ON\\s+" * _JOIN_SIDE *
                 "\\s*(?:==|=|\\bIN\\b)\\s*" * _JOIN_SIDE * "\\s*", "i")
     rest = body[pos:end]
@@ -634,6 +634,8 @@ function _taql_join_from(target, body::AbstractString, others)
         if rc == "rowid()"
             mr = Int[(ismissing(v) ? 0 : (0 <= v < nr ? Int(v) + 1 : 0)) for v in lk]
         else
+            rc in columnnames(right) || throw(ArgumentError(
+                "taql: unknown column \"$rc\" in the JOIN condition (table \"$ra\" is joined)"))
             rcol = collect(column(right, rc)[:])
             first = Dict{Any,Int}()
             for (i, v) in enumerate(rcol); haskey(first, v) || (first[v] = i); end
@@ -650,7 +652,7 @@ function _taql_join_from(target, body::AbstractString, others)
         end
         push!(names, ra * ".__rowid")
         push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])
-        rest = rest[length(jm.match)+1:end]
+        rest = rest[ncodeunits(jm.match)+1:end]
     end
     joined = GroupedTable(Symbol.(names), cols, jun, jep)
     body = body[1:m.offset-1] * "FROM __join " * rest
@@ -666,7 +668,8 @@ end
 # the `a.` qualifier from every column reference.
 function _matching_paren(s::AbstractString, i::Int)
     depth = 0; q = '\0'
-    for j in i:lastindex(s)
+    for j in eachindex(s)        # character starts only (a byte index into the middle of a multi-byte char throws)
+        j < i && continue
         c = s[j]
         if q != '\0'
             c == q && (q = '\0')
@@ -720,7 +723,7 @@ function _taql_preprocess_write(target, cmd::AbstractString)
     am === nothing && (am = match(r"^DELETE\s+FROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|ORDER|LIMIT)\b)(\w+)"i, cmd))
     if am !== nothing
         alias = String(am.captures[1])
-        cmd = replace(am.match, Regex("\\s+(?:AS\\s+)?" * alias * "(?=\\s+SET\\b|\\z)", "i") => "") * cmd[length(am.match)+1:end]
+        cmd = replace(am.match, Regex("\\s+(?:AS\\s+)?" * alias * "(?=\\s+SET\\b|\\z)", "i") => "") * cmd[ncodeunits(am.match)+1:end]
         cmd = replace(cmd, Regex("\\b" * alias * "\\.(?=[A-Za-z_])") => "")
     end
     return cmd
@@ -736,7 +739,7 @@ function _taql_preprocess_select(target, body::AbstractString)
     orig = target
     m = match(r"\bFROM\s*\("i, body)
     if m !== nothing
-        open = m.offset + length(m.match) - 1
+        open = m.offset + ncodeunits(m.match) - 1
         close = _matching_paren(body, open)
         inner = String(strip(body[open+1:close-1]))
         occursin(r"^SELECT\b"i, inner) || throw(ArgumentError("taql: FROM (...) must hold a SELECT"))
@@ -749,7 +752,7 @@ function _taql_preprocess_select(target, body::AbstractString)
     if am !== nothing
         alias = String(am.captures[1])
         body = body[1:am.offset-1] * replace(am.match, Regex("\\s+(?:AS\\s+)?" * alias * "\\z", "i") => "") *
-               body[am.offset+length(am.match):end]
+               body[am.offset+ncodeunits(am.match):end]
         body = replace(body, Regex("\\b" * alias * "\\.(?=[A-Za-z_])") => "")
     end
     return target, body
@@ -874,7 +877,7 @@ function _taql_alter(target, command::AbstractString)
     clauses = Tuple{String,String}[]
     for (i, cm) in enumerate(starts)
         stop = i < length(starts) ? starts[i+1].offset - 1 : lastindex(body)
-        push!(clauses, (uppercase(replace(String(cm.match), r"\s+" => " ")), String(strip(body[cm.offset+length(cm.match):stop]))))
+        push!(clauses, (uppercase(replace(String(cm.match), r"\s+" => " ")), String(strip(body[cm.offset+ncodeunits(cm.match):stop]))))
     end
     _alter_dryrun(path, clauses)       # real TaQL leaves the table untouched when any clause fails: check them all first
     for (kind, rest) in clauses
@@ -940,7 +943,8 @@ end
 # table: `taql("CREATE TABLE ...")`.
 function _bracket_group(s::AbstractString, i::Int)       # s[i] == '[' -> (inner text, index after the matching ']')
     depth = 0; q = '\0'
-    for k in i:lastindex(s)
+    for k in eachindex(s)
+        k < i && continue
         c = s[k]
         if q != '\0'
             c == q && (q = '\0')
@@ -966,12 +970,12 @@ function _taql_create(command::AbstractString)
     m = match(r"^CREATE\s+TABLE\s+('[^']*'|\"[^\"]*\"|[^\s\[]+)\s*"i, s)
     m === nothing && throw(ArgumentError("taql: malformed CREATE TABLE command"))
     path = _taql_table_path(m.captures[1])
-    i = m.offset + length(m.match)
+    i = m.offset + ncodeunits(m.match)
     rest(i) = lstrip(s[i:end])
     storage = :sepfile; blocksize = DEFAULT_MF_BLOCKSIZE
     am = match(r"^AS\s*(?=\[)"i, rest(i))
     if am !== nothing
-        i += (length(s[i:end]) - length(rest(i))) + length(am.match)
+        i += (ncodeunits(s[i:end]) - ncodeunits(rest(i))) + ncodeunits(am.match)
         inner, i = _bracket_group(s, i)
         for opt in _split_commas(inner)
             om = match(r"^(\w+)\s*=\s*(.+)$"s, strip(opt))
@@ -986,7 +990,7 @@ function _taql_create(command::AbstractString)
             end
         end
     end
-    i += length(s[i:end]) - length(rest(i))
+    i += ncodeunits(s[i:end]) - ncodeunits(rest(i))
     (i <= lastindex(s) && s[i] == '[') || throw(ArgumentError("taql: CREATE TABLE needs a column list [name type, ...]"))
     colstr, i = _bracket_group(s, i)
     tail = String(strip(s[i:end]))
@@ -995,7 +999,7 @@ function _taql_create(command::AbstractString)
     if lm !== nothing
         nrows = Int(_taql_const(String(strip(lm.captures[1]))))
         nrows >= 0 || throw(ArgumentError("taql: CREATE TABLE LIMIT must not be negative"))
-        tail = String(strip(tail[length(lm.match)+1:end]))
+        tail = String(strip(tail[ncodeunits(lm.match)+1:end]))
     end
     dm = match(r"^DMINFO\s*(?=\[)"i, tail)
     if dm !== nothing
@@ -1099,10 +1103,25 @@ the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
 string are not supported (use `copytable(dst, groupby(…))`, or
 `insert!(t, groupby(…))`).
 """
+# `$N` must name one of the tables handed to `taql` (real TaQL: "Invalid temporary table
+# number"); outside quoted strings only.  Before this check `$0` / `$2` were silently
+# ignored by plain SELECTs and `$0` indexed `others[-1]` in a JOIN (a BoundsError).
+function _taql_check_tablerefs(cmd::AbstractString, ntab::Int)
+    bare = replace(cmd, r"'[^']*'|\"[^\"]*\"" => "")
+    for m in eachmatch(r"\$(\d+)", bare)
+        k = tryparse(Int, m.captures[1])
+        (k === nothing || k < 1 || k > ntab) && throw(ArgumentError(
+            "taql: invalid table reference \$$(m.captures[1]) ($(ntab == 0 ? "no table" : ntab == 1 ? "1 table" : "$ntab tables") passed)"))
+    end
+    return nothing
+end
+
 taql(command::AbstractString) = taql(nothing, command)    # target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
 
 function taql(target, command::AbstractString, others...)
     cmd = strip(command)
+    isempty(cmd) && throw(ArgumentError("taql: empty command"))
+    _taql_check_tablerefs(cmd, (target === nothing ? 0 : 1) + length(others))
     kw = uppercase(String(first(split(cmd; limit=2))))
     if kw == "UPDATE" || kw == "DELETE"
         cmd = _taql_preprocess_write(target isa AbstractTable ? target : readtable(_cmd_path(target)), cmd)

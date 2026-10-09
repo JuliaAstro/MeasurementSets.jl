@@ -1951,3 +1951,49 @@ end
         end
     end
 end
+
+# Phase 377: `$N` must name a table handed to `taql` (real TaQL: "Invalid temporary table number";
+# `$0` used to index `others[-1]`, `$2` was silently ignored), an empty command is an error, and a
+# JOIN naming an unknown column fails with a clear message.
+@testset "taql: table references, empty command, JOIN column errors (Phase 377)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => Int32[1, 2, 3, 4], "S" => ["a", "\$2", "c", "d"]]; nrow=4)
+    @test_throws ArgumentError taql(d, "")
+    @test_throws ArgumentError taql(d, "   ")
+    for c in ["SELECT FROM \$0", "SELECT FROM \$2", "SELECT FROM \$11 a JOIN \$1 b ON a.I == b.I",
+              "SELECT FROM \$1 a JOIN \$5 b ON a.I == b.I", "UPDATE \$3 SET I = 1", "DELETE FROM \$9", "SELECT FROM \$99999999999999999999"]
+        @test_throws ArgumentError taql(d, c)
+    end
+    @test_throws ArgumentError taql(nothing, "SELECT FROM \$1")
+    @test MSv2.nrow(taql(d, "SELECT FROM \$1 WHERE S == '\$2'")) == 1      # a `\$2` inside a string literal is just text
+    @test MSv2.nrow(taql(d, "SELECT FROM \$1 a JOIN \$2 b ON a.I == b.I", d)) == 4   # two tables passed: \$2 is fine
+    @test_throws ArgumentError taql(d, "SELECT FROM \$1 a JOIN \$1 b ON a.I == b.NOPE")
+    @test_throws ArgumentError taql(d, "SELECT FROM \$1 a JOIN \$1 b ON a.NOPE == b.I")
+    if _HAVE_TAQL
+        for c in ["SELECT FROM \$0", "SELECT FROM \$2", "SELECT FROM \$11 a JOIN \$1 b ON a.I == b.I"]
+            @test (try _taqlcmd(c, d); false catch; true end)
+        end
+    end
+end
+
+# Phase 377 (fuzz): command parsing mixed character and byte indices -- a multi-byte character inside a
+# `FROM (SELECT ...)` / `IN (SELECT ...)` sub-query (or after a joined table name) raised StringIndexError.
+@testset "taql: non-ASCII text in sub-queries and aliases (Phase 377)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => Int32[1, 2, 3, 4], "S" => ["é", "ß", "c", "日本"]]; nrow=4)
+    n(c) = MSv2.nrow(taql(d, c))
+    @test n("SELECT FROM (SELECT I FROM \$1 WHERE S == 'é') WHERE I<5") == 1
+    @test n("SELECT FROM \$1 WHERE I IN (SELECT I FROM \$1 WHERE S == 'ß')") == 1
+    @test n("SELECT FROM (SELECT FROM \$1 WHERE S == '日本') WHERE S == '日本'") == 1
+    @test n("SELECT FROM \$1 WHERE S == 'é' AND I IN (SELECT I FROM \$1 WHERE S ~ p/日*/)") == 0
+    @test n("SELECT FROM \$1 WHERE EXISTS (SELECT FROM \$1 WHERE S == 'é')") == 4
+    @test n("SELECT S AS é FROM \$1 WHERE I<3") == 2
+    @test taql(d, "UPDATE \$1 SET S = 'é' WHERE S == 'ß'") == 1
+    @test_throws ArgumentError taql(d, "SELECT FROM (SELECT I é \$1 WHERE I>0) WHERE I<5")   # garbage in -> ordinary error
+end
+
+@testset "taql CREATE TABLE: non-ASCII column names (Phase 377)" begin
+    p = joinpath(mktempdir(), "c")
+    @test taql("CREATE TABLE '$p' [A I4, é R8 [NDIM=1], ßB S] LIMIT 3") == p
+    @test MSv2.columnnames(readtable(p)) == ["A", "é", "ßB"] && MSv2.nrow(readtable(p)) == 3
+end

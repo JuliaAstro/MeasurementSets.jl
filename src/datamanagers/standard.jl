@@ -241,12 +241,14 @@ end
 _swap(ssm::StandardStMan, x) = ssm.endian === :big ? ntoh(x) : ltoh(x)
 
 function _read_elems(ssm::StandardStMan, ::Type{T}, off::Int, n::Int) where {T}
+    _chk_count(n, sizeof(T), length(ssm.data), "array cell")
     out = Vector{T}(undef, n)
     _rd_run!(out, 0, T, ssm.data, off, n, ssm.endian === :big)
     return out
 end
 
 function _read_bits(ssm::StandardStMan, off::Int, bitstart::Int, n::Int)
+    _chk_count(n, 1, 8 * length(ssm.data), "Bool array cell")
     out = Vector{Bool}(undef, n)
     for k in 0:n-1
         b = bitstart + k
@@ -347,6 +349,7 @@ function _read_string_array(ssm::StandardStMan, cell::Int, c::ColumnDesc; fixed=
     be32(p) = ntoh(reinterpret(Int32, @view blob[p+1:p+SSM_INT])[1])
     if fixed !== nothing                              # fixed shape: elements only
         n = prod(fixed; init=1); p = 0
+        _chk_count(n, SSM_INT, length(blob), "string array cell")
         out = Vector{String}(undef, n)
         for k in 1:n
             len = Int(be32(p)); p += SSM_INT
@@ -355,10 +358,13 @@ function _read_string_array(ssm::StandardStMan, cell::Int, c::ColumnDesc; fixed=
         return reshape(out, fixed...)
     end
     ndim = Int(be32(0))
+    0 <= ndim <= 64 || error("StandardStMan: corrupt string array with $ndim axes")
     dims = ntuple(k -> Int(be32(SSM_INT * k)), ndim)  # dims right after ndim
     filled = Int(be32(SSM_INT * (ndim + 1)))          # then the "filled" flag
     p = SSM_INT * (ndim + 2)                          # elements start here
     n = prod(dims; init=1)
+    _chk_count(n, filled == 0 ? 0 : SSM_INT, length(blob), "string array cell")
+    0 <= n <= 1 << 28 || _toobig(n, "string array cell")
     out = Vector{String}(undef, n)
     for k in 1:n
         if filled == 0
