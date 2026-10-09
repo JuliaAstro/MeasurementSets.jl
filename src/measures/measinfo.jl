@@ -135,11 +135,14 @@ function measinfo(t::AbstractTable, col::AbstractString)
 end
 
 # a per-row `VarRefCol` code -> its reference-frame name
+_ref_from_code(mi::MeasInfo, code) = throw(ArgumentError(
+    "MEASINFO VarRefCol \"$(mi.varrefcol)\" must hold integer ref codes, got a $(typeof(code))"))
 function _ref_from_code(mi::MeasInfo, code::Integer)
     c = Int(code)
     if !isempty(mi.tabcodes)
         i = findfirst(==(c), mi.tabcodes)
         i === nothing && throw(ArgumentError("MEASINFO ref code $c not in TabRefCodes"))
+        i <= length(mi.tabtypes) || throw(ArgumentError("MEASINFO TabRefCodes is longer than TabRefTypes"))
         return mi.tabtypes[i]
     end
     # solar-system-body direction codes live at 32+ (a gap above N_Types)
@@ -170,7 +173,7 @@ function _ref_string(mi::MeasInfo, t::AbstractTable, col::AbstractString, row::I
     mi.fixedref !== nothing && return mi.fixedref
     mi.varrefcol === nothing && throw(ArgumentError(
         "column \"$col\": MEASINFO has neither Ref nor VarRefCol"))
-    _ref_from_code(mi, getcell(t, mi.varrefcol, row))
+    _ref_from_code(mi, getcell(t, _varref_name(t, mi), row))
 end
 
 _frame_type(kind::Symbol, s::AbstractString) =

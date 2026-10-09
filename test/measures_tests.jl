@@ -1881,3 +1881,25 @@ end
         @test 6.3e6 < hypot(xyz...) < 6.4e6
     end
 end
+
+# Phase 379: a MEASINFO that does not fit its column (found by a fuzz of garbage measure descriptions).  A string /
+# integer / scalar cell for a vector measure, a missing or non-integer VarRefCol and a too-short cell used to raise
+# MethodError / KeyError / BoundsError; a date outside SOFA's tables raised AssertionError from deep inside SOFA.jl.
+@testset "measures: MEASINFO that does not fit the data is an ordinary error (Phase 379)" begin
+    N = 4
+    mk(data; kw...) = (d = joinpath(mktempdir(), "t");
+        write_table(d, "T", Pair{String,Any}["C" => data, "R" => Int32.(1:N), "F" => Float64.(1:N)]; nrow=N, measures=Dict("C" => (; kw...))); readtable(d))
+    @test_throws ArgumentError MSv2.measure(mk(string.(1:N); kind=:epoch, ref="UTC"), "C")             # string cells
+    @test_throws ArgumentError MSv2.measure(mk(string.(1:N); kind=:position, ref="ITRF"), "C")
+    @test_throws ArgumentError MSv2.measure(mk(Int32.(1:N); kind=:position, ref="ITRF"), "C")           # scalar cell, vector measure
+    @test_throws ArgumentError MSv2.measure(mk(fill(NaN, N); kind=:direction, ref="J2000"), "C")
+    @test_throws ArgumentError MSv2.measure(mk([[0.1i, 0.2] for i in 1:N]; kind=:uvw, ref="ITRF"), "C")  # 2 elements, needs 3
+    @test_throws ArgumentError MSv2.measure(mk([Float64[] for _ in 1:N]; kind=:baseline, ref="ITRF"), "C")
+    @test_throws ArgumentError MSv2.measure(mk(collect(1.0:N); kind=:frequency, varrefcol="NOPE", tabtypes=String[], tabcodes=[0, 1]), "C")
+    @test_throws ArgumentError MSv2.measure(mk(collect(1.0:N); kind=:frequency, varrefcol="NOPE", tabtypes=String[], tabcodes=[0, 1]), "C", 2)
+    @test_throws ArgumentError MSv2.measure(mk(collect(1.0:N); kind=:position, varrefcol="F", tabtypes=["ITRF", "WGS84"], tabcodes=[0, 1]), "C")   # float codes
+    @test_throws ArgumentError MSv2.measure(mk(collect(1.0:N); kind=:frequency, varrefcol="R", tabtypes=["LSRK"], tabcodes=[1, 2, 3, 4]), "C")   # codes longer than types
+    if Base.get_extension(MSv2, :SOFAExt) !== nothing
+        @test_throws ArgumentError MSv2.measconvert(MSv2.MEpoch{MSv2.UTC}(1.0), MSv2.TAI)              # MJD 1 is before SOFA's tables (1960)
+    end
+end

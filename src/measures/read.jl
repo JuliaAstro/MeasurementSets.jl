@@ -47,6 +47,12 @@ end
 # whole-column: parse MEASINFO once and bulk-read the value column (and,
 # for a per-row `VarRefCol`, the code column) instead of going cell by
 # cell / re-parsing the keyword per row.
+function _varref_name(t::AbstractTable, mi::MeasInfo)
+    mi.varrefcol in columnnames(t) || throw(ArgumentError(
+        "MEASINFO names VarRefCol \"$(mi.varrefcol)\", which is not a column of the table"))
+    mi.varrefcol
+end
+
 function measure(t::AbstractTable, col::AbstractString)
     mi = measinfo(t, col)
     mi === nothing && throw(ArgumentError("column \"$col\" has no MEASINFO keyword"))
@@ -55,7 +61,7 @@ function measure(t::AbstractTable, col::AbstractString)
         R = _frame_type(mi.kind, mi.fixedref)
         return [_wrap_measure(mi.kind, R, v, mi) for v in vals]
     end
-    codes = column(t, mi.varrefcol)[:]
+    codes = column(t, _varref_name(t, mi))[:]
     return [_wrap_measure(mi.kind, _frame_type(mi.kind, _ref_from_code(mi, codes[i])),
                           vals[i], mi) for i in eachindex(vals)]
 end
@@ -125,7 +131,14 @@ function _scalar(v::AbstractArray)
     first(v)
 end
 
-_vec3(v::AbstractArray) = (Float64(v[1]), Float64(v[2]), Float64(v[3]))
+function _vec3(v::AbstractArray)
+    length(v) == 3 || throw(ArgumentError("measure: expected a 3-element cell, got a length-$(length(v)) array"))
+    (Float64(v[1]), Float64(v[2]), Float64(v[3]))
+end
+# a MEASINFO that names a kind the column data cannot be (a string / integer / scalar cell for a vector measure, ...)
+_scalar(v) = throw(ArgumentError("measure: expected a numeric scalar cell, got a $(typeof(v))"))
+_vec3(v) = throw(ArgumentError("measure: expected a 3-element numeric cell, got a $(typeof(v))"))
+_lonlat(v) = throw(ArgumentError("measure: expected a [lon, lat] (or unit-vector) cell, got a $(typeof(v))"))
 
 # number of polynomial terms of a FIELD direction cell: the `NUM_POLY`
 # column if present, else inferred from a `(2, npoly+1)` cell shape.
