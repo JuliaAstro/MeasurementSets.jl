@@ -1075,6 +1075,20 @@ function _taql_drop_table(target, command::AbstractString)
 end
 
 
+# `$N` must name one of the tables handed to `taql` (real TaQL: "Invalid temporary table
+# number"); outside quoted strings only.  Before this check `$0` / `$2` were silently
+# ignored by plain SELECTs and `$0` indexed `others[-1]` in a JOIN (a BoundsError).
+function _taql_check_tablerefs(cmd::AbstractString, ntab::Int)
+    bare = replace(cmd, r"'[^']*'|\"[^\"]*\"" => "")
+    for m in eachmatch(r"\$(\d+)", bare)
+        k = tryparse(Int, m.captures[1])
+        (k === nothing || k < 1 || k > ntab) && throw(ArgumentError(
+            "taql: invalid table reference \$$(m.captures[1]) ($(ntab == 0 ? "no table" : ntab == 1 ? "1 table" : "$ntab tables") passed)"))
+    end
+    return nothing
+end
+
+
 """
     taql(target, command::AbstractString)
 
@@ -1103,19 +1117,6 @@ the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
 string are not supported (use `copytable(dst, groupby(…))`, or
 `insert!(t, groupby(…))`).
 """
-# `$N` must name one of the tables handed to `taql` (real TaQL: "Invalid temporary table
-# number"); outside quoted strings only.  Before this check `$0` / `$2` were silently
-# ignored by plain SELECTs and `$0` indexed `others[-1]` in a JOIN (a BoundsError).
-function _taql_check_tablerefs(cmd::AbstractString, ntab::Int)
-    bare = replace(cmd, r"'[^']*'|\"[^\"]*\"" => "")
-    for m in eachmatch(r"\$(\d+)", bare)
-        k = tryparse(Int, m.captures[1])
-        (k === nothing || k < 1 || k > ntab) && throw(ArgumentError(
-            "taql: invalid table reference \$$(m.captures[1]) ($(ntab == 0 ? "no table" : ntab == 1 ? "1 table" : "$ntab tables") passed)"))
-    end
-    return nothing
-end
-
 taql(command::AbstractString) = taql(nothing, command)    # target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
 
 function taql(target, command::AbstractString, others...)
