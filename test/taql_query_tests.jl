@@ -4166,7 +4166,9 @@ end
         d = ev("meas.b1950([1.2, 0.5])")
         @test d ≈ ev("meas.b1950('J2000', 1.2, 0.5)")                    # same answer both ways
         @test d ≈ [1.1863574834469928, 0.4982090952225761] atol = 1e-6   # real casacore's value
-        @test ev("meas.galactic([1.2, 0.5])") ≈ [2.9857820692320334, -0.2211172043436338] atol = 1e-6
+        # real casacore's J2000 -> GALACTIC differs from SOFA's ICRS-based `icrs2g` by ~0.3" (Phase 377: this
+        # block only runs when SOFA happens to be loaded already, and its old 1e-6 tolerance was too tight)
+        @test ev("meas.galactic([1.2, 0.5])") ≈ [2.9857820692320334, -0.2211172043436338] atol = 1e-5
         @test ev("meas.j2000([1.2, 0.5])") ≈ [1.2, 0.5]
         @test ev("meas.b1950([1.2, 0.5], 'B1950')") ≈ [1.2, 0.5] atol = 1e-9
         @test ev("meas.b1950([-1.2, 0.5])")[1] < 0                       # (-pi, pi]
@@ -5446,5 +5448,98 @@ end
             end
         end
         @test nbad == 0
+    end
+end
+
+# Phase 377: robustness against extreme / garbage input (found by a mutation fuzz of the TaQL-lite
+# parser).  Real TaQL (all live-verified): an integer literal beyond Int64 SATURATES to the maximum
+# (decimal and hex; later Int64 arithmetic wraps), a float beyond the double range is +-Inf and one
+# below it 0.0; a subscript of 0 means the LAST element, negative ones count from the end (-1 ==
+# last), and an out-of-range index, an end-before-start range, a stride <= 0 or a non-integer
+# subscript is an error; any/all/ntrue/nfalse (and their `s` forms) want a Bool operand.  The
+# parser refuses absurd nesting instead of overflowing the stack.
+@testset "TaQL-lite: extreme literals, nesting, subscripts, Bool reductions (Phase 377)" begin
+    N = 6
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["ID" => Int32.(1:N), "I" => Int32[-2, 0, 1, 2, 3, 4],
+        "V" => [Float64.(reshape(1:12, 3, 4)) for _ in 1:N], "W" => [reshape(Float64.(1:12), 3, 4) .> 5 for _ in 1:N]];
+        nrow=N, tsm=[["V"], ["W"]])
+    t = readtable(d)
+    rows(c) = collect(column(query(t, c), "ID")[:])
+    val(e) = collect(column(query(t, "ID > 0"; select=["X" => e]), "X")[:])[1]
+    ids = Int32.(1:N)
+
+    # number literals outside the machine range
+    @test MSv2._tql_parse_int("99999999999999999999", 10) == typemax(Int64)
+    @test MSv2._tql_parse_int("FFFFFFFFFFFFFFFFFF", 16) == typemax(Int64)
+    @test MSv2._tql_parse_int("7FFFFFFFFFFFFFFF", 16) == typemax(Int64)
+    @test MSv2._tql_parse_int("1F", 16) == 31 && MSv2._tql_parse_int("42", 10) == 42
+    @test MSv2._tql_parse_float("1e999") == Inf && MSv2._tql_parse_float("1e-999") == 0.0
+    @test MSv2._tql_parse_float("0.0e5000") == 0.0 && MSv2._tql_parse_float("1e99999999999999999999") == Inf
+    @test MSv2._tql_parse_float("2.5e3") == 2500.0
+    @test rows("99999999999999999999 > 0") == ids
+    @test rows("I < 99999999999999999999") == ids
+    @test rows("I % 99999999999999999999 == 1") == [3]
+    @test rows("I + 9223372036854775808 > 0") == [1, 2]       # saturates to typemax, then Int64 arithmetic wraps
+    @test rows("0xFFFFFFFFFFFFFFFFFF > 1") == ids
+    @test rows("I == 0xFFFFFFFFFFFFFFFF") == Int32[]
+    @test rows("1e999 > I") == ids && rows("I > -1e999") == ids
+    @test rows("I > 1e-999") == [3, 4, 5, 6] && rows("I > 0.0e5000") == [3, 4, 5, 6]
+    @test rows("1e999 == 1e9999") == ids
+    @test val("1e999") == Inf && val("-1e999") == -Inf && val("1e-999") == 0.0
+    @test val("99999999999999999999") === typemax(Int64) && val("9223372036854775807 + 1") === typemin(Int64)
+
+    # nesting is refused with an ordinary error (a few thousand levels used to overflow the stack)
+    nest(n, l, r) = "I > " * l^n * "1" * r^n
+    @test rows(nest(100, "(", ")")) == [4, 5, 6] && rows(nest(100, "abs(", ")")) == [4, 5, 6]
+    for n in (500, 3000, 20000)
+        @test_throws ArgumentError query(t, nest(n, "(", ")"))
+        @test_throws ArgumentError query(t, nest(n, "abs(", ")"))
+    end
+    @test_throws ArgumentError query(t, "I > " * join(fill("2", 5000), " ** "))
+    @test_throws ArgumentError query(t, repeat("NOT ", 5000) * "(I > 1)")
+    @test rows("I > " * repeat("-", 5000) * "1") == [4, 5, 6]     # a unary-minus chain is iterative (an even count cancels)
+
+    # subscripts: 0 = last, negatives from the end, everything else out of range is an error
+    M(v...) = reshape(Float64[v...], length(v), 1)
+    @test val("V[0,1]") == 3.0 && val("V[-1,1]") == 3.0 && val("V[-2,1]") == 2.0 && val("V[-3,1]") == 1.0
+    @test val("V[2:0,1]") == M(2, 3) && val("V[1:0,1]") == M(1, 2, 3) && val("V[0:0,1]") == M(3)
+    @test val("V[-2:-1,1]") == M(2, 3) && val("V[2:2,1]") == M(2) && val("V[1:3:2,1]") == M(1, 3)
+    @test val("V[1:2,0]") == M(10, 11) && val("V[1,0:-1]") == M(10) && val("V[3:-1,1]") == M(3)
+    for e in ["V[0:2,1]", "V[-1:-2,1]", "V[3:1,1]", "V[-4,1]", "V[3:-2,1]", "V[1:1:0,1]", "V[1:5:3,1]", "V[5,1]", "V[1,5]",
+              "sum(V[1:5,1])", "sum(V[2:99,1])", "V[1,2.5]", "V['a',1]", "V[1,1,1]", "V[1-1e999,1]"]
+        @test_throws ArgumentError query(t, "ID > 0"; select=["X" => e])
+    end
+    @test_throws ArgumentError query(t, "V[152] > 0")
+    @test_throws ArgumentError query(t, "V[1,22] > 0")
+    @test val("V[2.0,1]") == 2.0                                   # a whole-valued float is accepted (real TaQL is stricter)
+    @test val("sum(V[1:0,1])") == 6.0
+
+    # any/all/ntrue/nfalse want a Bool operand (real: "function argument is not Bool")
+    for e in ["any(V)", "all(V)", "ntrue(V)", "nfalse(V)", "anys(V, 1)", "alls(V, 1)", "ntrues(V, 1)", "nfalses(V, 1)",
+              "any(I)", "any('a')", "all(2.5)", "ntrue(I)"]
+        @test_throws ArgumentError query(t, "ID > 0"; select=["X" => e])
+    end
+    @test_throws ArgumentError query(t, "any(V)")
+    @test val("any(V > 5)") === true && val("all(V > 5)") === false
+    @test val("ntrue(W)") == 7 && val("nfalse(W)") == 5
+    @test vec(val("anys(W, 1)")) == [false, true, true, true] && vec(val("alls(W, 1)")) == [false, false, true, true]
+
+    if _HAVE_TAQL
+        agree(c) = (ro = try rows(c) catch; :err end;
+                    rr = try (rt = _taqlcmd("SELECT FROM \$1 WHERE $c", d); size(rt, 1) == 0 ? Int32[] : collect(rt[:ID][:])) catch; :err end;
+                    ro == rr)
+        @test all(agree, ["99999999999999999999 > 0", "I % 99999999999999999999 == 1", "I + 9223372036854775808 > 0",
+            "0xFFFFFFFFFFFFFFFFFF > 1", "I == 0xFFFFFFFFFFFFFFFF", "1e999 > I", "I > -1e999", "I > 1e-999", "I < 4.9e-324",
+            "I > 123456789012345678901234567890", "I == 9223372036854775808", "any(V)", "any(V > 5)", "all(V)", "ntrue(I)",
+            "ntrue(W) > 0", "V[5,1] > 0", "V[0,1] > 0", "V[1,5] > 0", "V[3:1,1] == 1", "sum(V[2:99,1]) > 0", "V[1,2.5] > 0"])
+        same(a, b) = a isa AbstractArray ? vec(a) == vec(b) : a == b
+        for e in ["V[0,1]", "V[-1,1]", "V[-2,1]", "V[0:2,1]", "V[2:0,1]", "V[1:0,1]", "V[0:0,1]", "V[-2:-1,1]", "V[-1:-2,1]",
+                  "V[2:2,1]", "V[1:3:2,1]", "V[3:1,1]", "V[1:2,0]", "V[1,0:-1]", "V[-3,1]", "V[-4,1]", "V[3:-1,1]", "V[3:-2,1]",
+                  "V[1:1:0,1]", "V[1:5:3,1]", "1e999", "-1e999", "1e-999", "99999999999999999999", "9223372036854775807 + 1"]
+            ro = try val(e) catch; :err end
+            rr = try (rt = _taqlcmd("SELECT $e AS X FROM \$1 LIMIT 1", d); collect(rt[:X][:])[1]) catch; :err end
+            @test (ro === :err) == (rr === :err) && (ro === :err || same(ro, rr))
+        end
     end
 end

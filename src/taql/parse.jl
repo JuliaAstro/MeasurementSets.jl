@@ -81,7 +81,7 @@ function _taqllite_tokenize(s::AbstractString)
             # hex integer literal `0x1F` (real TaQL accepts it; Phase 244)
             j = i + 2
             while j <= n && isxdigit(cs[j]); j += 1; end
-            push!(toks, TQLToken(:num, join(cs[i:j-1]), parse(Int, join(cs[i+2:j-1]); base=16)))
+            push!(toks, TQLToken(:num, join(cs[i:j-1]), _tql_parse_int(join(cs[i+2:j-1]), 16)))
             i = j
         elseif isdigit(c) || (c == '.' && _isdigit_at(cs, i + 1, n))
             j = i
@@ -102,7 +102,7 @@ function _taqllite_tokenize(s::AbstractString)
                 end
             end
             text = join(cs[i:j-1])
-            val = (sawdot || isexp) ? parse(Float64, text) : parse(Int64, text)
+            val = (sawdot || isexp) ? _tql_parse_float(text) : _tql_parse_int(text, 10)
             # a unit run immediately adjacent (no space) -> a quantity
             # literal (`1.4GHz`, `10arcsec`, `30deg`); casacore's
             # FLINTUNIT. First char must be a letter or `°`; the run is
@@ -172,6 +172,28 @@ function _taqllite_tokenize(s::AbstractString)
     return toks
 end
 
+# Number literals outside the machine range (Phase 377).  Real TaQL reads them with
+# strtol / strtod: an integer beyond Int64 SATURATES to the maximum (decimal and hex alike;
+# later Int64 arithmetic then wraps), a float beyond the double range is +-Inf and one below
+# it is 0.0.  Julia >= 1.13 refuses to parse the float cases (and the integer ones throw
+# OverflowError), so a literal like `99999999999999999999` or `1e999` used to crash the lexer.
+function _tql_parse_int(digits::AbstractString, base::Int)
+    v = tryparse(Int64, digits; base)
+    return v === nothing ? typemax(Int64) : v
+end
+
+function _tql_parse_float(text::AbstractString)
+    v = tryparse(Float64, text)
+    v === nothing || return v
+    try
+        return Float64(parse(BigFloat, text))
+    catch
+        # an exponent too large even for BigFloat: only its sign matters (a zero mantissa is 0)
+        occursin(r"^[0.]*(?:[eE]|$)", text) && return 0.0
+        return occursin(r"[eE]-", text) ? 0.0 : Inf
+    end
+end
+
 _isdigit_at(cs, j, n) = j <= n && isdigit(cs[j])
 
 # does a `p/…/` `m/…/` `f/…/` pattern literal start at `cs[i]` (after
@@ -234,6 +256,20 @@ mutable struct TQLParser
     pos::Int
     validnames::AbstractSet{String}
     src::String
+    depth::Int                     # current nesting of `(`/function args/`[`/`**` (Phase 377)
+end
+TQLParser(toks, pos, validnames, src) = TQLParser(toks, pos, validnames, src, 0)
+
+# The recursive-descent parser (and the evaluator walking its tree) overflows the stack on a
+# few thousand nested parentheses; Julia then warns "program state may be corrupted".  Real
+# TaQL's bison parser refuses past its own stack depth too ("memory exhausted").  Nothing
+# real nests anywhere near this deep.
+const _TQL_MAX_DEPTH = 400
+function _tql_descend!(p)
+    p.depth += 1
+    p.depth > _TQL_MAX_DEPTH && throw(ArgumentError(
+        "TaQL-lite: expression nested more than $_TQL_MAX_DEPTH levels deep in \"$(first(p.src, 60))...\""))
+    return nothing
 end
 
 _peek(p::TQLParser) = p.toks[p.pos]
@@ -257,6 +293,7 @@ function _taqllite_parse(s::AbstractString, validnames::AbstractSet{String})
 end
 
 function _parse_or!(p::TQLParser)
+    _tql_descend!(p)
     a = _parse_and!(p)
     while true
         t = _peek(p)
@@ -265,6 +302,7 @@ function _parse_or!(p::TQLParser)
             b = _parse_and!(p)
             a = TQLOr(a, b)
         else
+            p.depth -= 1
             return a
         end
     end
@@ -288,7 +326,10 @@ function _parse_not!(p::TQLParser)
     t = _peek(p)
     if _iskw(t, "NOT") || (t.kind === :op && t.text == "!")
         _advance!(p)
-        return TQLNot(_parse_not!(p))
+        _tql_descend!(p)
+        e = TQLNot(_parse_not!(p))
+        p.depth -= 1
+        return e
     end
     return _parse_comparison!(p)
 end
@@ -538,7 +579,10 @@ function _parse_power!(p::TQLParser)
         # function already had a real Julia-`^`-throws-DomainError
         # divergence from (`_tql_pow`, `functions.jl`) -- use it here
         # too so `2 ** 0.5` on a negative base gives NaN, not a crash.
-        return TQLArith(_tql_pow, base, _parse_unary!(p))   # right-assoc
+        _tql_descend!(p)
+        e = TQLArith(_tql_pow, base, _parse_unary!(p))   # right-assoc
+        p.depth -= 1
+        return e
     end
     return base                                       # `^` handled at _parse_bitxor!
 end

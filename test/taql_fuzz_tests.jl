@@ -360,3 +360,71 @@ end
         isempty(bad) || println(bad)
     end
 end
+
+# Phase 377: mutation fuzz of the TaQL-lite parser / dispatcher with garbage input.  Valid queries
+# and commands are mutated (tokens deleted / swapped / duplicated / replaced, absurd literals,
+# unbalanced brackets) and pure garbage (deep nesting, huge IN lists, long chains) is thrown at
+# `query` and `taql`.  Whatever happens, it must end in a result or an ordinary error -- never a
+# stack overflow, an unchecked `BoundsError`/`InexactError`/`OverflowError`, a `KeyError` or a
+# `StringIndexError` leaking out of the parser.  (Property-only guard: it holds for any RNG stream.)
+@testset "TaQL-lite: garbage-input mutation fuzz never crashes (Phase 377)" begin
+    N = 8; r0 = MersenneTwister(377)
+    base = joinpath(mktempdir(), "t")
+    write_table(base, "T", Pair{String,Any}["ID" => Int32.(1:N), "I" => Int32.(rand(r0, -6:6, N)), "J" => Int32.(rand(r0, 0:5, N)),
+        "D" => round.(randn(r0, N) .* 3; digits=1), "B" => rand(r0, Bool, N), "S" => rand(r0, ["ab", "abc", "b", ""], N),
+        "V" => [rand(r0, 3, 4) for _ in 1:N]]; nrow=N, tsm=[["V"]])
+    exprs = ["I > 2", "I + J * 2 > D", "S LIKE 'a%'", "S ~ p/a*/", "I IN [1,2,3]", "I IN [1:3]", "J BETWEEN 1 AND 3", "NOT (B OR I > 0)",
+        "abs(D) < 2.5 AND S != ''", "mean(V) > 0.5", "V[1,2] > 0.5", "sum(V[1:2,2]) > 1", "any(V > 0.9)", "iif(I > 0, I, -I) > 2",
+        "sqrt(abs(D)) > 1", "strlength(S) >= 2", "upper(S) == 'AB'", "I % 3 == 0", "I // 2 == 1", "datetime('2020-02-12') > 0", "I ~= 2",
+        "I & 3 == 1", "rownumber() > 3", "min(I, J) > 1", "D ** 2 > 4", "S IN ['a','ab']", "V[V > 0.5][1] > 0.5", "marray(V,V>0.5)",
+        "meas.j2000('GALACTIC',1.0,0.5)[1] > 0"]
+    cmds = ["SELECT FROM \$1 WHERE I > 2", "SELECT I, J AS K, I+J AS L FROM \$1 WHERE I > 0 ORDER BY J DESC LIMIT 4", "SELECT DISTINCT J FROM \$1",
+        "SELECT J, gcount() AS N, gsum(I) AS S FROM \$1 GROUP BY J HAVING gcount() > 1", "UPDATE \$1 SET I = I + 1 WHERE I > 2",
+        "UPDATE \$1 SET V[1,1] = 0.0 WHERE B", "DELETE FROM \$1 WHERE I > 100", "INSERT INTO \$1 (I, J) VALUES (1, 2)", "INSERT INTO \$1 SET I = 3",
+        "SELECT FROM \$1 WHERE I IN (SELECT J FROM \$1)", "SELECT FROM \$1 a JOIN \$1 b ON a.I == b.J"]
+    alphabet = collect("()[]{},.:;'\"+-*/%&|^~!=<>_ \\@#\$?0123456789eEabcxyzABCXYZ")
+    toks(s) = [m.match for m in eachmatch(r"[A-Za-z_][A-Za-z_0-9.]*|\d+\.?\d*(?:[eE][+-]?\d+)?[A-Za-z]*|'[^']*'|\s+|.", s)]
+    rng = MersenneTwister(3770)
+    function mutate(s)
+        tk = toks(s)
+        for _ in 1:rand(rng, 1:3)
+            isempty(tk) && break
+            k = rand(rng, 1:10); i = rand(rng, 1:length(tk))
+            if k == 1; deleteat!(tk, i)
+            elseif k == 2; insert!(tk, i, string(rand(rng, alphabet)))
+            elseif k == 3; tk[i] = string(rand(rng, alphabet))
+            elseif k == 4; j = rand(rng, 1:length(tk)); tk[i], tk[j] = tk[j], tk[i]
+            elseif k == 5; insert!(tk, i, tk[rand(rng, 1:length(tk))])
+            elseif k == 6; tk[i] = rand(rng, ("99999999999999999999", "1e999", "-1e999", "0x", "0xFFFFFFFFFFFFFFFFFF", "1e-999", "NaN", "inf", "\u00e9", "'", "[", "]", "(", ")"))
+            elseif k == 7; insert!(tk, i, "(" ^ rand(rng, 1:3))
+            elseif k == 8; tk[i] = string(tk[i], rand(rng, ("[", "[1", "[1,", "[:", "(", "'", "/")))
+            elseif k == 9; tk = tk[1:i]
+            else; tk[i] = lowercase(tk[i]) == tk[i] ? uppercase(tk[i]) : lowercase(tk[i])
+            end
+        end
+        join(tk)
+    end
+    garbage() = (k = rand(rng, 1:5);
+        k == 1 ? String(rand(rng, alphabet, rand(rng, 0:40))) :
+        k == 2 ? "(" ^ rand(rng, [10, 1000, 20000]) * "1" * ")" ^ rand(rng, [10, 1000, 20000]) :
+        k == 3 ? "I > " * join(fill("-", rand(rng, [10, 1000, 20000]))) * "1" :
+        k == 4 ? "I IN [" * join(fill("1", rand(rng, [10, 1000, 20000])), ",") * "]" :
+                 "I > " * "1 + " ^ rand(rng, [100, 5000]) * "1")
+    forbidden = Dict{String,Int}(); examples = String[]
+    for c in 1:240
+        usecmd = rand(rng) < 0.4
+        s = rand(rng) < 0.1 ? garbage() : mutate(rand(rng, usecmd ? cmds : exprs))
+        dc = joinpath(mktempdir(), "w"); cp(base, dc)
+        try
+            usecmd ? taql(dc, s) : (q = query(readtable(dc), s); MSv2.nrow(q) >= 0 && collect(column(q, "ID")[:]))
+        catch e
+            if e isa Union{StackOverflowError,OutOfMemoryError,InexactError,OverflowError,AssertionError,UndefVarError,
+                           UndefRefError,BoundsError,KeyError,StringIndexError,DomainError,InterruptException}
+                forbidden[string(typeof(e))] = get(forbidden, string(typeof(e)), 0) + 1
+                length(examples) < 8 && push!(examples, string(typeof(e), ": ", first(s, 100)))
+            end
+        end
+    end
+    @test isempty(forbidden)
+    isempty(forbidden) || println("forbidden exceptions from garbage input: ", forbidden, "\n  ", join(examples, "\n  "))
+end

@@ -1017,6 +1017,18 @@ _tql_rms1(v) = sqrt(sum(abs2, v) / length(v))
 _tql_sumsqr1(v) = sum(y -> y^2, v)
 _tql_axfn(f; emp = nothing) = (x, axes...) -> _tql_axcollapse(f, x, axes...; emp)
 
+# any/all/ntrue/nfalse (and the axis-collapse `s` forms) take a Bool operand only; real TaQL
+# rejects `any(V)` for a double V ("Erroneous use of function any - function argument is not
+# Bool"), where Julia's `any` raised a TypeError / `!` a MethodError (Phase 377).
+function _tql_boolarg(name::AbstractString, x)
+    a = x isa TQLMArray ? x.data : x
+    ok = a isa AbstractArray ? (eltype(a) <: Bool || all(v -> v isa Bool, a)) : a isa Bool
+    ok || throw(ArgumentError("TaQL-lite: $name() needs a Bool argument, got $(a isa AbstractArray ? eltype(a) : typeof(a))"))
+    return x
+end
+_tql_boolred(name, f) = x -> f(_tql_boolarg(name, x))
+_tql_boolaxfn(name, f; emp) = (g = _tql_axfn(f; emp); (x, axes...) -> g(_tql_boolarg(name, x), axes...))
+
 # ---- Phase 251: array-reshaping functions (live-probed vs real TaQL) ----
 # `transpose` reverses ALL axes; `reversearray(arr[, axes...])` reverses the
 # listed 1-based axes (each occurrence toggles, so `[1,1]` is the identity;
@@ -1153,8 +1165,9 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "samplevariances" => (_tql_axfn(Statistics.var), 2:8), "samplestddevs" => (_tql_axfn(Statistics.std), 2:8),
     "avdevs" => (_tql_axfn(_tql_avdev1), 2:8), "rmss" => (_tql_axfn(_tql_rms1), 2:8),
     "sumsqrs" => (_tql_axfn(_tql_sumsqr1), 2:8), "sumsquares" => (_tql_axfn(_tql_sumsqr1), 2:8),
-    "anys" => (_tql_axfn(any; emp = false), 2:8), "alls" => (_tql_axfn(all; emp = false), 2:8),
-    "ntrues" => (_tql_axfn(v -> count(identity, v); emp = 0), 2:8), "nfalses" => (_tql_axfn(v -> count(!, v); emp = 0), 2:8),
+    "anys" => (_tql_boolaxfn("anys", any; emp = false), 2:8), "alls" => (_tql_boolaxfn("alls", all; emp = false), 2:8),
+    "ntrues" => (_tql_boolaxfn("ntrues", v -> count(identity, v); emp = 0), 2:8),
+    "nfalses" => (_tql_boolaxfn("nfalses", v -> count(!, v); emp = 0), 2:8),
     "fractiles" => ((x, fr, axes...) -> _tql_axcollapse(v -> _tql_fractile(v, fr), x, axes...), 3:9),
     "transpose" => (_tql_transpose, 1:1), "reversearray" => (_tql_reversearray, 1:8),
     "flatten" => (_tql_flatten, 1:1), "arrayflatten" => (_tql_flatten, 1:1),
@@ -1169,9 +1182,9 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     "variance" => (_red(x -> Statistics.var(x; corrected=false), :float), 1:1),
     "stddev" => (_red(x -> Statistics.std(x; corrected=false), :float), 1:1),
     "rms" => (_tql_rms, 1:1), "avdev" => (_tql_avdev, 1:1),
-    "any" => (_red(any), 1:1), "all" => (_red(all), 1:1),
-    "ntrue" => (_red(x -> count(identity, x)), 1:1),
-    "nfalse" => (_red(x -> count(!, x)), 1:1),
+    "any" => (_tql_boolred("any", _red(any)), 1:1), "all" => (_tql_boolred("all", _red(all)), 1:1),
+    "ntrue" => (_tql_boolred("ntrue", _red(x -> count(identity, x))), 1:1),
+    "nfalse" => (_tql_boolred("nfalse", _red(x -> count(!, x))), 1:1),
     "nelements" => (_tql_nelem, 1:1), "count" => (_tql_nelem, 1:1),
     "ndim" => (_tql_ndim, 1:1), "shape" => (_tql_shape, 1:1),
     # NOTE (found during Phase 186, not implemented): casacore also has

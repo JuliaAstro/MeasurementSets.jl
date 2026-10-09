@@ -518,23 +518,41 @@ end
 # would otherwise silently accept it as index 0/1 (Phase 287, live-verified:
 # `FA[B]` with `B` a per-row scalar column used to give `FA[0]`, a
 # `BoundsError`, for `B==false`, and the wrong element for `B==true`).
-_tql_toindex(v) = v isa Bool ? throw(ArgumentError(
-    "TaQL-lite: a Bool array subscript is a mask and must be an array, not a per-row scalar")) : Int(v)
+function _tql_toindex(v)
+    v isa Bool && throw(ArgumentError(
+        "TaQL-lite: a Bool array subscript is a mask and must be an array, not a per-row scalar"))
+    v isa Integer && return Int(v)
+    # a whole-valued float (`n/2`) is accepted; real TaQL is stricter, but nothing is lost
+    v isa AbstractFloat && isfinite(v) && isinteger(v) && return Int(v)
+    throw(ArgumentError("TaQL-lite: an array subscript must be an integer, got $(repr(v))"))
+end
 
 function _tql_axis(ax, arr, k::Int, ev)
     n = size(arr, k)
     # `end` inside this axis's subscript -> `n`; a negative resolved
-    # index counts from the end (casacore Slicer: -1 == last).
+    # index counts from the end (casacore Slicer: -1 == last) and 0 means
+    # the last element too (casacore subtracts the origin 1 first, so 0
+    # becomes -1) -- live-verified against real TaQL (Phase 377).
     e(x) = _tql_fromend(_tql_toindex(ev(_subst_end(x, n))), n)
-    ax isa NamedTuple || return e(ax)                             # scalar index
+    inrange(i) = (1 <= i <= n) || throw(ArgumentError(
+        "TaQL-lite: array subscript out of range (axis $k has $n elements)"))
+    if !(ax isa NamedTuple)                                       # scalar index
+        i = e(ax); inrange(i); return i
+    end
     lo = ax.lo === nothing ? 1 : e(ax.lo)
     hi = ax.hi === nothing ? n : e(ax.hi)
     st = ax.step === nothing ? 1 : _tql_toindex(ev(_subst_end(ax.step, n)))
     st > 0 || throw(ArgumentError("TaQL-lite: array subscript step must be positive"))
+    # an empty-selecting range (`V[3:1]`) is an error in real TaQL, not an empty array
+    # (an omitted endpoint defaults to the axis edge, so a bare `:` of an empty axis stays valid)
+    ax.lo === nothing || inrange(lo)
+    ax.hi === nothing || inrange(hi)
+    (n == 0 && ax.lo === nothing && ax.hi === nothing) || hi >= lo || throw(ArgumentError(
+        "TaQL-lite: array subscript range end is before its start"))
     return lo:st:hi
 end
 
-_tql_fromend(v::Int, n::Int) = v < 0 ? n + v + 1 : v
+_tql_fromend(v::Int, n::Int) = v < 0 ? n + v + 1 : v == 0 ? n : v
 
 # rewrite `end` -> TQLLit(n) in one axis subscript expression; a nested
 # `V[W[end], k]` keeps its inner index untouched (it self-resolves via
