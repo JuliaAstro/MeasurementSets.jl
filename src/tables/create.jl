@@ -859,6 +859,17 @@ function _copy_table(dir::AbstractString, gt::GroupedTable, r=1:nrow(gt);
                 units=Dict{String,Any}(String(k) => v for (k, v) in getfield(gt, :units) if String(k) in nms))
 end
 
+# `rows=` of a copy: integer row numbers within 1:n.  An out-of-range row used to make every column "unreadable"
+# (a warning, then a table with no columns); a non-integer one a raw error from deep inside the writer.
+function _check_copy_rows(r, n::Integer, what::AbstractString)
+    (r isa AbstractVector && eltype(r) <: Integer) || throw(ArgumentError(
+        "$what: rows must be a vector or range of integers (or Colon()), got $(typeof(r))"))
+    isempty(r) && return r
+    lo, hi = extrema(r)
+    (1 <= lo && hi <= n) || throw(ArgumentError("$what: row $(lo < 1 ? lo : hi) is outside 1:$n"))
+    return r
+end
+
 """
     copytable(dst, t; rows=Colon(), name="TABLE",
              storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE) -> dst
@@ -872,17 +883,6 @@ schema name).  `rows` selects/reorders rows (1-based into `t`);
 `table.mfh5` -- see `_write_table_core`.  This is "SELECT ...
 INTO" for any query result.
 """
-# `rows=` of a copy: integer row numbers within 1:n.  An out-of-range row used to make every column "unreadable"
-# (a warning, then a table with no columns); a non-integer one a raw error from deep inside the writer.
-function _check_copy_rows(r, n::Integer, what::AbstractString)
-    (r isa AbstractVector && eltype(r) <: Integer) || throw(ArgumentError(
-        "$what: rows must be a vector or range of integers (or Colon()), got $(typeof(r))"))
-    isempty(r) && return r
-    lo, hi = extrema(r)
-    (1 <= lo && hi <= n) || throw(ArgumentError("$what: row $(lo < 1 ? lo : hi) is outside 1:$n"))
-    return r
-end
-
 function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
                    name::AbstractString="TABLE",
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
