@@ -72,7 +72,10 @@ for k in 1:ncase
     end
     println("case $k: $desc"); flush(stdout)
     ENV["MS_CORRUPT_KEEP"] == "" || (rm(ENV["MS_CORRUPT_KEEP"]; recursive=true, force=true); cp(d, ENV["MS_CORRUPT_KEEP"]))
-    el = @elapsed(try readall(d) catch e; end); el > 15 && (println("   SLOW $(round(el, digits=1)) s: $desc"); global nslow += 1)
+    el = @elapsed(try readall(d) catch e; end)
+    # a real algorithmic blow-up is slow every time; one slow read in an emulated x86 container (a 72 s stall seen once) is not
+    el > 15 && (el = @elapsed(try readall(d) catch e; end))
+    el > 15 && (println("   SLOW $(round(el, digits=1)) s: $desc"); global nslow += 1)
 end
 println("DONE $kind $seed slow=$nslow")
 exit(nslow == 0 ? 0 : 3)

@@ -37,3 +37,20 @@ end
         @test r.exitcode == 0          # 139 = segfault, 137 = killed (out of memory), 3 = a read took > 15 s
     end
 end
+
+# Phase 377 (x86 CI): a flipped bit in table.dat gave WEIGHT_SPECTRUM a 9764866 x 4 cell; a Dysco weight block holds one
+# value per channel, so the block size could not catch it and the read built 30 gigabyte-sized zero-filled cells
+# (35-80 s and swapping on x86-64).  The cell shape of every Dysco column must now agree with the DATA column's.
+@testset "Dysco: a weight cell shape that disagrees with DATA is an error, not gigabytes (Phase 377)" begin
+    a1 = Int32[0, 0, 1, 0, 0, 1]; a2 = Int32[1, 2, 2, 1, 2, 2]; nr = 6
+    mk(wshape) = (d = joinpath(mktempdir(), "t");
+        write_table(d, "T", Pair{String,Any}["TIME" => collect(5.0e9 .+ [1, 1, 1, 2, 2, 2]), "ANTENNA1" => a1, "ANTENNA2" => a2,
+            "DATA" => [rand(ComplexF32, 2, 4) for _ in 1:nr], "WEIGHT_SPECTRUM" => [rand(Float32, wshape...) for _ in 1:nr]]; nrow=nr,
+            ism=["TIME", "ANTENNA1", "ANTENNA2"], dysco=[["DATA", "WEIGHT_SPECTRUM"]],
+            dysco_spec=Dict("DATA" => (; normalization=MSv2.AFNorm(), distribution=MSv2.TruncatedGaussian(), dataBitCount=10,
+                                       weightBitCount=12, antenna1=Int.(a1), antenna2=Int.(a2), rowsPerBlock=3, dither=false))); d)
+    t = readtable(mk((2, 4)))
+    @test size(column(t, "WEIGHT_SPECTRUM")[1]) == (2, 4)
+    t2 = readtable(mk((3, 4)))
+    @test (@elapsed(@test_throws ErrorException collect(column(t2, "WEIGHT_SPECTRUM")[:]))) < 5
+end
