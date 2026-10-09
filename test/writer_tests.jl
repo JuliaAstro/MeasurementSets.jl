@@ -402,3 +402,24 @@ end
     @test MSv2._classname(MSv2.TpFloat, true) == "ArrayColumnDesc<float   "
     @test MSv2._classname(MSv2.TpDComplex, false) == "ScalarColumnDesc<DComplex"
 end
+
+# Phase 383: junk column data given to `write_table` (a fuzz with scalars, Dates, Symbols, matrices, nested arrays, missing, mixed
+# types and wrong lengths under every storage option) used to die with bare MethodErrors from `collect`, `vec(::Float64)`,
+# `Int64(::Vector)` or `zero(String)` deep in the writers; each is an ArgumentError / error naming the column now.
+@testset "write_table: junk column data is an ordinary error (Phase 383)" begin
+    N = 4
+    w(cols; kw...) = write_table(joinpath(mktempdir(), "t"), "T", Pair{String,Any}[cols...]; nrow=N, kw...)
+    @test_throws ArgumentError w(["C" => 1])
+    @test_throws ArgumentError w(["C" => "s"])
+    @test_throws ArgumentError w(["C" => :sym])
+    @test_throws ArgumentError w(["C" => nothing])
+    @test_throws ArgumentError w(["C" => missing])
+    @test_throws ArgumentError w(["C" => [1.0 2.0; 3.0 4.0]])                 # a matrix is not "one entry per row"
+    @test_throws ArgumentError w(["C" => [[[1, 2], [3]] for _ in 1:N]])       # cells that are arrays of arrays
+    @test_throws ErrorException w(["C" => collect(1.0:N)]; tsm=[["C"]])        # tiled storage needs array cells
+    @test_throws ErrorException w(["C" => collect(1.0:N)]; tcm=[["C"]])
+    @test_throws ErrorException w(["C" => [["a", "b"] for _ in 1:N]]; tsm=[["C"]])   # ... of numbers, not strings
+    @test_throws ArgumentError w(["C" => collect(1.0:N)]; shapes=Dict("C" => (2,)))
+    d = w(["C" => (i for i in 1:N), "D" => (1.0, 2.0, 3.0, 4.0), "E" => 1:N])  # generators, tuples and ranges are still fine
+    @test column(readtable(d), "C")[:] == 1:N && column(readtable(d), "D")[:] == [1.0, 2.0, 3.0, 4.0]
+end
