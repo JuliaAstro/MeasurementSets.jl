@@ -379,7 +379,7 @@ _tql_match(e::TQLMatch, v::AbstractString) = xor(_tql_occursin(e.regex, v), e.ne
 _tql_match(e::TQLMatch, v::AbstractArray) = map(x -> _tql_match(e, x), v)      # elementwise over a string-array cell
 _tqleval(e::TQLMatch, cols, i) = _tql_match(e, _tqleval(e.lhs, cols, i))
 _tqleval(e::TQLFunc, cols, i) =
-    e.fn(ntuple(k -> _tqleval(e.args[k], cols, i), length(e.args))...)
+    _tql_call(e, ntuple(k -> _tqleval(e.args[k], cols, i), length(e.args)))
 _tqleval(::TQLRowNum, cols, i) = i
 _tqleval(::TQLEnd, cols, i) = throw(ArgumentError(
     "TaQL-lite: `end` is only valid inside an array subscript `[...]`"))
@@ -691,3 +691,16 @@ _tql_name(x, what::AbstractString) = throw(ArgumentError(
 _tql_check_cond(x::Union{Nothing,AbstractString,Function}, ::AbstractString) = x
 _tql_check_cond(x, what::AbstractString) = throw(ArgumentError(
     "$what must be nothing, a TaQL-lite string or a function, got $(typeof(x))"))
+
+# Call a TaQL-lite function on evaluated operands. A function applied to operands of a type it
+# does not handle (`sqrt('a')`, `year(S)`, `replace(1, 2, 3)`) is an ordinary ArgumentError naming
+# the function and the operand types, not a MethodError from deep inside the implementation.
+function _tql_call(e::TQLFunc, vals::Tuple)
+    try
+        return e.fn(vals...)
+    catch err
+        err isa Union{MethodError,TypeError,InexactError} || rethrow()
+        nm = isempty(e.name) ? string(e.fn) : e.name
+        throw(ArgumentError("TaQL-lite: $(nm)() does not accept operands of type ($(join(map(v -> string(typeof(v)), vals), ", ")))"))
+    end
+end

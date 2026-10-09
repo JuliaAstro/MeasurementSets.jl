@@ -70,7 +70,7 @@ _geval(e::TQLNot, cols, g) = _bcast(!, _geval(e.a, cols, g))
 _geval(e::TQLIn, cols, g) = _tql_in(_geval(e.lhs, cols, g), _in_resolve(e.vals, x -> _geval(x, cols, g)))
 _geval(e::TQLMatch, cols, g) = _tql_match(e, _geval(e.lhs, cols, g))
 _geval(e::TQLFunc, cols, g) =
-    e.fn(ntuple(k -> _geval(e.args[k], cols, g), length(e.args))...)
+    _tql_call(e, ntuple(k -> _geval(e.args[k], cols, g), length(e.args)))
 _geval(::TQLRowNum, cols, g) =
     throw(ArgumentError("TaQL-lite: rownumber() is not valid in groupby(...)"))
 _geval(::TQLEnd, cols, g) = throw(ArgumentError(

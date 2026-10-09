@@ -1179,7 +1179,7 @@ const _TQL_FUNCS = Dict{String,Tuple{Base.Callable,UnitRange{Int}}}(
     # --- binary elementwise ---
     "complex" => (_ew2((r, i) -> complex(float(r), float(i))), 2:2),
     "pow" => (_ew2(_tql_pow), 2:2), "atan2" => (_ew2((y, x) -> atan(y, x)), 2:2),
-    "fmod" => (_ew2(rem), 2:2),
+    "fmod" => (_ew2(_tql_fmod), 2:2),
     # --- array-cell reductions ---
     "sum" => (_red(sum, :elt), 1:1), "product" => (_red(prod, :elt), 1:1),
     "sums" => (_tql_axfn(sum), 2:8), "products" => (_tql_axfn(prod), 2:8),

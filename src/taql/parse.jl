@@ -389,6 +389,8 @@ const _TQL_CMPOPS = Dict{String,Function}(
 # `%`: result takes the sign of the divisor (floor-mod); `x % 0 == x`.
 _tql_mod(a::Real, b::Real) = b == 0 ? a : mod(a, b)
 _tql_mod(a, b) = rem(a, b)
+_tql_fmod(a::Integer, b::Integer) = b == 0 ? a : rem(a, b)       # integer fmod(x, 0) = x like real TaQL (was DivideError)
+_tql_fmod(a, b) = rem(a, b)
 # `//`: FLOOR division with a Double result (`-5 // 2 == -3.0`, `A // 0 == Inf`).
 _tql_floordiv(a::Real, b::Real) = floor(a / b)
 _tql_floordiv(a, b) = div(a, b)
