@@ -5543,3 +5543,39 @@ end
         end
     end
 end
+
+# Phase 381: extreme numeric ARGUMENTS of functions (found by an expression fuzz with sizes / widths / indices of
+# 1e308, 2^63-1, NaN, Inf): `array(1.0, 99999999999)` got the process killed (out of memory); integer conversions of huge or
+# fractional arguments raised bare InexactError; `dms(99999999999)` / `year(1e18)` overflowed Int64; `angdist(Inf, ...)` raised
+# DomainError (NaN in C++).
+@testset "TaQL-lite: extreme function arguments (Phase 381)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["ID" => Int32.(1:4), "D" => [1.0, 2.0, 3.0, 4.0], "V" => [Float64.(reshape(1:12, 3, 4)) for _ in 1:4]];
+                nrow=4, tsm=[["V"]])
+    t = readtable(d)
+    val(e) = collect(column(query(t, "ID > 0"; select=["X" => e]), "X")[:])[1]
+    bad(e) = @test (try query(t, "ID > 0"; select=["X" => e]); false catch err; err isa ArgumentError || (println("wrong error for ", e, ": ", err); false) end) ||
+                   (println("not rejected: ", e); false)
+    # allocation bombs
+    for e in ["array(1.0, 99999999999)", "array(1, 100000, 100000, 100000)", "array(1, [99999999999, 99999999999])",
+              "resize(V, [99999999999, 3])", "array(1.5, 9223372036854775807)"]
+        bad(e)
+    end
+    @test size(val("array(1.0, 3, 2)")) == (3, 2)
+    # integer arguments: whole numbers only, huge ones saturate
+    bad("substr('abcdef', 0.5)"); bad("substr('abcdef', 0.5, 2)")
+    @test val("substr('abcdef', 1e308)") == "" && val("substr('abcdef', 2, 1e308)") == "cdef"
+    @test val("substr('abcdef', 2.0, 2)") == "cd"
+    bad("runningsum(V, 0.5)"); bad("boxedsum(V, [0.5, 1])"); bad("reversearray(V, 0.5)")
+    @test all(iszero, val("runningsum(V, 1e308)"))                    # no position has a full window
+    bad("V[1e308]"); bad("V[1:1e308]"); bad("V[9223372036854775807]")
+    # fractiles lie in [0, 1]
+    bad("fractile(D, 1e999)"); bad("fractile(D, 1.5)"); bad("fractile(D, -0.1)"); bad("runningfractile(V, 1e999, 1)")
+    @test val("fractile(V, 0.5)") == 6.0 && val("fractile(V, 1.0)") == 12.0
+    # date / angle formatting of absurd values degrades like NaN (Phase 193), no overflow
+    for f in ("year", "month", "day", "cdate", "ctime", "cdatetime", "hms", "dms")
+        @test val("$f(1e18)") == val("$f(0.0/0.0)") && val("$f(9223372036854775807)") == val("$f(0.0/0.0)")
+    end
+    @test isnan(val("angdist(1e999, 0.5, 1.0, 9223372036854775807)")) && isnan(val("angdist(1.0, 0.5, 0.0/0.0, 0.2)"))
+    @test val("angdist(0.0, 0.0, 0.0, 1.0)") ≈ 1.0
+end

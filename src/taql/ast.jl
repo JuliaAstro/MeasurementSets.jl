@@ -521,9 +521,9 @@ end
 function _tql_toindex(v)
     v isa Bool && throw(ArgumentError(
         "TaQL-lite: a Bool array subscript is a mask and must be an array, not a per-row scalar"))
-    v isa Integer && return Int(v)
+    v isa Integer && return Int(clamp(v, -(Int128(1) << 62), Int128(1) << 62))
     # a whole-valued float (`n/2`) is accepted; real TaQL is stricter, but nothing is lost
-    v isa AbstractFloat && isfinite(v) && isinteger(v) && return Int(v)
+    v isa AbstractFloat && isfinite(v) && isinteger(v) && return Int(clamp(v, -2.0^62, 2.0^62))
     throw(ArgumentError("TaQL-lite: an array subscript must be an integer, got $(repr(v))"))
 end
 
