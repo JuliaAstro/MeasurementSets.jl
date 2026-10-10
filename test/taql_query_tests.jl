@@ -5599,10 +5599,12 @@ end
     @test ev("fmod(I, 2)") == [0, 1, -1, 1]
     @test all(isnan, ev("fmod(I, 0.0)"))
     @test ev("sqrt(X)") ≈ sqrt.([1.5, 2.5, 3.5, 4.5])            # valid operands are unaffected
+    # no live cross-check of integer fmod(x, 0): real casacore does a bare C++ integer remainder,
+    # undefined behaviour -- x on ARM64 (what the convention here follows) but SIGFPE (a DivideError) on x86-64
     if _HAVE_TAQL
         r = tempname()
-        _taqlcmd("SELECT fmod(I, 0) AS R FROM \$1 GIVING '$r' AS PLAIN", d)
-        @test collect(column(readtable(r), "R")[:]) == ev("fmod(I, 0)")
+        _taqlcmd("SELECT fmod(I, 2) AS R FROM \$1 GIVING '$r' AS PLAIN", d)
+        @test collect(column(readtable(r), "R")[:]) == ev("fmod(I, 2)")
     end
 end
 
