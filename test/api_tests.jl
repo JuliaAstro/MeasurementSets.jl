@@ -96,3 +96,26 @@ end
         @test isempty(col[falses(L)])
     end
 end
+
+# Phase 391: verb x table-kind symmetry.  Every verb that works on a Table works on a MeasurementSet
+# (its MAIN table) too: `length`, `for row in ms` and `edit(table)` were missing.
+import Tables
+@testset "MeasurementSet iterates like its MAIN table; edit(::Table) (Phase 391)" begin
+    p = joinpath(@__DIR__, "data", "sample.ms")
+    ms = MSv2.MeasurementSet(p); main = MSv2.readtable(p)
+    @test length(ms) == MSv2.nrow(ms) == length(main)
+    @test eltype(ms) === eltype(main) && Base.IteratorSize(typeof(ms)) == Base.HasLength()
+    n = 0
+    for r in ms
+        n += 1
+        n == 1 && @test Tables.getcolumn(r, :ANTENNA1) == Tables.getcolumn(first(main), :ANTENNA1)
+        n >= 5 && break
+    end
+    @test n == 5 && first(ms).TIME == first(main).TIME
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => [1, 2, 3], "B" => [1.5, 2.5, 3.5]]; nrow=3)
+    t = MSv2.readtable(d)
+    edit(t) do e; e["A"][2] = 20; end                     # edit(f, ::Table)
+    e = edit(t); e["B"][1] = 9.5; flush(e)                 # edit(::Table)
+    @test column(MSv2.readtable(d), "A")[:] == [1, 20, 3] && column(MSv2.readtable(d), "B")[1] == 9.5
+end
