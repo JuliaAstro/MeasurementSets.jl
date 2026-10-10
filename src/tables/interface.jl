@@ -74,3 +74,6 @@ Tables.rowaccess(::Type{MeasurementSet}) = true
 Tables.columns(ms::MeasurementSet) = Tables.columns(getfield(ms, :data))
 Tables.rows(ms::MeasurementSet) = Tables.rows(getfield(ms, :data))
 Tables.schema(ms::MeasurementSet) = Tables.schema(getfield(ms, :data))
+Tables.columnnames(ms::MeasurementSet) = Tables.columnnames(getfield(ms, :data))
+Tables.getcolumn(ms::MeasurementSet, nm::Symbol) = Tables.getcolumn(getfield(ms, :data), nm)
+Tables.getcolumn(ms::MeasurementSet, i::Int) = Tables.getcolumn(getfield(ms, :data), i)
