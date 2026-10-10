@@ -70,3 +70,29 @@ end
     @test MSv2.delete!(c; where="ANTENNA1 == 0") > 0
     @test MSv2.nrow(taql(MeasurementSet(d), "SELECT TIME WHERE ANTENNA1 == 1")) > 0
 end
+
+# Phase 389: a column is an AbstractVector -- indexing with a Bool mask selects the `true` rows, like
+# any Vector (Bool <: Integer, so `col[mask]` used to index by `true` / `false` and fail).  The
+# contract (ranges, vectors, masks, `end`, iteration, views) also holds for every column kind.
+@testset "columns obey the AbstractVector indexing contract (Phase 389)" begin
+    N = 12
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => collect(1:N), "S" => ["s$i" for i in 1:N], "V" => [Float32[i, 2i] for i in 1:N]]; nrow=N)
+    d2 = joinpath(mktempdir(), "t2")
+    write_table(d2, "T", Pair{String,Any}["I" => collect(101:100+N), "S" => ["u$i" for i in 1:N], "V" => [Float32[-i, 0] for i in 1:N]]; nrow=N)
+    t = readtable(d)
+    cd = joinpath(mktempdir(), "c"); MSv2.write_concattable(cd, [t, readtable(d2)])
+    views = (t, query(t, "I % 2 == 1"), query(t, "I > 0 ORDER BY I DESC"), readtable(cd), MSv2.MeasurementSet(joinpath(@__DIR__, "data", "sample.ms")))
+    mask(L) = [isodd(i * i + 1) for i in 1:L]
+    for v in views, nm in (v === views[end] ? ("ANTENNA1", "TIME") : ("I", "S", "V"))
+        col = column(v, nm); full = collect(col[:]); L = length(col)
+        m = mask(L)
+        @test isequal(collect(col[m]), full[m])
+        @test isequal(collect(col[BitVector(m)]), full[m])
+        @test isequal(collect(col[findall(m)]), full[m])
+        @test isequal(collect(col[2:3:L]), full[2:3:L]) && isequal(collect(col[[L, 1, 2]]), full[[L, 1, 2]])
+        @test isequal(col[end], full[end]) && isequal(collect(col), full)
+        @test_throws BoundsError col[trues(L + 1)]
+        @test isempty(col[falses(L)])
+    end
+end
