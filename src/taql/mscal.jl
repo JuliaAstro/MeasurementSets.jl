@@ -949,6 +949,9 @@ _stokes_convert(::StokesSetup, ::TQLMArray) = throw(ArgumentError(
     "mscal.stokes: a masked-array argument (e.g. DATA[FLAG]) is not " *
     "supported -- convert first, then mask the result, e.g. " *
     "mscal.stokes(DATA, 'I')[FLAG] or arraydata(DATA[FLAG]) as the input"))
+# a scalar / string / vector operand (not a correlation matrix) is an ordinary error too (Phase 386)
+_stokes_convert(::StokesSetup, x) = throw(ArgumentError(
+    "mscal.stokes: the argument must be a (ncorr, nchan) array cell (DATA, FLAG, WEIGHT_SPECTRUM, ...), got $(typeof(x))"))
 
 # --- name-set threading ---------------------------------------------------
 

@@ -482,6 +482,10 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                 for nm in g
                     i = findfirst(c -> c.name == nm, descs)
                     i === nothing && error("$dmname group $g: unknown column \"$nm\"")
+                    (descs[i].shape isa Dims && isempty(descs[i].shape)) && error("$dmname group $g: column \"$nm\" holds scalars; " *
+                                                       "a tiled storage manager needs array cells")
+                    descs[i].type == TpString && error("$dmname group $g: column \"$nm\" holds strings; casacore's tiled " *
+                                                       "storage managers store numbers and Bool only")
                     push!(idxs, i)
                 end
                 sort!(idxs)                       # bind in TableDesc column order (= header dtype order)
@@ -611,7 +615,17 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
     data = Vector{Any}[]
     for (nm, vals) in pairs
         cn = String(nm)
+        # a column is one entry per row: a scalar / Date / Symbol / matrix used to die in `collect` or the writer
+        # with a bare MethodError (Phase 383)
+        ((vals isa AbstractArray && ndims(vals) == 1) || vals isa Base.Generator || vals isa Tuple) ||
+            throw(ArgumentError("write_table: column \"$cn\" must be a vector with one entry per row, got $(typeof(vals))"))
         vals = collect(vals)
+        # a cell is a scalar or an array of scalars -- not an array of arrays
+        if !isempty(vals)
+            c1 = first(vals)
+            (c1 isa AbstractArray && any(x -> x isa AbstractArray, c1)) && throw(ArgumentError(
+                "write_table: column \"$cn\": a cell must be a scalar or an array of numbers / strings, not an array of arrays"))
+        end
         # typed columns: a `Measure` / `Unitful.Quantity` eltype is always
         # flattened to plain numbers here; the auto-derived unit / frame is
         # recorded for `_write_table_core` to stamp UNLESS an explicit
@@ -632,6 +646,8 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         length(vals) == nrow || error("column $cn: $(length(vals)) values, expected $nrow")
         et = _casatype_of(eltype(vals))
         shp = get(shapes, cn, _infer_shape(vals))      # `shapes=` forces a cell shape (e.g. `VariableShape(2)` for empty cells)
+        haskey(shapes, cn) && !(isempty(vals) || first(vals) isa AbstractArray) && throw(ArgumentError(
+            "write_table: shapes= names column \"$cn\", whose cells are scalars, not arrays"))
         sc = stdcol(cn)
         ct = sc === nothing ? et : sc.type
         arr = _is_tsm(shp) || (shp isa Dims && !isempty(shp))

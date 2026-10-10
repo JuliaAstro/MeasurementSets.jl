@@ -5579,3 +5579,62 @@ end
     @test isnan(val("angdist(1e999, 0.5, 1.0, 9223372036854775807)")) && isnan(val("angdist(1.0, 0.5, 0.0/0.0, 0.2)"))
     @test val("angdist(0.0, 0.0, 0.0, 1.0)") ≈ 1.0
 end
+
+# Phase 385: a TaQL-lite function applied to operands of a type it does not handle is an
+# ArgumentError naming the function (was a MethodError / TypeError / InexactError from inside
+# the implementation); integer fmod(x, 0) = x like real TaQL (was a DivideError).
+@testset "TaQL-lite functions refuse wrongly-typed operands (Phase 385)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => Int32[0, 3, -7, 5], "X" => [1.5, 2.5, 3.5, 4.5], "S" => ["a", "bb", "ccc", "d"],
+        "B" => [true, false, true, false], "VS" => [["a", "b"] for _ in 1:4]]; nrow=4)
+    t = readtable(d)
+    ev(e) = collect(column(query(t, "I >= -100"; select=["r" => e]), "r")[:])
+    for e in ("sqrt(S)", "abs(VS)", "year(S)", "cdate(S)", "upcase(I)", "strlength(X)", "replace(I, X, S)", "marray(X, 2.5)", "atan2(S, X)", "boxedmean(VS, 1)", "iif(I, X, X)", "round(S)", "int(S)", "capitalize(X)", "observatory(B)")
+        err = try; ev(e); nothing; catch x; x; end
+        @test err isa ArgumentError && occursin("TaQL-lite", err.msg)
+    end
+    @test_throws ArgumentError ev("sqrt(S)")
+    @test occursin("sqrt", sprint(showerror, try; ev("sqrt(S)"); catch x; x; end))
+    @test ev("fmod(I, 0)") == [0, 3, -7, 5]
+    @test ev("fmod(I, 2)") == [0, 1, -1, 1]
+    @test all(isnan, ev("fmod(I, 0.0)"))
+    @test ev("sqrt(X)") ≈ sqrt.([1.5, 2.5, 3.5, 4.5])            # valid operands are unaffected
+    # no live cross-check of integer fmod(x, 0): real casacore does a bare C++ integer remainder,
+    # undefined behaviour -- x on ARM64 (what the convention here follows) but SIGFPE (a DivideError) on x86-64
+    if _HAVE_TAQL
+        r = tempname()
+        _taqlcmd("SELECT fmod(I, 2) AS R FROM \$1 GIVING '$r' AS PLAIN", d)
+        @test collect(column(readtable(r), "R")[:]) == ev("fmod(I, 2)")
+    end
+end
+
+# Phase 386: operators and group aggregates given operands of a type they do not handle, and
+# malformed meas.*/mscal.* calls, are ArgumentErrors (were MethodError / TypeError / BoundsError).
+@testset "operators, aggregates and meas.* refuse wrongly-typed operands (Phase 386)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => Int32[1, 2, 3, 4], "K" => Int32[1, 1, 2, 2], "S" => ["a", "bb", "ccc", "d"],
+        "B" => [true, false, true, false], "VS" => [["a", "b"] for _ in 1:4], "V" => [[1.0, 2.0] for _ in 1:4]]; nrow=4)
+    t = readtable(d)
+    ev(e) = collect(column(query(t, "I > 0"; select=["r" => e]), "r")[:])
+    for e in ("S*2", "S-S", "S/I", "-S", "~S", "S&1", "S**2", "S%2", "S//2", "VS*2", "-VS", "S<I", "NOT I", "!S",
+              "I BETWEEN 'a' AND 'b'", "V+VS", "I LIKE 'a'", "B LIKE 'a'", "I ~ p/a/")
+        err = try; ev(e); nothing; catch x; x; end
+        @test err isa ArgumentError
+    end
+    @test occursin("operator *", sprint(showerror, try; ev("S*2"); catch x; x; end))
+    @test ev("S + 'x'") == ["ax", "bbx", "cccx", "dx"] && ev("S == I") == falses(4) && ev("B * B") == [true, false, true, false]
+    # group aggregates over values they cannot reduce
+    ga(q) = groupby(t, "K"; select=["K" => "K", "r" => q])
+    for q in ("gmean(S)", "gsum(S)", "gall(I)", "gany(S)", "gmedian(S)", "gnfalse(S)", "gmeans(VS)", "galls(V)")
+        @test_throws ArgumentError ga(q)
+    end
+    @test ga("gsum(I)").r == [3, 7] && ga("gmax(S)").r == ["bb", "d"]
+    # meas.<frame> needs a [lon, lat] direction
+    @test_throws ArgumentError ev("meas.j2000()")
+    @test_throws ArgumentError ev("meas.galactic(5e9)")
+    @test_throws ArgumentError ev("meas.galactic([1.0])")
+    if isdir(SAMPLE_MS)                       # a non-array operand to mscal.stokes (needs the MS subtables)
+        ms = readtable(SAMPLE_MS)
+        @test_throws ArgumentError collect(column(query(ms, "rownumber() < 3"; select=["r" => "mscal.stokes(ANTENNA1, 'I')"]), "r")[:])
+    end
+end

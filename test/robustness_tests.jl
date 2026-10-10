@@ -203,3 +203,62 @@ end
     @test_throws ArgumentError insert!(d; values=["S" => 5])
     @test MSv2.nrow(readtable(d)) == N                          # nothing was added
 end
+
+# Phase 384: the query verbs (query/groupby/join/update!/delete!/insert!) given a column name,
+# expression or collection of the wrong Julia type raise an ArgumentError naming the argument
+# (was a MethodError from a `String(x)` deep inside); a string into a numeric column and a
+# number into a String column are refused where assigned (was a MethodError at flush).
+@testset "query verbs refuse wrongly-typed arguments (Phase 384)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => collect(1:4), "K" => Int32[1, 1, 2, 2], "X" => [1.5, 2.5, 3.5, 4.5], "S" => ["a", "b", "c", "d"]]; nrow=4)
+    t = readtable(d)
+    # groupby: keys, select, where/having, orderby, cols, grouping sets
+    for g in (3, nothing, missing, (1, 2), ["I" => "K"], x -> x)
+        @test_throws ArgumentError groupby(t, g; select=["n" => "gcount()"])
+    end
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => 3])
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => nothing])
+    @test_throws ArgumentError groupby(t, "K"; select=[3 => "gcount()"])
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => "gcount()"], where=5)
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => "gcount()"], where=:I)
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => "gcount()"], having=3)
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => "gcount()"], orderby=[3])
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => "gcount()"], orderby=[(1, 2) => :desc])
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => "gcount()"], grouping_sets=x -> x)
+    @test_throws ArgumentError groupby(t, "K"; select=["n" => "gcount()"], grouping_sets=[3])
+    @test groupby(t, "K"; cols="X") do g; (; n=length(g)); end.n == [2, 2]       # a single name for `cols`
+    # query: select entries, orderby entries
+    @test_throws ArgumentError query(t, "I > 1"; select=["a" => 3])
+    @test_throws ArgumentError query(t, "I > 1"; select=[3 => "I"])
+    @test_throws ArgumentError query(t, "I > 1"; select=[("a", 3) => "I"])
+    @test_throws ArgumentError query(t; orderby=[3]) do r; true; end
+    @test_throws ArgumentError query(t; cols=[(1, 2) => "I"]) do r; true; end
+    # join: column selectors, output names
+    @test_throws ArgumentError join(t, t; on="I", rightcols=[3])
+    @test_throws ArgumentError join(t, t; on="I", rightcols=[("I", "K") => "X"])
+    # update! / delete! / insert!
+    @test_throws ArgumentError MSv2.update!(d; set=["X" => 3.0])
+    @test_throws ArgumentError MSv2.update!(d; set=["X" => ["I", "K"]])
+    @test_throws ArgumentError MSv2.update!(d; set=[3 => "I"])
+    @test_throws ArgumentError MSv2.update!(d; set=["X" => "I"], where=5)
+    @test_throws ArgumentError MSv2.update!(d; set=["X" => "I"], where=["I"])
+    @test_throws ArgumentError delete!(d; where=5)
+    @test_throws ArgumentError delete!(d; where=["I > 1"])
+    @test_throws ArgumentError delete!(d; where="I > 99", orderby=[3])
+    @test_throws ArgumentError insert!(d; values=[3 => 1])
+    @test_throws ArgumentError insert!(d; values=[("a", "b") => 1])
+    # a string into a numeric column / a number into a String column
+    @test_throws ArgumentError MSv2.update!(d; set=["X" => "S"])
+    @test_throws ArgumentError MSv2.update!(d; set=["I" => "S"])
+    @test_throws ArgumentError MSv2.update!(d; set=["S" => "I"])
+    @test_throws ArgumentError insert!(d; values=["X" => "s"])
+    edit(d) do e
+        @test_throws ArgumentError e["X"][1] = "s"
+        @test_throws ArgumentError e["S"][1] = 5
+        @test_throws ArgumentError e["I"][1] = "5"
+    end
+    # nothing above changed the table; ordinary writes still work
+    @test column(readtable(d), "X")[:] == [1.5, 2.5, 3.5, 4.5] && MSv2.nrow(readtable(d)) == 4
+    @test MSv2.update!(d; set=["X" => "I * 2.0"], where="I > 2") == 2
+    @test column(readtable(d), "X")[:] == [1.5, 2.5, 6.0, 8.0]
+end

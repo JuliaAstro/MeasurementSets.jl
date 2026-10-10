@@ -14,9 +14,17 @@ function _geval(e::TQLAggr, cols, g)
     e.arg === nothing && return e.fn(g)                    # gcount()
     # Phase 339: real TaQL aggregates in 64-bit / double (`gsum(UInt8)` is Int64, `gmean(Float32)` Float64)
     vals = Any[_widen(_tqleval(e.arg, cols, i)) for i in g]
-    e.mode === :perelem && return _perelem_reduce(e.fn, vals)
-    any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
-    return e.fn(vals)
+    try
+        e.mode === :perelem && return _perelem_reduce(e.fn, vals)
+        any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
+        return e.fn(vals)
+    catch err
+        # a group aggregate over values it cannot reduce (`gmean` of strings, `gall` of numbers) is an
+        # ordinary ArgumentError, not a MethodError / TypeError from inside the reduction (Phase 386)
+        err isa Union{MethodError,TypeError,InexactError} || rethrow()
+        ts = unique(string.(typeof.(vals)))
+        throw(ArgumentError("TaQL-lite: a group aggregate does not accept values of type ($(join(ts, ", ")))"))
+    end
 end
 
 # flatten a group's per-row aggregate values into one vector, dropping
@@ -70,7 +78,7 @@ _geval(e::TQLNot, cols, g) = _bcast(!, _geval(e.a, cols, g))
 _geval(e::TQLIn, cols, g) = _tql_in(_geval(e.lhs, cols, g), _in_resolve(e.vals, x -> _geval(x, cols, g)))
 _geval(e::TQLMatch, cols, g) = _tql_match(e, _geval(e.lhs, cols, g))
 _geval(e::TQLFunc, cols, g) =
-    e.fn(ntuple(k -> _geval(e.args[k], cols, g), length(e.args))...)
+    _tql_call(e, ntuple(k -> _geval(e.args[k], cols, g), length(e.args)))
 _geval(::TQLRowNum, cols, g) =
     throw(ArgumentError("TaQL-lite: rownumber() is not valid in groupby(...)"))
 _geval(::TQLEnd, cols, g) = throw(ArgumentError(
@@ -250,7 +258,7 @@ function query(f::Function, gt::GroupedTable;
                cols::Union{Nothing,AbstractVector}=nothing,
                orderby::Union{Nothing,AbstractVector}=nothing,
                select::AbstractVector{<:Pair}=[n => n for n in columnnames(gt)])
-    names = cols === nothing ? columnnames(gt) : String.(cols)
+    names = cols === nothing ? columnnames(gt) : _gb_names(cols)
     orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(gt, o) for o in orderby]
     allnames = unique(vcat(collect(names), [k.name for k in orderkeys]))
     cd = Dict{String,AbstractVector}(n => column(gt, n) for n in allnames)
@@ -263,7 +271,9 @@ function query(f::Function, gt::GroupedTable;
 end
 
 _gb_names(c::Union{AbstractString,Symbol}) = String[String(c)]
-_gb_names(cs) = String[String(c) for c in cs]
+_gb_names(cs::Union{AbstractVector,Tuple}) = String[_tql_name(c, "groupby: key column") for c in cs]
+_gb_names(cs) = throw(ArgumentError(
+    "groupby: key columns must be a name or a collection of names, got $(typeof(cs))"))
 
 function _gb_keys(t::AbstractTable, groupcols)
     ks = _gb_names(groupcols)
@@ -310,7 +320,7 @@ function _where_rows(t::AbstractTable, where, cols::AbstractDict)
         rws = CTDSRows(AbstractVector[cols[n] for n in nms], Symbol.(nms), nrow(t))
         return [i for (i, r) in enumerate(rws) if _tql_truthy(where(r))]
     end
-    ast = _taqllite_parse(String(where), Set(columnnames(t)))
+    ast = _taqllite_parse(_tql_name(where, "WHERE condition"), Set(columnnames(t)))
     !_has_aggr(ast) ||
         throw(ArgumentError("WHERE must not contain aggregate functions"))
     ast = _unit_conv(ast, t)
@@ -326,6 +336,8 @@ end
 function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
                      extrarefs::Vector{TQLExpr}, cols, anyclosure::Bool)
     vn = Set(columnnames(t))
+    _tql_check_cond(wherearg, "groupby: `where`")
+    _tql_check_cond(havingarg, "groupby: `having`")
     keys = _gb_keys(t, groupcols)
     whereast = wherearg isa AbstractString ? _taqllite_parse(wherearg, vn) : nothing
     whereast === nothing || !_has_aggr(whereast) ||
@@ -339,7 +351,7 @@ function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
     whereast === nothing || _tqlrefs!(needed, whereast)
     havingast === nothing || _tqlrefs!(needed, havingast)
     if cols !== nothing
-        union!(needed, String.(cols))
+        union!(needed, _gb_names(cols))
     elseif anyclosure
         union!(needed, columnnames(t))
     end
@@ -367,7 +379,8 @@ end
 # explicit list. At most one of rollup/cube/grouping_sets may be given.
 function _gb_one_set(gs, kidx::AbstractDict)
     names = gs isa Union{AbstractString,Symbol} ? String[String(gs)] :
-            String[String(x) for x in gs]
+            gs isa Union{AbstractVector,Tuple} ? String[_tql_name(x, "groupby: grouping-set key") for x in gs] :
+            throw(ArgumentError("groupby: a grouping set must be a name or a collection of names, got $(typeof(gs))"))
     for nm in names
         haskey(kidx, nm) || throw(ArgumentError(
             "groupby: grouping set names a non-grouping column \"$nm\""))
@@ -380,6 +393,8 @@ function _gb_sets(keys::Vector{String}, rollup::Bool, cube::Bool, gsets)
     count(!=(false), (rollup, cube, gsets !== nothing)) <= 1 || throw(ArgumentError(
         "groupby: give at most one of `rollup`, `cube`, `grouping_sets`"))
     if gsets !== nothing
+        gsets isa Union{AbstractVector,Tuple} || throw(ArgumentError(
+            "groupby: `grouping_sets` must be a collection of key sets, got $(typeof(gsets))"))
         kidx = Dict(k => j for (j, k) in enumerate(keys))
         return Vector{Int}[_gb_one_set(gs, kidx) for gs in gsets]
     end
@@ -459,14 +474,14 @@ function groupby(t::AbstractTable, groupcols;
                  rollup::Bool=false, cube::Bool=false, grouping_sets=nothing,
                  orderby::Union{Nothing,AbstractVector}=nothing)
     isempty(select) && throw(ArgumentError("groupby: `select` must not be empty"))
-    outnames = String[String(first(p)) for p in select]
+    outnames = String[_tql_name(first(p), "groupby: select output name") for p in select]
     allunique(outnames) || throw(ArgumentError("groupby: duplicate output column name"))
     vn = Set(columnnames(t))
 
     # classify each select RHS: (:fn, closure) or (:ast, TQLExpr)
     kinds = Tuple{Symbol,Any}[
         last(p) isa Function ? (:fn, last(p)) :
-        (:ast, _taqllite_parse(String(last(p)), vn)) for p in select]
+        (:ast, _taqllite_parse(_tql_name(last(p), "groupby: select expression"), vn)) for p in select]
     strasts = TQLExpr[a for (k, a) in kinds if k === :ast]
     anyclosure = any(k === :fn for (k, _) in kinds) ||
                  where isa Function || having isa Function
@@ -556,9 +571,9 @@ function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
             d = last(o)
             d isa Symbol && d in (:asc, :desc) ||
                 throw(ArgumentError("groupby orderby: direction must be :asc or :desc"))
-            push!(keys, TQLOrderKey(String(first(o)), d === :desc))
+            push!(keys, TQLOrderKey(_tql_name(first(o), "groupby orderby: column"), d === :desc))
         else
-            push!(keys, TQLOrderKey(String(o), false))
+            push!(keys, TQLOrderKey(_tql_name(o, "groupby orderby: column"), false))
         end
     end
     for k in keys

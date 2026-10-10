@@ -144,9 +144,9 @@ end
 # `(namemap, order)` for building a RefTable -- shared by
 # `write_reftable` (tables/table.jl) and the all-projection `query` path.
 function _select_spec(parent::AbstractTable, select::AbstractVector{<:Pair})
-    order = String[String(first(p)) for p in select]
+    order = String[_tql_name(first(p), "select: output name") for p in select]
     allunique(order) || throw(ArgumentError("duplicate output column name"))
-    namemap = Dict{String,String}(String(first(p)) => String(last(p)) for p in select)
+    namemap = Dict{String,String}(_tql_name(first(p), "select: output name") => _tql_name(last(p), "select: source column") for p in select)
     pcols = Set(columnnames(parent))
     for s in values(namemap)
         s in pcols || throw(ArgumentError("parent has no column \"$s\""))
@@ -225,25 +225,26 @@ function _select_classify(select::AbstractVector{<:Pair}, validnames)
     for p in select
         lk, rhs = first(p), last(p)
         pn = lk isa Tuple ?
-            (length(lk) == 2 ? (String(lk[1]), String(lk[2])) :
+            (length(lk) == 2 ? (_tql_name(lk[1], "select: output name"), _tql_name(lk[2], "select: output name")) :
              throw(ArgumentError("select: a (val, mask) target takes exactly two names"))) :
             (lk isa AbstractString ? _pair_split_names(lk) : nothing)
         if pn !== nothing
-            ast = _taqllite_parse(String(rhs), validnames)
+            ast = _taqllite_parse(_tql_name(rhs, "select expression"), validnames)
             _has_aggr(ast) && throw(ArgumentError(
                 "select: aggregate functions need `groupby`, not `query` (\"$(rhs)\")"))
             push!(out, (pn[1], :mpair, (pn[2], ast)))
             append!(names, pn)
             continue
         end
-        nm = String(lk)
+        nm = _tql_name(lk, "select: output name")
         push!(names, nm)
+        _tql_name(rhs, "select expression")
         if rhs isa Symbol || String(rhs) in validnames
             s = String(rhs)
             s in validnames || throw(ArgumentError("select: no column \"$s\""))
             push!(out, (nm, :proj, s))
         else
-            ast = _taqllite_parse(String(rhs), validnames)
+            ast = _taqllite_parse(_tql_name(rhs, "select expression"), validnames)
             if ast isa TQLCol
                 push!(out, (nm, :proj, ast.name))
             else
@@ -685,8 +686,10 @@ _normalize_orderkey(t::AbstractTable, s::Union{AbstractString,Symbol}) = begin
     n in columnnames(t) || throw(ArgumentError("orderby: no column \"$n\""))
     TQLOrderKey(n, false)
 end
+_normalize_orderkey(::AbstractTable, x) = throw(ArgumentError(
+    "orderby: each key must be a column name or `name => :asc/:desc`, got $(typeof(x))"))
 function _normalize_orderkey(t::AbstractTable, p::Pair)
-    n = String(first(p))
+    n = _tql_name(first(p), "orderby: column")
     n in columnnames(t) || throw(ArgumentError("orderby: no column \"$n\""))
     d = last(p)
     d isa Symbol && d in (:asc, :desc) || throw(ArgumentError(
@@ -713,7 +716,7 @@ function query(f::Function, t::AbstractTable;
               cols::Union{Nothing,AbstractVector}=nothing,
               orderby::Union{Nothing,AbstractVector}=nothing,
               select::AbstractVector{<:Pair}=[n => n for n in columnnames(t)])
-    names = cols === nothing ? columnnames(t) : String.(cols)
+    names = cols === nothing ? columnnames(t) : _gb_names(cols)
     orderkeys = orderby === nothing ? TQLOrderKey[] : [_normalize_orderkey(t, o) for o in orderby]
     extra = [k.name for k in orderkeys if !(k.name in names)]
     allnames = vcat(collect(names), extra)

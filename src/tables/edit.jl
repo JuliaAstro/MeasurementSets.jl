@@ -217,9 +217,12 @@ Base.getindex(c::EditColumn, ::Colon) = [c[i] for i in 1:length(c.tab.rowmap)]
 # A number that cannot be stored in a scalar numeric column (`Inf` or 1.5 into an Int32 column, 3e9 into Int32) used to
 # surface only at flush, as a bare InexactError from the writer; refuse it where it is assigned.
 function _check_scalar_cell(desc::ColumnDesc, v)
-    v isa Number || return nothing
     desc.shape isa Dims && isempty(desc.shape) || return nothing
     J = try juliatype(desc.type) catch; return nothing end
+    # a string into a numeric column (or a number into a String column) used to surface at flush as a bare MethodError from the writer
+    ((J === String && v isa Number) || (J <: Number && v isa AbstractString)) && throw(ArgumentError(
+        "cannot store a $(typeof(v)) in column \"$(desc.name)\" of type $J"))
+    v isa Number || return nothing
     (J <: Number && !(J <: Complex && v isa Real)) || return nothing
     try convert(J, v)
     catch e
