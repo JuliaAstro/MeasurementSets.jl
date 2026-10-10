@@ -1903,3 +1903,18 @@ end
         @test_throws ArgumentError MSv2.measconvert(MSv2.MEpoch{MSv2.UTC}(1.0), MSv2.TAI)              # MJD 1 is before SOFA's tables (1960)
     end
 end
+
+# Phase 387: the measures helpers with an untyped argument (a rest frequency, a Faraday-rotation
+# frequency) refuse a value of the wrong type with an ArgumentError (was a MethodError from `_hz`).
+@testset "measures helpers refuse wrongly-typed arguments (Phase 387)" begin
+    f = MSv2.MFrequency{MSv2.TOPO}(1.4e9)
+    for bad in ("x", [1.0, 2.0], 1:3, missing, MSv2.J2000, MSv2.MDoppler{MSv2.RADIO}(0.01), MSv2.MPosition{MSv2.ITRF}(1.0, 2.0, 3.0))
+        @test_throws ArgumentError MSv2.doppler(f, bad)
+        @test_throws ArgumentError MSv2.radialvelocity(f, bad)
+        @test_throws ArgumentError MSv2.frequency(MSv2.MDoppler{MSv2.RADIO}(0.01), bad)
+        @test_throws ArgumentError MSv2.faraday_rotation(1.0, bad)
+        @test_throws ArgumentError MSv2.derotate_angle(0.5, 1.0, bad)
+    end
+    @test_throws ArgumentError MSv2.faraday_rotation("1", 1e9)
+    @test MSv2.doppler(f, 1.42e9) isa MSv2.MDoppler && MSv2.faraday_rotation(2.0, f) == MSv2.faraday_rotation(2.0, 1.4e9)
+end

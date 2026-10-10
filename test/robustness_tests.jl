@@ -262,3 +262,43 @@ end
     @test MSv2.update!(d; set=["X" => "I * 2.0"], where="I > 2") == 2
     @test column(readtable(d), "X")[:] == [1.5, 2.5, 6.0, 8.0]
 end
+
+# Phase 388: unusual column names (non-ASCII, spaces, dots, quotes, brackets, colons, percent, emoji)
+# survive the whole pipeline -- write, read, real casacore, copytable, edit, addcolumn!, rename,
+# and TaQL via backslash escapes -- a fuzz of ~800 random names found no bug; kept as a fixed list.
+@testset "unusual column names (Phase 388)" begin
+    names = ["é", "日本", "a b", "a.b", "a-b", "x:y", "q'r", "ü(1)", "🚀", "A\"B", "p%q", "a[1]", "_u", "a,b", "c=d", "e<f>", "h\\i", "j*k"]
+    N = 4
+    d = joinpath(mktempdir(), "t")
+    cols = Pair{String,Any}[nm => (isodd(j) ? collect(1:N) .* j : Float64.(1:N) ./ j) for (j, nm) in enumerate(names)]
+    write_table(d, "T", cols; nrow=N)
+    t = readtable(d)
+    @test columnnames(t) == names
+    for (nm, v) in cols
+        @test collect(column(t, nm)[:]) == v
+    end
+    if _HAVE_CASACORE
+        ct = CCT.Table(d)
+        for (nm, v) in cols
+            @test collect(ct[Symbol(nm)][:]) == v
+        end
+    end
+    c = joinpath(mktempdir(), "c")
+    copytable(c, t)
+    @test columnnames(readtable(c)) == names
+    edit(d) do e
+        e[names[1]][1] = 77
+        addcolumn!(e, "new col.é", collect(1:N))
+    end
+    @test column(readtable(d), names[1])[1] == 77 && "new col.é" in columnnames(readtable(d))
+    MSv2.renamecolumn!(d, "a b", "a  b ü")
+    @test "a  b ü" in columnnames(readtable(d)) && !("a b" in columnnames(readtable(d)))
+    t = readtable(d)
+    esc(s) = replace(s, r"([^\w])" => s"\\\1")
+    for nm in columnnames(t)
+        r = query(t, "rownumber() >= 1"; select=["x" => esc(nm)])
+        @test collect(column(r, "x")[:]) == collect(column(t, nm)[:])
+    end
+    @test MSv2.update!(d; set=[esc("é") => esc("é") * " * 2"], where="rownumber() > 1") == N - 1
+    @test column(readtable(d), "é")[2:end] == (2:N) .* 2
+end

@@ -80,3 +80,20 @@ end
     @test [Tables.getcolumn(r, :A) for r in Tables.rows(ct)] == Int32[1, 2, 3, 9, 9]
     @test [Tables.getcolumn(r, :A) for r in ct] == Int32[1, 2, 3, 9, 9]   # direct iteration too
 end
+
+# Phase 390: a MeasurementSet is a Tables.jl source exactly like its MAIN table -- `Tables.columnnames`
+# used to return the struct's own field names (:path, :data, :tables, ...) and `Tables.getcolumn`
+# failed, so `Tables.columntable(ms)` / `DataFrame(ms)` had the wrong names or crashed.
+@testset "MeasurementSet is a Tables.jl source like its MAIN table (Phase 390)" begin
+    ms = MSv2.MeasurementSet(joinpath(@__DIR__, "data", "sample.ms"))
+    main = MSv2.readtable(joinpath(@__DIR__, "data", "sample.ms"))
+    @test Tables.columnnames(ms) == Tables.columnnames(main)
+    @test collect(Tables.schema(ms).names) == collect(Tables.columnnames(ms))
+    ct = Tables.columntable(ms)
+    @test collect(keys(ct)) == collect(Tables.columnnames(ms))
+    @test all(length(c) == MSv2.nrow(ms) for c in ct)
+    @test collect(Tables.getcolumn(ms, :TIME)) == collect(Tables.getcolumn(main, :TIME))
+    @test collect(Tables.getcolumn(ms, 1)) == collect(Tables.getcolumn(main, 1))
+    rt = Tables.rowtable(ms)
+    @test length(rt) == MSv2.nrow(ms) && rt[3].ANTENNA1 == Tables.getcolumn(main, :ANTENNA1)[3]
+end
