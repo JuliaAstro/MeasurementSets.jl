@@ -215,7 +215,19 @@ _widen(x::AbstractArray{<:Union{Float32,Float16}}) = Float64.(x)
 _widen(x::Complex{<:Union{Float32,Float16}}) = ComplexF64(x)
 _widen(x::AbstractArray{<:Complex{<:Union{Float32,Float16}}}) = ComplexF64.(x)
 _widen(x) = x
-_bcast(f, x) = (x = _widen(x); x isa AbstractArray ? f.(x) : f(x))
+# An operator applied to operand types it does not handle (`'a' * 2`, `-S`, `NOT I`, `S < I`) is an
+# ordinary ArgumentError naming the operator and the operand types, not a MethodError (Phase 386).
+_tql_opname(f) = (n = string(f); startswith(n, "_tql_") ? n[6:end] : n)
+_tql_operr(f, xs...) = ArgumentError("TaQL-lite: the operator $(_tql_opname(f)) does not accept operands of type ($(join(string.(typeof.(xs)), ", ")))")
+function _bcast(f, x)
+    x = _widen(x)
+    try
+        return x isa AbstractArray ? f.(x) : f(x)
+    catch e
+        e isa MethodError || rethrow()
+        throw(_tql_operr(f, x))
+    end
+end
 # two array operands must have the SAME shape (real TaQL: "ArrayMath function
 # +: array shapes mismatch" -- no implicit broadcasting; Phase 285)
 # Phase 333: a comparison / arithmetic between a TIME quantity (`6h`, `0.5d`, a column in seconds) and an ANGLE
@@ -228,6 +240,7 @@ function _bcast(f, x, y)
     try
         return _bcast_raw(f, x, y)
     catch e
+        e isa MethodError && throw(_tql_operr(f, x, y))
         _is_dimerror(e) || rethrow()
         c = _tql_dim_coerce(x, y)
         c === nothing && rethrow()
@@ -377,6 +390,7 @@ _tqleval(e::TQLMaskOf, cols, i) = (v = _tqleval(e.e, cols, i);
     v isa TQLMArray ? v.mask : _bcast(!isfinite, _unwrap_marray(v)))
 _tql_match(e::TQLMatch, v::AbstractString) = xor(_tql_occursin(e.regex, v), e.negate)
 _tql_match(e::TQLMatch, v::AbstractArray) = map(x -> _tql_match(e, x), v)      # elementwise over a string-array cell
+_tql_match(::TQLMatch, v) = throw(ArgumentError("TaQL-lite: LIKE / ~ needs a string operand, got $(typeof(v))"))
 _tqleval(e::TQLMatch, cols, i) = _tql_match(e, _tqleval(e.lhs, cols, i))
 _tqleval(e::TQLFunc, cols, i) =
     _tql_call(e, ntuple(k -> _tqleval(e.args[k], cols, i), length(e.args)))
@@ -699,6 +713,7 @@ function _tql_call(e::TQLFunc, vals::Tuple)
     try
         return e.fn(vals...)
     catch err
+        err isa AssertionError && throw(ArgumentError("TaQL-lite: $(isempty(e.name) ? string(e.fn) : e.name)(): $(err.msg)"))
         err isa Union{MethodError,TypeError,InexactError} || rethrow()
         nm = isempty(e.name) ? string(e.fn) : e.name
         throw(ArgumentError("TaQL-lite: $(nm)() does not accept operands of type ($(join(map(v -> string(typeof(v)), vals), ", ")))"))

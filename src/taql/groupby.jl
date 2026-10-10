@@ -14,9 +14,17 @@ function _geval(e::TQLAggr, cols, g)
     e.arg === nothing && return e.fn(g)                    # gcount()
     # Phase 339: real TaQL aggregates in 64-bit / double (`gsum(UInt8)` is Int64, `gmean(Float32)` Float64)
     vals = Any[_widen(_tqleval(e.arg, cols, i)) for i in g]
-    e.mode === :perelem && return _perelem_reduce(e.fn, vals)
-    any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
-    return e.fn(vals)
+    try
+        e.mode === :perelem && return _perelem_reduce(e.fn, vals)
+        any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
+        return e.fn(vals)
+    catch err
+        # a group aggregate over values it cannot reduce (`gmean` of strings, `gall` of numbers) is an
+        # ordinary ArgumentError, not a MethodError / TypeError from inside the reduction (Phase 386)
+        err isa Union{MethodError,TypeError,InexactError} || rethrow()
+        ts = unique(string.(typeof.(vals)))
+        throw(ArgumentError("TaQL-lite: a group aggregate does not accept values of type ($(join(ts, ", ")))"))
+    end
 end
 
 # flatten a group's per-row aggregate values into one vector, dropping

@@ -1689,6 +1689,10 @@ _meas_pos_arg(a) = a
 _meas_xyz(p) = (length(p) == 3 || throw(ArgumentError("meas: a position needs 3 values [x, y, z]")); 
                 (_tql_plain(p[1], :length), _tql_plain(p[2], :length), _tql_plain(p[3], :length)))
 
+# the direction argument of `meas.<frame>(dir, ...)` must be a [lon, lat] pair (a bare number was a BoundsError)
+_meas_dirvec(d::AbstractVector) = length(d) >= 2 ? d : throw(ArgumentError("TaQL-lite: a direction argument needs two values [lon, lat], got $(length(d))"))
+_meas_dirvec(d) = throw(ArgumentError("TaQL-lite: a direction argument must be an array [lon, lat], got $(typeof(d))"))
+
 function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
     R = get(_MEAS_DIR_FRAMES, fn, nothing)
     if R !== nothing
@@ -1698,6 +1702,7 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
             haskey(_MEAS_DIR_FRAMES, lowercase(strip(String(args[1].value))))
         # real value-first form: `meas.<frame>(dir [, 'SRC' [, epoch [, pos]]])` -- the
         # first arg is an array expression, and any 2nd arg is the source-frame string
+        isempty(args) && throw(ArgumentError("TaQL-lite: meas.$fn() needs a direction argument in \"$src\""))
         if !has_str1 && (length(args) == 1 || (args[2] isa TQLLit && args[2].value isa AbstractString))
             sref = length(args) >= 2 ? String(args[2].value) : "J2000"
             rest = args[3:end]
@@ -1716,13 +1721,13 @@ function _make_meas_func(fn::String, args::Vector{TQLExpr}, src::AbstractString)
             need_ep && push!(fargs, rest[1])
             need_p && push!(fargs, _meas_pos_arg(rest[need_ep ? 2 : 1]))
             cbr = if need_p
-                (d, e, p) -> _meas_dir_convert(R, sref, _tql_plain(d[1], :angle), _tql_plain(d[2], :angle),
+                (d0, e, p) -> _meas_dir_convert(R, sref, _tql_plain(_meas_dirvec(d0)[1], :angle), _tql_plain(_meas_dirvec(d0)[2], :angle),
                                                _tql_plain(e, :time), _meas_xyz(p))
             elseif need_ep
-                (d, e) -> _meas_dir_convert(R, sref, _tql_plain(d[1], :angle), _tql_plain(d[2], :angle),
+                (d0, e) -> _meas_dir_convert(R, sref, _tql_plain(_meas_dirvec(d0)[1], :angle), _tql_plain(_meas_dirvec(d0)[2], :angle),
                                             _tql_plain(e, :time), nothing)
             else
-                (d,) -> _meas_dir_convert(R, sref, _tql_plain(d[1], :angle), _tql_plain(d[2], :angle), nothing, nothing)
+                (d0,) -> _meas_dir_convert(R, sref, _tql_plain(_meas_dirvec(d0)[1], :angle), _tql_plain(_meas_dirvec(d0)[2], :angle), nothing, nothing)
             end
             return TQLFunc((a...) -> _meas_lon_pm_pi(cbr(a...)), fargs)
         end
