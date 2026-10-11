@@ -23,10 +23,11 @@ function MeasurementSet(path::AbstractString; precision::Union{Nothing,Symbol,Ty
 end
 
 Base.propertynames(ms::MeasurementSet) =
-    (:path, :data, :tables, Symbol.(first.(subtables(getfield(ms, :data))))...)
+    (:path, :data, :tables, :MAIN, Symbol.(first.(subtables(getfield(ms, :data))))...)
 
 function Base.getproperty(ms::MeasurementSet, s::Symbol)
     s in (:path, :data, :tables) && return getfield(ms, s)
+    s === :MAIN && return getfield(ms, :data)            # `ms.MAIN`: the MAIN table, as the guide has always written it
     return subtable(ms, String(s))
 end
 
