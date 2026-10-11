@@ -110,6 +110,10 @@ function edit(f::Function, path::AbstractString)
     return t
 end
 
+# an open `Table` is edited through its directory, like a `MeasurementSet` (`edit(ms)`)
+edit(t::Table) = edit(t.path)
+edit(f::Function, t::Table) = edit(f, t.path)
+
 # Release the session-long write lock exactly once, whether via a
 # normal `flush` or an aborted (exception-raising) session. `x` is
 # either the `EditTable` (once constructed) or, for a failure during

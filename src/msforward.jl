@@ -26,3 +26,9 @@ edit(f::Function, ms::MeasurementSet) = (d = getfield(ms, :data); d isa Table ? 
 Base.delete!(ms::MeasurementSet; kw...) = delete!(getfield(ms, :data); kw...)
 Base.insert!(ms::MeasurementSet; kw...) = insert!(getfield(ms, :data); kw...)
 Base.insert!(ms::MeasurementSet, source::AbstractTable; kw...) = insert!(getfield(ms, :data), source; kw...)
+
+# iterating / measuring a MeasurementSet is iterating / measuring its MAIN table (Phase 391)
+Base.length(ms::MeasurementSet) = nrow(ms)
+Base.IteratorSize(::Type{MeasurementSet}) = Base.HasLength()
+Base.eltype(::Type{MeasurementSet}) = CTDSRow
+Base.iterate(ms::MeasurementSet, args...) = iterate(getfield(ms, :data), args...)

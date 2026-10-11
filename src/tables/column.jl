@@ -141,6 +141,11 @@ function Base.getindex(c::Column, ::Colon)
 end
 
 Base.getindex(c::Column, r::AbstractVector{<:Integer}) = [c[i] for i in r]
+# a Bool mask selects the `true` rows (Bool <: Integer, so the method above would index by `true`/`false`)
+function Base.getindex(c::Column, m::AbstractVector{Bool})
+    length(m) == length(c) || throw(BoundsError(c, m))      # like a Vector indexed by a wrong-length mask
+    return c[findall(m)]
+end
 Base.collect(c::Column) = collect(c[:])   # force off any lazy `BlockColumn` (below)
 
 # --- block (whole-column, lazy-view) reads --------------------------
@@ -244,6 +249,10 @@ end
 Base.getindex(c::ConcatColumn, ::Colon) =
     isempty(c.parts) ? eltype(c)[] : reduce(vcat, (collect(p[:]) for p in c.parts))
 Base.getindex(c::ConcatColumn, r::AbstractVector{<:Integer}) = [c[i] for i in r]
+function Base.getindex(c::ConcatColumn, m::AbstractVector{Bool})
+    length(m) == length(c) || throw(BoundsError(c, m))      # like a Vector indexed by a wrong-length mask
+    return c[findall(m)]
+end
 Base.collect(c::ConcatColumn) = c[:]
 
 function column(t::RefTable, name::AbstractString; precision::Union{Nothing,Symbol,Type}=nothing)

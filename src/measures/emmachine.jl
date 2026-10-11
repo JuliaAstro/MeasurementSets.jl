@@ -80,6 +80,8 @@ number or [`MFrequency`](@ref)).  `λ = c / freq`.
 """
 faraday_rotation(rm::Real, freq::Real) = rm * (C_LIGHT / freq)^2
 faraday_rotation(rm::Real, f::MFrequency) = faraday_rotation(rm, f.hz)
+faraday_rotation(rm, freq) = throw(ArgumentError(
+    "faraday_rotation: rm must be a Real and freq a Real (Hz) or an MFrequency, got ($(typeof(rm)), $(typeof(freq)))"))
 
 """
     derotate_angle(χ, rm, freq) -> χ − RM·λ²

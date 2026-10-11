@@ -92,6 +92,7 @@ end
 
 _hz(x::Real) = float(x)
 _hz(f::MFrequency) = f.hz
+_hz(x) = throw(ArgumentError("a rest frequency must be a number (Hz) or an MFrequency, got $(typeof(x))"))
 
 # Phase 223 fix: `β = v/c` in the BETA convention, ALWAYS routed through
 # `_dop_ratio` -- deliberately does NOT use `measconvert(d, BETA).d`.
