@@ -346,3 +346,25 @@ end
     t = readtable(d); column(t, "I")[1]; @test !isempty(t.dmcache)
     MSv2._evict_dms!(t); @test isempty(t.dmcache) && column(t, "I")[2] == 2 && !isempty(t.dmcache)
 end
+
+# Phase 395: nothing accumulates over many tables -- no lock-registry entries, no open file descriptors
+# (written / read / edited / copied tables, separate files and MultiFile containers).  A sweep for leaks
+# (descriptors, lock registry, HDF5 files, memory per table kind and operation) found none beyond Phase 394's.
+@testset "no descriptors or lock entries accumulate over many tables (Phase 395)" begin
+    nfd() = isdir("/dev/fd") ? length(readdir("/dev/fd")) : -1
+    base = mktempdir()
+    function churn(n, tag, storage)
+        for i in 1:n
+            d = joinpath(base, "$(tag)_$i")
+            write_table(d, "T", Pair{String,Any}["I" => collect(1:20), "V" => [rand(Float32, 4) for _ in 1:20]]; nrow=20, storage)
+            t = readtable(d); collect(column(t, "I")[:]); getcell(t, "V", 3)
+            storage === :sepfile && edit(d) do e; e["I"][1] = 5; end
+            copytable(joinpath(base, "c_$(tag)_$i"), t)
+        end
+    end
+    churn(5, "w", :sepfile); churn(5, "m", :multifile); GC.gc(); GC.gc()          # warm up
+    f0 = nfd()
+    churn(60, "a", :sepfile); churn(60, "b", :multifile); GC.gc(); GC.gc()
+    @test isempty(MSv2._HELD_LOCKS)
+    f0 < 0 || @test nfd() <= f0 + 4
+end
