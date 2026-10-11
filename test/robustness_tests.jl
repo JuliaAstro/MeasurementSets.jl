@@ -314,3 +314,14 @@ end
     @test r.exitcode == 0
     @test occursin("ALL OK", String(take!(out)))
 end
+
+# Phase 393: parallel TaQL-lite queries.  The `regex()` / `pattern()` / `sqlpattern()` compile cache was a plain
+# global Dict, so tasks evaluating queries at the same time corrupted it ("Multiple concurrent writes to Dict",
+# UndefRefError -- 5 runs out of 5 at 8 threads); it is now locked, as is the one-time IERS table refresh.
+@testset "parallel TaQL-lite queries (Phase 393)" begin
+    child = joinpath(@__DIR__, "threads_query_child.jl")
+    out = IOBuffer()
+    r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) -t 4 --project=$(dirname(@__DIR__)) --startup-file=no $child`); stdout=out, stderr=out))
+    @test r.exitcode == 0
+    @test occursin("ALL OK", String(take!(out)))
+end
