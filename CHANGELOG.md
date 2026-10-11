@@ -11141,3 +11141,7 @@ Every code block in `README.md` and the index / concepts / guide pages (92 state
 ### Phase 397 — docstring signatures checked against the methods (no drift found)
 
 The signature lines at the top of every exported function's docstring (106 of them: `query(t, wherestr; select=...)`, `power_response(beam, θ, freq=reffreq(beam))`, ...) were parsed and checked against the real methods — some method takes that many positional arguments (counting `x=default` as optional positionals) and every keyword named is a keyword of some method, with the weak-dependency extensions loaded so the stubs' real methods exist. No docstring has drifted from its API; `test/docstring_signature_tests.jl` keeps it that way (a renamed keyword or a dropped argument now fails the suite). The same check found nothing wrong with the two exported types that carry hand-written signatures either.
+
+### Phases 392–393 follow-up — the thread-safety tests skip under Rosetta
+
+The x86-64 Docker run on an Apple-silicon host (Rosetta, `/proc/cpuinfo` says `VirtualApple`) segfaulted in the two 4-thread child tests (Phases 392 and 393). It is the emulation, not the package: plain Julia code with no MeasurementSets in it — 16 tasks that mmap a file, compile a `Regex` and allocate — segfaults there with `-t 2` and more (9 runs out of 9), and passes on one thread. The two thread-safety tests are skipped when that environment is detected; they run on real hardware, including CI.

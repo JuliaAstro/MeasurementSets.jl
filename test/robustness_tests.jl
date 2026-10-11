@@ -303,27 +303,42 @@ end
     @test column(readtable(d), "é")[2:end] == (2:N) .* 2
 end
 
+
+# Multi-threaded Julia does not run reliably under Rosetta, which is what an x86-64 Docker container on an Apple-silicon
+# host uses (`/proc/cpuinfo` says `VirtualApple`): plain Julia code -- tasks that mmap a file, compile a Regex and allocate,
+# no MeasurementSets code at all -- segfaults there with `-t 2` and more.  The thread-safety tests below are skipped
+# in that environment (they run on real hardware and in CI).
+_threads_usable() = !(Sys.islinux() && isfile("/proc/cpuinfo") && occursin("VirtualApple", read("/proc/cpuinfo", String)))
+
 # Phase 392: reading the same table from many tasks at once.  `_DM_CACHE` (the opened data managers) and
 # the tiled managers' lazily filled caches were plain Dicts mutated on first access, so two tasks racing to
 # open the first column of a fresh table could corrupt them -- a segfault or UndefRefError under `julia -t N`
 # (about one run in two at 8 threads).  The child runs with 4 threads and compares every value with the serial read.
 @testset "concurrent reads of one table from many tasks (Phase 392)" begin
+  if !_threads_usable()
+    @info "skipping: multi-threaded Julia is unreliable under Rosetta emulation (an x86-64 container on Apple silicon)"
+  else
     child = joinpath(@__DIR__, "threads_child.jl")
     out = IOBuffer()
     r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) -t 4 --project=$(dirname(@__DIR__)) --startup-file=no $child 30`); stdout=out, stderr=out))
     @test r.exitcode == 0
     @test occursin("ALL OK", String(take!(out)))
+  end
 end
 
 # Phase 393: parallel TaQL-lite queries.  The `regex()` / `pattern()` / `sqlpattern()` compile cache was a plain
 # global Dict, so tasks evaluating queries at the same time corrupted it ("Multiple concurrent writes to Dict",
 # UndefRefError -- 5 runs out of 5 at 8 threads); it is now locked, as is the one-time IERS table refresh.
 @testset "parallel TaQL-lite queries (Phase 393)" begin
+  if !_threads_usable()
+    @info "skipping: multi-threaded Julia is unreliable under Rosetta emulation (an x86-64 container on Apple silicon)"
+  else
     child = joinpath(@__DIR__, "threads_query_child.jl")
     out = IOBuffer()
     r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) -t 4 --project=$(dirname(@__DIR__)) --startup-file=no $child`); stdout=out, stderr=out))
     @test r.exitcode == 0
     @test occursin("ALL OK", String(take!(out)))
+  end
 end
 
 # Phase 394: a table that is no longer referenced is garbage collected.  The opened data managers (with their
