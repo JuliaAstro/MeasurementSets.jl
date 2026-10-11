@@ -68,7 +68,7 @@ Every table is a `Tables.jl` source — column *and* row access — so
 subtables drop straight into the data ecosystem:
 
 ```julia
-using DataFrames
+using DataFrames, Tables
 DataFrame(subtable(ms, "ANTENNA"))
 Tables.schema(subtable(ms, "SPECTRAL_WINDOW"))
 Tables.rowtable(subtable(ms, "FIELD"))
@@ -194,12 +194,18 @@ or, for aggregates the `g*` set can't express, a do-block returning a
 `NamedTuple`:
 
 ```julia
+using Statistics: mean
 groupby(ms.MAIN, [:ANTENNA1]; cols = ["ANTENNA1", "DATA", "WEIGHT"]) do g
     (; ANT  = first(g.ANTENNA1),
        N    = length(g),
        WAMP = sum(mean.(abs, g.DATA) .* g.WEIGHT) / sum(g.WEIGHT))
 end
 ```
+
+!!! note
+    `groupby` and `nrow` are exported by DataFrames.jl as well. If you load both
+    packages, name the one you mean — `MeasurementSets.groupby(...)`,
+    `MeasurementSets.nrow(t)` — or Julia reports the name as ambiguous.
 
 `join` (a method added to `Base.join`) attaches a subtable's columns to
 each MAIN row — an **N:1 lookup join**, TaQL's own `JOIN … ON` semantics:

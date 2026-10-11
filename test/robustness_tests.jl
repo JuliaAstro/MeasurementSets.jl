@@ -302,3 +302,84 @@ end
     @test MSv2.update!(d; set=[esc("é") => esc("é") * " * 2"], where="rownumber() > 1") == N - 1
     @test column(readtable(d), "é")[2:end] == (2:N) .* 2
 end
+
+
+# Multi-threaded Julia does not run reliably under Rosetta, which is what an x86-64 Docker container on an Apple-silicon
+# host uses (`/proc/cpuinfo` says `VirtualApple`): plain Julia code -- tasks that mmap a file, compile a Regex and allocate,
+# no MeasurementSets code at all -- segfaults there with `-t 2` and more.  The thread-safety tests below are skipped
+# in that environment (they run on real hardware and in CI).
+_threads_usable() = !(Sys.islinux() && isfile("/proc/cpuinfo") && occursin("VirtualApple", read("/proc/cpuinfo", String)))
+
+# Phase 392: reading the same table from many tasks at once.  `_DM_CACHE` (the opened data managers) and
+# the tiled managers' lazily filled caches were plain Dicts mutated on first access, so two tasks racing to
+# open the first column of a fresh table could corrupt them -- a segfault or UndefRefError under `julia -t N`
+# (about one run in two at 8 threads).  The child runs with 4 threads and compares every value with the serial read.
+@testset "concurrent reads of one table from many tasks (Phase 392)" begin
+  if !_threads_usable()
+    @info "skipping: multi-threaded Julia is unreliable under Rosetta emulation (an x86-64 container on Apple silicon)"
+  else
+    child = joinpath(@__DIR__, "threads_child.jl")
+    out = IOBuffer()
+    r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) -t 4 --project=$(dirname(@__DIR__)) --startup-file=no $child 30`); stdout=out, stderr=out))
+    @test r.exitcode == 0
+    @test occursin("ALL OK", String(take!(out)))
+  end
+end
+
+# Phase 393: parallel TaQL-lite queries.  The `regex()` / `pattern()` / `sqlpattern()` compile cache was a plain
+# global Dict, so tasks evaluating queries at the same time corrupted it ("Multiple concurrent writes to Dict",
+# UndefRefError -- 5 runs out of 5 at 8 threads); it is now locked, as is the one-time IERS table refresh.
+@testset "parallel TaQL-lite queries (Phase 393)" begin
+  if !_threads_usable()
+    @info "skipping: multi-threaded Julia is unreliable under Rosetta emulation (an x86-64 container on Apple silicon)"
+  else
+    child = joinpath(@__DIR__, "threads_query_child.jl")
+    out = IOBuffer()
+    r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) -t 4 --project=$(dirname(@__DIR__)) --startup-file=no $child`); stdout=out, stderr=out))
+    @test r.exitcode == 0
+    @test occursin("ALL OK", String(take!(out)))
+  end
+end
+
+# Phase 394: a table that is no longer referenced is garbage collected.  The opened data managers (with their
+# mmaps and whole-file buffers) were kept in a global `IdDict{Table,...}`, so every table ever read -- and
+# everything it had opened -- stayed alive for the life of the process (2000 opens leaked 1.6 GB).  The cache
+# now lives on the `Table` itself.
+@testset "an unreferenced table is garbage collected (Phase 394)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => collect(1:300), "S" => ["s$i" for i in 1:300], "V" => [rand(Float32, 8) for _ in 1:300]]; nrow=300)
+    function open_and_read()
+        t = readtable(d)
+        collect(column(t, "I")[:]); getcell(t, "V", 3); getcell(t, "S", 4)
+        @test length(t.dmcache) == 1                       # one SSM instance serves all three columns
+        return WeakRef(t)
+    end
+    refs = [open_and_read() for _ in 1:20]
+    GC.gc(); GC.gc(); GC.gc()
+    @test count(r -> r.value === nothing, refs) >= 19      # (the most recent may still sit in a register / slot)
+    # resync drops the old table's managers; the new table opens its own
+    t = readtable(d); column(t, "I")[1]; @test !isempty(t.dmcache)
+    MSv2._evict_dms!(t); @test isempty(t.dmcache) && column(t, "I")[2] == 2 && !isempty(t.dmcache)
+end
+
+# Phase 395: nothing accumulates over many tables -- no lock-registry entries, no open file descriptors
+# (written / read / edited / copied tables, separate files and MultiFile containers).  A sweep for leaks
+# (descriptors, lock registry, HDF5 files, memory per table kind and operation) found none beyond Phase 394's.
+@testset "no descriptors or lock entries accumulate over many tables (Phase 395)" begin
+    nfd() = isdir("/dev/fd") ? length(readdir("/dev/fd")) : -1
+    base = mktempdir()
+    function churn(n, tag, storage)
+        for i in 1:n
+            d = joinpath(base, "$(tag)_$i")
+            write_table(d, "T", Pair{String,Any}["I" => collect(1:20), "V" => [rand(Float32, 4) for _ in 1:20]]; nrow=20, storage)
+            t = readtable(d); collect(column(t, "I")[:]); getcell(t, "V", 3)
+            storage === :sepfile && edit(d) do e; e["I"][1] = 5; end
+            copytable(joinpath(base, "c_$(tag)_$i"), t)
+        end
+    end
+    churn(5, "w", :sepfile); churn(5, "m", :multifile); GC.gc(); GC.gc()          # warm up
+    f0 = nfd()
+    churn(60, "a", :sepfile); churn(60, "b", :multifile); GC.gc(); GC.gc()
+    @test isempty(MSv2._HELD_LOCKS)
+    f0 < 0 || @test nfd() <= f0 + 4
+end

@@ -132,7 +132,7 @@ columndesc(t, "DATA")                    # schema of one column
 keywords(t)["MS_VERSION"]                # 2.0f0
 
 # Tables.jl — subtables interoperate with the data ecosystem
-using DataFrames
+using DataFrames, Tables
 DataFrame(subtable(ms, "ANTENNA"))       # 26×8
 Tables.schema(subtable(ms, "SPECTRAL_WINDOW"))
 

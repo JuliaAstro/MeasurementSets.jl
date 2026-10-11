@@ -115,7 +115,8 @@ function _tile_layout(tsm::TiledStMan, cube::TSMCube)
     v = get(tsm.layout, ts, nothing)
     v === nothing || return v
     v2 = _tile_layout(tsm.types, ts)
-    tsm.layout[ts] = v2
+    # copy-on-write: a published Dict is never mutated, so concurrent readers (other tasks) stay safe (Phase 392)
+    d2 = copy(tsm.layout); d2[ts] = v2; tsm.layout = d2
     return v2
 end
 
@@ -237,7 +238,7 @@ function _tsmbytes(tsm::TiledStMan, sequ::Int)
     b === nothing || return b
     b2 = tsm.container === nothing ? Mmap.mmap(tsm.files[sequ], Vector{UInt8}) :
          container_mmap(tsm.container, basename(tsm.files[sequ]))
-    tsm.data[sequ] = b2
+    d2 = copy(tsm.data); d2[sequ] = b2; tsm.data = d2        # copy-on-write, see `_tile_layout` (Phase 392)
     return b2
 end
 

@@ -881,12 +881,15 @@ Base.:(==)(s::AbstractString, p::TQLPatternVal) = _tql_occursin(p.re, s)
 Base.:(==)(p::TQLPatternVal, s::AbstractString) = _tql_occursin(p.re, s)
 
 const _TQL_PATTERN_CACHE = Dict{Tuple{Symbol,String},TQLPatternVal}()
+# a plain Dict mutated by every query that builds a `regex()` / `pattern()` / `sqlpattern()` value: guard it, or
+# tasks evaluating queries in parallel corrupt it ("Multiple concurrent writes to Dict", UndefRefError; Phase 393)
+const _TQL_PATTERN_LOCK = ReentrantLock()
 
 function _tql_pattern(kind::Symbol, s)
     s isa AbstractString || throw(ArgumentError(
         "TaQL-lite: $(kind)() takes a string, not $(typeof(s))"))
     key = (kind, String(s))
-    v = get(_TQL_PATTERN_CACHE, key, nothing)
+    v = @lock _TQL_PATTERN_LOCK get(_TQL_PATTERN_CACHE, key, nothing)
     v === nothing || return v
     re = try
         kind === :regex ? _tql_compile("^(?:" * _bview(String(s)) * ")\$", "", "regex") :
@@ -895,7 +898,9 @@ function _tql_pattern(kind::Symbol, s)
         err isa ArgumentError && rethrow()
         throw(ArgumentError("TaQL-lite: invalid $(kind) \"$s\""))
     end
-    length(_TQL_PATTERN_CACHE) >= 2000 && empty!(_TQL_PATTERN_CACHE)
-    return _TQL_PATTERN_CACHE[key] = TQLPatternVal(re)
+    return @lock _TQL_PATTERN_LOCK begin
+        length(_TQL_PATTERN_CACHE) >= 2000 && empty!(_TQL_PATTERN_CACHE)
+        _TQL_PATTERN_CACHE[key] = TQLPatternVal(re)
+    end
 end
 

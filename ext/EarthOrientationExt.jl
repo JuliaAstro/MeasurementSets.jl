@@ -15,14 +15,18 @@ const _WARNED = Ref(false)
 # `MJD_EPOCH` / `ARCSEC` / `MSEC_PER_DAY` are shared -- see src/constants.jl
 _datetime(mjd::Float64) = MS.MJD_EPOCH + Millisecond(round(Int, mjd * MS.MSEC_PER_DAY))
 
+const _READY_LOCK = ReentrantLock()      # two tasks must not download / refresh the IERS table at once (Phase 393)
 function _ensure!()
     _READY[] && return
-    try
-        EO.update()                      # download / refresh the IERS table
-    catch
-        # bundled data (loaded by EO.__init__) is usually enough
+    @lock _READY_LOCK begin
+        _READY[] && return
+        try
+            EO.update()                  # download / refresh the IERS table
+        catch
+            # bundled data (loaded by EO.__init__) is usually enough
+        end
+        _READY[] = true
     end
-    _READY[] = true
 end
 
 """

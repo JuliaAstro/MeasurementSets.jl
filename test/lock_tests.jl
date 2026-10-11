@@ -363,7 +363,7 @@ end
     @test is_stale(t1)
     t2 = resync(t1)
     @test t2 !== t1 && t2.rows == 6 && !is_stale(t2)
-    @test !haskey(MSv2L._DM_CACHE, t1)
+    @test isempty(t1.dmcache)
     @test resync(t2) === t2                                 # no change -> same object
 
     ms = MeasurementSet(p)
