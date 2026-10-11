@@ -234,6 +234,9 @@ function _check_scalar_cell(desc::ColumnDesc, v)
         return nothing
     end
     desc.shape isa Dims && isempty(desc.shape) || return nothing
+    # an array into a scalar column used to pass here and fail at flush (a MethodError from the writer) -- or be
+    # silently reduced
+    v isa AbstractArray && throw(ArgumentError("column \"$(desc.name)\" holds scalar cells; got an array of shape $(size(v))"))
     J = try juliatype(desc.type) catch; return nothing end
     # a string into a numeric column (or a number into a String column) used to surface at flush as a bare MethodError from the writer
     ((J === String && v isa Number) || (J <: Number && v isa AbstractString)) && throw(ArgumentError(
@@ -701,6 +704,10 @@ end
 
 function Base.flush(t::EditTable)
     t.flushed && return t
+    # the session's lock belongs to the task that opened it; flushing from another task used to commit and then
+    # fail to release it ("unlock from wrong thread"), leaving the table locked for the rest of the process
+    t.lk.tlock.locked_by === current_task() || error(
+        "an edit session must be flushed by the task that opened it (edit($(repr(t.reader.path))) was called in another task)")
     newrows = length(t.rowmap)
     grew = newrows > t.reader.rows
     lk = t.lk

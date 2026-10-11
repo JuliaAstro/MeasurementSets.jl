@@ -24,7 +24,14 @@ function _dm_instance_locked(t::Table, sequ::Int)
     T = _dmtype(dm.name)
     T === nothing && error("data manager \"$(dm.name)\" not yet supported (column data)")
     inst = open(T, t, dm)
-    _check_rows(inst, t.rows)
+    try
+        _check_rows(inst, t.rows)
+    catch e
+        # a table opened before another process committed a change reads the NEW files with the OLD table.dat
+        e isa ErrorException && occursin("mismatch in #row", e.msg) && (try is_stale(t) catch; false end) &&
+            error(e.msg * " -- the table was modified after it was opened; reopen it (`readtable`) or `resync` it")
+        rethrow()
+    end
     cache[sequ] = inst
     return inst
 end

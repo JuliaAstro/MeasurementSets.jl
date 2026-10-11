@@ -428,3 +428,52 @@ end
     @test isempty(forbidden)
     isempty(forbidden) || println("forbidden exceptions from garbage input: ", forbidden, "\n  ", join(examples, "\n  "))
 end
+
+# Phase 399: mutation fuzz of the `taql()` command dispatcher -- tokens deleted, duplicated, swapped, replaced or
+# inserted in valid commands.  Deliberate errors are ArgumentError / ErrorException / KeyError (an unknown
+# column or keyword); anything else (a MethodError from `strip(::Nothing)`, a BoundsError, ...) is a bug.
+@testset "taql() command mutation fuzz (Phase 399)" begin
+    corpus = ["SELECT A, B AS BB FROM \$1 WHERE A > 3 ORDER BY A DESC LIMIT 4", "SELECT DISTINCT K FROM \$1",
+              "SELECT K, gcount() AS N, gsum(X) AS S FROM \$1 GROUP BY K HAVING gcount() > 1 ORDER BY K",
+              "SELECT FROM \$1 WHERE EXISTS (SELECT FROM \$1 WHERE A > 50)", "SELECT A FROM \$1 WHERE K IN (SELECT K FROM \$1 WHERE A > 2)",
+              "UPDATE \$1 SET A = A + 1 WHERE K == 2", "UPDATE \$1 SET A = 1, B = 2.5 ORDER BY A LIMIT 3", "UPDATE \$1 SET V[1] = 0.0 WHERE FLAG",
+              "UPDATE \$1 SET (X, FLAG) = X * 2", "DELETE FROM \$1 WHERE A > 5 ORDER BY A LIMIT 2", "DELETE FROM \$1 WHERE K IN [1, 2]",
+              "INSERT INTO \$1 (A, B) VALUES (1, 2.5), (3, 4.5)", "INSERT INTO \$1 SET A = 7, B = 1.5", "INSERT INTO \$1 (A) SELECT A FROM \$1 WHERE A > 3 LIMIT 2",
+              "ALTER TABLE \$1 ADD COLUMN Z R8", "ALTER TABLE \$1 RENAME COLUMN D TO DD", "ALTER TABLE \$1 SET KEYWORD KW = 5", "ALTER TABLE \$1 DROP COLUMN D",
+              "SELECT A, S FROM \$1 a JOIN \$1 b ON a.K == b.K", "SELECT sums(V, 1) AS SV FROM \$1 LIMIT 3 OFFSET 1"]
+    N = 30
+    src = joinpath(mktempdir(), "src")
+    write_table(src, "T", Pair{String,Any}["A" => Int32.(1:N), "B" => Float64.(1:N) ./ 3, "K" => Int32.(rem.(1:N, 5)), "S" => ["s$i" for i in 1:N],
+        "X" => Float64.(1:N), "V" => [Float32.(i .+ (1:4)) for i in 1:N], "FLAG" => isodd.(1:N), "D" => fill("x", N)]; nrow=N)
+    words = ("", " ", "()", "'", "[", "]", "*", "AS", "WHERE", "FROM", "LIMIT", "ORDER BY", "GROUP BY", "SET", "INTO", "VALUES", "1", "-1", ",", "A", "\\")
+    inserts = ("WHERE", "FROM", "LIMIT 3", "ORDER BY A", "GROUP BY K", "HAVING 1", "SET A = 1", "INTO 'x'", "DISTINCT", "OFFSET 2", "AS", "(", ")", "'")
+    function mutate(rng, s)
+        toks = split(s, r"(?<=\s)|(?=\s)|(?<=[(),'\"\[\]])|(?=[(),'\"\[\]])"; keepempty=false)
+        isempty(toks) && return s
+        k = rand(rng, 1:6)
+        if k == 1; deleteat!(toks, rand(rng, eachindex(toks)))
+        elseif k == 2; i = rand(rng, eachindex(toks)); insert!(toks, i, toks[i])
+        elseif k == 3; i, j = rand(rng, eachindex(toks)), rand(rng, eachindex(toks)); toks[i], toks[j] = toks[j], toks[i]
+        elseif k == 4; resize!(toks, rand(rng, 1:length(toks)))
+        elseif k == 5; toks[rand(rng, eachindex(toks))] = rand(rng, words)
+        else; insert!(toks, rand(rng, eachindex(toks)), rand(rng, inserts))
+        end
+        join(toks)
+    end
+    rng = MersenneTwister(399)
+    bad = String[]
+    d = joinpath(mktempdir(), "w")
+    for _ in 1:600
+        s = mutate(rng, rand(rng, corpus))
+        rand(rng) < 0.3 && (s = mutate(rng, s))
+        cp(src, d; force=true)
+        try
+            taql(d, s)
+        catch e
+            e isa Union{ArgumentError,ErrorException,KeyError} || push!(bad, s * "  ##  " * sprint(showerror, e)[1:min(end, 100)])
+        end
+        rm(d; recursive=true, force=true)
+    end
+    @test isempty(bad)
+    isempty(bad) || foreach(println, first(bad, 5))
+end
