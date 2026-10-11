@@ -27,6 +27,7 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
         include("schema_tests.jl")
         include("precision_tests.jl")
         include("blockcolumn_tests.jl")
+        include("perf_guard_tests.jl")
     else
         @info "SAMPLE_MS not found; skipping data-dependent tests" SAMPLE_MS
     end
@@ -41,6 +42,8 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
     include("engine_tests.jl")
     include("edit_tests.jl")
     include("lock_tests.jl")
+    include("bigtable_tests.jl")
+    include("crash_tests.jl")
     include("dysco_tests.jl")
     include("empty_undefined_tests.jl")
     include("corrupt_tests.jl")

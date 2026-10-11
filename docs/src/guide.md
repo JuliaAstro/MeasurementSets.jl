@@ -159,6 +159,17 @@ The flush runs under an exclusive `table.lock` and updates the sync blob,
 so a concurrent casacore reader re-syncs. [`is_stale`](@ref) /
 [`resync`](@ref) let a long-lived reader notice an external write.
 
+The files one flush replaces are committed together: they are written under
+hidden names and a journal (`table.commit`) is renamed into place before they
+are renamed over the table's files. A process killed before that leaves the old
+table; one killed after it is finished by the next `readtable` or `edit`. A flush
+that fails while writing (a full disk) leaves the table untouched. Tile edits
+made on their own are patched into the tile file in place and are not covered
+by this. Tables of any row count are read (casacore's 64-bit forms above 2³¹
+rows and 2 GiB are supported); `edit`, whole-column reads and `copytable` of a
+table too large for memory raise an error saying so, and the writers store at
+most 2³²−1 rows.
+
 ## Querying
 
 [`query`](@ref) row-filters a table and returns a [`RefTable`](@ref):

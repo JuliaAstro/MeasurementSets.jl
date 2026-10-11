@@ -459,8 +459,8 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
         out = Vector{Bool}(undef, nrow * nrelem)
         _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
             n = (lastrow - firstrow + 1) * nrelem
-            bits = _read_bits(ssm, bucketptr(ssm, bkt) + coloff, 0, n)
-            copyto!(out, (firstrow - 1) * nrelem + 1, bits, 1, n)
+            _chk_count(n, 1, 8 * length(ssm.data), "Bool column bucket")
+            _rd_bits!(out, (firstrow - 1) * nrelem, ssm.data, bucketptr(ssm, bkt) + coloff, 0, n)
         end
         # Phase 235/236: `out[range]` (a COPYING slice) used to allocate
         # one fresh small `Array` per row on top of the single `out`

@@ -477,6 +477,7 @@ they rely on the writers' atomic renames.
 function readtable(path::AbstractString; precision::Union{Nothing,Symbol,Type}=nothing)
     dir = String(rstrip(path, '/'))
     isdir(dir) || throw(ArgumentError("not a table directory: $dir"))
+    _recover_commit(dir)                      # complete a commit that was interrupted after its journal was written
     lockpath = joinpath(dir, "table.lock")
     tp, st, readme = read_tableinfo(dir)
     prec = precision === nothing ? (tp == "Measurement Set" ? :half : :full) :

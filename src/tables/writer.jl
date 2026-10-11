@@ -301,21 +301,151 @@ function concattable_dat_bytes(partnames::Vector{String}, subtabnames::Vector{St
 end
 
 function write_tableinfo(dir::AbstractString; type="", subtype="", readme="")
-    open(joinpath(dir, "table.info"), "w") do io
-        println(io, "Type = ", type)
-        println(io, "SubType = ", subtype)
-        println(io)
-        isempty(readme) || println(io, readme)     # casacore ends the readme with a newline
-    end
+    io = IOBuffer()
+    println(io, "Type = ", type)
+    println(io, "SubType = ", subtype)
+    println(io)
+    isempty(readme) || println(io, readme)     # casacore ends the readme with a newline
+    _atomic_write(joinpath(dir, "table.info"), take!(io))
 end
 
-# atomic file replace: write to a hidden sibling, then rename over `path`.
-# The dot prefix keeps the tmp out of `readdir` scans that count `table.f*`.
+# ----- atomic file replace and the crash-consistent commit group (Phase 398) -----
+#
+# `_atomic_write` replaces ONE file atomically (write to a hidden sibling, rename over it; the dot prefix keeps
+# the tmp out of `readdir` scans that count `table.f*`).  Changing a table usually means replacing SEVERAL files
+# (storage-manager files, `table.dat`, `table.info`) and then the sync blob in `table.lock`; killing the process
+# between those renames used to leave a table whose files disagree (every reader then stops with "mismatch in
+# #row", or worse, reads the wrong bytes).  Inside `_with_commit` the writes go to their hidden siblings only,
+# and the group is then committed by
+#   1. writing a journal naming the files, renamed to `table.commit` -- the commit point;
+#   2. renaming each sibling over its file;
+#   3. writing the sync blob;
+#   4. removing the journal.
+# Dying before 1 leaves the old table (the hidden siblings are junk); dying after 1 is rolled forward by the next
+# `readtable` / `edit` (`_recover_commit`), which needs only the siblings and the journal.  The caller holds the
+# table's write lock throughout, so a live committer is never recovered under its own feet.
+
+const COMMIT_JOURNAL = "table.commit"
+
+mutable struct CommitGroup
+    dir::String
+    names::Vector{String}                  # basenames of the files written, in order
+    sync::Union{Nothing,NamedTuple}        # the sync blob to write once the files are in place
+end
+
+const _COMMIT_KEY = :ms_commit_group
+# test seam: called as `hook(stage, i)` at each step of a commit (`:tmp`, `:journal_pending`, `:journal`,
+# `:rename`, `:after`); the crash-injection tests make it kill the process
+const _COMMIT_HOOK = Ref{Any}(nothing)
+_commit_hook(stage::Symbol, i::Integer=0) = (h = _COMMIT_HOOK[]; h === nothing || h(stage, Int(i)); nothing)
+
+_commit_tmp(dir::AbstractString, name::AbstractString) = joinpath(dir, "." * name * ".tmp")
+_active_commit(dir::AbstractString) =
+    (g = get(task_local_storage(), _COMMIT_KEY, nothing); g !== nothing && g.dir == abspath(dir) ? g : nothing)
+
 function _atomic_write(path::AbstractString, data)
+    g = _active_commit(dirname(path))
+    if g !== nothing                                   # joins the open commit group: sibling only
+        base = basename(path)
+        base in g.names || push!(g.names, base)        # recorded first: a write that fails half way (a full disk) is cleaned up too
+        write(_commit_tmp(g.dir, base), data)
+        _commit_hook(:tmp, length(g.names))
+        return path
+    end
     tmp = joinpath(dirname(path), "." * basename(path) * ".tmp")
     write(tmp, data)
     mv(tmp, path; force=true)
     return path
+end
+
+# write the sync blob now, or when the open commit group commits
+function _sync_or_defer!(lk, dir::AbstractString, nrow::Integer; ncolumn::Integer, ndm::Integer, tablechanged::Bool)
+    s = (; nrow=Int(nrow), ncolumn=Int(ncolumn), ndm=Int(ndm), tablechanged)
+    g = _active_commit(dir)
+    g === nothing ? _apply_sync(lk, s) : (g.sync = s)
+    return nothing
+end
+function _apply_sync(lk, s)
+    old = read_syncinfo(lk)
+    write_syncinfo(lk, s.nrow; modifycounter = (old.present ? old.modifycounter : 0) + 1,
+                   ncolumn=s.ncolumn, ndm=s.ndm, tablechanged=s.tablechanged)
+end
+
+# Run `f` collecting its file writes into one group and commit them together; nested calls join the outer group.
+function _with_commit(f::Function, dir::AbstractString, lk)
+    d = abspath(dir)
+    _active_commit(d) !== nothing && return f()
+    g = CommitGroup(d, String[], nothing)
+    local r
+    try
+        r = task_local_storage(_COMMIT_KEY, g) do
+            f()
+        end
+    catch
+        for n in g.names; rm(_commit_tmp(d, n); force=true); end     # nothing committed: the table is untouched
+        rethrow()
+    end
+    _commit!(g, lk)
+    return r
+end
+
+function _commit!(g::CommitGroup, lk)
+    journal = joinpath(g.dir, COMMIT_JOURNAL)
+    if !isempty(g.names)
+        jtmp = joinpath(g.dir, "." * COMMIT_JOURNAL * ".tmp")
+        s = g.sync
+        write(jtmp, join(g.names, "\n") * "\n" *
+                    (s === nothing ? "" : "sync $(s.nrow) $(s.ncolumn) $(s.ndm) $(s.tablechanged)\n"))
+        _commit_hook(:journal_pending)
+        mv(jtmp, journal; force=true)                  # the commit point
+        _commit_hook(:journal)
+        for (i, n) in enumerate(g.names)
+            mv(_commit_tmp(g.dir, n), joinpath(g.dir, n); force=true)
+            _commit_hook(:rename, i)
+        end
+    end
+    g.sync === nothing || _apply_sync(lk, g.sync)
+    _commit_hook(:after)
+    rm(journal; force=true)
+    return nothing
+end
+
+# Finish a commit that was interrupted after its journal was written.  Called by `readtable` / `edit`.
+function _recover_commit(dir::AbstractString)
+    journal = joinpath(dir, COMMIT_JOURNAL)
+    isfile(journal) || return false
+    try
+        withlock(dir, :write; create=false) do lk
+            isfile(journal) || return                  # the committer finished while we waited for the lock
+            lines = filter(!isempty, readlines(journal))
+            sync = nothing
+            for l in lines
+                if startswith(l, "sync ")
+                    f = split(l)
+                    sync = (; nrow=parse(Int, f[2]), ncolumn=parse(Int, f[3]), ndm=parse(Int, f[4]),
+                            tablechanged=parse(Bool, f[5]))
+                    continue
+                end
+                tmp = _commit_tmp(dir, l)
+                isfile(tmp) && mv(tmp, joinpath(dir, l); force=true)
+            end
+            sync === nothing || _apply_sync(lk, sync)
+            rm(journal; force=true)
+        end
+    catch e
+        e isa Union{SystemError,Base.IOError} || rethrow()
+        error("$dir has an interrupted commit ($COMMIT_JOURNAL) that could not be completed ($(sprint(showerror, e))); " *
+              "open it once with write access to recover it")
+    end
+    return true
+end
+
+# hidden `.*.tmp` siblings left by a writer that died before its commit point (the caller holds the write lock)
+function _clean_stale_tmp(dir::AbstractString)
+    isfile(joinpath(dir, COMMIT_JOURNAL)) && return
+    for f in readdir(dir)
+        startswith(f, ".") && endswith(f, ".tmp") && rm(joinpath(dir, f); force=true)
+    end
 end
 
 """
@@ -336,7 +466,6 @@ function write_table_files(dir::AbstractString, td::TableDesc, nrow::Integer,
         _atomic_write(joinpath(dir, "table.dat"),
                      table_dat_bytes(td, nrow, dms, varndim; storage, blocksize, endian))
         write_tableinfo(dir; type, subtype, readme)
-        write_syncinfo(lk, nrow; modifycounter = (old.present ? old.modifycounter : 0) + 1,
-                       ncolumn=length(td.columns), ndm=length(dms), tablechanged=!old.present)
+        _sync_or_defer!(lk, dir, nrow; ncolumn=length(td.columns), ndm=length(dms), tablechanged=!old.present)
     end
 end

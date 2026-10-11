@@ -451,8 +451,8 @@ function Base.insert!(target::Union{AbstractString,AbstractTable}; values,
     return k
 end
 
-Base.insert!(target::Union{AbstractString,AbstractTable}, source) =
-    insert!(target; values=source)
+Base.insert!(target::Union{AbstractString,AbstractTable}, source; kw...) =
+    insert!(target; values=source, kw...)
 
 _ins_row(x::NamedTuple) = Dict{String,Any}(_tql_name(k, "insert!: column name") => v for (k, v) in pairs(x))
 _ins_row(x::AbstractVector{<:Pair}) =
@@ -704,6 +704,7 @@ function _taql_subst_subqueries(target, body::AbstractString)
         close = _matching_paren(body, open)
         inner = String(strip(body[open+1:close-1]))
         r = taql(target, inner)
+        r isa AbstractTable || throw(ArgumentError("a sub-query must be a SELECT that returns rows (got $(typeof(r))): $inner"))
         neg = m.captures[1] !== nothing
         if uppercase(m.captures[2]) == "EXISTS"
             v = nrow(r) > 0

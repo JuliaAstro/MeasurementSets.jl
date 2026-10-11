@@ -383,3 +383,46 @@ end
     @test isempty(MSv2._HELD_LOCKS)
     f0 < 0 || @test nfd() <= f0 + 4
 end
+
+# Phase 399: failures found by static analysis (JET), a mutation fuzz of `taql()` and a stale-handle race.
+@testset "arrays into scalar columns, cross-task flush, stale handles, insert! keywords (Phase 399)" begin
+    mk(d, n=5) = write_table(d, "T", Pair{String,Any}["S" => ["s$i" for i in 1:n], "K" => Int32.(1:n), "X" => Float64.(1:n)]; nrow=n)
+    d = joinpath(mktempdir(), "t"); mk(d)
+    # an array into a scalar column: refused at the assignment (it used to fail at flush with a MethodError,
+    # or be silently reduced), and the table is untouched
+    for cmd in ("UPDATE \$1 SET S=['u','v'], K=7", "UPDATE \$1 SET K=[1,2]", "UPDATE \$1 SET X=['a']", "UPDATE \$1 SET S=[1,2]")
+        err = try taql(d, cmd); nothing catch e; e end
+        @test err isa ArgumentError && occursin("holds scalar cells", sprint(showerror, err))
+    end
+    @test column(readtable(d), "K")[:] == Int32.(1:5) && column(readtable(d), "S")[1] == "s1"
+    err = try edit(d) do t; t[:K][1] = [1, 2]; end; nothing catch e; e end
+    @test err isa ArgumentError
+    @test isempty(MSv2._HELD_LOCKS)
+
+    # an edit session belongs to the task that opened it: another task flushing it is refused up front
+    # (it used to commit, then fail to unlock and leave the table locked for the rest of the process)
+    t = edit(d)
+    t[:K][2] = Int32(22)
+    err = fetch(@async try flush(t); nothing catch e; e end)
+    @test err isa ErrorException && occursin("flushed by the task that opened it", err.msg)
+    flush(t)                                                    # the opening task can
+    @test column(readtable(d), "K")[2] == 22
+    @test isempty(MSv2._HELD_LOCKS)
+    edit(d) do t2; t2[:K][3] = Int32(33); end                   # and the table is not left locked
+    @test column(readtable(d), "K")[3] == 33
+
+    # a table opened before another writer commits fails loudly, saying so, when read afterwards
+    stale = readtable(d)
+    edit(d) do t3; addrows!(t3, 2); end
+    err = try column(stale, "S")[:]; nothing catch e; e end
+    @test err isa ErrorException && occursin("modified after it was opened", err.msg)
+    @test length(column(readtable(d), "S")[:]) == 7                    # a fresh handle reads the new table
+
+    # insert!(target, source; keywords...) passes the keywords on
+    src = joinpath(dirname(d), "src"); mk(src, 3)
+    @test insert!(d, readtable(src); limit=2) == 2
+    @test length(column(readtable(d), "S")[:]) == 9
+    # a sub-query must return rows
+    err = try taql(d, "SELECT K FROM \$1 WHERE K IN (SELECT K INTO '$(joinpath(dirname(d), "o"))')"); nothing catch e; e end
+    @test err isa ArgumentError
+end

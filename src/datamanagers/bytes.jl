@@ -69,6 +69,9 @@ end
 # ~3.4 KiB for the equal-size `DATA` cell via `_rd_run!` -- a 111x
 # wall-clock gap against a real casacore (Casacore.jl) cross-check on the
 # same MS.
+const _BITLUT_OK = Base.ENDIAN_BOM == 0x04030201
+const _BITLUT = UInt64[sum(UInt64((b >> j) & 1) << (8j) for j in 0:7) for b in 0:255]
+
 @inline function _rd_bits!(dest::AbstractVector{Bool}, doff::Int,
                            bytes::AbstractVector{UInt8}, base::Int, bitoff::Int, n::Int)
     n == 0 && return dest
@@ -77,19 +80,44 @@ end
         p = pointer(bytes) + base
         bytei = bitoff >> 3
         biti = bitoff & 7
-        byte = unsafe_load(p, bytei + 1)
-        @inbounds for k in 1:n
-            # lazy reload, only on the iteration that actually needs the
-            # next byte -- never fetches a byte past what `n` requires
-            # (an eager prefetch on every 8th bit could read one byte
-            # past a mmap/array that ends exactly on a byte boundary).
-            if biti == 8
-                biti = 0
-                bytei += 1
-                byte = unsafe_load(p, bytei + 1)
+        k = 0                                          # bits written so far
+        if biti != 0                                   # the rest of a partly used first byte
+            byte = unsafe_load(p, bytei + 1)
+            m = min(8 - biti, n)
+            @inbounds for j in 0:m-1
+                dest[doff + k + 1 + j] = (byte >> (biti + j)) & 0x01 == 0x01
             end
-            dest[doff + k] = (byte >> biti) & 0x01 == 0x01
-            biti += 1
+            k += m; bytei += 1
+        end
+        # whole bytes, eight bits at a time (a byte is only fetched when `n` needs it, so nothing past the
+        # end of a mmap/array that stops on a byte boundary is read)
+        nfull = (n - k) >> 3
+        if nfull > 0 && _BITLUT_OK && dest isa Vector{Bool}
+            # eight Bools per store: a lookup table maps a byte to the eight 0/1 bytes it unpacks to
+            # (little-endian lane order, hence the `_BITLUT_OK` guard)
+            checkbounds(dest, doff + k + 1:doff + k + 8 * nfull)
+            GC.@preserve dest begin
+                q = Ptr{UInt64}(pointer(dest, doff + k + 1))
+                @inbounds for i in 0:nfull-1
+                    unsafe_store!(q, _BITLUT[Int(unsafe_load(p, bytei + 1 + i)) + 1], i + 1)   # unaligned store: fine on x86-64 / ARM64
+                end
+            end
+            k += 8 * nfull; bytei += nfull
+        else
+            @inbounds for _ in 1:nfull
+                byte = unsafe_load(p, bytei + 1)
+                for j in 0:7
+                    dest[doff + k + 1 + j] = (byte >> j) & 0x01 == 0x01
+                end
+                k += 8; bytei += 1
+            end
+        end
+        r = n - k                                      # the leading bits of a last, partly used byte
+        if r > 0
+            byte = unsafe_load(p, bytei + 1)
+            @inbounds for j in 0:r-1
+                dest[doff + k + 1 + j] = (byte >> j) & 0x01 == 0x01
+            end
         end
     end
     return dest

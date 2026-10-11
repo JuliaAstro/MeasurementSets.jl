@@ -147,7 +147,7 @@ function _headerfile_get!(a::AipsIO, tsm::TiledStMan, t::Table)
     _check_count(a, ncol, "TiledStMan column")
     tsm.types = CasaType[casatype(read_i32(a)) for _ in 1:ncol]
     tsm.hyper = read_string(a)
-    version >= 3 ? read_scalar(a, UInt64) : read_u32(a)    # persMaxCacheSize
+    read_u32(a)                                            # persMaxCacheSize (a 32-bit uInt in every version)
     tsm.dims = Int(read_u32(a))
     1 <= tsm.dims <= 64 || error("TiledStMan: corrupt hypercube dimensionality $(tsm.dims)")
 
