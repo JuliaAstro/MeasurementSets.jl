@@ -3,6 +3,10 @@
 
 # cache opened data-manager instances on the table
 const _DM_CACHE = IdDict{Table,Dict{Int,Any}}()
+# `_DM_CACHE` is shared by every task reading any table: guard every access (Phase 392 -- two tasks racing to open
+# the first column of a fresh table corrupted the IdDict: a segfault / UndefRefError under `julia -t N`).
+# Reentrant, because opening a virtual engine opens its stored column's manager from inside `open`.
+const _DM_LOCK = ReentrantLock()
 
 _dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager")
 
@@ -11,7 +15,8 @@ _dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager"
 # datamanagers/datamanager.jl; each data manager registers itself into
 # them from its own file (e.g. standard.jl, virtual.jl).
 
-function _dm_instance(t::Table, sequ::Int)
+_dm_instance(t::Table, sequ::Int) = @lock _DM_LOCK _dm_instance_locked(t, sequ)
+function _dm_instance_locked(t::Table, sequ::Int)
     cache = get!(() -> Dict{Int,Any}(), _DM_CACHE, t)
     haskey(cache, sequ) && return cache[sequ]
     dm = t.managers[findfirst(d -> d.sequ == sequ, t.managers)]

@@ -302,3 +302,15 @@ end
     @test MSv2.update!(d; set=[esc("é") => esc("é") * " * 2"], where="rownumber() > 1") == N - 1
     @test column(readtable(d), "é")[2:end] == (2:N) .* 2
 end
+
+# Phase 392: reading the same table from many tasks at once.  `_DM_CACHE` (the opened data managers) and
+# the tiled managers' lazily filled caches were plain Dicts mutated on first access, so two tasks racing to
+# open the first column of a fresh table could corrupt them -- a segfault or UndefRefError under `julia -t N`
+# (about one run in two at 8 threads).  The child runs with 4 threads and compares every value with the serial read.
+@testset "concurrent reads of one table from many tasks (Phase 392)" begin
+    child = joinpath(@__DIR__, "threads_child.jl")
+    out = IOBuffer()
+    r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) -t 4 --project=$(dirname(@__DIR__)) --startup-file=no $child 30`); stdout=out, stderr=out))
+    @test r.exitcode == 0
+    @test occursin("ALL OK", String(take!(out)))
+end

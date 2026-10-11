@@ -36,7 +36,7 @@ function resync(t::Table)
     is_stale(t) || return t
     fresh = readtable(t.path; precision=t.precision)
     Base.@lock _REG_LOCK begin
-        delete!(_DM_CACHE, t)
+        @lock _DM_LOCK delete!(_DM_CACHE, t)
     end
     return fresh
 end
@@ -74,7 +74,7 @@ function resync(t::Union{RefTable,ConcatTable})
         "table directly, or persist it first (write_reftable/write_concattable)."))
     Base.@lock _REG_LOCK begin
         for p in (t isa RefTable ? (t.parent,) : t.parts)
-            p isa Table && delete!(_DM_CACHE, p)
+            p isa Table && @lock _DM_LOCK delete!(_DM_CACHE, p)
         end
     end
     return readtable(t.path; precision = _effective_precision(t))
@@ -85,9 +85,9 @@ resync(gt::GroupedTable) = gt
 function resync(ms::MeasurementSet)
     is_stale(ms) || return ms
     Base.@lock _REG_LOCK begin
-        delete!(_DM_CACHE, getfield(ms, :data))
+        @lock _DM_LOCK delete!(_DM_CACHE, getfield(ms, :data))
         for (_, sub) in getfield(ms, :tables)
-            delete!(_DM_CACHE, sub)
+            @lock _DM_LOCK delete!(_DM_CACHE, sub)
         end
     end
     return MeasurementSet(getfield(ms, :path))

@@ -44,7 +44,13 @@ function Base.open(::Type{VirtualTaQLColumn}, t::Table, dm::DataManagerInfo)
     return VirtualTaQLColumn(t, vdesc, expr, style, nothing, nothing, nothing, false)
 end
 
+# one-time lazy setup touches several fields; serialise it so a second task never sees it half done (Phase 392)
+const _VTQ_LOCK = ReentrantLock()
 function _vtq_prepare!(v::VirtualTaQLColumn)
+    v.prepared && return v
+    return @lock _VTQ_LOCK _vtq_prepare_locked!(v)
+end
+function _vtq_prepare_locked!(v::VirtualTaQLColumn)
     v.prepared && return v
     if !(isempty(v.style) || v.style in ("1", "base1"))
         @warn "VirtualTaQLColumn column \"$(v.vdesc.name)\": TaQL style " *
