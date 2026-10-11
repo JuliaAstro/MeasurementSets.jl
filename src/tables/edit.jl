@@ -77,6 +77,8 @@ function edit(path::AbstractString)
     Base.lock(lk.tlock)
     try
         lock_write!(lk)
+        _recover_commit(dir)                  # finish a commit an earlier session was killed in
+        _clean_stale_tmp(dir)                 # hidden siblings of a writer that died before its commit point
         r = readtable(dir; precision=:full)   # edits work at native precision
         r isa Table || error("edit: $(r isa RefTable ? "RefTable" : "ConcatTable") " *
                              "at $path — in-place edit is not supported")
@@ -89,6 +91,8 @@ function edit(path::AbstractString)
         any(m -> _is_virtualtaql_dm(m.name), r.managers) &&
             error("edit: $path has VirtualTaQLColumn columns computed from a stored " *
                   "TaQL expression — edit the source columns instead")
+        # the session keeps one row-map entry per row (8 bytes each)
+        _check_row_budget(r.rows, 8, "edit")
         return EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
                   Dict{String,Dict{Int,Any}}(),
                   Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false,
@@ -221,6 +225,14 @@ Base.getindex(c::EditColumn, ::Colon) = [c[i] for i in 1:length(c.tab.rowmap)]
 # A number that cannot be stored in a scalar numeric column (`Inf` or 1.5 into an Int32 column, 3e9 into Int32) used to
 # surface only at flush, as a bare InexactError from the writer; refuse it where it is assigned.
 function _check_scalar_cell(desc::ColumnDesc, v)
+    if desc.shape isa Dims && !isempty(desc.shape)
+        # a fixed-shape array column: a cell of another size used to be accepted here and fail at flush
+        # (a BoundsError deep in the writer, with the edit session's changes lost)
+        (v isa AbstractArray && size(v) == desc.shape) || throw(ArgumentError(
+            "column \"$(desc.name)\" holds cells of shape $(desc.shape); got " *
+            (v isa AbstractArray ? "an array of shape $(size(v))" : "a $(typeof(v))")))
+        return nothing
+    end
     desc.shape isa Dims && isempty(desc.shape) || return nothing
     J = try juliatype(desc.type) catch; return nothing end
     # a string into a numeric column (or a number into a String column) used to surface at flush as a bare MethodError from the writer
@@ -299,16 +311,45 @@ end
 
 # --- materialisation --------------------------------------------
 
+# Rough in-memory cost of one materialised cell (a boxed element of a `Vector{Any}`), for the memory
+# budget: an edit session regenerates a column from per-cell values, so a table whose column cannot
+# fit in memory (5e9 rows) used to run for hours, growing until the machine swapped.
+function _cell_cost(t::EditTable, c::ColumnDesc)
+    (c.shape isa Dims && isempty(c.shape)) && return c.type == TpString ? 64 : 32
+    t.reader.rows > 0 || return 64
+    cell = column(t.reader, c.name)[1]
+    return 64 + (cell isa AbstractArray ? sizeof(cell) : 0)
+end
+
+_identity_rowmap(t::EditTable) = all(i -> @inbounds(t.rowmap[i] == i), eachindex(t.rowmap))
+
+# every cell of `name` as a `Vector{Any}` aligned with `t.rowmap`: a scalar column that has not been
+# reordered is read in one bulk pass (a per-cell read of a run-length-stored column redoes an index
+# lookup for each row -- 150 s for 3e8 rows against ~1 s)
+function _read_cells_any(t::EditTable, c::ColumnDesc, name::AbstractString, edits=nothing)
+    _check_row_budget(length(t.rowmap), _cell_cost(t, c), "edit of column \"$name\"")
+    col = t.reader.rows > 0 ? column(t.reader, name) : nothing
+    if (edits === nothing || isempty(edits)) && col !== nothing && c.shape isa Dims && isempty(c.shape) && _identity_rowmap(t) &&
+       length(t.rowmap) == t.reader.rows
+        return Vector{Any}(col[:])
+    end
+    v = Vector{Any}(undef, length(t.rowmap))
+    @inbounds for (i, src) in enumerate(t.rowmap)
+        if edits !== nothing && haskey(edits, i)
+            v[i] = edits[i]
+        elseif src > 0
+            v[i] = col[src]
+        else
+            v[i] = _default_cell(c, t)
+        end
+    end
+    return v
+end
+
 # pull the whole column into `t.override`, aligned with `t.rowmap`
 function _materialize!(t::EditTable, name::AbstractString)
     haskey(t.override, name) && return
-    c = columndesc(t.reader, name)
-    col = t.reader.rows > 0 ? column(t.reader, name) : nothing
-    v = Vector{Any}(undef, length(t.rowmap))
-    @inbounds for (i, src) in enumerate(t.rowmap)
-        v[i] = src > 0 ? col[src] : _default_cell(c, t)
-    end
-    t.override[name] = v
+    t.override[name] = _read_cells_any(t, columndesc(t.reader, name), name)
 end
 
 # a length-`_nrows(t)` value vector for `name`, honouring every pending edit
@@ -317,20 +358,7 @@ function _resolve(t::EditTable, name::AbstractString)
     a = _added(t, name)
     a !== nothing && return a[3]
     c = columndesc(t.reader, name)
-    e = get(t.tsmedit, name, nothing)
-    col = nothing
-    v = Vector{Any}(undef, length(t.rowmap))
-    for (i, src) in enumerate(t.rowmap)
-        if e !== nothing && haskey(e, i)
-            v[i] = e[i]
-        elseif src > 0
-            col === nothing && (col = column(t.reader, name))
-            v[i] = col[src]
-        else
-            v[i] = _default_cell(c, t)
-        end
-    end
-    return v
+    return _read_cells_any(t, c, name, get(t.tsmedit, name, nothing))
 end
 
 # cheap per-row dimensionality probe for a variable-shape column
@@ -597,6 +625,13 @@ end
 # --- flush ----------------------------------------------------
 
 # rowmap is the identity prefix of the reader rows, then only appended rows
+# Tile edits are patched into the tile file IN PLACE, which no commit can undo; replacing other files in the same
+# flush would leave a killed process with a mixture (some tiles new, everything else old).  A flush that does both
+# takes the regenerating path instead, whose single commit is all-or-nothing.  (A flush of tile edits alone is
+# still in place, each cell patched on its own.)
+_mixes_inplace(t::EditTable) =
+    any(!isempty, values(t.tsmedit)) && (!isempty(t.override) || length(t.rowmap) > t.reader.rows)
+
 function _append_only(t::EditTable)
     n = t.reader.rows
     length(t.rowmap) >= n &&
@@ -670,19 +705,22 @@ function Base.flush(t::EditTable)
     grew = newrows > t.reader.rows
     lk = t.lk
     try
-        old = read_syncinfo(lk)
-        if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
-           !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
-           !(grew && _has_engine(t)) && !_engine_touched(t) &&  # engines re-encode on regen
-           !(grew && _has_dysco(t)) && !_dysco_touched(t) &&  # Dysco always re-encodes on regen
-           _tiled_fast_ok(t)
-            nc, nd = _flush_fast(t)
-        else
-            nc, nd = _flush_regen(t)
+        # every file this flush replaces is committed together (see `_with_commit`): killing the process
+        # leaves the old table, or a journal that the next open rolls forward -- never a mixture
+        _with_commit(t.reader.path, lk) do
+            if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
+               !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
+               !(grew && _has_engine(t)) && !_engine_touched(t) &&  # engines re-encode on regen
+               !(grew && _has_dysco(t)) && !_dysco_touched(t) &&  # Dysco always re-encodes on regen
+               !_mixes_inplace(t) &&                              # see `_mixes_inplace`
+               _tiled_fast_ok(t)
+                nc, nd = _flush_fast(t)
+            else
+                nc, nd = _flush_regen(t)
+            end
+            _sync_or_defer!(lk, t.reader.path, newrows; ncolumn=nc, ndm=nd,
+                            tablechanged = !isempty(t.addcols) || !isempty(t.dropcols))
         end
-        write_syncinfo(lk, newrows; modifycounter = (old.present ? old.modifycounter : 0) + 1,
-                       ncolumn=nc, ndm=nd,
-                       tablechanged = !isempty(t.addcols) || !isempty(t.dropcols))
     finally
         _release_edit_lock!(t)
     end

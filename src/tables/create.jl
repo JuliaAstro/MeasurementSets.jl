@@ -1,5 +1,14 @@
 # High-level writers: create a table / MeasurementSet on disk.
 
+# The storage-manager writers keep row numbers in 32 bits (tables of any size are READ; casacore itself
+# switches to 64-bit forms above 2^31-1 rows, and files written here between 2^31 and 2^32 rows open in
+# casacore).  A larger row count used to fail deep in a writer with a bare InexactError.
+function _check_nrow_limit(nrow::Integer, what::AbstractString)
+    nrow <= typemax(UInt32) && return nothing
+    throw(ArgumentError("$what: $nrow rows exceed the $(typemax(UInt32)) this package can write " *
+                        "(it reads tables of any size)"))
+end
+
 # element CasaType a Julia value implies
 _casatype_of(::Type{Bool}) = TpBool
 _casatype_of(::Type{UInt8}) = TpUChar
@@ -272,6 +281,7 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            readme::AbstractString="")
     _check_storage(storage)
     _check_blocksize(blocksize)
+    _check_nrow_limit(nrow, "write_table")
     # Phase 226 fix: `storage=`/`blocksize=` are checked above, BEFORE
     # `mkpath` -- Phase 199's own fix for exactly this shape of problem
     # (a caller's typo turning into a silently-created stray directory,
@@ -600,6 +610,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
+    _check_nrow_limit(nrow, "write_table")
     pairs = columns isa AbstractDict ? collect(columns) :
             Tables.istable(columns) ?
                 [Symbol(n) => Tables.getcolumn(columns, Symbol(n))
@@ -683,6 +694,7 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
                           public::Record, private::Record, tablename::AbstractString,
                           type::AbstractString, subtype::AbstractString, readme::AbstractString,
                           storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
+    _check_nrow_limit(length(rows), "copytable")      # before any column is read
     descs = ColumnDesc[]
     data = Vector{Any}[]
     ism = Set{String}()

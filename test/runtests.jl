@@ -41,6 +41,8 @@ const SAMPLE_MS = get(ENV, "MEASUREMENTSETS_TEST_MS",
     include("engine_tests.jl")
     include("edit_tests.jl")
     include("lock_tests.jl")
+    include("bigtable_tests.jl")
+    include("crash_tests.jl")
     include("dysco_tests.jl")
     include("empty_undefined_tests.jl")
     include("corrupt_tests.jl")

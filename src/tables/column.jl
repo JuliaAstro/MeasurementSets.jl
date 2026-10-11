@@ -137,7 +137,26 @@ function Base.getindex(c::Column, i::Int)
     c.target === nothing ? v : _narrowvalue(v, c.target)   # single cell: cheap post-convert
 end
 
+# Bytes one cell of a column occupies once read (estimate; a variable-shape cell is a guess).
+function _cell_bytes(d::ColumnDesc)
+    J = juliatype(d.type)
+    unit = d.type == TpString ? 32 : d.type == TpBool ? 1 : sizeof(J)
+    d.shape isa Dims && return max(prod(d.shape; init=1), 1) * unit
+    return 64
+end
+
+# A whole-column read of a table too large for memory fails with a clear error (a 5e9-row Float64
+# column is 40 GB; the process used to be killed).  The bound is half of physical memory.
+function _check_read_budget(d::ColumnDesc, nrow::Integer)
+    need = Int128(nrow) * _cell_bytes(d)
+    need <= Sys.total_memory() ÷ 2 && return nothing
+    throw(ArgumentError("reading column \"$(d.name)\": $nrow rows would need about " *
+                        "$(round(Float64(need) / 2^30; digits=1)) GiB of memory " *
+                        "(machine has $(round(Sys.total_memory() / 2^30; digits=1)) GiB); read it in row ranges instead"))
+end
+
 function Base.getindex(c::Column, ::Colon)
+    _check_read_budget(c.desc, c.table.rows)
     # whole column: hand the narrowed element type down so the storage
     # manager decodes straight into a Float16/BFloat16 buffer (no wide
     # intermediate).  `astype === nothing` is byte-identical to before.
@@ -293,6 +312,7 @@ function _read_cells(c::AbstractVector, r)
     full = r isa AbstractUnitRange{<:Integer} && !isempty(r) &&
            first(r) == 1 && last(r) == length(c)
     vals = full ? c[:] : (c[i] for i in r)
+    _check_row_budget(length(r), 32, "copying a column")
     out = Vector{Any}(undef, length(r))
     @inbounds for (k, v) in enumerate(vals)
         out[k] = v isa AbstractArray ? Array(v) : v
