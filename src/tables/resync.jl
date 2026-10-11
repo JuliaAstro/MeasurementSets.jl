@@ -1,12 +1,12 @@
 # Coherent re-read after another process wrote the table.
 #
 # A `Table` (and the storage-manager instances cached for it in
-# `_DM_CACHE`) is a snapshot taken at `readtable` time.  When another
+# `Table.dmcache`) is a snapshot taken at `readtable` time.  When another
 # process appends rows / edits cells it bumps the `table.lock` sync
 # blob's modify counter.  `is_stale` reports that; `resync` re-opens.
 #
 # `resync` returns a NEW object -- the old `Table` and its cached data
-# managers are abandoned (and evicted from `_DM_CACHE`).  In-place
+# managers are abandoned (and evicted from `dmcache`).  In-place
 # per-data-manager `resync64` is deliberately not attempted.
 
 """
@@ -36,7 +36,7 @@ function resync(t::Table)
     is_stale(t) || return t
     fresh = readtable(t.path; precision=t.precision)
     Base.@lock _REG_LOCK begin
-        @lock _DM_LOCK delete!(_DM_CACHE, t)
+        _evict_dms!(t)
     end
     return fresh
 end
@@ -74,7 +74,7 @@ function resync(t::Union{RefTable,ConcatTable})
         "table directly, or persist it first (write_reftable/write_concattable)."))
     Base.@lock _REG_LOCK begin
         for p in (t isa RefTable ? (t.parent,) : t.parts)
-            p isa Table && @lock _DM_LOCK delete!(_DM_CACHE, p)
+            p isa Table && _evict_dms!(p)
         end
     end
     return readtable(t.path; precision = _effective_precision(t))
@@ -85,9 +85,9 @@ resync(gt::GroupedTable) = gt
 function resync(ms::MeasurementSet)
     is_stale(ms) || return ms
     Base.@lock _REG_LOCK begin
-        @lock _DM_LOCK delete!(_DM_CACHE, getfield(ms, :data))
+        _evict_dms!(getfield(ms, :data))
         for (_, sub) in getfield(ms, :tables)
-            @lock _DM_LOCK delete!(_DM_CACHE, sub)
+            _evict_dms!(sub)
         end
     end
     return MeasurementSet(getfield(ms, :path))

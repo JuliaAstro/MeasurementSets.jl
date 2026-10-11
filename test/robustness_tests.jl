@@ -325,3 +325,24 @@ end
     @test r.exitcode == 0
     @test occursin("ALL OK", String(take!(out)))
 end
+
+# Phase 394: a table that is no longer referenced is garbage collected.  The opened data managers (with their
+# mmaps and whole-file buffers) were kept in a global `IdDict{Table,...}`, so every table ever read -- and
+# everything it had opened -- stayed alive for the life of the process (2000 opens leaked 1.6 GB).  The cache
+# now lives on the `Table` itself.
+@testset "an unreferenced table is garbage collected (Phase 394)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["I" => collect(1:300), "S" => ["s$i" for i in 1:300], "V" => [rand(Float32, 8) for _ in 1:300]]; nrow=300)
+    function open_and_read()
+        t = readtable(d)
+        collect(column(t, "I")[:]); getcell(t, "V", 3); getcell(t, "S", 4)
+        @test length(t.dmcache) == 1                       # one SSM instance serves all three columns
+        return WeakRef(t)
+    end
+    refs = [open_and_read() for _ in 1:20]
+    GC.gc(); GC.gc(); GC.gc()
+    @test count(r -> r.value === nothing, refs) >= 19      # (the most recent may still sit in a register / slot)
+    # resync drops the old table's managers; the new table opens its own
+    t = readtable(d); column(t, "I")[1]; @test !isempty(t.dmcache)
+    MSv2._evict_dms!(t); @test isempty(t.dmcache) && column(t, "I")[2] == 2 && !isempty(t.dmcache)
+end

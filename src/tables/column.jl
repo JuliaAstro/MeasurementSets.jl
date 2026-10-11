@@ -1,12 +1,13 @@
 # Column data access: a lazy `Column <: AbstractVector` that dispatches to
 # the bound data manager.
 
-# cache opened data-manager instances on the table
-const _DM_CACHE = IdDict{Table,Dict{Int,Any}}()
-# `_DM_CACHE` is shared by every task reading any table: guard every access (Phase 392 -- two tasks racing to open
-# the first column of a fresh table corrupted the IdDict: a segfault / UndefRefError under `julia -t N`).
-# Reentrant, because opening a virtual engine opens its stored column's manager from inside `open`.
+
+# Guards every access to a table's `dmcache` (Phase 392 -- two tasks racing to open the first column of a fresh
+# table corrupted the cache: a segfault / UndefRefError under `julia -t N`).  Reentrant, because opening a
+# virtual engine opens its stored column's manager from inside `open`.
 const _DM_LOCK = ReentrantLock()
+# forget a table's opened data managers (they will be re-opened on the next read)
+_evict_dms!(t::Table) = @lock _DM_LOCK empty!(t.dmcache)
 
 _dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager")
 
@@ -17,7 +18,7 @@ _dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager"
 
 _dm_instance(t::Table, sequ::Int) = @lock _DM_LOCK _dm_instance_locked(t, sequ)
 function _dm_instance_locked(t::Table, sequ::Int)
-    cache = get!(() -> Dict{Int,Any}(), _DM_CACHE, t)
+    cache = t.dmcache
     haskey(cache, sequ) && return cache[sequ]
     dm = t.managers[findfirst(d -> d.sequ == sequ, t.managers)]
     T = _dmtype(dm.name)

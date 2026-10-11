@@ -201,7 +201,12 @@ struct Table <: AbstractTable
     lockpath::String           # joinpath(path, "table.lock")
     container::Union{Nothing,Container}   # MultiFile/MultiHDF5, if present (Phase 20)
     precision::Union{Symbol,DataType}     # :half / :full / Float16 / BFloat16 (see `readtable`)
+    dmcache::Dict{Int,Any}     # opened data-manager instances by sequence number, filled lazily (see `_dm_instance`)
 end
+# the data-manager cache lives ON the table (it used to be a global `IdDict{Table,...}` that kept every table ever
+# read -- and its mmaps and file buffers -- alive for good: 2000 table opens leaked 1.6 GB; Phase 394)
+Table(path, type, subtype, readme, version, rows, endian, desc, managers, syncmod, lockpath, container, precision) =
+    Table(path, type, subtype, readme, version, rows, endian, desc, managers, syncmod, lockpath, container, precision, Dict{Int,Any}())
 
 # Fetch a data manager's private file's whole bytes, transparently
 # resolving through a MultiFile/MultiHDF5 container when the table uses
