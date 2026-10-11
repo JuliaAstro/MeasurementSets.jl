@@ -6,7 +6,7 @@
 import Tables
 
 const _DOC_ROOT = dirname(@__DIR__)
-const _DOC_SKIP = ("Pkg.develop", "Pkg.add", "angular_separation(pointing", "correct_flux(pb, apparent_flux", "\"my.ms\"",
+const _DOC_SKIP = ("using Pkg", "Pkg.develop", "Pkg.add", "angular_separation(pointing", "correct_flux(pb, apparent_flux", "\"my.ms\"",
                    "dst.ms", "INSERT INTO t (A, B)", "SELECT A, B AS BB")
 
 function _doc_blocks(file)
