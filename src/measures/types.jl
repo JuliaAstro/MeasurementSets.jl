@@ -316,6 +316,9 @@ MeasFrame(; epoch=nothing, position=nothing, direction=nothing) =
 # be actively misleading, not just cosmetically odd -- a clear early
 # error is the right choice here, not a silent fallback.
 _all_finite(x) = all(isfinite(getfield(x, f)) for f in fieldnames(typeof(x)))
+# a latitude beyond the poles is not a direction (a tiny round-off excess is tolerated)
+_latitude_ok(::Any) = true
+_latitude_ok(d::MDirection) = abs(d.lat) <= pi / 2 + 1e-9
 
 # Docs fix: a `"""..."""` docstring is silently DROPPED (not attached to
 # anything, not even an error) if ANYTHING -- even a bare `# comment` --
@@ -340,6 +343,10 @@ function measconvert(m::Measure, R::Type{<:RefFrame}; frame::MeasFrame=MeasFrame
     reftype(m) === R && return m
     _all_finite(m) || throw(ArgumentError(
         "measconvert: $(typeof(m)) has a non-finite (NaN/±Inf) value — cannot convert"))
+    _latitude_ok(m) || throw(ArgumentError(
+        "measconvert: $(typeof(m)) has a latitude of $(m.lat) rad, beyond ±π/2"))
+    frame.direction === nothing || _latitude_ok(frame.direction) || throw(ArgumentError(
+        "measconvert: frame.direction has a latitude of $(frame.direction.lat) rad, beyond ±π/2"))
     for (nm, v) in ((:epoch, frame.epoch), (:position, frame.position), (:direction, frame.direction))
         v === nothing || _all_finite(v) || throw(ArgumentError(
             "measconvert: frame.$nm ($(typeof(v))) has a non-finite (NaN/±Inf) value — cannot convert"))

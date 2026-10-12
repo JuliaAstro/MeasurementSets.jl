@@ -126,7 +126,10 @@ the `BETA` (true `v/c`) convention -- `measconvert` it to `RADIO` /
 `OPTICAL` / etc. as needed.
 """
 function doppler(f::MFrequency, restfreq)
-    t = (f.hz / _hz(restfreq))^2
+    r = _hz(restfreq)
+    (isfinite(r) && r > 0 && isfinite(f.hz) && f.hz >= 0) || throw(ArgumentError(
+        "doppler: the frequency ($(f.hz) Hz) and rest frequency ($r Hz) must be finite and positive"))
+    t = (f.hz / r)^2
     MDoppler{BETA}((1 - t) / (1 + t))
 end
 # Phase 224 fix: unlike its sibling above -- whose `t = (f/restfreq)^2
