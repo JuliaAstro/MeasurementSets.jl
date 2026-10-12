@@ -378,7 +378,19 @@ _tqleval(e::TQLCol, cols, i) = _widen(cols[e.name][i])    # real TaQL reads colu
 _tqleval(e::TQLLit, cols, i) = e.value
 _tqleval(e::TQLQuantityLit, cols, i) = e.value
 _tqleval(e::TQLArrayLit, cols, i) = [_tqleval(x, cols, i) for x in e.elems]
-_tqleval(e::TQLCmp, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
+# Comparing a string with a number is a type error in real TaQL; in Julia it
+# is silently `false` (so `NAME == 5`, or a number quoted by mistake, selected
+# nothing without a word).
+_tql_kind(x) = x isa AbstractString ? :str : x isa Number ? :num :
+    x isa AbstractArray ? (eltype(x) <: AbstractString ? :str : eltype(x) <: Number ? :num : :other) : :other
+function _tql_cmp(op, a, b)
+    ka = _tql_kind(a); kb = _tql_kind(b)
+    ((ka === :str && kb === :num) || (ka === :num && kb === :str)) && throw(ArgumentError(
+        "TaQL-lite: cannot compare a string with a number ($(repr(a)[1:min(end,30)]) vs $(repr(b)[1:min(end,30)]))"))
+    return _bcast(op, a, b)
+end
+
+_tqleval(e::TQLCmp, cols, i) = _tql_cmp(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
 _tqleval(e::TQLAnd, cols, i) = _tql_and(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLOr, cols, i) = _tql_or(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLNot, cols, i) = _bcast(!, _tqleval(e.a, cols, i))

@@ -132,6 +132,32 @@ result:
 copytable("/tmp/cal.tab", query(ms.MAIN, "FIELD_ID == 3"))
 ```
 
+A selection can also be kept as a *reference* instead of a copy —
+[`write_reftable`](@ref) stores only the row numbers (casacore's RefTable, what a
+TaQL `SELECT … GIVING '<path>'` writes), and [`write_concattable`](@ref) a virtual
+concatenation of same-schema tables:
+
+```julia
+sel = query(ms.MAIN, "ANTENNA1 == 3")
+write_reftable("/tmp/field1.tab", ms.MAIN, getfield(sel, :rows))       # a few KB, whatever the selection holds
+nrow(readtable("/tmp/field1.tab")) == nrow(sel)
+
+a = write_table("/tmp/part_a", "T", ["X" => [1.0, 2.0]]; nrow = 2)
+b = write_table("/tmp/part_b", "T", ["X" => [3.0]]; nrow = 1)
+write_concattable("/tmp/ab", [readtable("/tmp/part_a"), readtable("/tmp/part_b")])
+column(readtable("/tmp/ab"), "X")[:]                                   # [1.0, 2.0, 3.0]
+```
+
+`write_ms(dst, ms; rows, subtables, subtable_rows)` is the general form of
+`copyms` (it takes an opened `MeasurementSet`; `copyms` takes either).
+
+Any [Tables.jl](https://tables.juliadata.org) source can be written:
+`write_table(dir, "T", df)` takes a DataFrame, a `Vector{NamedTuple}` or a
+dictionary of vectors, and `nrow` is the first column's length. A
+`Union{T,Missing}` column without a missing value is stored as `T`; a missing
+value is an error that names the row, because casacore columns cannot hold
+them.
+
 ## Editing in place
 
 ```julia
@@ -158,6 +184,27 @@ end
 The flush runs under an exclusive `table.lock` and updates the sync blob,
 so a concurrent casacore reader re-syncs. [`is_stale`](@ref) /
 [`resync`](@ref) let a long-lived reader notice an external write.
+
+`t[:A][i] = v` and `t[:A][:] = vals` have function forms, `setcell!(t, "A", i, v)`
+and `setcolumn!(t, "A", vals)`. A cell is checked when it is assigned: a string
+into a numeric column, an array into a scalar column, or an array of the wrong
+shape into a fixed-shape column is an `ArgumentError` there, not a failure at flush.
+
+A [`RefTable`](@ref) or [`ConcatTable`](@ref) can be edited too — `edit` of one
+writes through to the real table (or the right part) at the translated row, as
+casacore does:
+
+```julia
+sel = query(ms.MAIN, "ANTENNA1 == 3")
+edit(sel) do t
+    t[:SCAN_NUMBER][1] = 99                  # row 1 of the selection = its parent's row
+end
+```
+
+The schema and keywords of a table on disk can be changed without reading it:
+`renamecolumn!(path, "OLD", "NEW")`, `setkeyword!(path, "KW", value)`,
+`renamekeyword!(path, "OLD", "NEW")` and `removekeyword!(path, "KW")` — the
+same as `ALTER TABLE` through [`taql`](@ref).
 
 The files one flush replaces are committed together: they are written under
 hidden names and a journal (`table.commit`) is renamed into place before they

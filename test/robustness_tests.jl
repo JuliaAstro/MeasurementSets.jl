@@ -500,3 +500,17 @@ import Tables
     @test_throws ArgumentError renamecolumn!(d, "A", "")
     @test columnnames(readtable(d)) == ["A"]
 end
+
+@testset "Phase 405 — opening / overwriting something that is not (or already is) a table" begin
+    d = mktempdir()
+    mkpath(joinpath(d, "empty"))
+    for f in (readtable, MeasurementSets.MeasurementSet, p -> edit(identity, p))
+        @test_throws ArgumentError f(joinpath(d, "empty"))
+        @test_throws ArgumentError f(joinpath(d, "nope"))
+    end
+    # a directory the user created first is fine; an existing table is not overwritten
+    write_table(joinpath(d, "empty"), "T", ["A" => [1, 2]]; nrow = 2)
+    @test column(readtable(joinpath(d, "empty")), "A")[:] == [1, 2]
+    @test_throws ErrorException write_table(joinpath(d, "empty"), "T", ["A" => [9]]; nrow = 1)
+    @test column(readtable(joinpath(d, "empty")), "A")[:] == [1, 2]
+end

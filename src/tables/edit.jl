@@ -39,6 +39,13 @@ mutable struct EditTable
     released::Bool        # guards against releasing `lk` twice (flush + an error path)
 end
 
+# A flushed (or aborted) session has released its lock and committed its
+# state: a later write would be silently lost, so refuse it.
+_check_open(t::EditTable, what::AbstractString) =
+    (t.flushed || t.released) &&
+        throw(ArgumentError("$what: this edit session is already closed (flushed or aborted); " *
+                            "open a new one with edit(path)"))
+
 struct EditColumn{T} <: AbstractVector{T}
     tab::EditTable
     desc::ColumnDesc
@@ -73,6 +80,8 @@ locked for the rest of the process.
 """
 function edit(path::AbstractString)
     dir = String(rstrip(path, '/'))
+    isdir(dir) || throw(ArgumentError("not a table directory: $dir"))
+    _check_is_table(dir)
     lk = open_lock(dir; create=true)
     Base.lock(lk.tlock)
     try
@@ -253,6 +262,7 @@ function _check_scalar_cell(desc::ColumnDesc, v)
 end
 
 function Base.setindex!(c::EditColumn, v, i::Int)
+    _check_open(c.tab, "setindex!")
     @boundscheck 1 <= i <= length(c.tab.rowmap) || throw(BoundsError(c, i))
     t = c.tab; n = c.desc.name
     _check_scalar_cell(c.desc, v)
@@ -268,6 +278,7 @@ function Base.setindex!(c::EditColumn, v, i::Int)
     return v
 end
 function Base.setindex!(c::EditColumn, vals, ::Colon)
+    _check_open(c.tab, "setindex!")
     length(vals) == length(c.tab.rowmap) ||
         error("assigning $(length(vals)) values to a $(length(c.tab.rowmap))-row column")
     for (i, v) in enumerate(vals)
@@ -400,6 +411,7 @@ row's value (the "store on change" file simply has no entry for them) --
 write the values you want rather than relying on either default.
 """
 function addrows!(t::EditTable, n::Integer)
+    _check_open(t, "addrows!")
     n >= 0 || error("addrows!: n must be >= 0")
     n == 0 && return t
     _check_row_budget(n, 8 * (1 + length(t.override) + length(t.addcols)), "addrows!")
@@ -421,6 +433,7 @@ Delete `rows` (1-based indices into the current row set).  Forces the
 regen persist path on flush.
 """
 function removerows!(t::EditTable, rows)
+    _check_open(t, "removerows!")
     idx = sort!(unique(Int[(r isa Integer || (r isa AbstractFloat && isfinite(r) && isinteger(r) && abs(r) < 2.0^62)) ? Int(r) :
                            throw(ArgumentError("removerows!: row numbers must be integers, got $(repr(r))")) for r in rows]))
     isempty(idx) && return t
@@ -473,6 +486,7 @@ new/shared StandardStMan (`:ssm`), IncrementalStMan (`:ism`) or a
 per-column TiledShapeStMan (`:tsm`).
 """
 function addcolumn!(t::EditTable, name::AbstractString; kind::Symbol=:ssm)
+    _check_open(t, "addcolumn!")
     _check_column_name(name, "addcolumn!")
     _check_kind(kind)
     _check_new_col(t, name)
@@ -565,6 +579,7 @@ end
 function addcolumn!(t::EditTable, name::AbstractString, data::AbstractVector;
                     kind::Symbol=:ssm, type::Union{CasaType,Nothing}=nothing,
                     shape=nothing)
+    _check_open(t, "addcolumn!")
     _check_column_name(name, "addcolumn!")
     _check_kind(kind)
     _check_new_col(t, name)
@@ -617,6 +632,7 @@ that instance's files are deleted on flush.  Removing `"ANTENNA1"` /
 see `_dysco_dependents`.
 """
 function removecolumn!(t::EditTable, name::AbstractString)
+    _check_open(t, "removecolumn!")
     if _added(t, name) !== nothing
         filter!(x -> x[1].name != name, t.addcols)
         return t

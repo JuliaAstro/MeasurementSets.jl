@@ -1918,3 +1918,21 @@ end
     @test_throws ArgumentError MSv2.faraday_rotation("1", 1e9)
     @test MSv2.doppler(f, 1.42e9) isa MSv2.MDoppler && MSv2.faraday_rotation(2.0, f) == MSv2.faraday_rotation(2.0, 1.4e9)
 end
+
+@testset "Phase 409 — measures refuse nonsensical inputs instead of returning NaN / garbage" begin
+    e = MEpoch{UTC}(60000.0)
+    @test_throws ArgumentError measconvert(MDirection{J2000}(0.0, 5.0), GALACTIC)
+    @test_throws ArgumentError measconvert(MDirection{J2000}(0.0, -2.0), GALACTIC)
+    @test measconvert(MDirection{J2000}(0.0, π / 2 + 1e-12), GALACTIC) isa MDirection   # round-off excess tolerated
+    @test_throws ArgumentError measconvert(MFrequency{TOPO}(1e9), LSRK;
+        frame = MeasFrame(epoch = e, position = MPosition{ITRF}(6.4e6, 0, 0), direction = MDirection{J2000}(0.0, 4.0)))
+    f = MFrequency{TOPO}(1.4e9)
+    @test_throws ArgumentError doppler(f, 0.0)
+    @test_throws ArgumentError doppler(f, -1e9)
+    @test_throws ArgumentError doppler(f, NaN)
+    @test_throws ArgumentError doppler(MFrequency{TOPO}(-1.0), 1e9)
+    @test doppler(f, 1.42e9) isa MDoppler{BETA}
+    @test_throws ArgumentError earthfield(MPosition{ITRF}(0.0, 0.0, 0.0), e)
+    @test_throws ArgumentError earthfield(MPosition{ITRF}(NaN, 0.0, 1.0), e)
+    @test all(isfinite, (b = earthfield(MPosition{ITRF}(6.4e6, 0.0, 0.0), e); (b.x, b.y, b.z)))
+end

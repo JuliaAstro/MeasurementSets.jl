@@ -134,6 +134,8 @@ negligible for the 5-year-interpolated model).
 """
 function earthfield(pos::MPosition, epoch::MEpoch)
     r = hypot(pos.x, pos.y, pos.z)
+    (isfinite(r) && r > 0) || throw(ArgumentError(
+        "earthfield: the position must be finite and away from the Earth's centre, got $pos"))
     lon = atan(pos.y, pos.x)
     lat = asin(clamp(pos.z / r, -1.0, 1.0))
     MEarthMagnetic{ITRF}(_earthfield_itrf(_igrf_gh(epoch.mjd), r, lon, lat)...)

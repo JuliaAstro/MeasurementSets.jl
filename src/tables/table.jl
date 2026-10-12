@@ -444,6 +444,12 @@ function _normalize_precision(p)
     return q
 end
 
+# a directory with neither `table.dat` nor an interrupted commit's journal
+# is not a table (a bare SystemError otherwise).
+_check_is_table(dir::AbstractString) =
+    (isfile(joinpath(dir, "table.dat")) || isfile(joinpath(dir, COMMIT_JOURNAL))) ||
+        throw(ArgumentError("not a table directory (no table.dat): $dir"))
+
 """
     readtable(path) -> Table | RefTable | ConcatTable
 
@@ -477,6 +483,7 @@ they rely on the writers' atomic renames.
 function readtable(path::AbstractString; precision::Union{Nothing,Symbol,Type}=nothing)
     dir = String(rstrip(path, '/'))
     isdir(dir) || throw(ArgumentError("not a table directory: $dir"))
+    _check_is_table(dir)
     _recover_commit(dir)                      # complete a commit that was interrupted after its journal was written
     lockpath = joinpath(dir, "table.lock")
     tp, st, readme = read_tableinfo(dir)
@@ -651,6 +658,8 @@ function write_reftable(dir::AbstractString, parent::AbstractTable,
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     any(x -> x < 1, rows) && throw(ArgumentError("write_reftable: row indices are 1-based"))
+    all(x -> x <= nrow(parent), rows) || throw(ArgumentError(
+        "write_reftable: row $(maximum(rows)) is outside 1:$(nrow(parent))"))
 
     namemap, order = _select_spec(parent, select)
     root, rootrows, rootnamemap = _flatten_to_root(parent, Int.(collect(rows)), namemap)

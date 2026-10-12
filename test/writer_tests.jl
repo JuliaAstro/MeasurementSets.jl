@@ -423,3 +423,24 @@ end
     d = w(["C" => (i for i in 1:N), "D" => (1.0, 2.0, 3.0, 4.0), "E" => 1:N])  # generators, tuples and ranges are still fine
     @test column(readtable(d), "C")[:] == 1:N && column(readtable(d), "D")[:] == [1.0, 2.0, 3.0, 4.0]
 end
+
+@testset "Phase 407 — copy/persist verbs refuse overlapping or out-of-range arguments; zero-row MS" begin
+    d = mktempdir()
+    src = joinpath(d, "ms")
+    ms0 = create_ms(src; nrow = 6, nant = 3)
+    # destination inside the source (or equal to it) is refused, nothing written
+    @test_throws ArgumentError copyms(src, joinpath(src, "inner"))
+    @test !isdir(joinpath(src, "inner"))
+    @test_throws ArgumentError copyms(src, d)               # source inside destination
+    @test_throws ArgumentError copytable(joinpath(src, "ANTENNA", "x"), readtable(joinpath(src, "ANTENNA")))
+    # write_reftable rows must exist in the parent; nothing is created on error
+    t = readtable(joinpath(src, "ANTENNA"))
+    @test_throws ArgumentError write_reftable(joinpath(d, "r"), t, [nrow(t) + 1])
+    @test !ispath(joinpath(d, "r"))
+    # a zero-row MS can be created, opened and extended
+    z = create_ms(joinpath(d, "zero"); nrow = 0)
+    @test nrow(MeasurementSet(z)) == 0
+    @test isempty(validate(MeasurementSet(z)))
+    edit(z) do s; addrows!(s, 2); end
+    @test nrow(readtable(z)) == 2
+end
