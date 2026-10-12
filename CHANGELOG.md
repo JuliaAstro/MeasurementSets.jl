@@ -11190,3 +11190,10 @@ Twenty-eight kinds of input were fed to `write_table` (a row table, a column tab
 - **`nrow=` is optional** for a table with columns: it is the first column's length (a table with no columns, or a bad source, still needs it or says so).
 - **Fixed:** duplicate column names (`[:A => x, :A => y]`) wrote two columns with the same name; it is an `ArgumentError`. An element that is not a `name => vector` pair (a partitioned table passed as `columns`) is an `ArgumentError` saying what `columns` may be.
 - **Fixed:** a column named `""` was written without complaint, and both our reader and casacore then returned **another column's data** for it; an empty name is refused by `write_table`, `addcolumn!` and `renamecolumn!`.
+
+### Phase 403 — whole-MS workflows
+
+The read side was checked first — sum / mean / sort / broadcast / `stack` / `reduce(hcat, …)` over lazy columns, the REPL display of every table kind (including a 9.8M-row column: it shows a few rows and reads no more) — and found nothing. Then the things done with a whole MS: append one MS's rows to another, cut a selection into a new MS, flag or delete rows, add the calibration columns.
+- `insert!(target, source)` takes the **path** of a table or MeasurementSet as `source` (a string used to be taken as the values, and refused); `INSERT INTO t SELECT FROM 'path' [WHERE …]` accepts an empty column list (every column), as TaQL does.
+- `copyms` accepts an opened `MeasurementSet` as well as a path, so `copyms(ms, dst; rows = query(ms, …).rows)` cuts a selection into a new MS.
+- `MODEL_DATA` and `CORRECTED_DATA` (what CASA calibration and imaging add; present in every casatools-simulated MS, which the Phase 330 comparison already listed) are optional columns of the schema, so `addcolumn!(t, "CORRECTED_DATA")` works — it failed with "not a standard column". The default cells of those two and of `WEIGHT_SPECTRUM` / `SIGMA_SPECTRUM` have the shape of the row's `DATA` cell (they used to be empty arrays).

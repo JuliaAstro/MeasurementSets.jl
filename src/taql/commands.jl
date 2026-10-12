@@ -454,6 +454,10 @@ end
 
 Base.insert!(target::Union{AbstractString,AbstractTable}, source; kw...) =
     insert!(target; values=source, kw...)
+# a string source is the path of a table (or MeasurementSet) whose rows are appended
+Base.insert!(target::Union{AbstractString,AbstractTable}, source::AbstractString; kw...) =
+    insert!(target; values=(isdir(source) || throw(ArgumentError("insert!: no table at \"$source\""));
+                            readtable(source)), kw...)
 
 _ins_row(x::NamedTuple) = Dict{String,Any}(_tql_name(k, "insert!: column name") => v for (k, v) in pairs(x))
 _ins_row(x::AbstractVector{<:Pair}) =
@@ -1368,11 +1372,11 @@ function _taql_insert(target, cmd::AbstractString)
         limit = Int(_taql_const(tm.captures[2]))
         cmd = String(tm.captures[1])
     end
-    msel = match(r"^INSERT\s+INTO\s+\S+\s*(?:\(([^)]*)\)\s*)?SELECT\s+(.*?)\s+FROM\s+(?:'([^']+)'|(\w+))\s*" *
+    msel = match(r"^INSERT\s+INTO\s+\S+\s*(?:\(([^)]*)\)\s*)?SELECT(?:\s+(.*?))?\s+FROM\s+(?:'([^']+)'|(\w+))\s*" *
                 r"(?:WHERE\s+(.+))?\s*$"is, cmd)
     if msel !== nothing
         tcols = msel.captures[1] === nothing ? nothing : _taql_unescape.(strip.(split(msel.captures[1], ',')))
-        collist = String(strip(msel.captures[2]))
+        collist = msel.captures[2] === nothing ? "*" : String(strip(msel.captures[2]))     # `SELECT FROM 'p'`: every column
         # `FROM 'path'` reads another table; a bare `FROM name` is the target itself
         # (real TaQL's `INSERT INTO t SELECT ... FROM t`; Phase 247)
         src = msel.captures[3] !== nothing ? readtable(String(msel.captures[3])) :

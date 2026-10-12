@@ -479,9 +479,24 @@ function addcolumn!(t::EditTable, name::AbstractString; kind::Symbol=:ssm)
     sc = _lookup_stdcol(name)
     kw = name == "FLAG_CATEGORY" ? _flag_category_kw() : Record()
     desc = _mkdesc(name, sc.type, _stdshape(sc.shape); keywords = kw)
-    data = Any[_default_cell(desc, t) for _ in 1:length(t.rowmap)]
+    data = _sibling_cells(t, desc)
+    data === nothing && (data = Any[_default_cell(desc, t) for _ in 1:length(t.rowmap)])
     push!(t.addcols, (desc, kind, data))
     return t
+end
+
+# The visibility-shaped columns (MODEL_DATA, CORRECTED_DATA, WEIGHT_SPECTRUM, SIGMA_SPECTRUM) hold one value per
+# channel and correlation, as DATA / FLAG do: each row's default cell has the shape of that row's DATA (or FLAG)
+# cell, not the empty cell a column with no shape to copy gets.
+function _sibling_cells(t::EditTable, desc::ColumnDesc)
+    desc.name in ("MODEL_DATA", "CORRECTED_DATA", "WEIGHT_SPECTRUM", "SIGMA_SPECTRUM") || return nothing
+    sib = findfirst(in(columnnames(t.reader)), ("DATA", "FLAG", "FLOAT_DATA"))
+    sib === nothing && return nothing
+    t.reader.rows > 0 || return nothing
+    col = column(t.reader, ("DATA", "FLAG", "FLOAT_DATA")[sib])
+    J = juliatype(desc.type)
+    last = size(col[t.reader.rows])
+    return Any[zeros(J, src > 0 ? size(col[src]) : last) for src in t.rowmap]
 end
 
 # Build a new column's `ColumnDesc` from a length-agnostic sample of its

@@ -213,14 +213,15 @@ const _CASACORE_SIM_COLUMNS = [
         st = stdtable(tab)
         @test st !== nothing
         i = findfirst(c -> c.name == col, st.columns)
-        i === nothing && (@test col in ("MODEL_DATA", "CORRECTED_DATA"); continue)
+        @test i !== nothing
+        i === nothing && continue
         c = st.columns[i]; nchecked += 1
         @test c.type == vt[t]
         # casatools: scalar -> -1; a few columns (SOURCE.DIRECTION / PROPER_MOTION / POSITION in the simulator's
         # SOURCE table) report no rank at all, which is not a disagreement
         c.shape isa Tuple && (isempty(c.shape) || nd != -1) && @test (isempty(c.shape) ? -1 : length(c.shape)) == nd
     end
-    @test nchecked == length(_CASACORE_SIM_COLUMNS) - 2
+    @test nchecked == length(_CASACORE_SIM_COLUMNS)      # MODEL_DATA / CORRECTED_DATA are in the schema since Phase 403
     for tab in unique(first.(_CASACORE_SIM_COLUMNS))
         have = Set(c[2] for c in _CASACORE_SIM_COLUMNS if c[1] == tab)
         @test all(c.name in have for c in stdtable(tab).columns if c.required)

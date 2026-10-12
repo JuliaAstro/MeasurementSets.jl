@@ -1177,6 +1177,10 @@ copyms(src::AbstractString, dst::AbstractString; rows=Colon(), subtables=Colon()
       subtable_rows::AbstractDict=Dict{String,Any}(),
       storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE) =
     write_ms(dst, MeasurementSet(src); rows, subtables, subtable_rows, storage, blocksize)
+copyms(src::MeasurementSet, dst::AbstractString; rows=Colon(), subtables=Colon(),
+       subtable_rows::AbstractDict=Dict{String,Any}(),
+       storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE) =
+    write_ms(dst, src; rows, subtables, subtable_rows, storage, blocksize)
 
 # --- synthesise a minimal standard MS -----------------------------
 
