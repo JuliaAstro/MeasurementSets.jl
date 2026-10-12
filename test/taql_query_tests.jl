@@ -5622,7 +5622,7 @@ end
         @test err isa ArgumentError
     end
     @test occursin("operator *", sprint(showerror, try; ev("S*2"); catch x; x; end))
-    @test ev("S + 'x'") == ["ax", "bbx", "cccx", "dx"] && ev("S == I") == falses(4) && ev("B * B") == [true, false, true, false]
+    @test ev("S + 'x'") == ["ax", "bbx", "cccx", "dx"] && ev("B * B") == [true, false, true, false]
     # group aggregates over values they cannot reduce
     ga(q) = groupby(t, "K"; select=["K" => "K", "r" => q])
     for q in ("gmean(S)", "gsum(S)", "gall(I)", "gany(S)", "gmedian(S)", "gnfalse(S)", "gmeans(VS)", "galls(V)")
@@ -5636,5 +5636,23 @@ end
     if isdir(SAMPLE_MS)                       # a non-array operand to mscal.stokes (needs the MS subtables)
         ms = readtable(SAMPLE_MS)
         @test_throws ArgumentError collect(column(query(ms, "rownumber() < 3"; select=["r" => "mscal.stokes(ANTENNA1, 'I')"]), "r")[:])
+    end
+end
+
+@testset "Phase 408 — comparing a string with a number is an error, not an empty result" begin
+    d = mktempdir(); p = joinpath(d, "t")
+    write_table(p, "T", ["N" => [1, 2, 3], "S" => ["a", "b", "c"], "SA" => [["a", "b"], ["c", "d"], ["e", "f"]]]; nrow = 3)
+    t = readtable(p)
+    for w in ("S == 5", "N == 'a'", "S < 1", "5 != S", "SA == 3")
+        @test_throws ArgumentError query(t, w)
+    end
+    @test nrow(query(t, "S == 'b'")) == 1
+    @test nrow(query(t, "N >= 2")) == 2
+    @test nrow(query(t, "any(SA == 'a')")) == 1
+    @test_throws ArgumentError groupby(t, "N"; select = ["n" => "gcount()"], having = "S == 1")
+    if _HAVE_TAQL                                  # real TaQL rejects the same comparisons
+        for w in ("S == N", "S == 5", "N == 'a'", "S != 5", "S < N")
+            @test_throws Exception _taqlcmd("SELECT FROM \$1 WHERE $w GIVING '$(tempname())' AS PLAIN", p)
+        end
     end
 end
