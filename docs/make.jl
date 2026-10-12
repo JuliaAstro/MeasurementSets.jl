@@ -10,7 +10,7 @@ using Documenter, MeasurementSets
 # them. Splitting only ever happens here at build time; the repo-root
 # CHANGELOG.md itself stays one plain, ungrouped file (normal for
 # GitHub, which has no such limit).
-const CHANGELOG_CHUNK_BYTES = 55_000   # raw-markdown budget per page (~95 KiB HTML observed, under the 100 KiB warn threshold)
+const CHANGELOG_CHUNK_BYTES = 48_000   # raw-markdown budget per page (~90 KiB HTML observed, under the 100 KiB warn threshold)
 
 changelog_pages = let src = read(joinpath(@__DIR__, "..", "CHANGELOG.md"), String)
     src = replace(src, "[README](README.md)" => "[Home](index.md)")
@@ -50,13 +50,16 @@ makedocs(
     format   = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
         canonical  = "https://juliaastro.org/MeasurementSets/stable/",
+        # the full changelog (hundreds of phases) dominates the search
+        # index; it only ever warns, never fails -- raised to 2 MiB.
+        search_size_threshold_warn = 2 * 2^20,
     ),
     repo     = Documenter.Remotes.GitHub("JuliaAstro", "MeasurementSets.jl"),
     pages = [
         "Home"          => "index.md",
         "Concepts"      => "concepts.md",
         "Guide"         => "guide.md",
-        "API reference" => ["api.md", "Part 2" => "api-2.md", "Measures" => "api-measures.md"],
+        "API reference" => ["api.md", "Part 2" => "api-2.md", "Primary beams" => "api-beams.md", "Measures" => "api-measures.md"],
         "Changelog"     => changelog_pages,
     ],
     checkdocs = :exported,

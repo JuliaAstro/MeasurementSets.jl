@@ -11197,3 +11197,13 @@ The read side was checked first — sum / mean / sort / broadcast / `stack` / `r
 - `insert!(target, source)` takes the **path** of a table or MeasurementSet as `source` (a string used to be taken as the values, and refused); `INSERT INTO t SELECT FROM 'path' [WHERE …]` accepts an empty column list (every column), as TaQL does.
 - `copyms` accepts an opened `MeasurementSet` as well as a path, so `copyms(ms, dst; rows = query(ms, …).rows)` cuts a selection into a new MS.
 - `MODEL_DATA` and `CORRECTED_DATA` (what CASA calibration and imaging add; present in every casatools-simulated MS, which the Phase 330 comparison already listed) are optional columns of the schema, so `addcolumn!(t, "CORRECTED_DATA")` works — it failed with "not a standard column". The default cells of those two and of `WEIGHT_SPECTRUM` / `SIGMA_SPECTRUM` have the shape of the row's `DATA` cell (they used to be empty arrays).
+
+### Phase 404 — documentation completion
+
+An audit of which exported names the prose pages (README, index, concepts, guide) never mention found 31 — mostly the persisting and in-place-editing verbs added after the guide was written. The Guide now covers them, all inside the executed docs-example test (every ```julia block runs against a copy of the sample MS):
+
+- **Persisting a selection**: `write_reftable(dst, parent, rows)` (a lazy row-reference table other tools can open), `write_concattable(dst, parts)` (a virtual row-wise concatenation), and `write_ms` (a whole MS, with row slices per subtable).
+- **Tables.jl sources** into `write_table`: `Tables.columns` sources and row tables, optional `nrow=`, and how `Union{T,Missing}` columns are stored (as `T` when nothing is missing, a clear error naming the row when something is).
+- **Editing in place**: `setcell!` / `setcolumn!` (with cell validation), editing through a `RefTable` view (`edit(sel) do t …`), and the alter verbs `renamecolumn!`, `setkeyword!`, `renamekeyword!`, `removekeyword!`.
+
+The docs build itself is back under Documenter's size limits with zero warnings: the generated changelog pages are cut smaller (`CHANGELOG_CHUNK_BYTES` 55 000 → 48 000, the largest page 103 → 90 KiB), the API reference's primary-beam section moved to its own page (`api-beams.md`; `api-2.md` 101 → 87 KiB), and the search-index warning threshold is raised to 2 MiB (the full changelog dominates the index; it only ever warned).
