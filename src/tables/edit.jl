@@ -473,6 +473,7 @@ new/shared StandardStMan (`:ssm`), IncrementalStMan (`:ism`) or a
 per-column TiledShapeStMan (`:tsm`).
 """
 function addcolumn!(t::EditTable, name::AbstractString; kind::Symbol=:ssm)
+    _check_column_name(name, "addcolumn!")
     _check_kind(kind)
     _check_new_col(t, name)
     sc = _lookup_stdcol(name)
@@ -549,6 +550,7 @@ end
 function addcolumn!(t::EditTable, name::AbstractString, data::AbstractVector;
                     kind::Symbol=:ssm, type::Union{CasaType,Nothing}=nothing,
                     shape=nothing)
+    _check_column_name(name, "addcolumn!")
     _check_kind(kind)
     _check_new_col(t, name)
     length(data) == length(t.rowmap) ||

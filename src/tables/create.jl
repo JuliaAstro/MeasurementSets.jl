@@ -31,6 +31,10 @@ _casatype_of(::Type{Any}) = error(
     "write_table: cannot store a column of element type Any -- a column with no " *
     "rows (or of mixed types) has no element type to write; give it a concrete one " *
     "(e.g. `Float64[]`)")
+# an empty column name is not a name casacore tables can hold (both readers return another column's data for it)
+_check_column_name(name::AbstractString, what::AbstractString) =
+    isempty(name) ? throw(ArgumentError("$what: a column name cannot be empty")) : nothing
+
 # why a column eltype cannot be stored, and what to do about it
 function _unsupported_eltype_message(::Type{T}) where {T}
     hint = T === Int8 ? "convert it with `Int16.(x)` (casacore has no 8-bit signed column)" :
@@ -628,7 +632,7 @@ so `write_table` -> `readtable` -> `qcolumn` / `measure` round-trips.
 explicitly and override the auto-detection for that column.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
-                     nrow::Integer, endian::Symbol=:little,
+                     nrow::Union{Nothing,Integer}=nothing, endian::Symbol=:little,
                      tsm=String[], tcm=String[], tcell=String[], ism=String[],
                      engines::AbstractDict=Dict{String,NamedTuple}(),
                      virtualtaql::AbstractDict=Dict{String,String}(),
@@ -640,12 +644,29 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
-    _check_nrow_limit(nrow, "write_table")
+    nrow === nothing || _check_nrow_limit(nrow, "write_table")
+    # a Tables.jl source is read through `Tables.columns` (a Vector{NamedTuple} or a partitioned table has no
+    # columns of its own: its `columnnames` is empty, and the table used to be written with no columns at all)
     pairs = columns isa AbstractDict ? collect(columns) :
             Tables.istable(columns) ?
-                [Symbol(n) => Tables.getcolumn(columns, Symbol(n))
-                 for n in Tables.columnnames(columns)] :
+                (cols = Tables.columnaccess(typeof(columns)) ? Tables.columns(columns) : Tables.columntable(columns);
+                 [Symbol(n) => Tables.getcolumn(cols, Symbol(n)) for n in Tables.columnnames(cols)]) :
             collect(columns)
+    for p in pairs
+        (p isa Pair || (p isa Tuple && length(p) == 2)) || throw(ArgumentError(
+            "write_table: `columns` must be a Tables.jl table, a Dict, or a collection of name => vector pairs; found an element of type $(typeof(p))"))
+    end
+    names = [String(first(p)) for p in pairs]
+    any(isempty, names) && throw(ArgumentError("write_table: a column name cannot be empty"))
+    allunique(names) || throw(ArgumentError("write_table: duplicate column name \"$(names[findfirst(n -> count(==(n), names) > 1, names)])\""))
+    if nrow === nothing                       # a table knows its length: the first column's
+        isempty(pairs) && throw(ArgumentError("write_table: a table with no columns needs `nrow=`"))
+        c1 = last(first(pairs))
+        c1 isa Union{AbstractVector,Base.Generator,Tuple} || throw(ArgumentError(
+            "write_table: column \"$(first(first(pairs)))\" must be a vector with one entry per row, got $(typeof(c1))"))
+        nrow = length(c1)
+        _check_nrow_limit(nrow, "write_table")
+    end
 
     std = get(SCHEMAVER2, uppercase(name), nothing)
     stdcol(cn) = std === nothing ? nothing :
