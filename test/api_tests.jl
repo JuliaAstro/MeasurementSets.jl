@@ -119,3 +119,44 @@ import Tables
     e = edit(t); e["B"][1] = 9.5; flush(e)                 # edit(::Table)
     @test column(MSv2.readtable(d), "A")[:] == [1, 20, 3] && column(MSv2.readtable(d), "B")[1] == 9.5
 end
+
+# Phase 403: whole-MS workflows -- append rows from another MS, select into a new MS, add the calibration columns.
+@testset "MeasurementSet workflows (Phase 403)" begin
+    base = mktempdir()
+    a = joinpath(base, "a.ms"); copyms(SAMPLE_MS, a; rows=1:200)
+    b = joinpath(base, "b.ms"); copyms(SAMPLE_MS, b; rows=201:400)
+    full = readtable(SAMPLE_MS; precision=:full)
+    # append another MS's rows: by object, by path, with a limit, and as TaQL `INSERT INTO t SELECT FROM 'path'`
+    @test insert!(a, MeasurementSet(b)) == 200
+    x = readtable(a; precision=:full)
+    @test column(x, "TIME")[:] == column(full, "TIME")[1:400]
+    @test column(x, "DATA")[400] == column(full, "DATA")[400] && column(x, "UVW")[250] == column(full, "UVW")[250]
+    @test isempty(validate(MeasurementSet(a)))
+    c = joinpath(base, "c.ms"); copyms(SAMPLE_MS, c; rows=1:50)
+    @test insert!(c, b) == 200                                    # a path
+    @test nrow(MeasurementSet(c)) == 250
+    @test_throws ArgumentError insert!(c, joinpath(base, "no-such-table"))
+    c2 = joinpath(base, "c2.ms"); copyms(SAMPLE_MS, c2; rows=1:50)
+    @test insert!(c2, MeasurementSet(b); limit=10) == 10
+    c3 = joinpath(base, "c3.ms"); copyms(SAMPLE_MS, c3; rows=1:50)
+    n3 = taql(c3, "INSERT INTO \$1 SELECT FROM '$b' WHERE ANTENNA1 == 3")
+    @test n3 > 0 && nrow(MeasurementSet(c3)) == 50 + n3
+    @test taql(c3, "INSERT INTO \$1 SELECT * FROM '$b' LIMIT 4") == 4
+    # copyms takes an opened MeasurementSet, and a row selection from a query
+    m = MeasurementSet(SAMPLE_MS)
+    r = query(m, "ANTENNA1 == 3 AND ANTENNA2 == 5")
+    d = joinpath(base, "sel.ms"); copyms(m, d; rows=getfield(r, :rows))
+    @test nrow(MeasurementSet(d)) == nrow(r) && isempty(validate(MeasurementSet(d)))
+    # MODEL_DATA / CORRECTED_DATA are standard optional columns, added with DATA-shaped cells
+    e = joinpath(base, "e.ms"); copyms(SAMPLE_MS, e; rows=1:10)
+    edit(MeasurementSet(e)) do t
+        addcolumn!(t, "CORRECTED_DATA")
+        addcolumn!(t, "MODEL_DATA")
+    end
+    y = readtable(e; precision=:full)
+    @test size(column(y, "CORRECTED_DATA")[3]) == size(column(y, "DATA")[3]) == (4, 64)
+    @test eltype(column(y, "MODEL_DATA")[1]) == ComplexF32 && all(iszero, column(y, "MODEL_DATA")[10])
+    @test isempty(validate(MeasurementSet(e)))
+    edit(e) do t; t[:CORRECTED_DATA][2] = fill(1f0 + 2f0im, 4, 64); end
+    @test column(readtable(e; precision=:full), "CORRECTED_DATA")[2] == fill(1f0 + 2f0im, 4, 64)
+end

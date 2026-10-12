@@ -37,6 +37,7 @@ other keywords hold to a renamed column -- a virtual engine's stored-column name
 A column forwarded to another table by a `ForwardColumnEngine` cannot be renamed.
 """
 function renamecolumn!(path::AbstractString, old::AbstractString, new::AbstractString)
+    _check_column_name(new, "renamecolumn!")
     _rewrite_desc!(path, td -> begin
         names = [c.name for c in td.columns]
         old in names || throw(KeyError(old))

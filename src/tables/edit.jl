@@ -225,6 +225,7 @@ Base.getindex(c::EditColumn, ::Colon) = [c[i] for i in 1:length(c.tab.rowmap)]
 # A number that cannot be stored in a scalar numeric column (`Inf` or 1.5 into an Int32 column, 3e9 into Int32) used to
 # surface only at flush, as a bare InexactError from the writer; refuse it where it is assigned.
 function _check_scalar_cell(desc::ColumnDesc, v)
+    ismissing(v) && throw(ArgumentError("column \"$(desc.name)\": casacore cells cannot hold a missing value"))
     if desc.shape isa Dims && !isempty(desc.shape)
         # a fixed-shape array column: a cell of another size used to be accepted here and fail at flush
         # (a BoundsError deep in the writer, with the edit session's changes lost)
@@ -472,14 +473,30 @@ new/shared StandardStMan (`:ssm`), IncrementalStMan (`:ism`) or a
 per-column TiledShapeStMan (`:tsm`).
 """
 function addcolumn!(t::EditTable, name::AbstractString; kind::Symbol=:ssm)
+    _check_column_name(name, "addcolumn!")
     _check_kind(kind)
     _check_new_col(t, name)
     sc = _lookup_stdcol(name)
     kw = name == "FLAG_CATEGORY" ? _flag_category_kw() : Record()
     desc = _mkdesc(name, sc.type, _stdshape(sc.shape); keywords = kw)
-    data = Any[_default_cell(desc, t) for _ in 1:length(t.rowmap)]
+    data = _sibling_cells(t, desc)
+    data === nothing && (data = Any[_default_cell(desc, t) for _ in 1:length(t.rowmap)])
     push!(t.addcols, (desc, kind, data))
     return t
+end
+
+# The visibility-shaped columns (MODEL_DATA, CORRECTED_DATA, WEIGHT_SPECTRUM, SIGMA_SPECTRUM) hold one value per
+# channel and correlation, as DATA / FLAG do: each row's default cell has the shape of that row's DATA (or FLAG)
+# cell, not the empty cell a column with no shape to copy gets.
+function _sibling_cells(t::EditTable, desc::ColumnDesc)
+    desc.name in ("MODEL_DATA", "CORRECTED_DATA", "WEIGHT_SPECTRUM", "SIGMA_SPECTRUM") || return nothing
+    sib = findfirst(in(columnnames(t.reader)), ("DATA", "FLAG", "FLOAT_DATA"))
+    sib === nothing && return nothing
+    t.reader.rows > 0 || return nothing
+    col = column(t.reader, ("DATA", "FLAG", "FLOAT_DATA")[sib])
+    J = juliatype(desc.type)
+    last = size(col[t.reader.rows])
+    return Any[zeros(J, src > 0 ? size(col[src]) : last) for src in t.rowmap]
 end
 
 # Build a new column's `ColumnDesc` from a length-agnostic sample of its
@@ -513,6 +530,7 @@ function _addcol_desc(name::AbstractString, data;
     # all. A plain (non-Measure/Quantity) `data` is unaffected --
     # `_measure_column_spec`/`_quantity_column_spec` both return
     # `nothing` for it, same as before.
+    vals isa AbstractVector && (vals = _nonmissing_column(name, vals, "addcolumn!"))     # `Union{T,Missing}` without a missing is `T`
     msp = _measure_column_spec(vals)
     if msp !== nothing
         vals = msp.data
@@ -547,6 +565,7 @@ end
 function addcolumn!(t::EditTable, name::AbstractString, data::AbstractVector;
                     kind::Symbol=:ssm, type::Union{CasaType,Nothing}=nothing,
                     shape=nothing)
+    _check_column_name(name, "addcolumn!")
     _check_kind(kind)
     _check_new_col(t, name)
     length(data) == length(t.rowmap) ||

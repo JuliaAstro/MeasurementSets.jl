@@ -426,3 +426,77 @@ end
     err = try taql(d, "SELECT K FROM \$1 WHERE K IN (SELECT K INTO '$(joinpath(dirname(d), "o"))')"); nothing catch e; e end
     @test err isa ArgumentError
 end
+
+# Phase 401: the element types a user's data actually has (DataFrames / CSV columns are `Union{T,Missing}`).
+@testset "Union{T,Missing} columns and unsupported element types (Phase 401)" begin
+    N = 6
+    rt(v) = (d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["C" => v]; nrow=N); column(readtable(d), "C")[:])
+    # nothing missing: stored as T
+    for (v, T) in ((Union{Float64,Missing}[1, 2, 3, 4, 5, 6], Float64), (Union{Int32,Missing}[1, 2, 3, 4, 5, 6], Int32),
+                   (Union{String,Missing}["a", "b", "c", "d", "e", "f"], String), (Union{Bool,Missing}[true, false, true, false, true, false], Bool))
+        got = rt(v)
+        @test eltype(got) == T && isequal(got, collect(nonmissingtype(eltype(v)), v))
+    end
+    # array cells with a Union element type
+    cells = [Union{Float64,Missing}[i, i + 1] for i in 1:N]
+    @test [collect(c) for c in rt(cells)] == [Float64[i, i + 1] for i in 1:N]
+    cells[3][2] = missing
+    err = try rt(cells); nothing catch e; e end
+    @test err isa ArgumentError && occursin("row 3 has a missing element", err.msg)
+    # a missing value: an error naming the row, for every entry point
+    err = try rt(Union{Float64,Missing}[1, missing, 3, 4, 5, missing]); nothing catch e; e end
+    @test err isa ArgumentError && occursin("row 2; 2 in all", err.msg) && occursin("write_table", err.msg)
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["A" => Int32.(1:4), "S" => ["a", "b", "c", "d"]]; nrow=4)
+    edit(d) do t; addcolumn!(t, "B", Union{Float64,Missing}[1.0, 2, 3, 4]); end
+    @test column(readtable(d), "B")[:] == [1.0, 2, 3, 4]
+    err = try edit(d) do t; addcolumn!(t, "C", Union{Float64,Missing}[1.0, missing, 3, 4]); end; nothing catch e; e end
+    @test err isa ArgumentError && occursin("addcolumn!", err.msg) && occursin("row 2", err.msg)
+    for f in (t -> (t[:A][1] = missing), t -> (t[:S][1] = missing), t -> (t[:A][:] = Union{Int32,Missing}[1, missing, 3, 4]))
+        err = try edit(f, d); nothing catch e; e end
+        @test err isa ArgumentError && occursin("missing", err.msg)
+    end
+    @test column(readtable(d), "A")[:] == Int32.(1:4)
+    err = try insert!(d; values=["A" => missing, "S" => "z"]); nothing catch e; e end
+    @test err isa ArgumentError && occursin("missing value", err.msg)
+    @test MSv2.nrow(readtable(d)) == 4
+    # unsupported types: the message names the type and what to convert it to
+    for (v, hint) in ((Int8.(1:N), "Int16"), (UInt64.(1:N), "Int64"), ([:a, :b, :c, :d, :e, :f], "String.(x)"), (collect("abcdef"), "String.(x)"),
+                      ([MSv2.Dates.Date(2020, 1, i) for i in 1:N], "MEpoch"), ([1 // i for i in 1:N], "Float64"), ([(1.0, 2.0) for _ in 1:N], "array per row"))
+        err = try rt(v); nothing catch e; e end
+        @test err isa ErrorException && occursin("cannot store a column of element type", err.msg) && occursin(hint, err.msg)
+    end
+end
+
+# Phase 402: tables from every kind of Tables.jl source; names casacore cannot hold.
+import Tables
+@testset "write_table sources and column names (Phase 402)" begin
+    N = 5
+    rows = [(A=Int32(i), B=Float64(i) / 2, S="s$i") for i in 1:N]
+    wr(src; kw...) = (d = joinpath(mktempdir(), "t"); write_table(d, "T", src; kw...); readtable(d))
+    # a row table (Vector{NamedTuple}) used to be written with NO columns and no error
+    for src in (rows, Tables.columntable(rows), Tables.rowtable(rows), Tables.rowtable(Tables.columntable(rows)))
+        t = wr(src)
+        @test columnnames(t) == ["A", "B", "S"] && nrow(t) == N
+        @test column(t, "A")[:] == Int32.(1:N) && column(t, "S")[:] == ["s$i" for i in 1:N]
+    end
+    @test columnnames(wr(Tables.table(rand(N, 3); header=[:X, :Y, :Z]))) == ["X", "Y", "Z"]
+    # nrow is the first column's length unless a table has no columns
+    @test nrow(wr(Dict("A" => Int32.(1:N)))) == N
+    @test nrow(wr([:A => Int32.(1:3), :B => rand(3)])) == 3
+    @test nrow(wr((A=Int32[], B=Float64[]))) == 0
+    @test nrow(wr(NamedTuple(); nrow=0)) == 0
+    for bad in (() -> wr(NamedTuple()), () -> wr(Dict("A" => 1:3, "B" => 1:4)))
+        @test_throws Union{ArgumentError,ErrorException} bad()
+    end
+    @test_throws ArgumentError wr([:A => Int32.(1:N), :A => Int32.(1:N)])        # duplicate names were written as two columns
+    @test_throws ArgumentError wr(Tables.partitioner([rows[1:2], rows[3:5]]))   # not a table: say so
+    # an empty column name made both readers return another column's data
+    for f in (() -> wr(["" => Int32.(1:N)]), )
+        @test_throws ArgumentError f()
+    end
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", ["A" => Int32.(1:N)])
+    @test_throws ArgumentError edit(t -> addcolumn!(t, "", Float64.(1:N)), d)
+    @test_throws ArgumentError edit(t -> addcolumn!(t, ""), d)
+    @test_throws ArgumentError renamecolumn!(d, "A", "")
+    @test columnnames(readtable(d)) == ["A"]
+end

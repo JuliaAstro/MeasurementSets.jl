@@ -31,11 +31,45 @@ _casatype_of(::Type{Any}) = error(
     "write_table: cannot store a column of element type Any -- a column with no " *
     "rows (or of mixed types) has no element type to write; give it a concrete one " *
     "(e.g. `Float64[]`)")
-_casatype_of(::Type{T}) where {T} = error(
-    "write_table: cannot store a column of element type $T. A Unitful " *
-    "quantity column needs `import Unitful, UnitfulAngles, UnitfulAstro`; " *
-    "a Measure column (MEpoch / MDirection / …) is stored automatically — " *
-    "check the column actually holds those.")
+# an empty column name is not a name casacore tables can hold (both readers return another column's data for it)
+_check_column_name(name::AbstractString, what::AbstractString) =
+    isempty(name) ? throw(ArgumentError("$what: a column name cannot be empty")) : nothing
+
+# why a column eltype cannot be stored, and what to do about it
+function _unsupported_eltype_message(::Type{T}) where {T}
+    hint = T === Int8 ? "convert it with `Int16.(x)` (casacore has no 8-bit signed column)" :
+           T === UInt64 ? "convert it with `Int64.(x)` if the values fit, else `Float64.(x)`" :
+           T === Symbol || T <: AbstractChar ? "convert it with `String.(x)`" :
+           T <: Union{Rational,BigFloat,BigInt,AbstractIrrational} ? "convert it with `Float64.(x)`" :
+           (T <: Tuple || T <: NamedTuple) ? "use an array per row instead of a tuple" :
+           T isa DataType && nameof(parentmodule(T)) === :Dates ? "store a Float64 (e.g. seconds since MJD 0) or an `MEpoch` measure column" :
+           "a Unitful quantity column needs `import Unitful, UnitfulAngles, UnitfulAstro`; a Measure column " *
+           "(MEpoch / MDirection / …) is stored automatically -- check the column actually holds those"
+    return "write_table: cannot store a column of element type $T: casacore columns hold Bool, UInt8, Int16, " *
+           "UInt16, Int32, UInt32, Int64, Float32, Float64, ComplexF32, ComplexF64 and String, as scalars or arrays; $hint"
+end
+_casatype_of(::Type{T}) where {T} = error(_unsupported_eltype_message(T))
+
+# A `Union{T,Missing}` column (what DataFrames / CSV produce, usually without a single missing value) is stored as
+# `T` when nothing is missing; casacore columns cannot hold missing values, so any is an error naming the row.
+function _nonmissing_column(cn::AbstractString, vals::AbstractVector, what::AbstractString="write_table")
+    T = eltype(vals)
+    if Missing <: T
+        i = findfirst(ismissing, vals)
+        i === nothing || throw(ArgumentError("$what: column \"$cn\" has a missing value (row $i; $(count(ismissing, vals)) in all) " *
+            "-- casacore columns cannot hold missing values; fill or drop them first"))
+        return collect(nonmissingtype(T), vals)
+    end
+    if T <: AbstractArray && Missing <: eltype(T)
+        E = nonmissingtype(eltype(T))
+        for (r, c) in enumerate(vals)
+            any(ismissing, c) && throw(ArgumentError("$what: column \"$cn\", row $r has a missing element " *
+                "-- casacore cells cannot hold missing values; fill or drop them first"))
+        end
+        return [Array{E,ndims(c)}(c) for c in vals]
+    end
+    return vals
+end
 
 # a table-keyword value -> (casacore type, stored value): scalars, arrays of every
 # numeric type / Bool / String, and (nested) records from a `Record` or a Dict
@@ -598,7 +632,7 @@ so `write_table` -> `readtable` -> `qcolumn` / `measure` round-trips.
 explicitly and override the auto-detection for that column.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
-                     nrow::Integer, endian::Symbol=:little,
+                     nrow::Union{Nothing,Integer}=nothing, endian::Symbol=:little,
                      tsm=String[], tcm=String[], tcell=String[], ism=String[],
                      engines::AbstractDict=Dict{String,NamedTuple}(),
                      virtualtaql::AbstractDict=Dict{String,String}(),
@@ -610,12 +644,29 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
-    _check_nrow_limit(nrow, "write_table")
+    nrow === nothing || _check_nrow_limit(nrow, "write_table")
+    # a Tables.jl source is read through `Tables.columns` (a Vector{NamedTuple} or a partitioned table has no
+    # columns of its own: its `columnnames` is empty, and the table used to be written with no columns at all)
     pairs = columns isa AbstractDict ? collect(columns) :
             Tables.istable(columns) ?
-                [Symbol(n) => Tables.getcolumn(columns, Symbol(n))
-                 for n in Tables.columnnames(columns)] :
+                (cols = Tables.columnaccess(typeof(columns)) ? Tables.columns(columns) : Tables.columntable(columns);
+                 [Symbol(n) => Tables.getcolumn(cols, Symbol(n)) for n in Tables.columnnames(cols)]) :
             collect(columns)
+    for p in pairs
+        (p isa Pair || (p isa Tuple && length(p) == 2)) || throw(ArgumentError(
+            "write_table: `columns` must be a Tables.jl table, a Dict, or a collection of name => vector pairs; found an element of type $(typeof(p))"))
+    end
+    names = [String(first(p)) for p in pairs]
+    any(isempty, names) && throw(ArgumentError("write_table: a column name cannot be empty"))
+    allunique(names) || throw(ArgumentError("write_table: duplicate column name \"$(names[findfirst(n -> count(==(n), names) > 1, names)])\""))
+    if nrow === nothing                       # a table knows its length: the first column's
+        isempty(pairs) && throw(ArgumentError("write_table: a table with no columns needs `nrow=`"))
+        c1 = last(first(pairs))
+        c1 isa Union{AbstractVector,Base.Generator,Tuple} || throw(ArgumentError(
+            "write_table: column \"$(first(first(pairs)))\" must be a vector with one entry per row, got $(typeof(c1))"))
+        nrow = length(c1)
+        _check_nrow_limit(nrow, "write_table")
+    end
 
     std = get(SCHEMAVER2, uppercase(name), nothing)
     stdcol(cn) = std === nothing ? nothing :
@@ -630,7 +681,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         # with a bare MethodError (Phase 383)
         ((vals isa AbstractArray && ndims(vals) == 1) || vals isa Base.Generator || vals isa Tuple) ||
             throw(ArgumentError("write_table: column \"$cn\" must be a vector with one entry per row, got $(typeof(vals))"))
-        vals = collect(vals)
+        vals = _nonmissing_column(cn, collect(vals))
         # a cell is a scalar or an array of scalars -- not an array of arrays
         if !isempty(vals)
             c1 = first(vals)
@@ -1126,6 +1177,10 @@ copyms(src::AbstractString, dst::AbstractString; rows=Colon(), subtables=Colon()
       subtable_rows::AbstractDict=Dict{String,Any}(),
       storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE) =
     write_ms(dst, MeasurementSet(src); rows, subtables, subtable_rows, storage, blocksize)
+copyms(src::MeasurementSet, dst::AbstractString; rows=Colon(), subtables=Colon(),
+       subtable_rows::AbstractDict=Dict{String,Any}(),
+       storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE) =
+    write_ms(dst, src; rows, subtables, subtable_rows, storage, blocksize)
 
 # --- synthesise a minimal standard MS -----------------------------
 

@@ -83,6 +83,8 @@ definetable("MAIN", [
     required("FLAG_ROW", TpBool),
     optional("DATA", TpComplex, VARSHAPE; doc="complex visibility matrix"),
     optional("FLOAT_DATA", TpFloat, VARSHAPE; doc="single-dish float data"),
+    optional("MODEL_DATA", TpComplex, VARSHAPE; doc="model visibilities (written by CASA calibration / imaging)"),
+    optional("CORRECTED_DATA", TpComplex, VARSHAPE; doc="calibrated visibilities (written by CASA calibration)"),
     optional("WEIGHT_SPECTRUM", TpFloat, VARSHAPE),
     optional("SIGMA_SPECTRUM", TpFloat, VARSHAPE),
 ];
