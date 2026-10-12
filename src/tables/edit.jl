@@ -225,6 +225,7 @@ Base.getindex(c::EditColumn, ::Colon) = [c[i] for i in 1:length(c.tab.rowmap)]
 # A number that cannot be stored in a scalar numeric column (`Inf` or 1.5 into an Int32 column, 3e9 into Int32) used to
 # surface only at flush, as a bare InexactError from the writer; refuse it where it is assigned.
 function _check_scalar_cell(desc::ColumnDesc, v)
+    ismissing(v) && throw(ArgumentError("column \"$(desc.name)\": casacore cells cannot hold a missing value"))
     if desc.shape isa Dims && !isempty(desc.shape)
         # a fixed-shape array column: a cell of another size used to be accepted here and fail at flush
         # (a BoundsError deep in the writer, with the edit session's changes lost)
@@ -513,6 +514,7 @@ function _addcol_desc(name::AbstractString, data;
     # all. A plain (non-Measure/Quantity) `data` is unaffected --
     # `_measure_column_spec`/`_quantity_column_spec` both return
     # `nothing` for it, same as before.
+    vals isa AbstractVector && (vals = _nonmissing_column(name, vals, "addcolumn!"))     # `Union{T,Missing}` without a missing is `T`
     msp = _measure_column_spec(vals)
     if msp !== nothing
         vals = msp.data

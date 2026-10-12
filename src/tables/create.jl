@@ -31,11 +31,41 @@ _casatype_of(::Type{Any}) = error(
     "write_table: cannot store a column of element type Any -- a column with no " *
     "rows (or of mixed types) has no element type to write; give it a concrete one " *
     "(e.g. `Float64[]`)")
-_casatype_of(::Type{T}) where {T} = error(
-    "write_table: cannot store a column of element type $T. A Unitful " *
-    "quantity column needs `import Unitful, UnitfulAngles, UnitfulAstro`; " *
-    "a Measure column (MEpoch / MDirection / …) is stored automatically — " *
-    "check the column actually holds those.")
+# why a column eltype cannot be stored, and what to do about it
+function _unsupported_eltype_message(::Type{T}) where {T}
+    hint = T === Int8 ? "convert it with `Int16.(x)` (casacore has no 8-bit signed column)" :
+           T === UInt64 ? "convert it with `Int64.(x)` if the values fit, else `Float64.(x)`" :
+           T === Symbol || T <: AbstractChar ? "convert it with `String.(x)`" :
+           T <: Union{Rational,BigFloat,BigInt,AbstractIrrational} ? "convert it with `Float64.(x)`" :
+           (T <: Tuple || T <: NamedTuple) ? "use an array per row instead of a tuple" :
+           T isa DataType && nameof(parentmodule(T)) === :Dates ? "store a Float64 (e.g. seconds since MJD 0) or an `MEpoch` measure column" :
+           "a Unitful quantity column needs `import Unitful, UnitfulAngles, UnitfulAstro`; a Measure column " *
+           "(MEpoch / MDirection / …) is stored automatically -- check the column actually holds those"
+    return "write_table: cannot store a column of element type $T: casacore columns hold Bool, UInt8, Int16, " *
+           "UInt16, Int32, UInt32, Int64, Float32, Float64, ComplexF32, ComplexF64 and String, as scalars or arrays; $hint"
+end
+_casatype_of(::Type{T}) where {T} = error(_unsupported_eltype_message(T))
+
+# A `Union{T,Missing}` column (what DataFrames / CSV produce, usually without a single missing value) is stored as
+# `T` when nothing is missing; casacore columns cannot hold missing values, so any is an error naming the row.
+function _nonmissing_column(cn::AbstractString, vals::AbstractVector, what::AbstractString="write_table")
+    T = eltype(vals)
+    if Missing <: T
+        i = findfirst(ismissing, vals)
+        i === nothing || throw(ArgumentError("$what: column \"$cn\" has a missing value (row $i; $(count(ismissing, vals)) in all) " *
+            "-- casacore columns cannot hold missing values; fill or drop them first"))
+        return collect(nonmissingtype(T), vals)
+    end
+    if T <: AbstractArray && Missing <: eltype(T)
+        E = nonmissingtype(eltype(T))
+        for (r, c) in enumerate(vals)
+            any(ismissing, c) && throw(ArgumentError("$what: column \"$cn\", row $r has a missing element " *
+                "-- casacore cells cannot hold missing values; fill or drop them first"))
+        end
+        return [Array{E,ndims(c)}(c) for c in vals]
+    end
+    return vals
+end
 
 # a table-keyword value -> (casacore type, stored value): scalars, arrays of every
 # numeric type / Bool / String, and (nested) records from a `Record` or a Dict
@@ -630,7 +660,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         # with a bare MethodError (Phase 383)
         ((vals isa AbstractArray && ndims(vals) == 1) || vals isa Base.Generator || vals isa Tuple) ||
             throw(ArgumentError("write_table: column \"$cn\" must be a vector with one entry per row, got $(typeof(vals))"))
-        vals = collect(vals)
+        vals = _nonmissing_column(cn, collect(vals))
         # a cell is a scalar or an array of scalars -- not an array of arrays
         if !isempty(vals)
             c1 = first(vals)

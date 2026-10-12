@@ -429,6 +429,7 @@ function Base.insert!(target::Union{AbstractString,AbstractTable}; values,
                      throw(ArgumentError("insert!: cannot store $(repr(v)) in column \"$c\" of type $(J[c])"))
                  end
     function cell(c, v)
+        ismissing(v) && throw(ArgumentError("insert!: column \"$c\": casacore cells cannot hold a missing value"))
         sc[c] && v isa Number && return conv(c, v)
         sc[c] && !(J[c] === String ? v isa AbstractString : v isa Number) && throw(ArgumentError(
             "insert!: column \"$c\" (type $(J[c])) takes a scalar, got $(typeof(v))"))
