@@ -11207,3 +11207,7 @@ An audit of which exported names the prose pages (README, index, concepts, guide
 - **Editing in place**: `setcell!` / `setcolumn!` (with cell validation), editing through a `RefTable` view (`edit(sel) do t …`), and the alter verbs `renamecolumn!`, `setkeyword!`, `renamekeyword!`, `removekeyword!`.
 
 The docs build itself is back under Documenter's size limits with zero warnings: the generated changelog pages are cut smaller (`CHANGELOG_CHUNK_BYTES` 55 000 → 48 000, the largest page 103 → 90 KiB), the API reference's primary-beam section moved to its own page (`api-beams.md`; `api-2.md` 101 → 87 KiB), and the search-index warning threshold is raised to 2 MiB (the full changelog dominates the index; it only ever warned).
+
+### Phase 405 — opening something that is not a table, overwriting something that is
+
+A probe of common user mistakes found three unclear outcomes. `readtable` / `MeasurementSet` / `edit` of a directory without a `table.dat` raised a bare `SystemError` (and `edit` of a missing path an `IOError` from `readdir`); they now raise an `ArgumentError` saying it is not a table directory (a directory holding an interrupted commit's journal still opens). `write_table` onto an existing table silently overwrote it, leaving the old storage-manager files behind; every other writer already refused an existing destination, so it now refuses too (a directory you created first, or one without a `table.dat`, is still fine).

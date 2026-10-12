@@ -73,6 +73,8 @@ locked for the rest of the process.
 """
 function edit(path::AbstractString)
     dir = String(rstrip(path, '/'))
+    isdir(dir) || throw(ArgumentError("not a table directory: $dir"))
+    _check_is_table(dir)
     lk = open_lock(dir; create=true)
     Base.lock(lk.tlock)
     try

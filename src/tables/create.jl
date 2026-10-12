@@ -342,6 +342,10 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
     # only surfaces deep inside `with_container_sink`, not just the
     # early "nothing written yet" case Phase 199 originally covered.
     _dir_preexisted = ispath(dir)
+    # never write over an existing table: its old storage-manager files
+    # would be left behind (and its lock may be held); every other
+    # writer already refuses an existing destination.
+    isfile(joinpath(dir, "table.dat")) && error("$dir already exists (it is a table)")
     mkpath(dir)
     try
         tsmg = _tsm_groups(tsm)
