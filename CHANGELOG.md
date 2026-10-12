@@ -11211,3 +11211,7 @@ The docs build itself is back under Documenter's size limits with zero warnings:
 ### Phase 405 — opening something that is not a table, overwriting something that is
 
 A probe of common user mistakes found three unclear outcomes. `readtable` / `MeasurementSet` / `edit` of a directory without a `table.dat` raised a bare `SystemError` (and `edit` of a missing path an `IOError` from `readdir`); they now raise an `ArgumentError` saying it is not a table directory (a directory holding an interrupted commit's journal still opens). `write_table` onto an existing table silently overwrote it, leaving the old storage-manager files behind; every other writer already refused an existing destination, so it now refuses too (a directory you created first, or one without a `table.dat`, is still fine).
+
+### Phase 406 — a closed edit session refuses further writes
+
+Probing edit-session misuse found a silent data loss: after `flush(t)` (or an aborted do-block) the session had released its lock and committed its state, but `t[:A][1] = 5`, `addrows!`, `removerows!`, `addcolumn!` and `removecolumn!` on it still returned normally — the change was simply never written, and a second `flush` was a no-op. All of them now raise an `ArgumentError` saying the session is closed and to open a new one with `edit(path)`. `flush` stays idempotent, reads from a closed session still work, and views onto a RefTable/ConcatTable inherit the check (they delegate to the same sessions).

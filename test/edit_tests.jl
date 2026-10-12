@@ -856,3 +856,26 @@ end
         end
     end
 end
+
+@testset "Phase 406 — a closed edit session refuses further writes" begin
+    d = mktempdir(); p = joinpath(d, "t")
+    write_table(p, "T", ["A" => [1, 2, 3]]; nrow = 3)
+    t = edit(p)
+    t[:A][1] = 10
+    flush(t)
+    flush(t)                                   # idempotent
+    for f in (() -> (t[:A][2] = 5), () -> (t[:A][:] = [1, 2, 3]), () -> addrows!(t, 1),
+              () -> removerows!(t, [1]), () -> addcolumn!(t, "B"),
+              () -> addcolumn!(t, "C", [1, 2, 3]), () -> removecolumn!(t, "A"))
+        @test_throws ArgumentError f()
+    end
+    @test column(readtable(p), "A")[:] == [10, 2, 3]
+    # an aborted do-block session is closed too
+    t2 = nothing
+    @test_throws ErrorException edit(p) do s
+        t2 = s; error("boom")
+    end
+    @test_throws ArgumentError (t2[:A][1] = 0)
+    edit(p) do s; s[:A][3] = 30; end           # a fresh session still works
+    @test column(readtable(p), "A")[:] == [10, 2, 30]
+end
