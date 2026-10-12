@@ -658,6 +658,8 @@ function write_reftable(dir::AbstractString, parent::AbstractTable,
     dir = String(rstrip(dir, '/'))
     ispath(dir) && error("$dir already exists")
     any(x -> x < 1, rows) && throw(ArgumentError("write_reftable: row indices are 1-based"))
+    all(x -> x <= nrow(parent), rows) || throw(ArgumentError(
+        "write_reftable: row $(maximum(rows)) is outside 1:$(nrow(parent))"))
 
     namemap, order = _select_spec(parent, select)
     root, rootrows, rootnamemap = _flatten_to_root(parent, Int.(collect(rows)), namemap)

@@ -970,6 +970,7 @@ function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
                    name::AbstractString="TABLE",
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dst = String(rstrip(dst, '/'))
+    t isa Table && _check_not_nested(t.path, dst, "copytable")
     ispath(dst) && error("$dst already exists")
     r = rows === Colon() ? (1:nrow(t)) : _check_copy_rows(rows, nrow(t), "copytable")
     t isa GroupedTable ? _copy_table(dst, t, r; name) :
@@ -1059,6 +1060,16 @@ function _source_dm(t::Table, c::ColumnDesc)
     i === nothing ? c.manager : t.managers[i].name
 end
 
+# A destination inside the source (or the source inside the destination)
+# would write the copy into the very tree being read.
+function _check_not_nested(src::AbstractString, dst::AbstractString, what::AbstractString)
+    (isempty(src) || isempty(dst)) && return
+    a = _lockkey(src); b = _lockkey(dst)
+    (a == b || startswith(b, a * "/") || startswith(a, b * "/")) &&
+        throw(ArgumentError("$what: destination $dst overlaps the source $src"))
+    return
+end
+
 """
     write_ms(dir, ms::MeasurementSet; rows=Colon(), subtables=Colon(),
             storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE)
@@ -1079,6 +1090,7 @@ function write_ms(dir::AbstractString, ms::MeasurementSet;
     _check_storage(storage)
     _check_blocksize(blocksize)
     main0 = getfield(ms, :data)
+    main0 isa Table && _check_not_nested(main0.path, dir, "write_ms")
     realkws = Set(kw for (kw, _) in MeasurementSets.subtables(main0))
     # `subtables=`/`subtable_rows=` name subtables by keyword, matched only
     # by iterating the SOURCE's own real keywords (`want(kw) = ... kw in
@@ -1205,7 +1217,7 @@ function _synth_shape(name, nchan, ncorr, nrec)
     name in ("RECEPTOR_ANGLE", "POLARIZATION_TYPE") && return (nrec,)
     name in ("SIGMA", "WEIGHT") && return (ncorr,)
     name == "FLAG_CATEGORY" && return (ncorr, nchan, 1)
-    (name == "DATA" || name == "FLAG") && return (ncorr, nchan)
+    name in ("DATA", "FLAG", "WEIGHT_SPECTRUM", "SIGMA_SPECTRUM", "MODEL_DATA", "CORRECTED_DATA") && return (ncorr, nchan)
     return (1,)
 end
 
@@ -1367,6 +1379,15 @@ function create_ms(dir::AbstractString; nrow::Integer=10, nchan::Integer=4,
         ismcols = Set(["TIME", "INTERVAL", "EXPOSURE", "TIME_CENTROID", "FEED1",
             "FEED2", "FIELD_ID", "ARRAY_ID", "OBSERVATION_ID", "PROCESSOR_ID",
             "SCAN_NUMBER", "STATE_ID"])
+        if nrow == 0
+            # a zero-row array column has no cell to infer its rank from
+            mdescs = map(mdescs) do c
+                c.shape isa VariableShape || return c
+                nd = length(_synth_shape(c.name, nchan, ncorr, nrec))
+                ColumnDesc(c.name, c.comment, c.manager, c.group, c.type, c.classname,
+                           VariableShape(nd), c.option, c.maxlength, c.keywords, c.default, c.sequ)
+            end
+        end
         _write_table_core(dir, mdescs, mdata; nrow=nrow, endian=:little, public=pub,
                           tsm=[["DATA", "FLAG", "WEIGHT_SPECTRUM"]],
                           ism=intersect(ismcols, Set(c.name for c in mdescs)),
