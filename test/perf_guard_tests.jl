@@ -74,3 +74,11 @@ end
     write_table(d, "T", Pair{String,Any}["F" => cells]; nrow=N)
     @test [collect(x) for x in column(readtable(d), "F")[:]] == cells
 end
+
+# Phase 413: AipsIO's `io` field was abstractly typed (`::IO`), so every primitive read of a table
+# description was a dynamic dispatch -- opening a table took ~4.5x longer (441 vs 98 us, 98 vs 65 KiB).
+@testset "Phase 413 — table open stays cheap (AipsIO is concretely typed)" begin
+    @test isconcretetype(fieldtype(typeof(MeasurementSets.AipsIO(UInt8[0, 0, 0, 0])), :io))
+    readtable(SAMPLE_MS)
+    @test (@allocated readtable(SAMPLE_MS)) < 90 * 1024
+end

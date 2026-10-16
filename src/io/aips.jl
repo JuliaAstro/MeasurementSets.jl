@@ -25,14 +25,14 @@ _toendian(endian::Symbol, x) = endian === :big ? hton(x) : htol(x)
 
 # ============================ reader ================================
 
-mutable struct AipsIO
-    io::IO
+mutable struct AipsIO{I<:IO}
+    io::I                    # concretely typed: every primitive read is then statically dispatched
     endian::Symbol           # :big or :little
     level::Int
     ends::Vector{Int}     # recorded end offset for each open nesting level
 end
 
-AipsIO(io::IO; endian::Symbol=:big) = AipsIO(io, endian, 0, Int[])
+AipsIO(io::I; endian::Symbol=:big) where {I<:IO} = AipsIO{I}(io, endian, 0, Int[])
 AipsIO(data::Vector{UInt8}; kw...) = AipsIO(IOBuffer(data); kw...)
 
 # An element count read from a (possibly corrupt) file must be possible: each element takes at least
