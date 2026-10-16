@@ -161,9 +161,12 @@ end
 # collection of names → one single-column group each; a collection of
 # collections → used verbatim (one shared hypercube per inner group).
 function _tsm_groups(x)
+    x isa Union{AbstractString,Symbol} && (x = [x])          # a single name
+    x isa Union{AbstractVector,AbstractSet,Tuple} || throw(ArgumentError(
+        "a storage-manager group spec must be a collection of column names or of name groups, got $(typeof(x))"))
     isempty(x) && return Vector{String}[]
-    first(x) isa AbstractString ? [String[String(s)] for s in x] :
-                                  [String[String(c) for c in g] for g in x]
+    first(x) isa Union{AbstractString,Symbol} ? [String[String(s)] for s in x] :
+                                                [String[String(c) for c in g] for g in x]
 end
 
 # keyword-set merge: drop `_`-prefixed keys from `base`, append `extra`
@@ -239,6 +242,13 @@ function _stamp_measinfo(c::ColumnDesc, spec)
         units = spec.units
     else
         kind = spec.kind
+        haskey(_MEAS_FRAMES, kind) || throw(ArgumentError(
+            "measures: unknown measure kind $(repr(kind)) (have $(join(sort(collect(keys(_MEAS_FRAMES))), ", ")))"))
+        if !(haskey(spec, :varrefcol) && spec.varrefcol !== nothing)
+            haskey(_MEAS_FRAMES[kind], spec.ref) || throw(ArgumentError(
+                "measures: $(repr(spec.ref)) is not a reference frame of a $kind measure " *
+                "(have $(join(sort(collect(keys(_MEAS_FRAMES[kind]))), ", ")))"))
+        end
         rec = haskey(spec, :varrefcol) && spec.varrefcol !== nothing ?
               _measinfo_record(kind; varrefcol=spec.varrefcol,
                                tabtypes=get(spec, :tabtypes, String[]),
@@ -315,6 +325,8 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
                            readme::AbstractString="")
     _check_storage(storage)
     _check_blocksize(blocksize)
+    endian in (:little, :big) || throw(ArgumentError("endian must be :little or :big, got $(repr(endian))"))
+    nrow >= 0 || throw(ArgumentError("write_table: nrow must be >= 0, got $nrow"))
     _check_nrow_limit(nrow, "write_table")
     # Phase 226 fix: `storage=`/`blocksize=` are checked above, BEFORE
     # `mkpath` -- Phase 199's own fix for exactly this shape of problem
@@ -472,6 +484,18 @@ function _write_table_core(dir::AbstractString, descs::Vector{ColumnDesc},
         dyscon = Set{String}()
         for g in dyscog, n in g
             push!(dyscon, n)
+        end
+        # a column lives in exactly one storage-manager group
+        let seen = Dict{String,String}()
+            for (kind, names) in ((:tsm, [n for g in tsmg for n in g]),
+                                  (:tcm, [n for g in _tsm_groups(tcm) for n in g]),
+                                  (:tcell, [n for g in _tsm_groups(tcell) for n in g]),
+                                  (:ism, collect(String, ism)),
+                                  (:dysco, [n for g in dyscog for n in g])), n in names
+                haskey(seen, n) && throw(ArgumentError(
+                    "column \"$n\" is named in two storage-manager groups ($(seen[n]) and $kind)"))
+                seen[n] = String(kind)
+            end
         end
         # `tsm=`/`tcm=`/`tcell=`/`dysco=` all validate every referenced name
         # (Phase 201's fix pattern, applied here too — a typo used to be
@@ -648,6 +672,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
+    nrow === nothing || nrow >= 0 || throw(ArgumentError("write_table: nrow must be >= 0, got $nrow"))
     nrow === nothing || _check_nrow_limit(nrow, "write_table")
     # a Tables.jl source is read through `Tables.columns` (a Vector{NamedTuple} or a partitioned table has no
     # columns of its own: its `columnnames` is empty, and the table used to be written with no columns at all)
@@ -953,6 +978,12 @@ function _check_copy_rows(r, n::Integer, what::AbstractString)
     return r
 end
 
+# every on-disk table a (possibly derived) table reads its data from
+_source_paths(t::Table) = [t.path]
+_source_paths(t::RefTable) = _source_paths(t.parent)
+_source_paths(t::ConcatTable) = reduce(vcat, _source_paths.(t.parts); init = String[])
+_source_paths(::AbstractTable) = String[]
+
 """
     copytable(dst, t; rows=Colon(), name="TABLE",
              storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE) -> dst
@@ -970,7 +1001,7 @@ function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
                    name::AbstractString="TABLE",
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dst = String(rstrip(dst, '/'))
-    t isa Table && _check_not_nested(t.path, dst, "copytable")
+    foreach(p -> _check_not_nested(p, dst, "copytable"), _source_paths(t))
     ispath(dst) && error("$dst already exists")
     r = rows === Colon() ? (1:nrow(t)) : _check_copy_rows(rows, nrow(t), "copytable")
     t isa GroupedTable ? _copy_table(dst, t, r; name) :

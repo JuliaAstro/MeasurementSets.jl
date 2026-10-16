@@ -467,11 +467,11 @@ end
     @test mv3[1].mps ≈ 1e4 && mv3[2].mps ≈ 2e4
 
     # read.jl: `_wrap_measure`'s fallback for an unrecognised MEASINFO
-    # `type` -- no write-side validation rejects an arbitrary `kind`, so
-    # this only ever surfaces on read.
+    # `type` -- write_table's `measures=` NamedTuple form validates `kind`/`ref` (Phase 411),
+    # but a `MeasInfo` struct is written as given, so this only ever surfaces on read.
     tabbad = joinpath(dir, "BADKIND")
     write_table(tabbad, "BADKIND", Pair{String,Any}["X" => [1.0, 2.0]]; nrow = 2,
-                measures = Dict("X" => (; kind = :nonsense, ref = "FOO")))
+                measures = Dict("X" => MSv2.MeasInfo(:nonsense, "FOO", nothing, String[], Int[], String[])))   # a MeasInfo skips the kind/ref validation
     @test_throws ArgumentError measure(readtable(tabbad), "X", 1)
 
     # read.jl: `_scalar`'s legitimate length-1-array case -- distinct

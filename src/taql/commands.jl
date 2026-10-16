@@ -1407,6 +1407,8 @@ function _taql_insert(target, cmd::AbstractString)
         cols = mv.captures[1] === nothing ?
                columnnames(target isa AbstractTable ? target : readtable(_cmd_path(target))) :
                _taql_unescape.(strip.(split(mv.captures[1], ',')))
+        allunique(cols) || throw(ArgumentError(
+            "taql: INSERT names a column twice ($(join(unique(c for c in cols if count(==(c), cols) > 1), ", ")))"))
         groups = _paren_groups(mv.captures[2])
         isempty(groups) &&
             throw(ArgumentError("taql: INSERT ... VALUES has no value tuples"))

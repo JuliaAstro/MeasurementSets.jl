@@ -444,3 +444,24 @@ end
     edit(z) do s; addrows!(s, 2); end
     @test nrow(readtable(z)) == 2
 end
+
+@testset "Phase 411 — write_table option misuse is refused before anything is written" begin
+    d = mktempdir()
+    cols() = ["A" => [1, 2, 3], "V" => [rand(2, 2) for _ in 1:3], "X" => [1.5, 2.5, 3.5]]
+    w(p; kw...) = write_table(p, "T", cols(); nrow = 3, kw...)
+    for (i, kw) in enumerate((
+            (; tsm = [["V"], ["V"]]), (; tsm = [["V"]], ism = ["V"]), (; tsm = [["V"]], tcm = [["V"]]),
+            (; endian = :middle), (; nrow = -1),
+            (; measures = Dict("X" => (; kind = :bogus, ref = "UTC"))),
+            (; measures = Dict("X" => (; kind = :epoch, ref = "NOPE")))))
+        p = joinpath(d, "t$i")
+        @test_throws ArgumentError w(p; kw...)
+        @test !ispath(p)
+    end
+    # a single name (string or symbol) is one group; known epoch / direction refs still pass
+    w(joinpath(d, "ok1"); tsm = "V")
+    w(joinpath(d, "ok2"); tsm = [:V])
+    @test column(readtable(joinpath(d, "ok2")), "A")[:] == [1, 2, 3]
+    w(joinpath(d, "ok3"); measures = Dict("X" => (; kind = :epoch, ref = "TAI")))
+    @test measinfo(readtable(joinpath(d, "ok3")), "X").fixedref == "TAI"
+end

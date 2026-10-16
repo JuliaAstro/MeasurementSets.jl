@@ -397,3 +397,12 @@ built on, found missing in the same sweep.
 column(ms::MeasurementSet, sub::AbstractString, name::AbstractString;
       precision::Union{Nothing,Symbol,Type}=nothing) =
     _pcolumn(subtable(ms, sub), name, precision)
+
+# --- read-only columns -------------------------------------------------
+# A column read from a table is a lazy, read-only view.  Julia's generic
+# `CanonicalIndexError` ("setindex! not defined for Column{Float64}") says
+# nothing about how to change the data, so point at `edit`.
+const _ReadOnlyColumn = Union{Column,BlockColumn,MappedColumn,ConcatColumn}
+Base.setindex!(c::_ReadOnlyColumn, v, i...) = throw(ArgumentError(
+    "columns read from a table are read-only; change the data in an edit session: " *
+    "edit(path) do t; t[:COLUMN][i] = value; end"))
