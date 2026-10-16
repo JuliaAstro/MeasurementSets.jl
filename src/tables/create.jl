@@ -953,6 +953,12 @@ function _check_copy_rows(r, n::Integer, what::AbstractString)
     return r
 end
 
+# every on-disk table a (possibly derived) table reads its data from
+_source_paths(t::Table) = [t.path]
+_source_paths(t::RefTable) = _source_paths(t.parent)
+_source_paths(t::ConcatTable) = reduce(vcat, _source_paths.(t.parts); init = String[])
+_source_paths(::AbstractTable) = String[]
+
 """
     copytable(dst, t; rows=Colon(), name="TABLE",
              storage=:sepfile, blocksize=DEFAULT_MF_BLOCKSIZE) -> dst
@@ -970,7 +976,7 @@ function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
                    name::AbstractString="TABLE",
                    storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     dst = String(rstrip(dst, '/'))
-    t isa Table && _check_not_nested(t.path, dst, "copytable")
+    foreach(p -> _check_not_nested(p, dst, "copytable"), _source_paths(t))
     ispath(dst) && error("$dst already exists")
     r = rows === Colon() ? (1:nrow(t)) : _check_copy_rows(rows, nrow(t), "copytable")
     t isa GroupedTable ? _copy_table(dst, t, r; name) :

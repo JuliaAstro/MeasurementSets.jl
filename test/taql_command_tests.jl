@@ -1997,3 +1997,15 @@ end
     @test taql("CREATE TABLE '$p' [A I4, é R8 [NDIM=1], ßB S] LIMIT 3") == p
     @test MSv2.columnnames(readtable(p)) == ["A", "é", "ßB"] && MSv2.nrow(readtable(p)) == 3
 end
+
+@testset "Phase 410 — INSERT naming a column twice; SELECT INTO a path inside the source" begin
+    d = mktempdir(); p = joinpath(d, "t")
+    write_table(p, "T", ["A" => [1, 2, 3], "S" => ["a", "b", "c"]]; nrow = 3)
+    @test_throws ArgumentError taql(p, "INSERT INTO t (A, A) VALUES (1, 2)")
+    @test nrow(readtable(p)) == 3
+    @test_throws ArgumentError taql(p, "SELECT A INTO '$(joinpath(p, "sub"))'")
+    @test !ispath(joinpath(p, "sub"))
+    @test_throws ArgumentError copytable(joinpath(p, "sub"), query(readtable(p), "A > 1"))
+    @test_throws ArgumentError copytable(joinpath(p, "sub"), query(query(readtable(p), "A > 1"), "A > 2"))
+    @test nrow(readtable(taql(p, "SELECT A WHERE A > 1 INTO '$(joinpath(d, "ok"))'"))) == 2   # elsewhere is fine
+end
