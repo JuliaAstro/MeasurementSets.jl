@@ -160,3 +160,16 @@ end
     edit(e) do t; t[:CORRECTED_DATA][2] = fill(1f0 + 2f0im, 4, 64); end
     @test column(readtable(e; precision=:full), "CORRECTED_DATA")[2] == fill(1f0 + 2f0im, 4, 64)
 end
+
+@testset "Phase 412 — assigning into a read-only column says how to edit" begin
+    d = mktempdir(); p = joinpath(d, "t")
+    write_table(p, "T", ["A" => [1, 2, 3]]; nrow = 3)
+    t = readtable(p)
+    for c in (column(t, "A"), column(query(t, "A > 1"), "A"),
+              column(readtable(write_concattable(joinpath(d, "cc"), [t, t])), "A"))
+        e = try; c[1] = 5; nothing; catch x; x; end
+        @test e isa ArgumentError && occursin("edit", e.msg)
+        @test_throws ArgumentError fill!(c, 0)
+    end
+    @test column(t, "A")[:] == [1, 2, 3]
+end
