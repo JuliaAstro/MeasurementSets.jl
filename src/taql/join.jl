@@ -232,7 +232,7 @@ function _result_filter(gt::GroupedTable, where)
         ast = _taqllite_parse(String(where), Set(Base.keys(cd)))
         !_has_aggr(ast) ||
             throw(ArgumentError("join: `where` must not contain aggregate functions"))
-        [i for i in 1:n if _tql_truthy(_tqleval(ast, cd, i))]
+        _where_matches(ast, cd, n)
     end
     return GroupedTable(copy(gt.names), AbstractVector[c[keep] for c in gt.cols], copy(getfield(gt, :units)), copy(getfield(gt, :epochs)))
 end

@@ -240,7 +240,7 @@ function query(gt::GroupedTable, wherestr::AbstractString;
     _orderby_refs!(needed, orderby)
     cd = _tql_cols(gt, needed, ast)         # unit attachment + epoch-date conversion, like the plain-table query
     nr = nrow(gt)
-    keep = ast === nothing ? collect(1:nr) : [i for i in 1:nr if _tql_truthy(_tqleval(ast, cd, i))]
+    keep = ast === nothing ? collect(1:nr) : _where_matches(ast, cd, nr)
     _orderby_materialize!(cd, orderby, keep, nr)
     keep = _apply_orderby(keep, orderby, cd)
     cls = _select_classify(select, Set(columnnames(gt)))
@@ -324,7 +324,7 @@ function _where_rows(t::AbstractTable, where, cols::AbstractDict)
     !_has_aggr(ast) ||
         throw(ArgumentError("WHERE must not contain aggregate functions"))
     ast = _unit_conv(ast, t)
-    return [i for i in 1:nrow(t) if _tql_truthy(_tqleval(ast, cols, i))]
+    return _where_matches(ast, cols, nrow(t))
 end
 
 # Shared preparation for both `groupby` methods: validate keys, parse
@@ -364,7 +364,7 @@ function _gb_prepare(t::AbstractTable, groupcols, wherearg, havingarg,
             rws = CTDSRows(AbstractVector[loaded[n] for n in nms], Symbol.(nms), nrow(t))
             [i for (i, r) in enumerate(rws) if _tql_truthy(wherearg(r))]
         end :
-        [i for i in 1:nrow(t) if _tql_truthy(_tqleval(whereast, loaded, i))]
+        _where_matches(whereast, loaded, nrow(t))
 
     havingfn =
         havingarg === nothing ? ((g, kn, act) -> true) :

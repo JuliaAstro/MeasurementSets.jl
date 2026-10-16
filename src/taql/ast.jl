@@ -731,3 +731,87 @@ function _tql_call(e::TQLFunc, vals::Tuple)
         throw(ArgumentError("TaQL-lite: $(nm)() does not accept operands of type ($(join(map(v -> string(typeof(v)), vals), ", ")))"))
     end
 end
+
+
+# ---------------------------------------------------------------------
+# Compiled row predicates.  `_tqleval` walks the AST per row: every node is
+# a dynamic dispatch on an abstract `TQLExpr` field and every column
+# reference a `Dict{String,...}` lookup.  `_compile` turns the common nodes
+# into nested closures over the (concretely typed) column vectors once, so
+# a WHERE over millions of rows runs without either; every other node falls
+# back to `_tqleval`, so the semantics are those of `_tqleval` by
+# construction.
+_compile(e::TQLExpr, cols) = i -> _tqleval(e, cols, i)
+_compile(e::TQLLit, cols) = (x = e.value; i -> x)
+function _compile(e::TQLCol, cols)
+    v = cols[e.name]
+    return i -> _widen(v[i])
+end
+function _compile(e::TQLCmp, cols)
+    op = e.op; fl = _compile(e.lhs, cols); fr = _compile(e.rhs, cols)
+    return i -> _tql_cmp(op, fl(i), fr(i))
+end
+function _compile(e::TQLArith, cols)
+    op = e.op; fl = _compile(e.lhs, cols); fr = _compile(e.rhs, cols)
+    return i -> _bcast(op, fl(i), fr(i))
+end
+function _compile(e::TQLAnd, cols)
+    fa = _compile(e.a, cols); fb = _compile(e.b, cols)
+    return i -> _tql_and(fa(i), fb(i))
+end
+function _compile(e::TQLOr, cols)
+    fa = _compile(e.a, cols); fb = _compile(e.b, cols)
+    return i -> _tql_or(fa(i), fb(i))
+end
+function _compile(e::TQLNot, cols)
+    fa = _compile(e.a, cols)
+    return i -> _bcast(!, fa(i))
+end
+function _compile(e::TQLNeg, cols)
+    fa = _compile(e.a, cols)
+    return i -> _bcast(-, fa(i))
+end
+
+function _compile(e::TQLFunc, cols)
+    fs = Tuple(_compile(a, cols) for a in e.args)
+    return i -> _tql_call(e, map(f -> f(i), fs))
+end
+function _compile(e::TQLBetween, cols)
+    fl = _compile(e.lhs, cols); flo = _compile(e.lo, cols); fhi = _compile(e.hi, cols); neg = e.negate
+    return i -> _tql_between(fl(i), flo(i), fhi(i), neg)
+end
+function _compile(e::TQLMatch, cols)
+    fl = _compile(e.lhs, cols)
+    return i -> _tql_match(e, fl(i))
+end
+_compile(::TQLRowNum, cols) = i -> i
+function _compile(e::TQLIn, cols)
+    # only a list of plain literals can be resolved once; a dynamic list stays per row
+    any(v -> v isa TQLExpr || v isa TQLDynRange, e.vals) && return i -> _tqleval(e, cols, i)
+    fl = _compile(e.lhs, cols); vals = e.vals
+    return i -> _tql_in(fl(i), vals)
+end
+
+# number of AST nodes (an upper bound is enough: only used to keep absurdly
+# large expressions off the compiler, whose closure types grow with the tree)
+_ast_nodes(e::TQLExpr) = 1 + sum(f -> _ast_nodes_in(getfield(e, f)), fieldnames(typeof(e)); init = 0)
+_ast_nodes_in(x::TQLExpr) = _ast_nodes(x)
+_ast_nodes_in(x::AbstractVector) = sum(_ast_nodes_in, x; init = 0)
+_ast_nodes_in(::Any) = 0
+
+# Compilation pays off over many rows only; a short table, or a huge
+# expression, keeps using the interpreter.
+const COMPILE_MIN_ROWS = 2000
+const COMPILE_MAX_NODES = 40
+_use_compiled(ast::TQLExpr, n::Integer) = n >= COMPILE_MIN_ROWS && _ast_nodes(ast) <= COMPILE_MAX_NODES
+
+# the rows `1:n` for which the condition `ast` holds (a function barrier, so
+# the compiled closure is specialised)
+_filter_rows(f, n::Integer) = Int[i for i in 1:n if _tql_truthy(f(i))]
+_where_matches(ast::TQLExpr, cols, n::Integer) = _use_compiled(ast, n) ?
+    _filter_rows(_compile(ast, cols), n) :
+    Int[i for i in 1:n if _tql_truthy(_tqleval(ast, cols, i))]
+# `Any[value of `ast` at row i for i in rows]`
+_eval_rows(ast::TQLExpr, cols, rows) = _use_compiled(ast, length(rows)) ?
+    _eval_rows_(_compile(ast, cols), rows) : Any[_tqleval(ast, cols, i) for i in rows]
+_eval_rows_(f, rows) = Any[f(i) for i in rows]
