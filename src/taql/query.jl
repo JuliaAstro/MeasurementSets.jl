@@ -78,8 +78,9 @@ function _orderby_materialize!(cols::AbstractDict, orderby, rows::Vector{Int}, n
     for k in orderby
         k.expr === nothing && continue
         v = Vector{Any}(nothing, n)
-        for i in rows
-            v[i] = _tqleval(k.expr, cols, i)
+        vals = _eval_rows(k.expr, cols, rows)     # compiled for big row sets (Phase 414)
+        for (j, i) in enumerate(rows)
+            v[i] = vals[j]
         end
         cols[k.name] = v
     end
@@ -110,15 +111,25 @@ function _apply_orderby(matched::Vector{Int}, orderby::Vector{TQLOrderKey},
         asc = [TQLOrderKey(k.name, false, k.expr) for k in orderby]
         return reverse(_apply_orderby(matched, asc, cols))
     end
-    lt = function (i, j)
-        for k in orderby
-            vi, vj = cols[k.name][i], cols[k.name][j]
-            isequal(vi, vj) && continue
-            return k.desc ? isless(vj, vi) : isless(vi, vj)
-        end
-        return false
+    return _sorted_rows(matched, [cols[k.name] for k in orderby],
+                        Bool[k.desc for k in orderby])
+end
+
+# Stable lexicographic multi-key sort by least-significant-key-first passes:
+# each key is gathered once into a concretely-typed vector and `sortperm`'d
+# (documented stable -- equal keys keep ascending positions, also for
+# `rev=true`), instead of a comparator closure doing a `Dict` lookup and two
+# boxed cell reads per comparison (Phase 416: 1M rows, one numeric key,
+# 1.1 s / 1.2 GiB -> a fraction of that).  Same ordering as the old
+# comparator: `isless` per key, so `missing` last ascending / first
+# descending, NaN after every number, -0.0 before 0.0.
+function _sorted_rows(rows::Vector{Int}, keyvecs::AbstractVector, desc::AbstractVector{Bool})
+    for j in length(keyvecs):-1:1
+        kv = keyvecs[j]
+        vals = eltype(kv) === Any ? identity.([kv[i] for i in rows]) : kv[rows]
+        rows = rows[sortperm(vals; rev=desc[j])]
     end
-    return sort(matched; lt, alg=Base.Sort.MergeSort)
+    return rows
 end
 
 # A query result's `path` is `""` (in-memory, never persisted on its

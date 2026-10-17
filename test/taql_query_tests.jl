@@ -5683,3 +5683,54 @@ end
     @test_throws ArgumentError query(t, "S == 5")            # type errors surface through the compiled path too
     @test_throws ArgumentError query(t, "A")
 end
+
+# Phase 416: ORDER BY sorted with a comparator closure (a Dict lookup + two boxed cell reads per
+# comparison); it now gathers each key once and does stable least-significant-key-first `sortperm`
+# passes.  The ordering must be exactly the old comparator's -- `isless` per key, ties kept in the
+# original row order (all-descending = reversed ascending, Phase 246), `missing` last ascending.
+@testset "Phase 416 — ORDER BY sort == reference comparator sort" begin
+    TO = MeasurementSets.TQLOrderKey
+    function ref_sort(matched, keys, cols)
+        if all(k -> k.desc, keys)
+            return reverse(ref_sort(matched, [TO(k.name, false, k.expr) for k in keys], cols))
+        end
+        lt = function (i, j)
+            for k in keys
+                vi, vj = cols[k.name][i], cols[k.name][j]
+                isequal(vi, vj) && continue
+                return k.desc ? isless(vj, vi) : isless(vi, vj)
+            end
+            return false
+        end
+        return sort(matched; lt, alg = Base.Sort.MergeSort)
+    end
+    rng = MersenneTwister(416)
+    for trial in 1:600
+        n = rand(rng, 0:40)
+        cols = Dict{String,AbstractVector}(); keys = TO[]
+        for j in 1:rand(rng, 1:3)
+            kind = rand(rng, 1:6)
+            cols["k$j"] = kind == 1 ? rand(rng, 1:4, n) :
+                          kind == 2 ? rand(rng, [0.0, -0.0, 1.5, NaN, Inf, -Inf], n) :
+                          kind == 3 ? [rand(rng, ["a", "b", "", "ab"]) for _ in 1:n] :
+                          kind == 4 ? Union{Missing,Int}[rand(rng) < 0.3 ? missing : rand(rng, 1:3) for _ in 1:n] :
+                          kind == 5 ? Any[rand(rng) < 0.5 ? rand(rng, 1:3) : rand(rng, [1.5, 2.5]) for _ in 1:n] :
+                                      Float32.(rand(rng, 1:3, n))
+            push!(keys, TO("k$j", rand(rng, Bool), nothing))
+        end
+        matched = n == 0 ? Int[] : unique(rand(rng, 1:n, rand(rng, 0:n)))
+        rand(rng, Bool) && sort!(matched)
+        @test isequal(MeasurementSets._apply_orderby(matched, keys, cols), ref_sort(matched, keys, cols))
+    end
+    # the same through the public verbs: query ORDER BY (incl. an expression key) and groupby orderby
+    d = mktempdir(); p = joinpath(d, "t"); n = 3000
+    K = Int32.(rand(rng, 1:7, n)); B = rand(rng, n)
+    write_table(p, "T", Pair{String,Any}["K" => K, "B" => B]; nrow = n)
+    t = readtable(p)
+    r = query(t, "ORDER BY K, B DESC")
+    @test column(r, "B")[:] == B[sortperm(collect(zip(K, -B)))]
+    r = query(t, "ORDER BY -B")
+    @test column(r, "B")[:] == sort(B; rev = true)
+    g = groupby(t, "K"; select = ["K" => "K", "m" => "gmean(B)"], orderby = ["m" => :desc])
+    @test issorted(g.m; rev = true)
+end

@@ -101,3 +101,14 @@ end
     end
     @test_throws BoundsError MeasurementSets._wrbytes!(zeros(UInt8, 4), 2, Int32(1), :little)
 end
+
+# Phase 416: ORDER BY used a comparator closure (Dict lookup + two boxed reads per comparison): 1M rows, one
+# numeric key, ~1.1 s and ~1.2 GiB.  The gathered-key `sortperm` passes need a few 8-byte vectors per key.
+@testset "Phase 416 — ORDER BY allocates O(n) small vectors, not a boxed comparison per row" begin
+    d = mktempdir(); p = joinpath(d, "t"); n = 100_000; rng = MersenneTwister(416)
+    write_table(p, "T", Pair{String,Any}["K" => Int32.(rand(rng, 1:100, n)), "B" => rand(rng, n)]; nrow = n)
+    t = readtable(p)
+    query(t, "ORDER BY B"); query(t, "ORDER BY K, B DESC")           # warm up
+    @test (@allocated query(t, "ORDER BY B")) < 120 * n               # was ~1200 B/row
+    @test (@allocated query(t, "ORDER BY K, B DESC")) < 200 * n
+end

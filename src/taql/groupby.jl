@@ -597,14 +597,8 @@ function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
     # real TaQL (live-verified, Phase 355): when EVERY key is descending the result is the reversed ascending sort (fully-tied groups come
     # out in reverse order); mixed directions keep ties in their original (first-seen) order -- the same rule as a row ORDER BY (Phase 246)
     alldesc = !isempty(keys) && all(k -> k.desc, keys)
-    perm = sort(collect(1:n); alg=Base.Sort.MergeSort, lt=function (i, j)
-        for k in keys
-            vi, vj = bycol[k.name][i], bycol[k.name][j]
-            isequal(vi, vj) && continue
-            return (k.desc && !alldesc) ? isless(vj, vi) : isless(vi, vj)
-        end
-        return false
-    end)
+    perm = _sorted_rows(collect(1:n), AbstractVector[bycol[k.name] for k in keys],
+                        Bool[k.desc && !alldesc for k in keys])
     alldesc && reverse!(perm)
     return GroupedTable(copy(gt.names), AbstractVector[c[perm] for c in gt.cols], copy(getfield(gt, :units)), copy(getfield(gt, :epochs)))
 end
