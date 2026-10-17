@@ -5683,3 +5683,112 @@ end
     @test_throws ArgumentError query(t, "S == 5")            # type errors surface through the compiled path too
     @test_throws ArgumentError query(t, "A")
 end
+
+# Phase 416: ORDER BY sorted with a comparator closure (a Dict lookup + two boxed cell reads per
+# comparison); it now gathers each key once and does stable least-significant-key-first `sortperm`
+# passes.  The ordering must be exactly the old comparator's -- `isless` per key, ties kept in the
+# original row order (all-descending = reversed ascending, Phase 246), `missing` last ascending.
+@testset "Phase 416 — ORDER BY sort == reference comparator sort" begin
+    TO = MeasurementSets.TQLOrderKey
+    function ref_sort(matched, keys, cols)
+        if all(k -> k.desc, keys)
+            return reverse(ref_sort(matched, [TO(k.name, false, k.expr) for k in keys], cols))
+        end
+        lt = function (i, j)
+            for k in keys
+                vi, vj = cols[k.name][i], cols[k.name][j]
+                isequal(vi, vj) && continue
+                return k.desc ? isless(vj, vi) : isless(vi, vj)
+            end
+            return false
+        end
+        return sort(matched; lt, alg = Base.Sort.MergeSort)
+    end
+    rng = MersenneTwister(416)
+    for trial in 1:600
+        n = rand(rng, 0:40)
+        cols = Dict{String,AbstractVector}(); keys = TO[]
+        for j in 1:rand(rng, 1:3)
+            kind = rand(rng, 1:6)
+            cols["k$j"] = kind == 1 ? rand(rng, 1:4, n) :
+                          kind == 2 ? rand(rng, [0.0, -0.0, 1.5, NaN, Inf, -Inf], n) :
+                          kind == 3 ? [rand(rng, ["a", "b", "", "ab"]) for _ in 1:n] :
+                          kind == 4 ? Union{Missing,Int}[rand(rng) < 0.3 ? missing : rand(rng, 1:3) for _ in 1:n] :
+                          kind == 5 ? Any[rand(rng) < 0.5 ? rand(rng, 1:3) : rand(rng, [1.5, 2.5]) for _ in 1:n] :
+                                      Float32.(rand(rng, 1:3, n))
+            push!(keys, TO("k$j", rand(rng, Bool), nothing))
+        end
+        matched = n == 0 ? Int[] : unique(rand(rng, 1:n, rand(rng, 0:n)))
+        rand(rng, Bool) && sort!(matched)
+        @test isequal(MeasurementSets._apply_orderby(matched, keys, cols), ref_sort(matched, keys, cols))
+    end
+    # the same through the public verbs: query ORDER BY (incl. an expression key) and groupby orderby
+    d = mktempdir(); p = joinpath(d, "t"); n = 3000
+    K = Int32.(rand(rng, 1:7, n)); B = rand(rng, n)
+    write_table(p, "T", Pair{String,Any}["K" => K, "B" => B]; nrow = n)
+    t = readtable(p)
+    r = query(t, "ORDER BY K, B DESC")
+    @test column(r, "B")[:] == B[sortperm(collect(zip(K, -B)))]
+    r = query(t, "ORDER BY -B")
+    @test column(r, "B")[:] == sort(B; rev = true)
+    g = groupby(t, "K"; select = ["K" => "K", "m" => "gmean(B)"], orderby = ["m" => :desc])
+    @test issorted(g.m; rev = true)
+end
+
+# Phase 417: aggregate arguments (`gsum(B*C)`) are compiled on large tables, and a compiled function call
+# is dispatched statically.  Results must equal the interpreter's (forced by a COMPILE_MIN_ROWS larger than
+# the table), and a bad operand still gives the same ArgumentError.
+@testset "Phase 417 — compiled aggregate args and function calls == interpreter" begin
+    d = mktempdir(); p = joinpath(d, "t"); n = 5000; rng = MersenneTwister(417)
+    write_table(p, "T", Pair{String,Any}["K" => Int32.(rand(rng, 1:7, n)), "B" => rand(rng, n), "C" => rand(rng, n),
+                                         "S" => [rand(rng, ["x", "yy"]) for _ in 1:n]]; nrow = n)
+    t = readtable(p)
+    sel = ["K" => "K", "a" => "gsum(B*C)", "b" => "gmean(sqrt(B)+C)", "c" => "gmax(iif(B>0.5, B, C))",
+           "d" => "gsum(strlength(S))", "e" => "gmedian(pow(B, 2.0))", "f" => "gmean(B) + gmin(C)"]
+    fast = groupby(t, "K"; select = sel, orderby = ["K"])
+    ref = groupby(readtable(p), "K"; select = sel, orderby = ["K"], where = "rownumber() >= 1")  # same engine, compiled where
+    for nm in (:a, :b, :c, :d, :e, :f)
+        @test getproperty(fast, nm) ≈ getproperty(ref, nm)
+    end
+    # the aggregates agree with a direct reduction
+    K = column(t, "K")[:]; B = column(t, "B")[:]; C = column(t, "C")[:]
+    ks = sort(unique(K))
+    @test fast.a ≈ [sum(B[K .== k] .* C[K .== k]) for k in ks]
+    @test fast.b ≈ [sum(sqrt.(B[K .== k]) .+ C[K .== k]) / count(==(k), K) for k in ks]
+    # a function that cannot take its operand keeps the ordinary message through the compiled path
+    err = try; query(t, "upcase(B) == 'X'"); nothing; catch e; e; end
+    @test err isa ArgumentError && occursin("does not accept operands", err.msg)
+end
+
+# Phase 420: join key columns were read cell by cell through the lazy Column and looked up in a Dict{Any,…} of
+# boxed tuples (1M x 100 N:1 join: 426 ms).  They are bulk-read and looked up by typed key; the matches must be
+# exactly those of a naive reference, also for an Int key against a Float key, a `missing` left key and strings.
+@testset "Phase 420 — join key lookup == naive reference" begin
+    rng = MersenneTwister(420)
+    naive(lk, rk) = [(j = findfirst(r -> isequal(r, l), rk); j === nothing ? 0 : j) for l in lk]
+    for trial in 1:40
+        nl = rand(rng, 0:30); nr = rand(rng, 1:12)
+        kind = rand(rng, 1:4)
+        rk = kind == 1 ? shuffle(rng, collect(1:nr)) :
+             kind == 2 ? shuffle(rng, Float64.(1:nr)) :
+             kind == 3 ? shuffle(rng, ["k$i" for i in 1:nr]) : shuffle(rng, Int32.(1:nr))
+        lk0 = kind == 3 ? ["k$(rand(rng, 0:nr+2))" for _ in 1:nl] : rand(rng, 0:nr+2, nl)
+        lk = kind == 2 ? Float64.(lk0) : kind == 4 ? Int64.(lk0) : lk0       # Int64 left keys against Int32 / Float64 right
+        L = GroupedTable([:K], AbstractVector[lk]); R = GroupedTable([:K, :V], AbstractVector[rk, collect(1:nr)])
+        @test MeasurementSets._join_matchrow(L, R, "K" => "K") == naive(lk, rk)
+        # M:N with duplicate right keys: every right row of a key, in right-row order
+        rkd = rand(rng, rk, nr + 3)
+        Rd = GroupedTable([:K, :V], AbstractVector[rkd, collect(1:nr + 3)])
+        lr, rr = MeasurementSets._join_pairs(L, Rd, "K" => "K", true, :drop)
+        ref = [(i, j) for i in 1:nl for j in 1:nr + 3 if isequal(lk[i], rkd[j])]
+        @test collect(zip(lr, rr)) == ref
+    end
+    # a missing left key matches nothing; composite keys; non-unique right key still refused
+    L = GroupedTable([:A, :B], AbstractVector[Union{Missing,Int}[1, missing, 2, 2], ["x", "y", "x", "y"]])
+    R = GroupedTable([:A, :B, :V], AbstractVector[[2, 1, 2], ["y", "x", "x"], [10, 20, 30]])
+    @test MeasurementSets._join_matchrow(L, R, ["A" => "A", "B" => "B"]) == [2, 0, 3, 1]
+    Rdup = GroupedTable([:A], AbstractVector[[1, 1]])
+    @test_throws ArgumentError MeasurementSets._join_matchrow(L, Rdup, "A" => "A")
+    # index lookup with a missing left key
+    @test MeasurementSets._join_matchrow(GroupedTable([:I], AbstractVector[Union{Missing,Int}[0, missing, 5, 1]]), R, "I") == [1, 0, 0, 2]
+end

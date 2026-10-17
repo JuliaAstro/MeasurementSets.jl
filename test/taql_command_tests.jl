@@ -2009,3 +2009,18 @@ end
     @test_throws ArgumentError copytable(joinpath(p, "sub"), query(query(readtable(p), "A > 1"), "A > 2"))
     @test nrow(readtable(taql(p, "SELECT A WHERE A > 1 INTO '$(joinpath(d, "ok"))'"))) == 2   # elsewhere is fine
 end
+
+# Phase 418: update! keeps the current value of a whole-column write in one vector instead of a Dict entry per
+# cell; later SET items on the same column (slices, WHERE-restricted) must still see it.
+@testset "Phase 418 — update!: later SET items see an earlier whole-column write" begin
+    d = mktempdir(); p = joinpath(d, "t")
+    A = collect(1.0:6.0); V = [fill(Float64(i), 2, 3) for i in 1:6]
+    write_table(p, "T", Pair{String,Any}["A" => A, "V" => V]; nrow = 6, tsm = [["V"]])
+    update!(p; set = ["A" => "A * 10.0", "A" => "A + 1.0"])                      # second item sees the first
+    @test column(readtable(p), "A")[:] == A .* 10 .+ 1
+    update!(p; set = ["V" => "V * 2.0", "V[1,1]" => "-1.0"])                     # slice after a whole-cell write
+    v = column(readtable(p), "V")[:]
+    @test all(i -> v[i][1, 1] == -1.0 && v[i][2, 3] == 2.0 * i, 1:6)
+    update!(p; set = ["A" => "0.0"]); update!(p; set = ["A" => "A + 5.0"], where = "rownumber() > 4")
+    @test column(readtable(p), "A")[:] == [0, 0, 0, 0, 5, 5]
+end

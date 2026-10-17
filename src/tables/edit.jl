@@ -281,6 +281,16 @@ function Base.setindex!(c::EditColumn, vals, ::Colon)
     _check_open(c.tab, "setindex!")
     length(vals) == length(c.tab.rowmap) ||
         error("assigning $(length(vals)) values to a $(length(c.tab.rowmap))-row column")
+    t = c.tab; n = c.desc.name
+    if _added(t, n) === nothing && !(_kind(t, n) in _TILED_KINDS)
+        # whole column: validate every value, then replace the override in one step -- no per-cell dispatch and
+        # no reading of the old column only to overwrite all of it (Phase 418)
+        for v in vals
+            _check_scalar_cell(c.desc, v)
+        end
+        t.override[n] = Any[v for v in vals]
+        return vals
+    end
     for (i, v) in enumerate(vals)
         c[i] = v
     end
@@ -341,12 +351,27 @@ _identity_rowmap(t::EditTable) = all(i -> @inbounds(t.rowmap[i] == i), eachindex
 # every cell of `name` as a `Vector{Any}` aligned with `t.rowmap`: a scalar column that has not been
 # reordered is read in one bulk pass (a per-cell read of a run-length-stored column redoes an index
 # lookup for each row -- 150 s for 3e8 rows against ~1 s)
-function _read_cells_any(t::EditTable, c::ColumnDesc, name::AbstractString, edits=nothing)
+function _read_cells_any(t::EditTable, c::ColumnDesc, name::AbstractString, edits=nothing; concrete::Bool=false)
     _check_row_budget(length(t.rowmap), _cell_cost(t, c), "edit of column \"$name\"")
     col = t.reader.rows > 0 ? column(t.reader, name) : nothing
     if (edits === nothing || isempty(edits)) && col !== nothing && c.shape isa Dims && isempty(c.shape) && _identity_rowmap(t) &&
        length(t.rowmap) == t.reader.rows
-        return Vector{Any}(col[:])
+        # a read-only consumer (the storage-manager writers) takes the typed vector as is: boxing a million
+        # numbers only to unbox them again in the writer loop was most of a one-column update's flush (Phase 419)
+        return concrete ? col[:] : Vector{Any}(col[:])
+    end
+    # a scalar column after rows were removed/added/reordered: one bulk read, then a gather through the row map
+    # (a per-cell read of each surviving row redid a storage-manager lookup per row -- Phase 422)
+    if (edits === nothing || isempty(edits)) && col !== nothing && c.shape isa Dims && isempty(c.shape)
+        bulk = col[:]
+        if concrete && all(>(0), t.rowmap)
+            return bulk[t.rowmap]
+        end
+        d = _default_cell(c, t)
+        if concrete && eltype(bulk) !== Any && d isa eltype(bulk)       # appended rows: typed gather + default fill
+            return _gather_default(bulk, t.rowmap, d)
+        end
+        return Any[src > 0 ? bulk[src] : d for src in t.rowmap]
     end
     v = Vector{Any}(undef, length(t.rowmap))
     @inbounds for (i, src) in enumerate(t.rowmap)
@@ -367,13 +392,16 @@ function _materialize!(t::EditTable, name::AbstractString)
     t.override[name] = _read_cells_any(t, columndesc(t.reader, name), name)
 end
 
+_gather_default(bulk::AbstractVector{T}, rowmap::Vector{Int}, d::T) where {T} =
+    T[src > 0 ? bulk[src] : d for src in rowmap]
+
 # a length-`_nrows(t)` value vector for `name`, honouring every pending edit
 function _resolve(t::EditTable, name::AbstractString)
     haskey(t.override, name) && return t.override[name]
     a = _added(t, name)
     a !== nothing && return a[3]
     c = columndesc(t.reader, name)
-    return _read_cells_any(t, c, name, get(t.tsmedit, name, nothing))
+    return _read_cells_any(t, c, name, get(t.tsmedit, name, nothing); concrete = true)
 end
 
 # cheap per-row dimensionality probe for a variable-shape column
@@ -882,7 +910,7 @@ function _flush_regen(t::EditTable)
 
     descfor(nm) = (a = _added(t, nm); a !== nothing ? a[1] : columndesc(rd, nm))
 
-    resolved = Dict{String,Vector{Any}}()
+    resolved = Dict{String,AbstractVector}()      # keep a typed vector typed (Phase 422)
     getres(nm) = get!(() -> _resolve(t, nm), resolved, nm)
 
     # --- virtual engines: re-encode a touched / row-changed engine column,

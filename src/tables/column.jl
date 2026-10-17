@@ -138,8 +138,20 @@ end
 Base.size(c::Column) = (c.table.rows,)
 Base.IndexStyle(::Type{<:Column}) = IndexLinear()
 
-function Base.getindex(c::Column, i::Int)
+# Phase 421: a plain numeric scalar cell of a StandardStMan column, with the element type known from `Column{T}`
+# (no runtime type lookup, no dynamic dispatch on the untyped `inst`).
+_fastscalar(::Type{T}) where {T} = isbitstype(T) && T !== Bool && T <: Union{Integer,AbstractFloat,Complex}
+function _ssm_scalar_cell(ssm::StandardStMan, ssmcol::Int, ::Type{T}, row::Int) where {T}
+    off, firstrow = locate(ssm, ssmcol, row)
+    return _ld(T, ssm.data, off + (row - firstrow) * sizeof(T), ssm.endian === :big)
+end
+
+function Base.getindex(c::Column{T}, i::Int) where {T}
     @boundscheck checkbounds(c, i)
+    inst = c.inst
+    if _fastscalar(T) && c.target === nothing && inst isa StandardStMan && c.desc isa ColumnDesc{Tuple{}}
+        return _ssm_scalar_cell(inst, c.index, T, i)
+    end
     v = getcell(c.inst, c.index, c.desc, i, c.cols)
     c.target === nothing ? v : _narrowvalue(v, c.target)   # single cell: cheap post-convert
 end
@@ -172,7 +184,18 @@ function Base.getindex(c::Column, ::Colon)
     getcolumn(c.inst, c.index, c.desc, c.table.rows, c.cols; astype)
 end
 
-Base.getindex(c::Column, r::AbstractVector{<:Integer}) = [c[i] for i in r]
+# Phase 423: a scalar column read at many rows (a query result's `MappedColumn`, `DataFrame(t)`, `copy`) was one
+# storage-manager lookup per cell.  A dense selection reads the column once and indexes it; a sparse one keeps
+# the per-cell reads (reading the whole column for a handful of rows would be the slow way round).
+function Base.getindex(c::Column{T}, r::AbstractVector{<:Integer}) where {T}
+    if !(T <: AbstractArray) && length(r) >= 4096 && 8 * length(r) >= length(c)
+        return c[:][r]
+    end
+    return [c[i] for i in r]
+end
+# copying a whole scalar column is the bulk read as well (`copy` of an AbstractVector goes through `getindex` cell
+# by cell; `collect` already forwards to `c[:]` below)
+Base.copy(c::Column{T}) where {T} = T <: AbstractArray ? [c[i] for i in eachindex(c)] : c[:]
 # a Bool mask selects the `true` rows (Bool <: Integer, so the method above would index by `true`/`false`)
 function Base.getindex(c::Column, m::AbstractVector{Bool})
     length(m) == length(c) || throw(BoundsError(c, m))      # like a Vector indexed by a wrong-length mask
@@ -264,6 +287,7 @@ end
 Base.getindex(m::MappedColumn, ::Colon) = m.parent[m.rows]
 Base.getindex(m::MappedColumn, r::AbstractVector{<:Integer}) = m.parent[m.rows[r]]
 Base.collect(m::MappedColumn) = m[:]
+Base.copy(m::MappedColumn) = m[:]
 
 "A column of a [`ConcatTable`](@ref): rows run through `parts` per `offsets`."
 struct ConcatColumn{T} <: AbstractVector{T}
@@ -286,6 +310,7 @@ function Base.getindex(c::ConcatColumn, m::AbstractVector{Bool})
     return c[findall(m)]
 end
 Base.collect(c::ConcatColumn) = c[:]
+Base.copy(c::ConcatColumn) = c[:]
 
 function column(t::RefTable, name::AbstractString; precision::Union{Nothing,Symbol,Type}=nothing)
     haskey(t.namemap, name) || throw(KeyError(name))

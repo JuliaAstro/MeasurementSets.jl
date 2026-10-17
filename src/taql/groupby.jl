@@ -10,10 +10,29 @@
 
 _geval(::TQLGrouping, cols, g) = throw(ArgumentError(
     "TaQL-lite: GROUPING() must be resolved per grouping set (internal error)"))
+# Phase 417: an aggregate argument (`gsum(B*C)`) was interpreted per row and boxed into a
+# `Vector{Any}` before the reduction.  Large tables compile the argument once per query (cached
+# per column dictionary, so the entry dies with it) and collect a concretely typed vector.
+const _AGG_CACHE = WeakKeyDict{Any,IdDict{Any,Any}}()
+const _AGG_LOCK = ReentrantLock()
+function _agg_compiled(arg, cols)
+    n = isempty(cols) ? 0 : length(first(values(cols)))
+    _use_compiled(arg, n) || return nothing
+    @lock _AGG_LOCK begin
+        d = get!(() -> IdDict{Any,Any}(), _AGG_CACHE, cols)
+        get!(() -> _compile(arg, cols), d, arg)
+    end
+end
+function _agg_vals(f, g)
+    v = [_widen(f(i)) for i in g]
+    return eltype(v) === Any ? identity.(v) : v      # un-inferable closure: narrow so the reduction is typed
+end
+
 function _geval(e::TQLAggr, cols, g)
     e.arg === nothing && return e.fn(g)                    # gcount()
     # Phase 339: real TaQL aggregates in 64-bit / double (`gsum(UInt8)` is Int64, `gmean(Float32)` Float64)
-    vals = Any[_widen(_tqleval(e.arg, cols, i)) for i in g]
+    f = _agg_compiled(e.arg, cols)
+    vals = f === nothing ? Any[_widen(_tqleval(e.arg, cols, i)) for i in g] : _agg_vals(f, g)
     try
         e.mode === :perelem && return _perelem_reduce(e.fn, vals)
         any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
@@ -597,14 +616,8 @@ function _gt_sort(gt::GroupedTable, orderby::AbstractVector)
     # real TaQL (live-verified, Phase 355): when EVERY key is descending the result is the reversed ascending sort (fully-tied groups come
     # out in reverse order); mixed directions keep ties in their original (first-seen) order -- the same rule as a row ORDER BY (Phase 246)
     alldesc = !isempty(keys) && all(k -> k.desc, keys)
-    perm = sort(collect(1:n); alg=Base.Sort.MergeSort, lt=function (i, j)
-        for k in keys
-            vi, vj = bycol[k.name][i], bycol[k.name][j]
-            isequal(vi, vj) && continue
-            return (k.desc && !alldesc) ? isless(vj, vi) : isless(vi, vj)
-        end
-        return false
-    end)
+    perm = _sorted_rows(collect(1:n), AbstractVector[bycol[k.name] for k in keys],
+                        Bool[k.desc && !alldesc for k in keys])
     alldesc && reverse!(perm)
     return GroupedTable(copy(gt.names), AbstractVector[c[perm] for c in gt.cols], copy(getfield(gt, :units)), copy(getfield(gt, :epochs)))
 end

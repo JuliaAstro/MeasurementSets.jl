@@ -257,6 +257,23 @@ function _read_bits(ssm::StandardStMan, off::Int, bitstart::Int, n::Int)
     return out
 end
 
+# Phase 421: a scalar cell (the overwhelmingly common random-access read) is one typed load -- the generic
+# method below builds a one-element vector (and a dims tuple) per cell just to take `[1]` of it.
+function getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc{Tuple{}}, row::Integer, ::Integer)
+    off, firstrow = locate(ssm, ssmcol, row)
+    inbucket = Int(row) - firstrow
+    t = c.type
+    if t == TpBool
+        b = inbucket
+        return (ssm.data[off + (b >> 3) + 1] >> (b & 7)) & 0x01 == 0x01
+    elseif t == TpString
+        c.maxlength > 0 && error("fixed-length strings not yet supported")
+        return _read_string_ref(ssm, off + inbucket * SSM_STRING_REF)
+    end
+    return _ssm_load_scalar(ssm, juliatype(t), off + inbucket * sizeof(juliatype(t)))
+end
+_ssm_load_scalar(ssm::StandardStMan, ::Type{T}, o::Int) where {T} = _ld(T, ssm.data, o, ssm.endian === :big)
+
 """
     getcell(ssm::StandardStMan, ssmcol, coldesc, row, cols) -> value
 
@@ -405,6 +422,19 @@ function _foreach_bucket(f, ssm::StandardStMan, ssmcol::Int)
     end
 end
 
+# Phase 424b: the bucket walk with the element types as dispatch parameters, reading each bucket's run with
+# `_rd_run!`.  It was a closure over runtime `T` indexing a `reinterpret`ed view per element, which on Julia 1.10
+# allocated ~56 B per value (64 vs 8 B/element for a Float64 column; 1.13 hides it).
+function _ssm_read_numeric(ssm::StandardStMan, ssmcol::Int, ::Type{T}, ::Type{Tout}, total::Int, nrelem::Int, coloff::Int) where {T,Tout}
+    flat = Vector{Tout}(undef, total)
+    big = ssm.endian === :big
+    _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
+        n = (lastrow - firstrow + 1) * nrelem
+        _rd_run!(flat, (firstrow - 1) * nrelem, T, ssm.data, bucketptr(ssm, bkt) + coloff, n, big)
+    end
+    return flat
+end
+
 """
     getcolumn(ssm::StandardStMan, ssmcol, coldesc, nrow, cols; astype=nothing) -> Vector / Array
 
@@ -496,16 +526,7 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
     else
         T = juliatype(c.type)
         Tout = astype === nothing ? T : astype
-        flat = Vector{Tout}(undef, nrow * nrelem)
-        _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
-            n = (lastrow - firstrow + 1) * nrelem
-            off = bucketptr(ssm, bkt) + coloff
-            raw = reinterpret(T, @view ssm.data[off+1 : off + n*sizeof(T)])
-            base = (firstrow - 1) * nrelem
-            @inbounds for k in 1:n
-                flat[base + k] = Tout(_swap(ssm, raw[k]))
-            end
-        end
+        flat = _ssm_read_numeric(ssm, ssmcol, T, Tout, nrow * nrelem, nrelem, coloff)
         isempty(dims) && return flat
         # Phase 235/236: same copying-slice -> lazy `BlockColumn` fix as
         # the `Bool` branch above (this is the one that hits the
@@ -535,7 +556,20 @@ end
 # One scalar per row (a one-element fixed-shape ARRAY cell too).  A function
 # barrier on the element type `J`: the column is often a `Vector{Any}`, and
 # without it every cell is a dynamic dispatch plus a boxed conversion.
-function _ssm_put_scalars!(file, co, ext, r0, nr, col, ::Type{J}, endian) where {J}
+# Phase 418: a little-endian column already stored as `Vector{J}` of plain numbers, whose cells sit back to
+# back (`ext == sizeof(J)`), is one memory copy per bucket instead of a bounds-checked store per value.
+function _ssm_put_scalars!(file::Vector{UInt8}, co, ext, r0, nr, col::Vector{J}, ::Type{J}, endian) where {J<:Union{Integer,AbstractFloat}}
+    if J !== Bool && endian === :little && Base.ENDIAN_BOM == 0x04030201 && ext == sizeof(J) && nr > 0
+        (co >= 0 && co + nr * sizeof(J) <= length(file) && r0 + nr <= length(col)) ||
+            throw(BoundsError(file, co+1:co+nr*sizeof(J)))
+        GC.@preserve file col unsafe_copyto!(Ptr{J}(pointer(file, co + 1)), pointer(col, r0 + 1), nr)
+        return nothing
+    end
+    return _ssm_put_scalars_generic!(file, co, ext, r0, nr, col, J, endian)
+end
+_ssm_put_scalars!(file, co, ext, r0, nr, col, ::Type{J}, endian) where {J} =
+    _ssm_put_scalars_generic!(file, co, ext, r0, nr, col, J, endian)
+function _ssm_put_scalars_generic!(file, co, ext, r0, nr, col, ::Type{J}, endian) where {J}
     for lr in 0:nr-1
         v = col[r0 + lr + 1]
         _wrbytes!(file, co + lr * ext, J(v isa AbstractArray ? first(v) : v), endian)
@@ -582,7 +616,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     # --- variable strings: build the string stream + per-cell refs -----
     strstream = UInt8[]
     strref = [Vector{NTuple{3,Int}}(undef, 0) for _ in 1:ncol]   # (bkt,off,len) or inline
-    inlinechars = [Dict{Int,Vector{UInt8}}() for _ in 1:ncol]
+    foreach(v -> sizehint!(v, nrow), strref)
 
     # index bytes: SSMIndex `itsLastRow` (0-based last row of each bucket)
     idxrows = UInt32[min((k + 1) * rpb, nrow) - 1 for k in 0:ndata-1]
@@ -605,8 +639,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
             s = kinds[i] === :indstr ? _string_array_blob(coldata[i][r]; header = !(cols[i].shape isa Dims)) :
                                        codeunits(String(coldata[i][r]))
             if length(s) <= SSM_STRING_INLINE_MAX && kinds[i] !== :indstr
-                push!(strref[i], (0, 0, length(s)))
-                inlinechars[i][r] = collect(s)
+                push!(strref[i], (-1, 0, length(s)))      # bkt == -1: stored inline in the data bucket (Phase 418: no per-string copy)
             else
                 bkt = length(strstream) ÷ strchar
                 off = length(strstream) % strchar
@@ -647,8 +680,8 @@ function write_standardstman(dir::AbstractString, sequ::Int,
                     r = r0 + lr + 1
                     o = co + lr * SSM_STRING_REF
                     bkt, soff, len = strref[i][r]
-                    if haskey(inlinechars[i], r)
-                        cs = inlinechars[i][r]
+                    if bkt < 0
+                        cs = codeunits(String(coldata[i][r]))
                         copyto!(file, o + 1, cs, 1, length(cs))
                     else
                         _wrbytes!(file, o,               Int32(strbase + bkt), endian)

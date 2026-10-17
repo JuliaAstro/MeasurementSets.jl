@@ -27,7 +27,7 @@ function _join_matchrow(left::AbstractTable, right::AbstractTable, on)
     if on isa Union{AbstractString,Symbol}
         String(on) in columnnames(left) ||
             throw(ArgumentError("join: left table has no column \"$(on)\""))
-        lc = column(left, String(on))
+        lc = _load_col(column(left, String(on)))      # bulk-read once, not a lazy cell read per left row (Phase 420)
         # Phase 227 fix: `v` can be `missing` (the left table is itself a
         # `missing`-containing outer-join/masked result — the verbs chain,
         # so this is ordinary usage, not contrived input); `0 <= missing`
@@ -47,17 +47,36 @@ function _join_matchrow(left::AbstractTable, right::AbstractTable, on)
     for k in rkeys
         k in columnnames(right) || throw(ArgumentError("join: right table has no column \"$k\""))
     end
-    rcols = [column(right, k) for k in rkeys]
-    lcols = [column(left, k) for k in lkeys]
-    idx = Dict{Any,Int}()
+    rcols = [_load_col(column(right, k)) for k in rkeys]
+    lcols = [_load_col(column(left, k)) for k in lkeys]
+    return _join_lookup(lcols, rcols, nr, nrow(left))
+end
+
+# first-row-per-key lookup of every left row in the right key columns (0 = no match); the right key must be
+# unique.  One key column gets a Dict keyed by the plain element type (no per-row tuple), several a typed tuple.
+function _join_lookup(lcols, rcols, nr::Int, nl::Int)
+    if length(rcols) == 1
+        rc = rcols[1]; lc = lcols[1]
+        idx = Dict{eltype(rc),Int}()
+        for j in 1:nr
+            key = rc[j]
+            haskey(idx, key) && throw(ArgumentError(
+                "join: right key $((key,)) is not unique (rows $(idx[key]) and $j) -- the lookup is ambiguous"))
+            idx[key] = j
+        end
+        return _join_lookup_get(idx, lc, nl)
+    end
+    nk = length(rcols)
+    idx = Dict{Tuple{map(eltype, rcols)...},Int}()
     for j in 1:nr
-        key = ntuple(t -> rcols[t][j], length(rkeys))
+        key = ntuple(t -> rcols[t][j], nk)
         haskey(idx, key) && throw(ArgumentError(
             "join: right key $(key) is not unique (rows $(idx[key]) and $j) -- the lookup is ambiguous"))
         idx[key] = j
     end
-    return Int[get(idx, ntuple(t -> lcols[t][i], length(lkeys)), 0) for i in 1:nrow(left)]
+    return Int[get(idx, ntuple(t -> lcols[t][i], nk), 0) for i in 1:nl]
 end
+_join_lookup_get(idx, lc, nl) = Int[get(idx, lc[i], 0) for i in 1:nl]
 
 # equi-join key columns for `on` (a Pair or vector of pairs); errors on
 # a bare-column-name (index-lookup) `on`.
@@ -75,7 +94,15 @@ function _join_keycols(left::AbstractTable, right::AbstractTable, on)
     for k in rkeys
         k in columnnames(right) || throw(ArgumentError("join: right table has no column \"$k\""))
     end
-    return [column(left, k) for k in lkeys], [column(right, k) for k in rkeys]
+    return [_load_col(column(left, k)) for k in lkeys], [_load_col(column(right, k)) for k in rkeys]
+end
+
+function _join_multi_index(::Type{K}, keyr, nr::Int) where {K}
+    ridx = Dict{K,Vector{Int}}()
+    for j in 1:nr
+        push!(get!(() -> Int[], ridx, keyr(j)), j)
+    end
+    return ridx
 end
 
 # The (left-row, right-row) index pairs of the join (`0` on a side means
@@ -105,14 +132,15 @@ function _join_pairs(left::AbstractTable, right::AbstractTable, on, multi::Bool,
     keepR = unmatched in (:right, :full)               # keep unmatched right rows
     lcols, rcols = _join_keycols(left, right, on)
     nk = length(lcols)
-    ridx = Dict{Any,Vector{Int}}()
-    for j in 1:nrow(right)
-        push!(get!(() -> Int[], ridx, ntuple(t -> rcols[t][j], nk)), j)
-    end
+    # typed key (the element type itself for one key column, a typed tuple for several): no per-row boxed tuple
+    keyof = nk == 1 ? (cols -> (j -> cols[1][j])) : (cols -> (j -> ntuple(t -> cols[t][j], nk)))
+    K = nk == 1 ? eltype(rcols[1]) : Tuple{map(eltype, rcols)...}
+    kr = keyof(rcols); kl = keyof(lcols)
+    ridx = _join_multi_index(K, kr, nrow(right))
     lrows = Int[]; rrows = Int[]
     matched_r = falses(nrow(right))
     for i in 1:nrow(left)
-        ms = get(ridx, ntuple(t -> lcols[t][i], nk), nothing)
+        ms = get(ridx, kl(i), nothing)
         if ms === nothing
             unmatched === :error && throw(ArgumentError(
                 "join: left row $i has no match on the right (use unmatched=:drop / :missing / ...)"))

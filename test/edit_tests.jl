@@ -879,3 +879,55 @@ end
     edit(p) do s; s[:A][3] = 30; end           # a fresh session still works
     @test column(readtable(p), "A")[:] == [10, 2, 30]
 end
+
+# Phase 419: the flush resolves every column of a regenerated storage-manager file; an untouched scalar column
+# used to be boxed into a Vector{Any} only for the writer to unbox it again.  It is now the typed vector, and a
+# column with pending edits still resolves to the edited values.
+@testset "Phase 419 — flush resolves untouched scalar columns as typed vectors" begin
+    d = mktempdir(); p = joinpath(d, "t"); n = 40
+    write_table(p, "T", Pair{String,Any}["K" => Int32.(1:n), "B" => collect(1.0:n), "S" => ["s$i" for i in 1:n]]; nrow = n)
+    t = edit(p)
+    @test MeasurementSets._resolve(t, "B") isa Vector{Float64}
+    @test MeasurementSets._resolve(t, "K") isa Vector{Int32}
+    t[:B][3] = -1.0
+    r = MeasurementSets._resolve(t, "B")
+    @test r[3] == -1.0 && r[4] == 4.0 && length(r) == n
+    @test MeasurementSets._resolve(t, "S") == ["s$i" for i in 1:n]
+    flush(t)
+    u = readtable(p)
+    @test column(u, "B")[:] == replace(collect(1.0:n), 3.0 => -1.0)
+    @test column(u, "K")[:] == Int32.(1:n) && column(u, "S")[:] == ["s$i" for i in 1:n]
+    # restricted update! through the same path, with an appended row and a removed row
+    update!(p; set = ["K" => "K + 100"], where = "K > 35")
+    edit(p) do e; addrows!(e, 2); removerows!(e, [1]); end
+    k = column(readtable(p), "K")[:]
+    @test length(k) == n + 1 && k[1:34] == Int32.(2:35) && k[35:n-1] == Int32.(136:140)
+end
+
+# Phase 422: after rows were removed or appended, every scalar column was re-read cell by cell through the row
+# map (a storage-manager lookup per row) and re-boxed; it is now one bulk read and a typed gather.
+@testset "Phase 422 — structural edits: removed / appended rows across scalar column kinds" begin
+    rng = MersenneTwister(422)
+    for (ism, endian) in ((false, :little), (true, :little), (false, :big)), trial in 1:6
+        n = rand(rng, 5:60)
+        K = Int32.(rand(rng, 1:9, n)); B = rand(rng, n); S = ["s$(rand(rng, 1:5))" for _ in 1:n]; F = rand(rng, Bool, n)
+        V = [rand(rng, 2, 3) for _ in 1:n]
+        d = mktempdir(); p = joinpath(d, "t")
+        write_table(p, "T", Pair{String,Any}["K" => K, "B" => B, "S" => S, "F" => F, "V" => V]; nrow = n, endian,
+                    ism = ism ? ["K", "B"] : String[])
+        gone = sort(unique(rand(rng, 1:n, rand(rng, 0:n ÷ 2)))); keep = setdiff(1:n, gone); add = rand(rng, 0:5)
+        edit(p) do e
+            isempty(gone) || removerows!(e, gone)
+            add > 0 && addrows!(e, add)
+            add > 0 && (e[:K][length(keep) + 1] = Int32(77); e[:S][length(keep) + add] = "new")
+        end
+        r = readtable(p)
+        m = length(keep) + add
+        @test nrow(r) == m
+        @test column(r, "K")[:] == vcat(K[keep], zeros(Int32, add)) .+ Int32.(add > 0 && m >= length(keep) + 1 ? (1:m) .== length(keep) + 1 : falses(m)) .* Int32(77)
+        @test column(r, "B")[:] == vcat(B[keep], zeros(add))
+        @test column(r, "S")[:] == vcat(S[keep], fill("", add)) |> x -> (add > 0 && (x[length(keep) + add] = "new"); x)
+        @test column(r, "F")[:] == vcat(F[keep], falses(add))
+        @test column(r, "V")[1:length(keep)] == V[keep]
+    end
+end

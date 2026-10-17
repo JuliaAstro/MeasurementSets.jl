@@ -380,6 +380,28 @@ function _itrs_to_cirs(v, uta, utb, tta, ttb, eop)
     return _rz(SOFA.era00(uta, utb))' * (pom' * v)
 end
 
+# Phase 423: `atco13` / `atci13` / `atic13` / `atoi13` rebuild the astrometry context (precession-nutation series,
+# Earth ephemeris, site rotation) on every call -- 64 KiB and ~50 us per direction.  The context depends only on
+# the frame (epoch, site, Earth orientation), so it is built once and cached (a small bounded table, locked), and
+# each direction costs the quick `atciq` / `atioq` / `aticq` / `atoiq` step.  Bit-identical to the one-shot routines.
+const _ASTROM_LOCK = ReentrantLock()
+const _ASTROM_CACHE = Dict{Any,Any}()
+function _astrom_cached(f, key)
+    @lock _ASTROM_LOCK begin
+        v = get(_ASTROM_CACHE, key, nothing)
+        v === nothing || return v
+        length(_ASTROM_CACHE) >= 16 && empty!(_ASTROM_CACHE)
+        return _ASTROM_CACHE[key] = f()
+    end
+end
+_ctx_ci(tt1, tt2) = _astrom_cached(() -> SOFA.apci13(tt1, tt2), (:ci, tt1, tt2))
+_ctx_co(utc1, utc2, eop, el, phi, hm) = _astrom_cached(
+    () -> SOFA.apco13(utc1, utc2, eop.dut1, el, phi, hm, eop.xp, eop.yp, 0.0, 273.15, 0.0, 0.5).astrom,
+    (:co, utc1, utc2, eop.dut1, el, phi, hm, eop.xp, eop.yp))
+_ctx_io(utc1, utc2, eop, el, phi, hm) = _astrom_cached(
+    () -> SOFA.apio13(utc1, utc2, eop.dut1, el, phi, hm, eop.xp, eop.yp, 0.0, 273.15, 0.0, 0.5, SOFA.Astrom()),
+    (:io, utc1, utc2, eop.dut1, el, phi, hm, eop.xp, eop.yp))
+
 function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
     # Phase 298: `_mconv(::MDirection,...)` (below) already routes every
     # body-frame direction through `_body_dir_icrs` directly, *before*
@@ -403,9 +425,9 @@ function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
         r = SOFA.eceq06(SOFA.JD2000, 0.0, m.lon, m.lat);  return (r.ra, r.dec)
     elseif A === APP
         tt1, tt2 = _frame_tt(frame)
-        eo = SOFA.atci13(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, tt1, tt2).eo
-        ri = m.lon + eo
-        r = SOFA.atic13(ri, m.lat, tt1, tt2)
+        cx = _ctx_ci(tt1, tt2)
+        ri = m.lon + cx.eo
+        r = SOFA.aticq(ri, m.lat, cx.astrom)
         return (r.ra, r.dec)
     elseif A === AZEL || A === AZELGEO || A === HADEC
         utc1, utc2 = _frame_utc(frame)
@@ -414,10 +436,9 @@ function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
         typ = A === HADEC ? 'H' : 'A'
         a = m.lon                                          # ha  /  az
         b = A === HADEC ? m.lat : (pi/2 - m.lat)           # dec /  zen
-        ci = SOFA.atoi13(typ, a, b, utc1, utc2, eop.dut1,
-                         el, phi, hm, eop.xp, eop.yp, 0.0, 273.15, 0.0, 0.5)
+        ci = SOFA.atoiq(typ, a, b, _ctx_io(utc1, utc2, eop, el, phi, hm))
         tt1, tt2 = _frame_tt(frame)
-        r = SOFA.atic13(ci.ra, ci.dec, tt1, tt2)
+        r = SOFA.aticq(ci.ra, ci.dec, _ctx_ci(tt1, tt2).astrom)
         return (r.ra, r.dec)
     elseif A === ITRF
         uta, utb = _frame_ut1(frame)
@@ -428,7 +449,7 @@ function _dir_to_icrs(m::MDirection{A}, frame::MeasFrame) where {A}
         # direction below.
         v = _itrs_to_cirs(SVector(_dir_xyz(m)), uta, utb, tta, ttb, eop)
         ra = atan(v[2], v[1]); dec = asin(clamp(v[3], -1, 1))
-        r = SOFA.atic13(ra, dec, tta, ttb)
+        r = SOFA.aticq(ra, dec, _ctx_ci(tta, ttb).astrom)
         return (r.ra, r.dec)
     end
     error("MeasurementSets: direction frame $(nameof(A)) is not supported")
@@ -457,14 +478,16 @@ function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) w
         r = SOFA.eqec06(SOFA.JD2000, 0.0, lon, lat);  return MDirection{B}(r.lon, r.lat)
     elseif B === APP
         tt1, tt2 = _frame_tt(frame)
-        r = SOFA.atci13(lon, lat, 0.0, 0.0, 0.0, 0.0, tt1, tt2)
-        return MDirection{B}(r.ra - r.eo, r.dec)
+        cx = _ctx_ci(tt1, tt2)
+        r = SOFA.atciq(lon, lat, 0.0, 0.0, 0.0, 0.0, cx.astrom)
+        return MDirection{B}(r.ra - cx.eo, r.dec)
     elseif B === AZEL || B === AZELGEO || B === HADEC
         utc1, utc2 = _frame_utc(frame)
         el, phi, hm = _frame_site(frame; geodetic = B !== AZEL)
         eop = _frame_eop(frame)
-        r = SOFA.atco13(lon, lat, 0.0, 0.0, 0.0, 0.0, utc1, utc2, eop.dut1,
-                        el, phi, hm, eop.xp, eop.yp, 0.0, 273.15, 0.0, 0.5)
+        ax = _ctx_co(utc1, utc2, eop, el, phi, hm)
+        ri = SOFA.atciq(lon, lat, 0.0, 0.0, 0.0, 0.0, ax)
+        r = SOFA.atioq(ri.ra, ri.dec, ax)
         return B === HADEC ? MDirection{B}(r.ha, r.dec) : MDirection{B}(r.azi, pi/2 - r.zen)
     elseif B === ITRF
         uta, utb = _frame_ut1(frame)
@@ -475,7 +498,7 @@ function _icrs_to_dir(lon::Float64, lat::Float64, ::Type{B}, frame::MeasFrame) w
         # direction gets aberration and light deflection (`atci13`) before the Earth-rotation
         # and polar-motion rotation.  A pure GCRS -> ITRS rotation (what this used to be) is
         # ~20" off (the annual aberration) from casacore / casatools `me.measure(.., 'ITRF')`.
-        a = SOFA.atci13(lon, lat, 0.0, 0.0, 0.0, 0.0, tta, ttb)
+        a = SOFA.atciq(lon, lat, 0.0, 0.0, 0.0, 0.0, _ctx_ci(tta, ttb).astrom)
         v = _cirs_to_itrs(SVector(cos(a.dec)*cos(a.ra), cos(a.dec)*sin(a.ra), sin(a.dec)), uta, utb, tta, ttb, eop)
         return _xyz_dir(B, v...)
     end
