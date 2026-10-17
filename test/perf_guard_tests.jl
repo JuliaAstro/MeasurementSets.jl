@@ -220,3 +220,37 @@ end
     @test (@allocated copy(c)) < 20 * n
     @test (@allocated c[r]) < 40 * length(r)
 end
+
+# Phase 424: packing a row's plane into a tile dispatched dynamically on the element type for EVERY element
+# (`juliatype(...)` was a runtime value): create_ms / copyms of a 20000 x 64 x 4 MS took ~1 s and 1 GiB.
+@testset "Phase 424 — tile plane packing: memcpy path == element loop; create_ms / copyms stay cheap" begin
+    TS = MeasurementSets
+    for T in (Int16, UInt16, Int32, UInt32, Int64, Float32, Float64, ComplexF32, ComplexF64, Bool), endian in (:little, :big)
+        plane = T === Bool ? rand(MersenneTwister(424), Bool, 12) : T.(rand(MersenneTwister(424), 1:100, 12))
+        for within in (0, 5), views in (false, true)
+            p = views ? reshape(view(plane, 1:12), 12) : plane              # a non-Vector plane takes the element loop
+            a = zeros(UInt8, 8 + 40 * 16); b = copy(a)
+            TS._pack_plane!(a, 8, within, 12, T, p, endian)
+            if T === Bool
+                for e in 0:11
+                    plane[e+1] && (bi = 8 + ((within + e) >> 3) + 1; b[bi] |= 0x01 << ((within + e) & 7))
+                end
+            else
+                for e in 1:12
+                    TS._wrbytes!(b, 8 + within * sizeof(T) + (e - 1) * sizeof(T), plane[e], endian)
+                end
+            end
+            @test a == b
+        end
+    end
+    @test_throws BoundsError MeasurementSets._pack_plane!(zeros(UInt8, 10), 8, 0, 4, Int32, Int32[1, 2, 3, 4], :little)
+    # marginal bytes per row (the difference of two sizes removes the fixed subtable cost)
+    d = mktempdir(); perrow = 16 * 4 * (8 + 1 + 4)                                   # DATA + FLAG + WEIGHT_SPECTRUM bytes per row
+    mk(n, nm) = (p = joinpath(d, nm); create_ms(p; nrow = n, nchan = 16, ncorr = 4, nant = 4); p)
+    mk(500, "w"); copyms(joinpath(d, "w"), joinpath(d, "wc"))                       # warm up
+    n1, n2 = 4000, 8000
+    c1 = @allocated mk(n1, "a"); c2 = @allocated mk(n2, "b")
+    @test (c2 - c1) / (n2 - n1) < 10 * perrow           # 6.5x now, was 17.5x
+    k1 = @allocated copyms(joinpath(d, "a"), joinpath(d, "ac")); k2 = @allocated copyms(joinpath(d, "b"), joinpath(d, "bc"))
+    @test (k2 - k1) / (n2 - n1) < 16 * perrow           # 11.7x now, was 22.7x
+end

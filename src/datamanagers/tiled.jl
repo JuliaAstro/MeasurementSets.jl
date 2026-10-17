@@ -598,22 +598,30 @@ function _pack_planes!(buf::Vector{UInt8}, tilebase::Int, within::Int, planelen:
                        types::Vector{CasaType}, offs::Vector{Int},
                        planes, endian::Symbol)
     for k in eachindex(types)
-        T = juliatype(types[k])
-        plane = planes[k]
-        base = tilebase + offs[k]
-        if T === Bool
-            for e in 0:planelen-1
-                if plane[e+1] != 0
-                    b = within + e
-                    buf[base + (b >> 3) + 1] |= (0x01 << (b & 7))
-                end
-            end
-        else
-            o = base + within * sizeof(T)
-            for e in 1:planelen
-                _wrbytes!(buf, o + (e-1)*sizeof(T), T(plane[e]), endian)
-            end
+        _pack_plane!(buf, tilebase + offs[k], within, planelen, juliatype(types[k]), planes[k], endian)
+    end
+end
+
+# Phase 424: the element type is a function-barrier parameter here (it was a runtime `juliatype(...)` value, so every
+# element was a dynamic dispatch), and a little-endian plane that already is a `Vector{T}` is one memory copy.
+function _pack_plane!(buf::Vector{UInt8}, base::Int, within::Int, planelen::Int, ::Type{Bool}, plane, endian::Symbol)
+    for e in 0:planelen-1
+        if plane[e+1] != 0
+            b = within + e
+            buf[base + (b >> 3) + 1] |= (0x01 << (b & 7))
         end
+    end
+end
+function _pack_plane!(buf::Vector{UInt8}, base::Int, within::Int, planelen::Int, ::Type{T}, plane, endian::Symbol) where {T}
+    o = base + within * sizeof(T)
+    if endian === :little && Base.ENDIAN_BOM == 0x04030201 && plane isa Vector{T} && isbitstype(T) &&
+       length(plane) >= planelen
+        (o >= 0 && o + planelen * sizeof(T) <= length(buf)) || throw(BoundsError(buf, o+1:o+planelen*sizeof(T)))
+        GC.@preserve buf plane unsafe_copyto!(Ptr{T}(pointer(buf, o + 1)), pointer(plane), planelen)
+        return nothing
+    end
+    for e in 1:planelen
+        _wrbytes!(buf, o + (e-1)*sizeof(T), T(plane[e]), endian)
     end
 end
 
