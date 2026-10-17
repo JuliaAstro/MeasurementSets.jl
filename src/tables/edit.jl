@@ -360,6 +360,19 @@ function _read_cells_any(t::EditTable, c::ColumnDesc, name::AbstractString, edit
         # numbers only to unbox them again in the writer loop was most of a one-column update's flush (Phase 419)
         return concrete ? col[:] : Vector{Any}(col[:])
     end
+    # a scalar column after rows were removed/added/reordered: one bulk read, then a gather through the row map
+    # (a per-cell read of each surviving row redid a storage-manager lookup per row -- Phase 422)
+    if (edits === nothing || isempty(edits)) && col !== nothing && c.shape isa Dims && isempty(c.shape)
+        bulk = col[:]
+        if concrete && all(>(0), t.rowmap)
+            return bulk[t.rowmap]
+        end
+        d = _default_cell(c, t)
+        if concrete && eltype(bulk) !== Any && d isa eltype(bulk)       # appended rows: typed gather + default fill
+            return _gather_default(bulk, t.rowmap, d)
+        end
+        return Any[src > 0 ? bulk[src] : d for src in t.rowmap]
+    end
     v = Vector{Any}(undef, length(t.rowmap))
     @inbounds for (i, src) in enumerate(t.rowmap)
         if edits !== nothing && haskey(edits, i)
@@ -378,6 +391,9 @@ function _materialize!(t::EditTable, name::AbstractString)
     haskey(t.override, name) && return
     t.override[name] = _read_cells_any(t, columndesc(t.reader, name), name)
 end
+
+_gather_default(bulk::AbstractVector{T}, rowmap::Vector{Int}, d::T) where {T} =
+    T[src > 0 ? bulk[src] : d for src in rowmap]
 
 # a length-`_nrows(t)` value vector for `name`, honouring every pending edit
 function _resolve(t::EditTable, name::AbstractString)
@@ -894,7 +910,7 @@ function _flush_regen(t::EditTable)
 
     descfor(nm) = (a = _added(t, nm); a !== nothing ? a[1] : columndesc(rd, nm))
 
-    resolved = Dict{String,Vector{Any}}()
+    resolved = Dict{String,AbstractVector}()      # keep a typed vector typed (Phase 422)
     getres(nm) = get!(() -> _resolve(t, nm), resolved, nm)
 
     # --- virtual engines: re-encode a touched / row-changed engine column,

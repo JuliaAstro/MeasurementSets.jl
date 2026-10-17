@@ -190,3 +190,15 @@ end
         @test (@allocated c[12345]) < 48          # 0 B in a function; a global's box costs 16 (was 80-96)
     end
 end
+
+# Phase 422: removerows!/addrows! re-read every surviving cell through the row map (~1.5 s per million rows).
+@testset "Phase 422 — removerows!/addrows! allocate O(n) small vectors, not a cell read per row" begin
+    d = mktempdir(); n = 100_000; rng = MersenneTwister(422)
+    write_table(joinpath(d, "t"), "T", Pair{String,Any}["K" => Int32.(rand(rng, 1:9, n)), "B" => rand(rng, n)]; nrow = n)
+    run(f) = (q = joinpath(d, "u"); isdir(q) && rm(q; recursive = true); cp(joinpath(d, "t"), q); f(q))
+    rem(q) = edit(e -> removerows!(e, 1:100:n), q)
+    app(q) = edit(e -> addrows!(e, 100), q)
+    run(rem); run(app)
+    @test (run(q -> @allocated rem(q))) < 700 * n       # was ~1500 B/row
+    @test (run(q -> @allocated app(q))) < 700 * n
+end

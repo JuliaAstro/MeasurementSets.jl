@@ -903,3 +903,31 @@ end
     k = column(readtable(p), "K")[:]
     @test length(k) == n + 1 && k[1:34] == Int32.(2:35) && k[35:n-1] == Int32.(136:140)
 end
+
+# Phase 422: after rows were removed or appended, every scalar column was re-read cell by cell through the row
+# map (a storage-manager lookup per row) and re-boxed; it is now one bulk read and a typed gather.
+@testset "Phase 422 — structural edits: removed / appended rows across scalar column kinds" begin
+    rng = MersenneTwister(422)
+    for (ism, endian) in ((false, :little), (true, :little), (false, :big)), trial in 1:6
+        n = rand(rng, 5:60)
+        K = Int32.(rand(rng, 1:9, n)); B = rand(rng, n); S = ["s$(rand(rng, 1:5))" for _ in 1:n]; F = rand(rng, Bool, n)
+        V = [rand(rng, 2, 3) for _ in 1:n]
+        d = mktempdir(); p = joinpath(d, "t")
+        write_table(p, "T", Pair{String,Any}["K" => K, "B" => B, "S" => S, "F" => F, "V" => V]; nrow = n, endian,
+                    ism = ism ? ["K", "B"] : String[])
+        gone = sort(unique(rand(rng, 1:n, rand(rng, 0:n ÷ 2)))); keep = setdiff(1:n, gone); add = rand(rng, 0:5)
+        edit(p) do e
+            isempty(gone) || removerows!(e, gone)
+            add > 0 && addrows!(e, add)
+            add > 0 && (e[:K][length(keep) + 1] = Int32(77); e[:S][length(keep) + add] = "new")
+        end
+        r = readtable(p)
+        m = length(keep) + add
+        @test nrow(r) == m
+        @test column(r, "K")[:] == vcat(K[keep], zeros(Int32, add)) .+ Int32.(add > 0 && m >= length(keep) + 1 ? (1:m) .== length(keep) + 1 : falses(m)) .* Int32(77)
+        @test column(r, "B")[:] == vcat(B[keep], zeros(add))
+        @test column(r, "S")[:] == vcat(S[keep], fill("", add)) |> x -> (add > 0 && (x[length(keep) + add] = "new"); x)
+        @test column(r, "F")[:] == vcat(F[keep], falses(add))
+        @test column(r, "V")[1:length(keep)] == V[keep]
+    end
+end
