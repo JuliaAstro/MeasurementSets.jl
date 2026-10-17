@@ -277,3 +277,41 @@ end
         @test (@allocated c[long]) <= ncodeunits(S[long]) + 64     # the String and nothing else (an IOBuffer + byte vector before)
     end
 end
+
+# Phase 426: `column(t, name)` rebuilt the Column every call (~450 ns, 480 B), so `getcell(t, name, i)` in a loop was
+# 20x slower than a cached column; a numeric IncrementalStMan cell also went through the generic decode (370 ns).
+@testset "Phase 426 — cached Column objects; typed ISM scalar cell read" begin
+    rng = MersenneTwister(426); n = 20_000
+    runs(v) = (out = similar(v); k = 1; while k <= n; len = rand(rng, 1:400); out[k:min(n, k + len - 1)] .= v[k]; k += len; end; out)
+    cols = Pair{String,Any}["I16" => runs(Int16.(rand(rng, -999:999, n))), "U32" => runs(UInt32.(rand(rng, 0:10^6, n))),
+                            "I64" => runs(rand(rng, Int64, n)), "F32" => runs(rand(rng, Float32, n)), "F64" => runs(rand(rng, n)),
+                            "C64" => runs(rand(rng, ComplexF64, n)), "SS" => Int32.(1:n)]
+    for endian in (:little, :big)
+        p = joinpath(mktempdir(), "t")
+        write_table(p, "T", cols; nrow = n, endian, ism = ["I16", "U32", "I64", "F32", "F64", "C64"])
+        t = readtable(p)
+        rows = unique!([1, 2, n, n - 1, 400, 401, 4096, 4097, n ÷ 2, rand(rng, 1:n, 200)...])
+        for (nm, v) in cols
+            c = column(t, nm)
+            @test [c[i] for i in rows] == v[rows]
+            @test c[:] == v
+            @test getcell(t, nm, rows[3]) == v[rows[3]]
+        end
+        c = column(t, "F64"); c[7]
+        @test (@allocated c[12345]) < 48
+        # the cache: the same object back, the per-call precision form is built fresh, eviction drops the entry
+        @test column(t, "F64") === column(t, "F64") && column(t, "F64"; precision = :full)[3] == cols[5].second[3]
+        @test column(t, "F64") === t.colcache["F64"]            # the very object kept with the table
+        old = column(t, "I64"); MeasurementSets._evict_dms!(t)
+        @test column(t, "I64") !== old && column(t, "I64")[5] == cols[3].second[5]
+        # a column of a table opened at another precision is its own object
+        @test column(readtable(p; precision = :full), "F64")[9] == cols[5].second[9]
+        # MeasurementSet forwarding: same values as the table verbs
+        ms = MeasurementSet(SAMPLE_MS)
+        @test getcell(ms, "TIME", 3) == getcell(readtable(SAMPLE_MS), "TIME", 3) && column(ms, "TIME")[4] == column(readtable(SAMPLE_MS), "TIME")[4]
+        @test getcell(ms, "TIME", 3; precision = :full) == getcell(ms, "TIME", 3)
+    end
+    p = joinpath(mktempdir(), "t"); write_table(p, "T", Pair{String,Any}["F64" => rand(rng, 5000)]; nrow = 5000)
+    t = readtable(p); g(t) = (for i in 1:5000; getcell(t, "F64", i); end); g(t)
+    @test (@allocated g(t)) < 5000 * 64        # was ~500 B per call
+end

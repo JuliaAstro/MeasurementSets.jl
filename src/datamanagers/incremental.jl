@@ -272,6 +272,15 @@ function _ism_decode(ism::IncrementalStMan, c::ColumnDesc, dataoff::Int)
     end
 end
 
+# Phase 426: a numeric scalar cell with the element type known statically (`Column{T}`): the same lookup as `getcell`
+# below, then one typed load -- no `ColumnDesc` inspection and no decode dispatch.
+function _ism_scalar_cell(ism::IncrementalStMan, colnr::Int, ncol::Int, ::Type{T}, row::Int) where {T}
+    bi = _ism_bucket(ism.index, row)
+    bucketnr = ism.index.bucket[bi]
+    dataoff = _ism_value_offset(ism, bucketnr, colnr, ncol, row - ism.index.rows[bi])
+    return _ld(T, ism.data, dataoff, ism.endian === :big)
+end
+
 """
     getcell(ism::IncrementalStMan, colnr, coldesc, row, ncol) -> value
 
