@@ -254,3 +254,26 @@ end
     k1 = @allocated copyms(joinpath(d, "a"), joinpath(d, "ac")); k2 = @allocated copyms(joinpath(d, "b"), joinpath(d, "bc"))
     @test (k2 - k1) / (n2 - n1) < 16 * perrow           # 11.7x now, was 22.7x
 end
+
+# Phase 425: a scalar String cell was copied twice on its way out (a byte slice, then the String; long values went
+# through an IOBuffer as well): 64 / 384 B for a 3 / 100-byte value.  Now one String each.
+@testset "Phase 425 — SSM String cells: direct reads == source, one allocation" begin
+    rng = MersenneTwister(425); n = 3000
+    S = String[]
+    for i in 1:n
+        len = i % 7 == 0 ? rand(rng, 100:300) : i % 211 == 0 ? rand(rng, 6000:20000) : rand(rng, 0:12)   # inline, string-bucket, bucket-spanning
+        push!(S, i % 5 == 0 ? join(rand(rng, ['é', 'λ', 'x', '日'], max(len ÷ 2, 0))) : randstring(rng, len))
+    end
+    for endian in (:little, :big)
+        p = joinpath(mktempdir(), "t")
+        write_table(p, "T", Pair{String,Any}["S" => S, "K" => Int32.(1:n)]; nrow = n, endian)
+        c = column(readtable(p), "S")
+        @test [c[i] for i in 1:n] == S
+        @test c[:] == S
+        @test [getcell(readtable(p), "S", i) for i in (1, 7, 211, 422, n)] == S[[1, 7, 211, 422, n]]
+        short = findfirst(s -> 1 <= ncodeunits(s) <= 12, S); long = findfirst(s -> 100 <= ncodeunits(s) <= 300, S)
+        c[short]; c[long]
+        @test (@allocated c[short]) <= 64          # was 64 + the byte slice
+        @test (@allocated c[long]) <= ncodeunits(S[long]) + 64     # the String and nothing else (an IOBuffer + byte vector before)
+    end
+end
