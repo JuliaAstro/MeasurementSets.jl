@@ -164,3 +164,29 @@ end
     f(); f()
     @test (@allocated f()) < 250 * n          # was ~2000 B/row
 end
+
+# Phase 421: a random-access read of a plain numeric StandardStMan cell built a one-element vector and a dims
+# tuple, and dispatched dynamically on the untyped data-manager instance (80-96 B, 160-200 ns per cell).
+@testset "Phase 421 — numeric SSM cell read == generic getcell, allocation-free" begin
+    n = 30_000; rng = MersenneTwister(421)      # several buckets
+    cols = Pair{String,Any}[
+        "I16" => Int16.(rand(rng, -999:999, n)), "U16" => UInt16.(rand(rng, 0:999, n)), "I32" => Int32.(rand(rng, -10^6:10^6, n)),
+        "U32" => UInt32.(rand(rng, 0:10^6, n)), "I64" => rand(rng, Int64, n), "F32" => rand(rng, Float32, n),
+        "F64" => rand(rng, n), "C32" => rand(rng, ComplexF32, n), "C64" => rand(rng, ComplexF64, n),
+        "BO" => rand(rng, Bool, n), "ST" => [string("s", i % 97) for i in 1:n]]
+    for endian in (:little, :big)
+        p = joinpath(mktempdir(), "t")
+        write_table(p, "T", cols; nrow = n, endian)
+        t = readtable(p)
+        for (nm, v) in cols
+            c = column(t, nm)
+            rows = unique!([1, 2, 3, 1000, 4095, 4096, 4097, n ÷ 2, n - 1, n, rand(rng, 1:n, 40)...])
+            @test [c[i] for i in rows] == v[rows]
+            @test [c[i] for i in rows] == [getcell(t, nm, i; precision = :full) for i in rows]
+        end
+        c = column(t, "F64"); c[5]
+        @test (@allocated c[12345]) < 48          # 0 B in a function; a global's box costs 16 (was 80-96)
+        c = column(t, "I32"); c[5]
+        @test (@allocated c[12345]) < 48          # 0 B in a function; a global's box costs 16 (was 80-96)
+    end
+end

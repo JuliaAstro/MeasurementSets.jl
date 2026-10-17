@@ -138,8 +138,20 @@ end
 Base.size(c::Column) = (c.table.rows,)
 Base.IndexStyle(::Type{<:Column}) = IndexLinear()
 
-function Base.getindex(c::Column, i::Int)
+# Phase 421: a plain numeric scalar cell of a StandardStMan column, with the element type known from `Column{T}`
+# (no runtime type lookup, no dynamic dispatch on the untyped `inst`).
+_fastscalar(::Type{T}) where {T} = isbitstype(T) && T !== Bool && T <: Union{Integer,AbstractFloat,Complex}
+function _ssm_scalar_cell(ssm::StandardStMan, ssmcol::Int, ::Type{T}, row::Int) where {T}
+    off, firstrow = locate(ssm, ssmcol, row)
+    return _ld(T, ssm.data, off + (row - firstrow) * sizeof(T), ssm.endian === :big)
+end
+
+function Base.getindex(c::Column{T}, i::Int) where {T}
     @boundscheck checkbounds(c, i)
+    inst = c.inst
+    if _fastscalar(T) && c.target === nothing && inst isa StandardStMan && c.desc isa ColumnDesc{Tuple{}}
+        return _ssm_scalar_cell(inst, c.index, T, i)
+    end
     v = getcell(c.inst, c.index, c.desc, i, c.cols)
     c.target === nothing ? v : _narrowvalue(v, c.target)   # single cell: cheap post-convert
 end

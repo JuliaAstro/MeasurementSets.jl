@@ -257,6 +257,23 @@ function _read_bits(ssm::StandardStMan, off::Int, bitstart::Int, n::Int)
     return out
 end
 
+# Phase 421: a scalar cell (the overwhelmingly common random-access read) is one typed load -- the generic
+# method below builds a one-element vector (and a dims tuple) per cell just to take `[1]` of it.
+function getcell(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc{Tuple{}}, row::Integer, ::Integer)
+    off, firstrow = locate(ssm, ssmcol, row)
+    inbucket = Int(row) - firstrow
+    t = c.type
+    if t == TpBool
+        b = inbucket
+        return (ssm.data[off + (b >> 3) + 1] >> (b & 7)) & 0x01 == 0x01
+    elseif t == TpString
+        c.maxlength > 0 && error("fixed-length strings not yet supported")
+        return _read_string_ref(ssm, off + inbucket * SSM_STRING_REF)
+    end
+    return _ssm_load_scalar(ssm, juliatype(t), off + inbucket * sizeof(juliatype(t)))
+end
+_ssm_load_scalar(ssm::StandardStMan, ::Type{T}, o::Int) where {T} = _ld(T, ssm.data, o, ssm.endian === :big)
+
 """
     getcell(ssm::StandardStMan, ssmcol, coldesc, row, cols) -> value
 
