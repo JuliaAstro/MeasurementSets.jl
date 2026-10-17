@@ -725,11 +725,22 @@ function _tql_call(e::TQLFunc, vals::Tuple)
     try
         return e.fn(vals...)
     catch err
-        err isa AssertionError && throw(ArgumentError("TaQL-lite: $(isempty(e.name) ? string(e.fn) : e.name)(): $(err.msg)"))
-        err isa Union{MethodError,TypeError,InexactError} || rethrow()
-        nm = isempty(e.name) ? string(e.fn) : e.name
-        throw(ArgumentError("TaQL-lite: $(nm)() does not accept operands of type ($(join(map(v -> string(typeof(v)), vals), ", ")))"))
+        _tql_call_fail(e, err, vals)
     end
+end
+# same, with the callable passed as a type parameter so the call is statically dispatched (Phase 417)
+@inline function _tql_callf(fn::F, e::TQLFunc, vals...) where {F}
+    try
+        return fn(vals...)
+    catch err
+        _tql_call_fail(e, err, vals)
+    end
+end
+function _tql_call_fail(e::TQLFunc, err, vals::Tuple)
+    err isa AssertionError && throw(ArgumentError("TaQL-lite: $(isempty(e.name) ? string(e.fn) : e.name)(): $(err.msg)"))
+    err isa Union{MethodError,TypeError,InexactError} || rethrow()
+    nm = isempty(e.name) ? string(e.fn) : e.name
+    throw(ArgumentError("TaQL-lite: $(nm)() does not accept operands of type ($(join(map(v -> string(typeof(v)), vals), ", ")))"))
 end
 
 
@@ -773,9 +784,11 @@ function _compile(e::TQLNeg, cols)
 end
 
 function _compile(e::TQLFunc, cols)
-    fs = Tuple(_compile(a, cols) for a in e.args)
-    return i -> _tql_call(e, map(f -> f(i), fs))
+    return _mk_funcall(e.fn, e, Tuple(_compile(a, cols) for a in e.args))
 end
+_mk_funcall(fn::F, e, fs::Tuple{A}) where {F,A} = (f1 = fs[1]; i -> _tql_callf(fn, e, f1(i)))
+_mk_funcall(fn::F, e, fs::Tuple{A,B}) where {F,A,B} = (f1 = fs[1]; f2 = fs[2]; i -> _tql_callf(fn, e, f1(i), f2(i)))
+_mk_funcall(fn::F, e, fs::Tuple) where {F} = i -> _tql_callf(fn, e, map(f -> f(i), fs)...)
 function _compile(e::TQLBetween, cols)
     fl = _compile(e.lhs, cols); flo = _compile(e.lo, cols); fhi = _compile(e.hi, cols); neg = e.negate
     return i -> _tql_between(fl(i), flo(i), fhi(i), neg)

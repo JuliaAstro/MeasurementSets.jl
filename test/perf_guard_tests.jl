@@ -112,3 +112,16 @@ end
     @test (@allocated query(t, "ORDER BY B")) < 120 * n               # was ~1200 B/row
     @test (@allocated query(t, "ORDER BY K, B DESC")) < 200 * n
 end
+
+# Phase 417: an aggregate argument was interpreted per row into a Vector{Any}; function calls in compiled
+# predicates went through a dynamic call + tuple map.
+@testset "Phase 417 — aggregate args and function calls in compiled expressions stay cheap" begin
+    d = mktempdir(); p = joinpath(d, "t"); n = 100_000; rng = MersenneTwister(417)
+    write_table(p, "T", Pair{String,Any}["K" => Int32.(rand(rng, 1:100, n)), "B" => rand(rng, n), "C" => rand(rng, n)]; nrow = n)
+    t = readtable(p)
+    f1() = groupby(t, "K"; select = ["K" => "K", "a" => "gsum(sqrt(B)+C)"])
+    f2() = query(t, "sqrt(B) + C > 1")
+    f1(); f2()                              # warm up
+    @test (@allocated f1()) < 400 * n       # was ~900 B/row
+    @test (@allocated f2()) < 150 * n       # was ~1400 B/row
+end

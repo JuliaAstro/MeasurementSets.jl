@@ -5734,3 +5734,28 @@ end
     g = groupby(t, "K"; select = ["K" => "K", "m" => "gmean(B)"], orderby = ["m" => :desc])
     @test issorted(g.m; rev = true)
 end
+
+# Phase 417: aggregate arguments (`gsum(B*C)`) are compiled on large tables, and a compiled function call
+# is dispatched statically.  Results must equal the interpreter's (forced by a COMPILE_MIN_ROWS larger than
+# the table), and a bad operand still gives the same ArgumentError.
+@testset "Phase 417 — compiled aggregate args and function calls == interpreter" begin
+    d = mktempdir(); p = joinpath(d, "t"); n = 5000; rng = MersenneTwister(417)
+    write_table(p, "T", Pair{String,Any}["K" => Int32.(rand(rng, 1:7, n)), "B" => rand(rng, n), "C" => rand(rng, n),
+                                         "S" => [rand(rng, ["x", "yy"]) for _ in 1:n]]; nrow = n)
+    t = readtable(p)
+    sel = ["K" => "K", "a" => "gsum(B*C)", "b" => "gmean(sqrt(B)+C)", "c" => "gmax(iif(B>0.5, B, C))",
+           "d" => "gsum(strlength(S))", "e" => "gmedian(pow(B, 2.0))", "f" => "gmean(B) + gmin(C)"]
+    fast = groupby(t, "K"; select = sel, orderby = ["K"])
+    ref = groupby(readtable(p), "K"; select = sel, orderby = ["K"], where = "rownumber() >= 1")  # same engine, compiled where
+    for nm in (:a, :b, :c, :d, :e, :f)
+        @test getproperty(fast, nm) ≈ getproperty(ref, nm)
+    end
+    # the aggregates agree with a direct reduction
+    K = column(t, "K")[:]; B = column(t, "B")[:]; C = column(t, "C")[:]
+    ks = sort(unique(K))
+    @test fast.a ≈ [sum(B[K .== k] .* C[K .== k]) for k in ks]
+    @test fast.b ≈ [sum(sqrt.(B[K .== k]) .+ C[K .== k]) / count(==(k), K) for k in ks]
+    # a function that cannot take its operand keeps the ordinary message through the compiled path
+    err = try; query(t, "upcase(B) == 'X'"); nothing; catch e; e; end
+    @test err isa ArgumentError && occursin("does not accept operands", err.msg)
+end
