@@ -5759,3 +5759,36 @@ end
     err = try; query(t, "upcase(B) == 'X'"); nothing; catch e; e; end
     @test err isa ArgumentError && occursin("does not accept operands", err.msg)
 end
+
+# Phase 420: join key columns were read cell by cell through the lazy Column and looked up in a Dict{Any,…} of
+# boxed tuples (1M x 100 N:1 join: 426 ms).  They are bulk-read and looked up by typed key; the matches must be
+# exactly those of a naive reference, also for an Int key against a Float key, a `missing` left key and strings.
+@testset "Phase 420 — join key lookup == naive reference" begin
+    rng = MersenneTwister(420)
+    naive(lk, rk) = [(j = findfirst(r -> isequal(r, l), rk); j === nothing ? 0 : j) for l in lk]
+    for trial in 1:40
+        nl = rand(rng, 0:30); nr = rand(rng, 1:12)
+        kind = rand(rng, 1:4)
+        rk = kind == 1 ? shuffle(rng, collect(1:nr)) :
+             kind == 2 ? shuffle(rng, Float64.(1:nr)) :
+             kind == 3 ? shuffle(rng, ["k$i" for i in 1:nr]) : shuffle(rng, Int32.(1:nr))
+        lk0 = kind == 3 ? ["k$(rand(rng, 0:nr+2))" for _ in 1:nl] : rand(rng, 0:nr+2, nl)
+        lk = kind == 2 ? Float64.(lk0) : kind == 4 ? Int64.(lk0) : lk0       # Int64 left keys against Int32 / Float64 right
+        L = GroupedTable([:K], AbstractVector[lk]); R = GroupedTable([:K, :V], AbstractVector[rk, collect(1:nr)])
+        @test MeasurementSets._join_matchrow(L, R, "K" => "K") == naive(lk, rk)
+        # M:N with duplicate right keys: every right row of a key, in right-row order
+        rkd = rand(rng, rk, nr + 3)
+        Rd = GroupedTable([:K, :V], AbstractVector[rkd, collect(1:nr + 3)])
+        lr, rr = MeasurementSets._join_pairs(L, Rd, "K" => "K", true, :drop)
+        ref = [(i, j) for i in 1:nl for j in 1:nr + 3 if isequal(lk[i], rkd[j])]
+        @test collect(zip(lr, rr)) == ref
+    end
+    # a missing left key matches nothing; composite keys; non-unique right key still refused
+    L = GroupedTable([:A, :B], AbstractVector[Union{Missing,Int}[1, missing, 2, 2], ["x", "y", "x", "y"]])
+    R = GroupedTable([:A, :B, :V], AbstractVector[[2, 1, 2], ["y", "x", "x"], [10, 20, 30]])
+    @test MeasurementSets._join_matchrow(L, R, ["A" => "A", "B" => "B"]) == [2, 0, 3, 1]
+    Rdup = GroupedTable([:A], AbstractVector[[1, 1]])
+    @test_throws ArgumentError MeasurementSets._join_matchrow(L, Rdup, "A" => "A")
+    # index lookup with a missing left key
+    @test MeasurementSets._join_matchrow(GroupedTable([:I], AbstractVector[Union{Missing,Int}[0, missing, 5, 1]]), R, "I") == [1, 0, 0, 2]
+end

@@ -152,3 +152,15 @@ end
     r = readtable(q2)
     @test column(r, "B")[:] == B0 .* 2 && column(r, "S")[:] == column(readtable(p), "S")[:]
 end
+
+# Phase 420: an equi-join read its key column through the lazy Column (one cell read per left row) and boxed a
+# tuple per row for the lookup: 1M x 100 N:1 join 426 ms; bulk-read typed keys need one small vector per side.
+@testset "Phase 420 — equi-join key lookup allocates O(n) bytes, not a cell read per row" begin
+    d = mktempdir(); n = 100_000; rng = MersenneTwister(420)
+    write_table(joinpath(d, "l"), "L", Pair{String,Any}["K" => Int32.(rand(rng, 0:99, n)), "B" => rand(rng, n)]; nrow = n)
+    write_table(joinpath(d, "r"), "R", Pair{String,Any}["K" => Int32.(0:99), "N" => ["n$i" for i in 0:99]]; nrow = 100)
+    l = readtable(joinpath(d, "l")); r = readtable(joinpath(d, "r"))
+    f() = join(l, r; on = "K" => "K", rightcols = ["N"])
+    f(); f()
+    @test (@allocated f()) < 250 * n          # was ~2000 B/row
+end
