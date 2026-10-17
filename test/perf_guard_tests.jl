@@ -202,3 +202,21 @@ end
     @test (run(q -> @allocated rem(q))) < 700 * n       # was ~1500 B/row
     @test (run(q -> @allocated app(q))) < 700 * n
 end
+
+# Phase 423: copying / indexing a lazy scalar column read it one cell at a time (DataFrame(t), a query result's
+# column); a dense selection and `copy` are now one bulk read.
+@testset "Phase 423 — dense column selections and copy are bulk reads" begin
+    d = mktempdir(); p = joinpath(d, "t"); n = 60_000; rng = MersenneTwister(423)
+    B = rand(rng, n); K = Int32.(rand(rng, 1:9, n)); S = [string("s", rand(rng, 1:20)) for _ in 1:n]
+    write_table(p, "T", Pair{String,Any}["B" => B, "K" => K, "S" => S]; nrow = n)
+    t = readtable(p); c = column(t, "B")
+    @test copy(c) == B && copy(column(t, "S")) == S && copy(column(t, "K")) isa Vector{Int32}
+    r = sort(unique(rand(rng, 1:n, 30_000))); shuf = reverse(r)
+    @test c[r] == B[r] && c[shuf] == B[shuf]                       # dense: bulk path
+    @test c[[7, 3, 59_999]] == B[[7, 3, 59_999]]                   # sparse: per-cell path
+    @test_throws BoundsError c[vcat(r, n + 1)]
+    q = query(t, "K > 3"); @test column(q, "B")[:] == B[K .> 3]
+    copy(c); c[r]
+    @test (@allocated copy(c)) < 20 * n
+    @test (@allocated c[r]) < 40 * length(r)
+end

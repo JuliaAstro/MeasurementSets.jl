@@ -1936,3 +1936,37 @@ end
     @test_throws ArgumentError earthfield(MPosition{ITRF}(NaN, 0.0, 1.0), e)
     @test all(isfinite, (b = earthfield(MPosition{ITRF}(6.4e6, 0.0, 0.0), e); (b.x, b.y, b.z)))
 end
+
+# Phase 423: the direction conversions cache the SOFA astrometry context per frame (`apci13` / `apco13` / `apio13`
+# + the quick `atciq` / `atioq` / `aticq` / `atoiq` step) instead of the one-shot `atci13` / `atco13` / `atic13` /
+# `atoi13`, which rebuild it for every direction (64 KiB, ~50 us each).  The split routines are the one-shot ones
+# taken apart, so the results must be BIT-identical -- checked here against the one-shot calls on many frames,
+# more than the cache holds (it is cleared when full) and interleaved so a stale entry would show.
+@testset "Phase 423 — cached astrometry context == one-shot SOFA routines" begin
+    ext = Base.get_extension(MSv2, :SOFAExt)
+    rng = MersenneTwister(423)
+    frames = [MSv2.MeasFrame(epoch = MSv2.MEpoch{MSv2.UTC}(58000.0 + 3000 * rand(rng)),
+                             position = MSv2.MPosition{MSv2.ITRF}(6.378e6 * (2rand(rng) - 1) / 1.8, 6.378e6 * (2rand(rng) - 1) / 1.8, 4.0e6 * (2rand(rng) - 1)))
+              for _ in 1:40]
+    for trial in 1:600
+        fr = frames[rand(rng, eachindex(frames))]
+        lon = 2pi * rand(rng); lat = pi * (rand(rng) - 0.5)
+        utc1, utc2 = ext._frame_utc(fr); tt1, tt2 = ext._frame_tt(fr); eop = ext._frame_eop(fr)
+        for B in (MSv2.AZEL, MSv2.AZELGEO, MSv2.HADEC)
+            el, phi, hm = ext._frame_site(fr; geodetic = B !== MSv2.AZEL)
+            ref = SOFA.atco13(lon, lat, 0.0, 0.0, 0.0, 0.0, utc1, utc2, eop.dut1, el, phi, hm, eop.xp, eop.yp, 0.0, 273.15, 0.0, 0.5)
+            got = MSv2.measconvert(MSv2.MDirection{MSv2.J2000}(lon, lat), B; frame = fr)
+            @test B === MSv2.HADEC ? (got.lon == ref.ha && got.lat == ref.dec) : (got.lon == ref.azi && got.lat == pi / 2 - ref.zen)
+        end
+        ref = SOFA.atci13(lon, lat, 0.0, 0.0, 0.0, 0.0, tt1, tt2)
+        got = MSv2.measconvert(MSv2.MDirection{MSv2.J2000}(lon, lat), MSv2.APP; frame = fr)
+        @test got.lon == ref.ra - ref.eo && got.lat == ref.dec
+        # and back: observed / apparent -> J2000 through the cached inverse
+        for A in (MSv2.AZEL, MSv2.HADEC, MSv2.APP)
+            d = MSv2.MDirection{A}(2pi * rand(rng), 1.2 * (rand(rng) - 0.5))
+            back = MSv2.measconvert(d, MSv2.J2000; frame = fr)
+            again = MSv2.measconvert(MSv2.measconvert(back, A; frame = fr), MSv2.J2000; frame = fr)
+            @test isapprox(again.lon, back.lon; atol = 1e-8) && isapprox(again.lat, back.lat; atol = 1e-8)
+        end
+    end
+end
