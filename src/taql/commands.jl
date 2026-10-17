@@ -203,14 +203,17 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
     # continues from) immediately after each write, so every subsequent
     # spec — on the same or a different column — observes it.
     curval = Dict{Tuple{String,Int},Any}()
+    fresh = Dict{String,Vector}()          # whole-column writes: one vector, not a million `curval` entries (Phase 418)
     _curbase(c, i) = get(curval, (c, i)) do
-        haskey(fullcols, c) ? fullcols[c][i] : cols[c][i]
+        haskey(fresh, c) ? fresh[c][i] : haskey(fullcols, c) ? fullcols[c][i] : cols[c][i]
     end
+    descs = Dict{String,Any}()
+    getdesc(c) = get!(() -> columndesc(rd, c), descs, c)
 
     # a scalar written into an ARRAY column fills the cell's current shape; an array into a FIXED-shape column must have exactly that shape
     # (real TaQL, live-verified Phase 359 -- it used to be silently truncated here)
     function fit_cell(c, i, x)
-        cd = columndesc(rd, c)
+        cd = getdesc(c)
         isarr = !(cd.shape isa Dims && isempty(cd.shape))
         isarr || return x
         fs = cd.shape isa Dims ? cd.shape : nothing
@@ -228,19 +231,24 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
             u = colunit(c)
             ec = t[c]
             Jc = juliatype(columndesc(rd, c).type)
+            cdc = getdesc(c)
+            # a scalar column never needs `fit_cell`; skipping the call also skips its boxed arguments (Phase 418)
+            fitc = (cdc.shape isa Dims && isempty(cdc.shape)) ? ((c_, i_, x_) -> x_) : fit_cell
             if levels === nothing
                 if where === nothing && !limited
                     fa = _compile(a, cols)
-                    vals = [fit_cell(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(fa(i)), u))) for i in 1:nr]
+                    vals = [fitc(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(fa(i)), u))) for i in 1:nr]
                     ec[:] = vals
+                    isempty(curval) || filter!(kv -> kv.first[1] != c, curval)
+                    fresh[c] = vals
+                    cc = cols[c]
                     for i in 1:nr
-                        cols[c][i] = vals[i]
-                        curval[(c, i)] = vals[i]
+                        cc[i] = vals[i]
                     end
                 else
                     fa = _compile(a, cols)
                     for i in rows
-                        val = fit_cell(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(fa(i)), u)))
+                        val = fitc(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(fa(i)), u)))
                         ec[i] = val
                         cols[c][i] = val
                         curval[(c, i)] = val

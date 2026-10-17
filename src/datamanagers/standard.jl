@@ -535,7 +535,20 @@ end
 # One scalar per row (a one-element fixed-shape ARRAY cell too).  A function
 # barrier on the element type `J`: the column is often a `Vector{Any}`, and
 # without it every cell is a dynamic dispatch plus a boxed conversion.
-function _ssm_put_scalars!(file, co, ext, r0, nr, col, ::Type{J}, endian) where {J}
+# Phase 418: a little-endian column already stored as `Vector{J}` of plain numbers, whose cells sit back to
+# back (`ext == sizeof(J)`), is one memory copy per bucket instead of a bounds-checked store per value.
+function _ssm_put_scalars!(file::Vector{UInt8}, co, ext, r0, nr, col::Vector{J}, ::Type{J}, endian) where {J<:Union{Integer,AbstractFloat}}
+    if J !== Bool && endian === :little && Base.ENDIAN_BOM == 0x04030201 && ext == sizeof(J) && nr > 0
+        (co >= 0 && co + nr * sizeof(J) <= length(file) && r0 + nr <= length(col)) ||
+            throw(BoundsError(file, co+1:co+nr*sizeof(J)))
+        GC.@preserve file col unsafe_copyto!(Ptr{J}(pointer(file, co + 1)), pointer(col, r0 + 1), nr)
+        return nothing
+    end
+    return _ssm_put_scalars_generic!(file, co, ext, r0, nr, col, J, endian)
+end
+_ssm_put_scalars!(file, co, ext, r0, nr, col, ::Type{J}, endian) where {J} =
+    _ssm_put_scalars_generic!(file, co, ext, r0, nr, col, J, endian)
+function _ssm_put_scalars_generic!(file, co, ext, r0, nr, col, ::Type{J}, endian) where {J}
     for lr in 0:nr-1
         v = col[r0 + lr + 1]
         _wrbytes!(file, co + lr * ext, J(v isa AbstractArray ? first(v) : v), endian)
@@ -582,7 +595,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     # --- variable strings: build the string stream + per-cell refs -----
     strstream = UInt8[]
     strref = [Vector{NTuple{3,Int}}(undef, 0) for _ in 1:ncol]   # (bkt,off,len) or inline
-    inlinechars = [Dict{Int,Vector{UInt8}}() for _ in 1:ncol]
+    foreach(v -> sizehint!(v, nrow), strref)
 
     # index bytes: SSMIndex `itsLastRow` (0-based last row of each bucket)
     idxrows = UInt32[min((k + 1) * rpb, nrow) - 1 for k in 0:ndata-1]
@@ -605,8 +618,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
             s = kinds[i] === :indstr ? _string_array_blob(coldata[i][r]; header = !(cols[i].shape isa Dims)) :
                                        codeunits(String(coldata[i][r]))
             if length(s) <= SSM_STRING_INLINE_MAX && kinds[i] !== :indstr
-                push!(strref[i], (0, 0, length(s)))
-                inlinechars[i][r] = collect(s)
+                push!(strref[i], (-1, 0, length(s)))      # bkt == -1: stored inline in the data bucket (Phase 418: no per-string copy)
             else
                 bkt = length(strstream) ÷ strchar
                 off = length(strstream) % strchar
@@ -647,8 +659,8 @@ function write_standardstman(dir::AbstractString, sequ::Int,
                     r = r0 + lr + 1
                     o = co + lr * SSM_STRING_REF
                     bkt, soff, len = strref[i][r]
-                    if haskey(inlinechars[i], r)
-                        cs = inlinechars[i][r]
+                    if bkt < 0
+                        cs = codeunits(String(coldata[i][r]))
                         copyto!(file, o + 1, cs, 1, length(cs))
                     else
                         _wrbytes!(file, o,               Int32(strbase + bkt), endian)

@@ -125,3 +125,30 @@ end
     @test (@allocated f1()) < 400 * n       # was ~900 B/row
     @test (@allocated f2()) < 150 * n       # was ~1400 B/row
 end
+
+# Phase 418: a whole-column update! rewrote its storage-manager file one boxed value at a time and built a
+# million-entry Dict of current values; the SSM writer also copied every inline string.
+@testset "Phase 418 — SSM scalar memcpy path == generic path; whole-column update! stays cheap" begin
+    for J in (Int16, UInt16, Int32, UInt32, Int64, Float32, Float64), (r0, nr) in ((0, 7), (3, 5), (0, 1))
+        col = J.(rand(MersenneTwister(418), 1:100, 12))
+        a = zeros(UInt8, 8 + 12 * sizeof(J)); b = copy(a)
+        MeasurementSets._ssm_put_scalars!(a, 8, sizeof(J), r0, nr, col, J, :little)
+        MeasurementSets._ssm_put_scalars_generic!(b, 8, sizeof(J), r0, nr, col, J, :little)
+        @test a == b
+        # a column of Any, big-endian and a wider stride take the generic path and still agree with it
+        c2 = zeros(UInt8, 8 + 12 * sizeof(J)); d2 = copy(c2)
+        MeasurementSets._ssm_put_scalars!(c2, 8, sizeof(J), r0, nr, Any[x for x in col], J, :big)
+        MeasurementSets._ssm_put_scalars_generic!(d2, 8, sizeof(J), r0, nr, col, J, :big)
+        @test c2 == d2
+    end
+    @test_throws BoundsError MeasurementSets._ssm_put_scalars!(zeros(UInt8, 8), 4, 4, 0, 3, Int32[1, 2, 3], Int32, :little)
+    d = mktempdir(); p = joinpath(d, "t"); n = 50_000; rng = MersenneTwister(418)
+    write_table(p, "T", Pair{String,Any}["K" => Int32.(rand(rng, 1:100, n)), "B" => rand(rng, n),
+                                         "S" => [string("s", rand(rng, 1:50)) for _ in 1:n]]; nrow = n)
+    q = joinpath(d, "u"); cp(p, q); update!(q; set = ["B" => "B*2.0"])           # warm up
+    B0 = column(readtable(p), "B")[:]
+    q2 = joinpath(d, "u2"); cp(p, q2)
+    @test (@allocated update!(q2; set = ["B" => "B*2.0"])) < 700 * n               # was ~1200 B/row
+    r = readtable(q2)
+    @test column(r, "B")[:] == B0 .* 2 && column(r, "S")[:] == column(readtable(p), "S")[:]
+end

@@ -281,6 +281,16 @@ function Base.setindex!(c::EditColumn, vals, ::Colon)
     _check_open(c.tab, "setindex!")
     length(vals) == length(c.tab.rowmap) ||
         error("assigning $(length(vals)) values to a $(length(c.tab.rowmap))-row column")
+    t = c.tab; n = c.desc.name
+    if _added(t, n) === nothing && !(_kind(t, n) in _TILED_KINDS)
+        # whole column: validate every value, then replace the override in one step -- no per-cell dispatch and
+        # no reading of the old column only to overwrite all of it (Phase 418)
+        for v in vals
+            _check_scalar_cell(c.desc, v)
+        end
+        t.override[n] = Any[v for v in vals]
+        return vals
+    end
     for (i, v) in enumerate(vals)
         c[i] = v
     end
