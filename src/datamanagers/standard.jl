@@ -523,6 +523,24 @@ _wrbytes!(buf, off, x, endian) = begin
     v = _toendian(endian, x)
     copyto!(buf, off + 1, reinterpret(UInt8, [v]), 1, sizeof(x))
 end
+# the common case without the temporary array: a bounds-checked unaligned store
+function _wrbytes!(buf::Vector{UInt8}, off::Integer, x::T, endian) where {T<:Union{Bool,Integer,AbstractFloat}}
+    v = _toendian(endian, x)
+    n = sizeof(T)
+    (off >= 0 && off + n <= length(buf)) || throw(BoundsError(buf, off+1:off+n))
+    GC.@preserve buf unsafe_store!(Ptr{T}(pointer(buf, off + 1)), v)
+    return nothing
+end
+
+# One scalar per row (a one-element fixed-shape ARRAY cell too).  A function
+# barrier on the element type `J`: the column is often a `Vector{Any}`, and
+# without it every cell is a dynamic dispatch plus a boxed conversion.
+function _ssm_put_scalars!(file, co, ext, r0, nr, col, ::Type{J}, endian) where {J}
+    for lr in 0:nr-1
+        v = col[r0 + lr + 1]
+        _wrbytes!(file, co + lr * ext, J(v isa AbstractArray ? first(v) : v), endian)
+    end
+end
 
 """
     write_standardstman(dir, sequ, cols, coldata, nrow, endian) -> Vector{UInt8}
@@ -640,12 +658,12 @@ function write_standardstman(dir::AbstractString, sequ::Int,
                 end
             else
                 J = juliatype(c.type)
-                for lr in 0:nr-1
-                    v = coldata[i][r0 + lr + 1]
-                    o = co + lr * ext
-                    if nel == 1
-                        _wrbytes!(file, o, J(v isa AbstractArray ? first(v) : v), endian)   # a one-element fixed-shape ARRAY cell too
-                    else
+                if nel == 1
+                    _ssm_put_scalars!(file, co, ext, r0, nr, coldata[i], J, endian)
+                else
+                    for lr in 0:nr-1
+                        v = coldata[i][r0 + lr + 1]
+                        o = co + lr * ext
                         vv = vec(v)
                         for e in 1:nel
                             _wrbytes!(file, o + (e-1)*sizeof(J), J(vv[e]), endian)

@@ -230,15 +230,17 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
             Jc = juliatype(columndesc(rd, c).type)
             if levels === nothing
                 if where === nothing && !limited
-                    vals = [fit_cell(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u))) for i in 1:nr]
+                    fa = _compile(a, cols)
+                    vals = [fit_cell(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(fa(i)), u))) for i in 1:nr]
                     ec[:] = vals
                     for i in 1:nr
                         cols[c][i] = vals[i]
                         curval[(c, i)] = vals[i]
                     end
                 else
+                    fa = _compile(a, cols)
                     for i in rows
-                        val = fit_cell(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(_tqleval(a, cols, i)), u)))
+                        val = fit_cell(c, i, _tql_coerce(Jc, _tql_write_strip(_unwrap_marray(fa(i)), u)))
                         ec[i] = val
                         cols[c][i] = val
                         curval[(c, i)] = val

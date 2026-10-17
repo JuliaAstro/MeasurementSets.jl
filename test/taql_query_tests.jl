@@ -5656,3 +5656,30 @@ end
         end
     end
 end
+
+# Phase 414: WHERE conditions are compiled to closures (`_compile`); every expression must select
+# exactly the rows the per-row interpreter (`_tqleval`) selects.
+@testset "Phase 414 — compiled WHERE == interpreted WHERE" begin
+    rng = MersenneTwister(414); n = 3000     # above COMPILE_MIN_ROWS, so `query` takes the compiled path
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => rand(rng, Int32(0):Int32(9), n), "B" => rand(rng, n), "C" => rand(rng, Float32, n),
+        "S" => rand(rng, ["alpha", "beta", "gamma", "delta"], n), "F" => rand(rng, Bool, n),
+        "V" => [rand(rng, 3) for _ in 1:n]]; nrow = n)
+    t = readtable(d)
+    conds = ["A == 3", "A != 3 AND B > 0.5", "B > 0.5 OR C < 0.2", "NOT (A < 4)", "A + 1 > 5", "-A < -4", "F", "NOT F AND A >= 2",
+             "S == 'beta'", "S LIKE 'a%'", "S IN ['alpha', 'beta']", "A IN [1, 2, 3]", "A BETWEEN 2 AND 5", "A NOT BETWEEN 2 AND 5",
+             "sqrt(B) + C > 1", "abs(B - 0.5) < 0.1", "mean(V) > 0.5", "any(V > 0.9)", "rownumber() % 7 == 0", "iif(A > 4, B, C) > 0.5",
+             "C * 2 > B", "A % 3 == 0 AND S != 'gamma'"]
+    for w in conds
+        ast = MeasurementSets._taqllite_parse(w, Set(columnnames(t)))
+        needed = Set{String}(); MeasurementSets._tqlrefs!(needed, ast)
+        cols = MeasurementSets._tql_cols(t, needed, ast)
+        slow = [i for i in 1:n if MeasurementSets._tql_truthy(MeasurementSets._tqleval(ast, cols, i))]
+        @test MeasurementSets._use_compiled(ast, n)
+        @test MeasurementSets._where_matches(ast, cols, n) == slow
+        @test MeasurementSets._filter_rows(MeasurementSets._compile(ast, cols), 40) == filter(<=(40), slow)
+        @test query(t, w).rows == slow
+    end
+    @test_throws ArgumentError query(t, "S == 5")            # type errors surface through the compiled path too
+    @test_throws ArgumentError query(t, "A")
+end

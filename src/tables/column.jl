@@ -320,6 +320,11 @@ function _read_cells(c::AbstractVector, r)
            first(r) == 1 && last(r) == length(c)
     vals = full ? c[:] : (c[i] for i in r)
     _check_row_budget(length(r), 32, "copying a column")
+    # a whole scalar column keeps its concrete element type (no boxing, and the
+    # writers' loops compile to straight-line code)
+    if full && vals isa Vector && eltype(vals) <: Union{Number,AbstractString} && isconcretetype(eltype(vals))
+        return vals
+    end
     out = Vector{Any}(undef, length(r))
     @inbounds for (k, v) in enumerate(vals)
         out[k] = v isa AbstractArray ? Array(v) : v

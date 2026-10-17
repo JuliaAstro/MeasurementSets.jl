@@ -74,3 +74,30 @@ end
     write_table(d, "T", Pair{String,Any}["F" => cells]; nrow=N)
     @test [collect(x) for x in column(readtable(d), "F")[:]] == cells
 end
+
+# Phase 413: AipsIO's `io` field was abstractly typed (`::IO`), so every primitive read of a table
+# description was a dynamic dispatch -- opening a table took ~4.5x longer (441 vs 98 us, 98 vs 65 KiB).
+@testset "Phase 413 — table open stays cheap (AipsIO is concretely typed)" begin
+    @test isconcretetype(fieldtype(typeof(MeasurementSets.AipsIO(UInt8[0, 0, 0, 0])), :io))
+    readtable(SAMPLE_MS)
+    @test (@allocated readtable(SAMPLE_MS)) < 90 * 1024
+end
+
+# Phase 415: copying a scalar column boxed every cell (`Vector{Any}`) and wrote it through a temporary array.
+@testset "Phase 415 — scalar column copy stays cheap; _wrbytes! fast path agrees with the generic one" begin
+    d = mktempdir(); p = joinpath(d, "t"); n = 50_000
+    write_table(p, "T", Pair{String,Any}["A" => Int32.(1:n), "B" => collect(range(0, 1, length = n))]; nrow = n)
+    t = readtable(p)
+    copytable(joinpath(d, "w"), t)                                  # warm up
+    @test (@allocated copytable(joinpath(d, "c"), t)) < 300 * n     # was ~450 B/row for two numeric columns
+    c = readtable(joinpath(d, "c"))
+    @test column(c, "A")[:] == 1:n && column(c, "B")[end] == 1.0
+    for T in (Bool, UInt8, Int16, UInt16, Int32, UInt32, Int64, Float32, Float64), endian in (:little, :big)
+        x = T === Bool ? true : T(3)
+        a = zeros(UInt8, 16); b = zeros(UInt8, 16)
+        MeasurementSets._wrbytes!(a, 3, x, endian)
+        copyto!(b, 4, reinterpret(UInt8, [MeasurementSets._toendian(endian, x)]), 1, sizeof(x))
+        @test a == b
+    end
+    @test_throws BoundsError MeasurementSets._wrbytes!(zeros(UInt8, 4), 2, Int32(1), :little)
+end

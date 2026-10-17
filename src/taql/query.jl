@@ -430,9 +430,9 @@ function _select_materialize(cls, src::AbstractTable, rows::Vector{Int})
             push!(out, Symbol(nm) => _mapcol(column(src, v), rows))
         elseif kind === :expr
             v2 = _unit_conv(v, src)
-            push!(out, Symbol(nm) => _tql_concrete(identity.(Any[_strip(_tqleval(v2, cd, i)) for i in rows])))
+            push!(out, Symbol(nm) => _tql_concrete(identity.(Any[_strip(x) for x in _eval_rows(v2, cd, rows)])))
         else                                       # :mpair -> data + mask
-            vals = Any[_tqleval(v[2], cd, i) for i in rows]
+            vals = _eval_rows(v[2], cd, rows)
             push!(out, Symbol(nm) => _tql_concrete(identity.(Any[_strip(x) for x in vals])))
             push!(out, Symbol(v[1]) => identity.(Any[
                 x isa TQLMArray ? x.mask : _bcast(!isfinite, _unwrap_marray(x)) for x in vals]))
@@ -667,7 +667,7 @@ function query(t::AbstractTable, wherestr::AbstractString;
     _orderby_refs!(needed, orderby)
     cols = _tql_cols(t, needed, ast)
     matched = ast === nothing ? collect(1:nrow(t)) :
-              [i for i in 1:nrow(t) if _tql_truthy(_tqleval(ast, cols, i))]
+              _where_matches(ast, cols, nrow(t))
     _orderby_materialize!(cols, orderby, matched, nrow(t))
     matched = _apply_orderby(matched, orderby, cols)
     cls = _select_classify(select, validnames)
