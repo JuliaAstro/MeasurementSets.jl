@@ -422,6 +422,19 @@ function _foreach_bucket(f, ssm::StandardStMan, ssmcol::Int)
     end
 end
 
+# Phase 424b: the bucket walk with the element types as dispatch parameters, reading each bucket's run with
+# `_rd_run!`.  It was a closure over runtime `T` indexing a `reinterpret`ed view per element, which on Julia 1.10
+# allocated ~56 B per value (64 vs 8 B/element for a Float64 column; 1.13 hides it).
+function _ssm_read_numeric(ssm::StandardStMan, ssmcol::Int, ::Type{T}, ::Type{Tout}, total::Int, nrelem::Int, coloff::Int) where {T,Tout}
+    flat = Vector{Tout}(undef, total)
+    big = ssm.endian === :big
+    _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
+        n = (lastrow - firstrow + 1) * nrelem
+        _rd_run!(flat, (firstrow - 1) * nrelem, T, ssm.data, bucketptr(ssm, bkt) + coloff, n, big)
+    end
+    return flat
+end
+
 """
     getcolumn(ssm::StandardStMan, ssmcol, coldesc, nrow, cols; astype=nothing) -> Vector / Array
 
@@ -513,16 +526,7 @@ function getcolumn(ssm::StandardStMan, ssmcol::Int, c::ColumnDesc, nrow::Integer
     else
         T = juliatype(c.type)
         Tout = astype === nothing ? T : astype
-        flat = Vector{Tout}(undef, nrow * nrelem)
-        _foreach_bucket(ssm, ssmcol) do bkt, firstrow, lastrow
-            n = (lastrow - firstrow + 1) * nrelem
-            off = bucketptr(ssm, bkt) + coloff
-            raw = reinterpret(T, @view ssm.data[off+1 : off + n*sizeof(T)])
-            base = (firstrow - 1) * nrelem
-            @inbounds for k in 1:n
-                flat[base + k] = Tout(_swap(ssm, raw[k]))
-            end
-        end
+        flat = _ssm_read_numeric(ssm, ssmcol, T, Tout, nrow * nrelem, nrelem, coloff)
         isempty(dims) && return flat
         # Phase 235/236: same copying-slice -> lazy `BlockColumn` fix as
         # the `Bool` branch above (this is the one that hits the
