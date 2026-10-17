@@ -351,12 +351,14 @@ _identity_rowmap(t::EditTable) = all(i -> @inbounds(t.rowmap[i] == i), eachindex
 # every cell of `name` as a `Vector{Any}` aligned with `t.rowmap`: a scalar column that has not been
 # reordered is read in one bulk pass (a per-cell read of a run-length-stored column redoes an index
 # lookup for each row -- 150 s for 3e8 rows against ~1 s)
-function _read_cells_any(t::EditTable, c::ColumnDesc, name::AbstractString, edits=nothing)
+function _read_cells_any(t::EditTable, c::ColumnDesc, name::AbstractString, edits=nothing; concrete::Bool=false)
     _check_row_budget(length(t.rowmap), _cell_cost(t, c), "edit of column \"$name\"")
     col = t.reader.rows > 0 ? column(t.reader, name) : nothing
     if (edits === nothing || isempty(edits)) && col !== nothing && c.shape isa Dims && isempty(c.shape) && _identity_rowmap(t) &&
        length(t.rowmap) == t.reader.rows
-        return Vector{Any}(col[:])
+        # a read-only consumer (the storage-manager writers) takes the typed vector as is: boxing a million
+        # numbers only to unbox them again in the writer loop was most of a one-column update's flush (Phase 419)
+        return concrete ? col[:] : Vector{Any}(col[:])
     end
     v = Vector{Any}(undef, length(t.rowmap))
     @inbounds for (i, src) in enumerate(t.rowmap)
@@ -383,7 +385,7 @@ function _resolve(t::EditTable, name::AbstractString)
     a = _added(t, name)
     a !== nothing && return a[3]
     c = columndesc(t.reader, name)
-    return _read_cells_any(t, c, name, get(t.tsmedit, name, nothing))
+    return _read_cells_any(t, c, name, get(t.tsmedit, name, nothing); concrete = true)
 end
 
 # cheap per-row dimensionality probe for a variable-shape column

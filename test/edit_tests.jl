@@ -879,3 +879,27 @@ end
     edit(p) do s; s[:A][3] = 30; end           # a fresh session still works
     @test column(readtable(p), "A")[:] == [10, 2, 30]
 end
+
+# Phase 419: the flush resolves every column of a regenerated storage-manager file; an untouched scalar column
+# used to be boxed into a Vector{Any} only for the writer to unbox it again.  It is now the typed vector, and a
+# column with pending edits still resolves to the edited values.
+@testset "Phase 419 — flush resolves untouched scalar columns as typed vectors" begin
+    d = mktempdir(); p = joinpath(d, "t"); n = 40
+    write_table(p, "T", Pair{String,Any}["K" => Int32.(1:n), "B" => collect(1.0:n), "S" => ["s$i" for i in 1:n]]; nrow = n)
+    t = edit(p)
+    @test MeasurementSets._resolve(t, "B") isa Vector{Float64}
+    @test MeasurementSets._resolve(t, "K") isa Vector{Int32}
+    t[:B][3] = -1.0
+    r = MeasurementSets._resolve(t, "B")
+    @test r[3] == -1.0 && r[4] == 4.0 && length(r) == n
+    @test MeasurementSets._resolve(t, "S") == ["s$i" for i in 1:n]
+    flush(t)
+    u = readtable(p)
+    @test column(u, "B")[:] == replace(collect(1.0:n), 3.0 => -1.0)
+    @test column(u, "K")[:] == Int32.(1:n) && column(u, "S")[:] == ["s$i" for i in 1:n]
+    # restricted update! through the same path, with an appended row and a removed row
+    update!(p; set = ["K" => "K + 100"], where = "K > 35")
+    edit(p) do e; addrows!(e, 2); removerows!(e, [1]); end
+    k = column(readtable(p), "K")[:]
+    @test length(k) == n + 1 && k[1:34] == Int32.(2:35) && k[35:n-1] == Int32.(136:140)
+end
