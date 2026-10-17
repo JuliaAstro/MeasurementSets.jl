@@ -262,14 +262,19 @@ Read the sub-array at last-axis index `lastpos` (0-based) of `cube` for the
 `colidx`-th bound column (binding index), de-tiling into a column-major
 Julia array of shape `cube.cubeshape[1:end-1]`.
 """
-function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int, colidx::Int)
+function read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int, colidx::Int; astype::Union{Nothing,Type}=nothing)
     T = juliatype(tsm.types[colidx])
-    nd = length(cube.cubeshape)
+    return _read_plane(tsm, cube, lastpos, colidx, T, astype === nothing || T === Bool ? T : astype, Val(length(cube.cubeshape)))
+end
+# Phase 427: the element type and the number of axes are runtime values in `read_plane`; one dynamic call into a body
+# specialised on both (it was ~1.7 us and 4 KiB for a 2 KiB DATA cell, all of it boxing and dynamic dispatch).  `astype`
+# narrows the decode in place (a Float16 / BFloat16 read, Phase 34-36) instead of converting the finished cell.
+function _read_plane(tsm::TiledStMan, cube::TSMCube, lastpos::Int, colidx::Int, ::Type{T}, ::Type{Tout}, ::Val{nd}) where {T,Tout,nd}
     cs = cube.cubeshape
     ts = cube.tileshape
     tpd = ntuple(d -> cld(cs[d], ts[d]), nd)
     ps  = ntuple(d -> cs[d], nd - 1)              # plane shape
-    out = Array{T}(undef, ps...)
+    out = Array{Tout}(undef, ps...)
 
     bytes = _tsmbytes(tsm, cube.sequ)
     bbytes, offs = _tile_layout(tsm, cube)
@@ -376,11 +381,11 @@ end
 `cols` is unused (see [`StandardStMan`'s `getcell`](@ref) for why every
 data-manager's `getcell` method shares this signature).
 """
-function getcell(tsm::TiledStMan, colidx::Int, ::ColumnDesc, row::Integer, ::Integer)
+function getcell(tsm::TiledStMan, colidx::Int, ::ColumnDesc, row::Integer, ::Integer; astype::Union{Nothing,Type}=nothing)
     cube, p = _cube_for_row(tsm, row)
-    isnull(cube) && return _undefined_cell(tsm, colidx)
-    p === nothing && return read_cube_whole(tsm, colidx, cube)
-    return read_plane(tsm, cube, p - 1, colidx)
+    isnull(cube) && return _undefined_cell(tsm, colidx; astype)
+    p === nothing && return read_cube_whole(tsm, colidx, cube; astype)
+    return read_plane(tsm, cube, p - 1, colidx; astype)
 end
 
 # What casacore hands back for a cell that was never written (a variable-shape

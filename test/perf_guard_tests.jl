@@ -315,3 +315,29 @@ end
     t = readtable(p); g(t) = (for i in 1:5000; getcell(t, "F64", i); end); g(t)
     @test (@allocated g(t)) < 5000 * 64        # was ~500 B per call
 end
+
+# Phase 427: a tiled cell was read through a type-unstable body (runtime element type and rank: ~1.7 us / 4 KiB for a
+# 2 KiB DATA cell) and a narrowed (Float16 / BFloat16) one was converted after being read in full.
+@testset "Phase 427 — tiled cell reads: narrowed decode == converted full decode; allocation" begin
+    d = mktempdir(); p = joinpath(d, "ms"); n = 300
+    create_ms(p; nrow = n, nchan = 16, ncorr = 4, nant = 4)
+    rng = MersenneTwister(427)
+    edit(p) do e
+        for r in rand(rng, 1:n, 60)
+            e[:DATA][r] = rand(rng, ComplexF32, 4, 16); e[:WEIGHT_SPECTRUM][r] = rand(rng, Float32, 4, 16); e[:FLAG][r] = rand(rng, Bool, 4, 16)
+        end
+    end
+    t = readtable(p; precision = :full)
+    for (nm, prec, conv) in (("DATA", :half, ComplexF16), ("DATA", Float16, ComplexF16), ("DATA", BFloat16, Complex{BFloat16}),
+                             ("WEIGHT_SPECTRUM", Float16, Float16), ("WEIGHT_SPECTRUM", BFloat16, BFloat16), ("FLAG", Float16, Bool))
+        full = column(t, nm); nar = column(t, nm; precision = prec)
+        for r in unique!([1, 2, n, rand(rng, 1:n, 40)...])
+            v = nar[r]
+            @test eltype(v) === conv && v == conv.(full[r])
+        end
+    end
+    c = column(t, "DATA"); f() = (for r in 1:n; c[r]; end); f()
+    @test (@allocated f()) < n * (4 * 16 * 8 + 1200)           # payload + a small constant per cell (was ~+2000)
+    cf = column(t, "FLAG"); g() = (for r in 1:n; cf[r]; end); g()
+    @test (@allocated g()) < n * (4 * 16 + 1000)
+end

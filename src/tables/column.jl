@@ -166,6 +166,9 @@ function Base.getindex(c::Column{T}, i::Int) where {T}
         inst isa StandardStMan && return _ssm_scalar_cell(inst, c.index, T, i)
         inst isa IncrementalStMan && return _ism_scalar_cell(inst, c.index, c.cols, T, i)
     end
+    if c.target !== nothing && inst isa TiledStMan        # narrowed read: decode straight into the narrow type (Phase 427)
+        return getcell(inst, c.index, c.desc, i, c.cols; astype = _narrowtype(juliatype(c.desc.type), c.target))
+    end
     v = getcell(c.inst, c.index, c.desc, i, c.cols)
     c.target === nothing ? v : _narrowvalue(v, c.target)   # single cell: cheap post-convert
 end
