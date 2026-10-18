@@ -136,7 +136,9 @@ function update!(target; set::AbstractVector{<:Pair}, where=nothing,
     # actually writes into (Phase 149 -- needed so a later SET item can
     # observe an earlier one's write, see below).
     for c in Set(s[1] for s in specs)
-        cols[c] isa Vector{Any} || (cols[c] = Any[v for v in cols[c]])
+        # (Phase 438: a concrete scalar vector is already mutable and takes the coerced values as they are)
+        v = cols[c]
+        (v isa Vector && !(eltype(v) <: AbstractArray)) || (cols[c] = Any[x for x in v])
     end
 
     # unit-strip a `Quantity` SET RHS to each target column's own unit

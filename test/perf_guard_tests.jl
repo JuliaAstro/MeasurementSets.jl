@@ -341,3 +341,20 @@ end
     cf = column(t, "FLAG"); g() = (for r in 1:n; cf[r]; end); g()
     @test (@allocated g()) < n * (4 * 16 + 1000)
 end
+
+# Phase 438: update! no longer boxes every SET target column into a Vector{Any} up front (a no-match update of a
+# 1M-row table read a million boxes for nothing)
+@testset "Phase 438 — update! keeps concrete scalar target columns" begin
+    n = 50_000; rng = MersenneTwister(438); d = mktempdir(); p = joinpath(d, "t")
+    K = rand(rng, Int32(0):Int32(9), n); B = rand(rng, n)
+    write_table(p, "T", Pair{String,Any}["K" => copy(K), "B" => copy(B), "I" => Int16.(rand(rng, 1:100, n))]; nrow = n)
+    update!(p; set = ["B" => "B+1"], where = "K < -5")                       # warm up
+    @test (@allocated update!(p; set = ["B" => "B+1"], where = "K < -5")) < 300 * n   # was ~ 700 B/row
+    # later SET items still see earlier writes (Int16 target fed by a Double expression, then read back)
+    I0 = column(readtable(p; precision = :full), "I")[:]
+    update!(p; set = ["I" => "K * 3", "B" => "I + 0.5"], where = "K == 4")
+    r = readtable(p; precision = :full)
+    want_i = [k == 4 ? Int16(k * 3) : i for (k, i) in zip(K, I0)]
+    @test column(r, "I")[:] == want_i
+    @test all(column(r, "B")[:][K .== 4] .== 12.5) && column(r, "B")[:][K .!= 4] == B[K .!= 4]
+end
