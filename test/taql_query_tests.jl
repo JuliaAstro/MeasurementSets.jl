@@ -5809,3 +5809,21 @@ end
         @test got == want
     end
 end
+
+# Phase 436: string sort keys with few distinct values are sorted through integer ranks (same order, stable)
+@testset "ORDER BY string keys == direct string sort (Phase 436)" begin
+    rng = MersenneTwister(436)
+    ref(rows, kvs, desc) = (for j in length(kvs):-1:1; v = kvs[j][rows]; rows = rows[sortperm(v; rev = desc[j])]; end; rows)
+    for pool in (["b", "a", "", "é", "Z", "ab", "a "], [string(i) for i in 1:5000])
+        n = 12_000
+        S = rand(rng, pool, n); K = rand(rng, Int32(0):Int32(3), n)
+        for (kvs, desc) in (([S], [false]), ([S], [true]), ([S, K], [false, true]), ([K, S], [true, false]), ([S, S], [false, true]))
+            rows = collect(1:n)
+            @test MSv2._sorted_rows(rows, kvs, desc) == ref(rows, kvs, desc)
+            sub = sort!(rand(rng, 1:n, 11_000))
+            @test MSv2._sorted_rows(sub, kvs, desc) == ref(sub, kvs, desc)
+        end
+    end
+    @test MSv2._string_ranks(repeat(["b", "a", "b"], 100)) == repeat([2, 1, 2], 100)
+    @test MSv2._string_ranks(["b", "a", "c"]) == ["b", "a", "c"]            # mostly distinct: unchanged
+end
