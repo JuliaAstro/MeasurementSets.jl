@@ -715,13 +715,24 @@ function _ssm_patch_plan(t::EditTable)
         (inst isa StandardStMan && inst.container === nothing) || return nothing
         length(newvals) == rd.rows || return nothing
         idx, _ = _dm_local(rd, c)
-        old = column(rd, name; precision = :full)[:]
+        limit = rd.rows ÷ 8                   # more changes than this: one regeneration is cheaper
+        # a quick look at the first rows: a whole-column rewrite differs almost everywhere, so skip the full read
+        col = column(rd, name; precision = :full)
+        probe = min(rd.rows, 64); ndiff = 0
+        for i in 1:probe
+            v = newvals[i]; v isa Number || return nothing
+            x = try J(v) catch; return nothing end
+            isequal(x, col[i]) || (ndiff += 1)
+        end
+        ndiff > max(probe ÷ 8, 1) && rd.rows > 8 * probe && return nothing
+        old = col[:]
         rows = Int[]; vals = J[]
         for i in 1:rd.rows
             v = newvals[i]
             v isa Number || return nothing
             x = try J(v) catch; return nothing end
             isequal(x, old[i]) || (push!(rows, i); push!(vals, x))
+            length(rows) > limit && return nothing
         end
         isempty(rows) || push!(get!(() -> Any[], plan, c.sequ), (name, idx, J, rows, vals))
     end
