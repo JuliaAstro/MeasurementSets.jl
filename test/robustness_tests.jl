@@ -341,6 +341,32 @@ end
   end
 end
 
+# Phase 429: the caches added in Phases 417-428 (the per-table `Column` cache and its eviction, the SOFA astrometry
+# context cache -- more frames than it holds, so it is cleared while other tasks use it -- and the compiled aggregate
+# arguments) under 16 tasks at once.  The aggregate cache was a global `WeakKeyDict` keyed by the column dictionary and
+# threw `KeyError`s in 3 runs out of 3 at 8 threads; it now lives on the aggregate node.
+@testset "parallel use of the Phase 417-428 caches (Phase 429)" begin
+  if !_threads_usable()
+    @info "skipping: multi-threaded Julia is unreliable under Rosetta emulation (an x86-64 container on Apple silicon)"
+  else
+    child = joinpath(@__DIR__, "threads_cache_child.jl")
+    out = IOBuffer()
+    r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) -t 4 --project=$(dirname(@__DIR__)) --startup-file=no $child 3`); stdout=out, stderr=out))
+    @test r.exitcode == 0
+    @test occursin("ALL OK", String(take!(out)))
+  end
+  # the compiled aggregate argument is kept on the node and follows the column dictionary it was compiled against
+  n = 3000; d = joinpath(mktempdir(), "t")
+  write_table(d, "T", Pair{String,Any}["K" => Int32.(1 .+ (0:n-1) .% 3), "B" => Float64.(1:n)]; nrow = n)
+  ast = MeasurementSets._taqllite_parse("gsum(B*2.0)", Set(["K", "B"]))
+  c1 = Dict{String,AbstractVector}("K" => Int32.(1 .+ (0:n-1) .% 3), "B" => Float64.(1:n))
+  c2 = Dict{String,AbstractVector}("K" => Int32.(1 .+ (0:n-1) .% 3), "B" => Float64.(n:-1:1) .* 10)
+  g = collect(1:3:n)
+  @test MeasurementSets._geval(ast, c1, g) == sum(2.0 .* c1["B"][g])
+  @test MeasurementSets._geval(ast, c2, g) == sum(2.0 .* c2["B"][g])      # other columns -> recompiled, not stale
+  @test MeasurementSets._geval(ast, c1, g) == sum(2.0 .* c1["B"][g])
+end
+
 # Phase 394: a table that is no longer referenced is garbage collected.  The opened data managers (with their
 # mmaps and whole-file buffers) were kept in a global `IdDict{Table,...}`, so every table ever read -- and
 # everything it had opened -- stayed alive for the life of the process (2000 opens leaked 1.6 GB).  The cache

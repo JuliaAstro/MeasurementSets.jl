@@ -10,18 +10,18 @@
 
 _geval(::TQLGrouping, cols, g) = throw(ArgumentError(
     "TaQL-lite: GROUPING() must be resolved per grouping set (internal error)"))
-# Phase 417: an aggregate argument (`gsum(B*C)`) was interpreted per row and boxed into a
-# `Vector{Any}` before the reduction.  Large tables compile the argument once per query (cached
-# per column dictionary, so the entry dies with it) and collect a concretely typed vector.
-const _AGG_CACHE = WeakKeyDict{Any,IdDict{Any,Any}}()
-const _AGG_LOCK = ReentrantLock()
-function _agg_compiled(arg, cols)
+# Phase 417: an aggregate argument (`gsum(B*C)`) was interpreted per row and boxed into a `Vector{Any}` before the
+# reduction.  Large tables compile the argument once per query and collect a concretely typed vector.  The compiled
+# closure is kept on the node (`TQLAggr.compiled`, valid for the `cols` it was compiled against) -- Phase 429: it was a
+# global `WeakKeyDict` keyed by the column dictionary, which threw `KeyError`s under concurrent queries.
+function _agg_compiled(e::TQLAggr, cols)
     n = isempty(cols) ? 0 : length(first(values(cols)))
-    _use_compiled(arg, n) || return nothing
-    @lock _AGG_LOCK begin
-        d = get!(() -> IdDict{Any,Any}(), _AGG_CACHE, cols)
-        get!(() -> _compile(arg, cols), d, arg)
-    end
+    _use_compiled(e.arg, n) || return nothing
+    c = e.compiled[]
+    (c !== nothing && c[1] === cols) && return c[2]
+    f = _compile(e.arg, cols)
+    e.compiled[] = (cols, f)
+    return f
 end
 function _agg_vals(f, g)
     v = [_widen(f(i)) for i in g]
@@ -31,7 +31,7 @@ end
 function _geval(e::TQLAggr, cols, g)
     e.arg === nothing && return e.fn(g)                    # gcount()
     # Phase 339: real TaQL aggregates in 64-bit / double (`gsum(UInt8)` is Int64, `gmean(Float32)` Float64)
-    f = _agg_compiled(e.arg, cols)
+    f = _agg_compiled(e, cols)
     vals = f === nothing ? Any[_widen(_tqleval(e.arg, cols, i)) for i in g] : _agg_vals(f, g)
     try
         e.mode === :perelem && return _perelem_reduce(e.fn, vals)
