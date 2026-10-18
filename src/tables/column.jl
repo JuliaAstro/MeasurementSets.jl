@@ -403,6 +403,20 @@ name on every call, so for those cache the lazy column once and index into that:
 getcell(t::AbstractTable, name::AbstractString, row::Integer;
         precision::Union{Nothing,Symbol,Type}=nothing) = _pcolumn(t, name, precision)[row]
 
+# Phase 428: a RefTable / ConcatTable cell goes straight to the underlying table's `getcell` (which keeps its
+# `Column` cached) instead of building a MappedColumn / ConcatColumn -- and every part's column for the latter --
+# for each call.
+function getcell(t::RefTable, name::AbstractString, row::Integer; precision::Union{Nothing,Symbol,Type}=nothing)
+    haskey(t.namemap, name) || throw(KeyError(name))
+    1 <= row <= length(t.rows) || throw(BoundsError(t, row))
+    return getcell(t.parent, t.namemap[name], t.rows[row]; precision)
+end
+function getcell(t::ConcatTable, name::AbstractString, row::Integer; precision::Union{Nothing,Symbol,Type}=nothing)
+    1 <= row <= t.offsets[end] || throw(BoundsError(t, row))
+    k = searchsortedlast(t.offsets, row - 1)               # last part starting before `row` (skips empty parts)
+    return getcell(t.parts[k], name, row - t.offsets[k]; precision)
+end
+
 Base.getindex(t::AbstractTable, name::AbstractString) = column(t, name)
 Base.getindex(t::AbstractTable, name::Symbol) = column(t, String(name))
 
