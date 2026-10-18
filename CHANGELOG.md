@@ -11327,3 +11327,7 @@ An `mscal.*` query computed, for every distinct (antenna, field, TIME), the hour
 ### Phase 433 — `SELECT DISTINCT` keys rows by typed values
 
 A benchmark of the grouping and string paths on 1M rows (`groupby` 50–130 ms, string `==` / `LIKE` 26–56 ms, `IN` 28 ms, `BETWEEN` 1.6 ms) found one outlier: `taql(t, "SELECT DISTINCT K")` took 327 ms, because every row built a `Tuple` of boxed values into a `Set{Any}` and read the columns through lazy views. The result columns are now materialised and the first row of each distinct tuple is found by `_distinct_rows`: one column uses a `Set` of its own element type, several go through a function barrier so the key is a tuple of concrete types. 1M rows: one column 327 → 4.4 ms, two columns (`K`, `S`) 292 → 35 ms; the row choice (first row of each tuple, NaN / -0.0 / array cells included) is unchanged and checked against the old definition on random tables.
+
+### Phase 434 — compiled `IN [...]` over a short literal list
+
+The compiled `WHERE` closure for `x IN [a, b, c]` called the generic `_tql_in` per row, which scanned the list for range elements every time and compared against a `Vector{Any}`. A list of at most 16 plain scalars is now searched as a tuple (`x in (a, b, c)`, unrolled, nothing boxed), with array cells and range lists keeping the generic path. 1M rows: `K IN [1,2,3]` 28 → 1.1 ms. A test compares the compiled and interpreted results over integer, float (NaN, -0.0), string, `NOT IN`, range, dynamic-element, array-cell and 18-element lists.

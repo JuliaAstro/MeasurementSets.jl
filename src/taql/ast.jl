@@ -804,6 +804,11 @@ function _compile(e::TQLIn, cols)
     # only a list of plain literals can be resolved once; a dynamic list stays per row
     any(v -> v isa TQLExpr || v isa TQLDynRange, e.vals) && return i -> _tqleval(e, cols, i)
     fl = _compile(e.lhs, cols); vals = e.vals
+    # Phase 434: a short list of plain scalars is searched as a tuple (unrolled, no per-row range check or boxing)
+    if length(vals) <= 16 && !any(v -> v isa TQLRangeSet, vals)
+        tv = Tuple(vals)
+        return i -> (x = fl(i); x isa AbstractArray ? _tql_in(x, vals) : x in tv)
+    end
     return i -> _tql_in(fl(i), vals)
 end
 
