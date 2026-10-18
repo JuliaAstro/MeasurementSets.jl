@@ -2024,3 +2024,24 @@ end
     update!(p; set = ["A" => "0.0"]); update!(p; set = ["A" => "A + 5.0"], where = "rownumber() > 4")
     @test column(readtable(p), "A")[:] == [0, 0, 0, 0, 5, 5]
 end
+
+# Phase 433: DISTINCT keys the rows by typed values (one column: a typed Set; several: a tuple of concrete types)
+@testset "SELECT DISTINCT row selection (Phase 433)" begin
+    rng = MersenneTwister(433)
+    naive(cols) = (seen = Set{Any}(); [i for i in 1:length(cols[1]) if (k = Tuple(c[i] for c in cols); k in seen ? false : (push!(seen, k); true))])
+    for trial in 1:30
+        n = rand(rng, 0:300)
+        cols = AbstractVector[rand(rng, Int32(0):Int32(rand(rng, 1:6)), n), rand(rng, ["a", "b", "c", ""], n),
+                              rand(rng, [0.0, -0.0, NaN, 1.5], n), [rand(rng, 1:2, 2) for _ in 1:n]]
+        for sel in ([1], [2], [3], [4], [1, 2], [2, 3, 1], [1, 2, 3, 4])
+            n == 0 && continue
+            @test MSv2._distinct_rows(cols[sel]) == naive(cols[sel])
+        end
+    end
+    @test MSv2._distinct_rows(AbstractVector[]) == Int[]
+    p = joinpath(mktempdir(), "t"); n = 5000
+    write_table(p, "T", Pair{String,Any}["K" => rand(rng, Int32(0):Int32(9), n), "S" => rand(rng, ["x", "y"], n)]; nrow = n)
+    t = readtable(p)
+    r = taql(t, "SELECT DISTINCT K, S"); @test nrow(r) == length(unique(zip(column(t, "K")[:], column(t, "S")[:])))
+    @test nrow(taql(t, "SELECT DISTINCT K")) == 10
+end

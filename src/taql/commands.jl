@@ -1297,9 +1297,7 @@ function taql(target, command::AbstractString, others...)
         if distinct || window !== nothing
             keep = collect(1:nrow(result))
             if distinct
-                cols = [column(result, n) for n in columnnames(result)]
-                seen = Set{Any}()
-                keep = [i for i in keep if (k = Tuple(c[i] for c in cols); k in seen ? false : (push!(seen, k); true))]
+                keep = _distinct_rows([_load_col(column(result, n)) for n in columnnames(result)])
             end
             window === nothing || (keep = keep[_select_window(length(keep), window)])
             result = _select_rows(result, keep)
@@ -1312,6 +1310,30 @@ function taql(target, command::AbstractString, others...)
         throw(ArgumentError(
             "taql: unknown command \"$kw\" (expected UPDATE / DELETE / SELECT / INSERT)"))
     end
+end
+
+# first row of each distinct tuple of the (already materialised) columns, in row order; a single column is keyed by
+# its values directly (typed Set, no tuple per row)
+function _distinct_rows(cols::AbstractVector)
+    n = isempty(cols) ? 0 : length(cols[1])
+    keep = Int[]
+    if length(cols) == 1
+        c = cols[1]; seen = Set{eltype(c)}()
+        for i in 1:n
+            v = c[i]; v in seen || (push!(seen, v); push!(keep, i))
+        end
+    else
+        _distinct_tuples!(keep, Tuple(cols), n)
+    end
+    return keep
+end
+# function barrier: the column element types become static, so the keys are plain tuples of concrete values
+function _distinct_tuples!(keep, cols::Tuple, n)
+    seen = Set{Tuple{map(eltype, cols)...}}()
+    for i in 1:n
+        k = map(c -> c[i], cols); k in seen || (push!(seen, k); push!(keep, i))
+    end
+    return keep
 end
 
 # inside of each top-level (…) / […] group, in order
