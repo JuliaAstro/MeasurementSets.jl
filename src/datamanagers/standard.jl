@@ -564,6 +564,24 @@ function _wrbytes!(buf::Vector{UInt8}, off::Integer, x::T, endian) where {T<:Uni
     return nothing
 end
 
+# Phase 435: overwrite single numeric scalar cells of an existing StandardStMan file in place (the cells keep their
+# size, so no bucket moves): the bytes are patched in the in-memory image and written at their file offsets.
+function ssm_patch_scalars!(ssm::StandardStMan, ssmcol::Int, ::Type{J}, rows::AbstractVector{<:Integer},
+                            vals::AbstractVector) where {J}
+    ssm.container === nothing || error("ssm_patch_scalars!: the file lives inside a container")
+    open(ssm.path, "r+") do io
+        for k in eachindex(rows)
+            r = rows[k]
+            off, first = locate(ssm, ssmcol, r)
+            p = off + (r - first) * sizeof(J)
+            _wrbytes!(ssm.data, p, J(vals[k]), ssm.endian)
+            seek(io, p)
+            write(io, view(ssm.data, p+1:p+sizeof(J)))
+        end
+    end
+    return nothing
+end
+
 # One scalar per row (a one-element fixed-shape ARRAY cell too).  A function
 # barrier on the element type `J`: the column is often a `Vector{Any}`, and
 # without it every cell is a dynamic dispatch plus a boxed conversion.

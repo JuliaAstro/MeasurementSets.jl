@@ -698,6 +698,45 @@ end
 _mixes_inplace(t::EditTable) =
     any(!isempty, values(t.tsmedit)) && (!isempty(t.override) || length(t.rowmap) > t.reader.rows)
 
+# Phase 435: a flush whose only changes are single numeric cells of StandardStMan columns (a few `t[:X][i] = v`
+# on a big table) patches those cells in the data-manager file instead of regenerating the whole instance.
+# Returns `sequ => [(column, ssmcol, J, rows, vals), ...]`, or `nothing` when anything else needs the regen path.
+function _ssm_patch_plan(t::EditTable)
+    rd = t.reader
+    isempty(t.override) && return nothing
+    any(!isempty, values(t.tsmedit)) && return nothing
+    length(t.rowmap) == rd.rows || return nothing
+    plan = Dict{Int,Vector{Any}}()
+    for (name, newvals) in t.override
+        c = try columndesc(rd, name) catch; return nothing end
+        J = juliatype(c.type)
+        (c.shape isa Dims && isempty(c.shape) && J <: Union{Integer,AbstractFloat} && J !== Bool) || return nothing
+        inst = _dm_instance(rd, c.sequ)
+        (inst isa StandardStMan && inst.container === nothing) || return nothing
+        length(newvals) == rd.rows || return nothing
+        idx, _ = _dm_local(rd, c)
+        old = column(rd, name; precision = :full)[:]
+        rows = Int[]; vals = J[]
+        for i in 1:rd.rows
+            v = newvals[i]
+            v isa Number || return nothing
+            x = try J(v) catch; return nothing end
+            isequal(x, old[i]) || (push!(rows, i); push!(vals, x))
+        end
+        isempty(rows) || push!(get!(() -> Any[], plan, c.sequ), (name, idx, J, rows, vals))
+    end
+    # every touched data manager must be covered (the flush would otherwise replace files as well)
+    for m in rd.managers
+        m.sequ in keys(plan) && continue
+        for c in rd.desc.columns
+            c.sequ == m.sequ && haskey(t.override, c.name) && !isequal(t.override[c.name], column(rd, c.name; precision = :full)[:]) && return nothing
+        end
+    end
+    total = sum(sum(length(p[4]) for p in ps) for ps in values(plan); init = 0)
+    total * 8 <= rd.rows || return nothing          # many changes: one regeneration is cheaper
+    return plan
+end
+
 function _append_only(t::EditTable)
     n = t.reader.rows
     length(t.rowmap) >= n &&
@@ -778,7 +817,16 @@ function Base.flush(t::EditTable)
         # every file this flush replaces is committed together (see `_with_commit`): killing the process
         # leaves the old table, or a journal that the next open rolls forward -- never a mixture
         _with_commit(t.reader.path, lk) do
-            if isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
+            plan = isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) ? _ssm_patch_plan(t) : nothing
+            if plan !== nothing
+                for (sequ, ps) in plan
+                    inst = _dm_instance(t.reader, sequ)
+                    for (_, idx, J, rows, vals) in ps
+                        ssm_patch_scalars!(inst, idx, J, rows, vals)
+                    end
+                end
+                nc, nd = length(t.reader.desc.columns), length(t.reader.managers)
+            elseif isempty(t.addcols) && isempty(t.dropcols) && _append_only(t) &&
                !(grew && _has_tcell(t)) &&                     # TiledCellStMan can't grow in place
                !(grew && _has_engine(t)) && !_engine_touched(t) &&  # engines re-encode on regen
                !(grew && _has_dysco(t)) && !_dysco_touched(t) &&  # Dysco always re-encodes on regen

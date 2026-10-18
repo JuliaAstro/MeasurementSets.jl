@@ -931,3 +931,37 @@ end
         @test column(r, "V")[1:length(keep)] == V[keep]
     end
 end
+
+# Phase 435: a few single-cell edits of numeric StandardStMan columns patch the file in place (same inode, only the
+# touched bytes), the rest of the data-manager instance (strings included) is untouched
+validate_dir_leftovers(p) = [x for x in readdir(p) if endswith(x, "_tmp") || startswith(x, ".") || x == "table.commit"]
+@testset "edit — numeric SSM cells are patched in place (Phase 435)" begin
+    rng = MersenneTwister(435)
+    for endian in (:little, :big)
+        n = 4000; d = mktempdir(); p = joinpath(d, "t")
+        K = rand(rng, Int32(-5):Int32(5), n); B = rand(rng, n); U = rand(rng, UInt8, n); S = rand(rng, ["a", "bb", ""], n)
+        write_table(p, "T", Pair{String,Any}["K" => copy(K), "B" => copy(B), "U" => copy(U), "S" => copy(S)]; nrow = n, endian)
+        f = filter(x -> startswith(x, "table.f") && !contains(x, "_"), readdir(p))
+        ino0 = stat(joinpath(p, only(f))).inode
+        ks = rand(rng, 1:n, 6); bs = rand(rng, 1:n, 5); us = [1, n]
+        edit(p) do e
+            for i in ks; e[:K][i] = Int32(100 + i % 7); K[i] = Int32(100 + i % 7); end
+            for i in bs; e[:B][i] = -0.5 * i; B[i] = -0.5 * i; end
+            for i in us; e[:U][i] = UInt8(7); U[i] = 7; end
+        end
+        r = readtable(p; precision = :full)
+        @test column(r, "K")[:] == K && column(r, "B")[:] == B && column(r, "U")[:] == U && column(r, "S")[:] == S
+        @test stat(joinpath(p, only(f))).inode == ino0                    # patched in place, not replaced
+        @test isempty(validate_dir_leftovers(p))
+        if _HAVE_CASACORE
+            ct = CCT.Table(p)
+            @test collect(ct[:K][:]) == K && collect(ct[:B][:]) == B && collect(ct[:S][:]) == S
+        end
+        # many changes -> regeneration, same result
+        edit(p) do e; for i in 1:n; e[:B][i] = Float64(i); end; end
+        @test column(readtable(p; precision = :full), "B")[:] == Float64.(1:n)
+        # a no-op rewrite changes nothing
+        edit(p) do e; e[:K][3] = column(readtable(p), "K")[3]; end
+        @test column(readtable(p; precision = :full), "K")[:] == K
+    end
+end
