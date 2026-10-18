@@ -803,3 +803,36 @@ end
         @test MSv2._strip_directory(joinpath(r, "x"), r) == "././x"
     end
 end
+
+# Phase 428: `getcell` on a RefTable / ConcatTable goes straight to the parent / part instead of building a
+# MappedColumn / ConcatColumn per call; it must return exactly what indexing that column returns.
+@testset "Phase 428 — getcell(RefTable / ConcatTable) == column(...)[row]" begin
+    d = mktempdir(); rng = MersenneTwister(428)
+    mk(nm, n) = (p = joinpath(d, nm); write_table(p, "T", Pair{String,Any}["A" => Int32.(rand(rng, 1:99, n)), "B" => rand(rng, n),
+                 "C" => [rand(rng, Float32, 2, 3) for _ in 1:n]]; nrow = n, tsm = [["C"]]); readtable(p))
+    t = mk("t", 40)
+    rt = query(t, "A > 30"; select = ["A" => "A", "BB" => "B", "C" => "C"])
+    for r in 1:length(rt.rows), nm in ("A", "BB", "C")
+        @test getcell(rt, nm, r) == column(rt, nm)[r]
+    end
+    @test getcell(rt, "C", 2; precision = :full) == column(rt, "C"; precision = :full)[2]
+    rr = query(rt, "A > 60")                                       # a chain of selections
+    @test all(r -> getcell(rr, "BB", r) == column(rr, "BB")[r], 1:length(rr.rows))
+    @test_throws KeyError getcell(rt, "NOPE", 1)
+    @test_throws BoundsError getcell(rt, "A", 0)
+    @test_throws BoundsError getcell(rt, "A", length(rt.rows) + 1)
+    # ConcatTable with an empty part in the middle and at the end
+    parts = [mk("p1", 7), mk("p2", 0), mk("p3", 5), mk("p4", 0)]
+    cdir = joinpath(d, "cat"); write_concattable(cdir, parts); ct = readtable(cdir)
+    @test nrow(ct) == 12
+    for r in 1:12, nm in ("A", "B", "C")
+        @test getcell(ct, nm, r) == column(ct, nm)[r]
+    end
+    @test getcell(ct, "A", 8) == column(parts[3], "A")[1]            # first row after the empty part
+    @test_throws BoundsError getcell(ct, "A", 13)
+    @test_throws BoundsError getcell(ct, "A", 0)
+    @test_throws KeyError getcell(ct, "NOPE", 1)
+    # speed: a loop of getcells on a RefTable allocates O(1) per call, not a MappedColumn
+    f() = (for r in 1:length(rt.rows); getcell(rt, "A", r); end)
+    f(); @test (@allocated f()) < length(rt.rows) * 400
+end

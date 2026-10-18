@@ -7,6 +7,13 @@ for f in (:column, :getcolumn, :getcell, :groupby, :measure, :measinfo, :columnu
     @eval $f(ms::MeasurementSet, args...; kw...) = $f(getfield(ms, :data), args...; kw...)
 end
 
+# the two verbs a loop calls per row get explicit methods: the slurping `args...; kw...` forwarders above cost
+# ~400 ns per call (Phase 426), more than the cell read behind them
+getcell(ms::MeasurementSet, name::AbstractString, row::Integer; precision = nothing) =
+    getcell(getfield(ms, :data), name, row; precision)
+column(ms::MeasurementSet, name::AbstractString; precision = nothing) =
+    column(getfield(ms, :data), name; precision)
+
 query(ms::MeasurementSet, wherestr::AbstractString; kw...) = query(getfield(ms, :data), wherestr; kw...)
 query(f::Function, ms::MeasurementSet; kw...) = query(f, getfield(ms, :data); kw...)
 groupby(f::Function, ms::MeasurementSet, groupcols; kw...) = groupby(f, getfield(ms, :data), groupcols; kw...)

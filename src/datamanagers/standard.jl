@@ -320,7 +320,8 @@ function _read_string_ref(ssm::StandardStMan, off::Int)
     len = Int(_i32(ssm, off + 2 * SSM_INT))               # 3rd Int32 = length
     len <= 0 && return ""
     if len <= SSM_STRING_INLINE_MAX
-        return String(ssm.data[off+1:off+len])
+        _chk(ssm.data, off, len)
+        return GC.@preserve ssm unsafe_string(pointer(ssm.data, off + 1), len)     # no intermediate byte slice (Phase 425)
     end
     bkt = Int(_i32(ssm, off))
     soff = Int(_i32(ssm, off + SSM_INT))
@@ -348,8 +349,18 @@ function _read_string_bytes(ssm::StandardStMan, bkt::Int, offset::Int, len::Int)
     return take!(out)
 end
 
-_read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int) =
-    String(_read_string_bytes(ssm, bkt, offset, len))
+# A value that sits inside one string bucket (the usual case) is read straight out of it; only one that spans
+# buckets goes through the buffered reader (Phase 425: that was an IOBuffer + a byte vector + a String per value).
+function _read_string_bucket(ssm::StandardStMan, bkt::Int, offset::Int, len::Int)
+    base = bucketptr(ssm, bkt)
+    usedlen = Int(_be_i32(ssm, base + SSM_INT))
+    if 0 <= offset && len > 0 && offset + len <= usedlen
+        s = base + SSM_STRBUCKET_HEADER + offset
+        _chk(ssm.data, s, len)
+        return GC.@preserve ssm unsafe_string(pointer(ssm.data, s + 1), len)
+    end
+    return String(_read_string_bytes(ssm, bkt, offset, len))
+end
 
 # indirect string array (SSMIndStringColumn): the 12-byte cell is the same
 # (bucketNr, offset, totalLength) triple as a scalar string; the blob in the

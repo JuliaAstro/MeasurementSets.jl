@@ -254,3 +254,90 @@ end
     k1 = @allocated copyms(joinpath(d, "a"), joinpath(d, "ac")); k2 = @allocated copyms(joinpath(d, "b"), joinpath(d, "bc"))
     @test (k2 - k1) / (n2 - n1) < 16 * perrow           # 11.7x now, was 22.7x
 end
+
+# Phase 425: a scalar String cell was copied twice on its way out (a byte slice, then the String; long values went
+# through an IOBuffer as well): 64 / 384 B for a 3 / 100-byte value.  Now one String each.
+@testset "Phase 425 — SSM String cells: direct reads == source, one allocation" begin
+    rng = MersenneTwister(425); n = 3000
+    S = String[]
+    for i in 1:n
+        len = i % 7 == 0 ? rand(rng, 100:300) : i % 211 == 0 ? rand(rng, 6000:20000) : rand(rng, 0:12)   # inline, string-bucket, bucket-spanning
+        push!(S, i % 5 == 0 ? join(rand(rng, ['é', 'λ', 'x', '日'], max(len ÷ 2, 0))) : randstring(rng, len))
+    end
+    for endian in (:little, :big)
+        p = joinpath(mktempdir(), "t")
+        write_table(p, "T", Pair{String,Any}["S" => S, "K" => Int32.(1:n)]; nrow = n, endian)
+        c = column(readtable(p), "S")
+        @test [c[i] for i in 1:n] == S
+        @test c[:] == S
+        @test [getcell(readtable(p), "S", i) for i in (1, 7, 211, 422, n)] == S[[1, 7, 211, 422, n]]
+        short = findfirst(s -> 1 <= ncodeunits(s) <= 12, S); long = findfirst(s -> 100 <= ncodeunits(s) <= 300, S)
+        c[short]; c[long]
+        @test (@allocated c[short]) <= 64          # was 64 + the byte slice
+        @test (@allocated c[long]) <= ncodeunits(S[long]) + 64     # the String and nothing else (an IOBuffer + byte vector before)
+    end
+end
+
+# Phase 426: `column(t, name)` rebuilt the Column every call (~450 ns, 480 B), so `getcell(t, name, i)` in a loop was
+# 20x slower than a cached column; a numeric IncrementalStMan cell also went through the generic decode (370 ns).
+@testset "Phase 426 — cached Column objects; typed ISM scalar cell read" begin
+    rng = MersenneTwister(426); n = 20_000
+    runs(v) = (out = similar(v); k = 1; while k <= n; len = rand(rng, 1:400); out[k:min(n, k + len - 1)] .= v[k]; k += len; end; out)
+    cols = Pair{String,Any}["I16" => runs(Int16.(rand(rng, -999:999, n))), "U32" => runs(UInt32.(rand(rng, 0:10^6, n))),
+                            "I64" => runs(rand(rng, Int64, n)), "F32" => runs(rand(rng, Float32, n)), "F64" => runs(rand(rng, n)),
+                            "C64" => runs(rand(rng, ComplexF64, n)), "SS" => Int32.(1:n)]
+    for endian in (:little, :big)
+        p = joinpath(mktempdir(), "t")
+        write_table(p, "T", cols; nrow = n, endian, ism = ["I16", "U32", "I64", "F32", "F64", "C64"])
+        t = readtable(p)
+        rows = unique!([1, 2, n, n - 1, 400, 401, 4096, 4097, n ÷ 2, rand(rng, 1:n, 200)...])
+        for (nm, v) in cols
+            c = column(t, nm)
+            @test [c[i] for i in rows] == v[rows]
+            @test c[:] == v
+            @test getcell(t, nm, rows[3]) == v[rows[3]]
+        end
+        c = column(t, "F64"); c[7]
+        @test (@allocated c[12345]) < 48
+        # the cache: the same object back, the per-call precision form is built fresh, eviction drops the entry
+        @test column(t, "F64") === column(t, "F64") && column(t, "F64"; precision = :full)[3] == cols[5].second[3]
+        @test column(t, "F64") === t.colcache["F64"]            # the very object kept with the table
+        old = column(t, "I64"); MeasurementSets._evict_dms!(t)
+        @test column(t, "I64") !== old && column(t, "I64")[5] == cols[3].second[5]
+        # a column of a table opened at another precision is its own object
+        @test column(readtable(p; precision = :full), "F64")[9] == cols[5].second[9]
+        # MeasurementSet forwarding: same values as the table verbs
+        ms = MeasurementSet(SAMPLE_MS)
+        @test getcell(ms, "TIME", 3) == getcell(readtable(SAMPLE_MS), "TIME", 3) && column(ms, "TIME")[4] == column(readtable(SAMPLE_MS), "TIME")[4]
+        @test getcell(ms, "TIME", 3; precision = :full) == getcell(ms, "TIME", 3)
+    end
+    p = joinpath(mktempdir(), "t"); write_table(p, "T", Pair{String,Any}["F64" => rand(rng, 5000)]; nrow = 5000)
+    t = readtable(p); g(t) = (for i in 1:5000; getcell(t, "F64", i); end); g(t)
+    @test (@allocated g(t)) < 5000 * 64        # was ~500 B per call
+end
+
+# Phase 427: a tiled cell was read through a type-unstable body (runtime element type and rank: ~1.7 us / 4 KiB for a
+# 2 KiB DATA cell) and a narrowed (Float16 / BFloat16) one was converted after being read in full.
+@testset "Phase 427 — tiled cell reads: narrowed decode == converted full decode; allocation" begin
+    d = mktempdir(); p = joinpath(d, "ms"); n = 300
+    create_ms(p; nrow = n, nchan = 16, ncorr = 4, nant = 4)
+    rng = MersenneTwister(427)
+    edit(p) do e
+        for r in rand(rng, 1:n, 60)
+            e[:DATA][r] = rand(rng, ComplexF32, 4, 16); e[:WEIGHT_SPECTRUM][r] = rand(rng, Float32, 4, 16); e[:FLAG][r] = rand(rng, Bool, 4, 16)
+        end
+    end
+    t = readtable(p; precision = :full)
+    for (nm, prec, conv) in (("DATA", :half, ComplexF16), ("DATA", Float16, ComplexF16), ("DATA", BFloat16, Complex{BFloat16}),
+                             ("WEIGHT_SPECTRUM", Float16, Float16), ("WEIGHT_SPECTRUM", BFloat16, BFloat16), ("FLAG", Float16, Bool))
+        full = column(t, nm); nar = column(t, nm; precision = prec)
+        for r in unique!([1, 2, n, rand(rng, 1:n, 40)...])
+            v = nar[r]
+            @test eltype(v) === conv && v == conv.(full[r])
+        end
+    end
+    c = column(t, "DATA"); f() = (for r in 1:n; c[r]; end); f()
+    @test (@allocated f()) < n * (4 * 16 * 8 + 1200)           # payload + a small constant per cell (was ~+2000)
+    cf = column(t, "FLAG"); g() = (for r in 1:n; cf[r]; end); g()
+    @test (@allocated g()) < n * (4 * 16 + 1000)
+end

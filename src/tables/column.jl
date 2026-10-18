@@ -7,7 +7,7 @@
 # virtual engine opens its stored column's manager from inside `open`.
 const _DM_LOCK = ReentrantLock()
 # forget a table's opened data managers (they will be re-opened on the next read)
-_evict_dms!(t::Table) = @lock _DM_LOCK empty!(t.dmcache)
+_evict_dms!(t::Table) = @lock _DM_LOCK (empty!(t.dmcache); empty!(t.colcache))
 
 _dm_instance(::Table, ::Nothing) = error("column is not bound to a data manager")
 
@@ -115,6 +115,19 @@ range, `col[:]` the whole column (fast path).
 """
 function column(t::Table, name::AbstractString;
                 precision::Union{Nothing,Symbol,Type}=nothing)
+    # Phase 426: building a `Column` (description lookup, manager lookup under the lock, a runtime-typed constructor)
+    # cost ~450 ns / 480 B, so `getcell(t, name, i)` in a loop was 20x slower than a cached `column`.  A column at the
+    # table's own precision is immutable and tied to the table's data managers, so it is kept with them.
+    if precision === nothing
+        col = @lock _DM_LOCK get(t.colcache, name, nothing)
+        col === nothing || return col
+        col = _build_column(t, name, nothing)
+        @lock _DM_LOCK (t.colcache[String(name)] = col)
+        return col
+    end
+    return _build_column(t, name, precision)
+end
+function _build_column(t::Table, name::AbstractString, precision)
     c = columndesc(t, name)
     inst = _dm_instance(t, c.sequ)
     idx, n = _dm_local(t, c)
@@ -149,8 +162,12 @@ end
 function Base.getindex(c::Column{T}, i::Int) where {T}
     @boundscheck checkbounds(c, i)
     inst = c.inst
-    if _fastscalar(T) && c.target === nothing && inst isa StandardStMan && c.desc isa ColumnDesc{Tuple{}}
-        return _ssm_scalar_cell(inst, c.index, T, i)
+    if _fastscalar(T) && c.target === nothing && c.desc isa ColumnDesc{Tuple{}}
+        inst isa StandardStMan && return _ssm_scalar_cell(inst, c.index, T, i)
+        inst isa IncrementalStMan && return _ism_scalar_cell(inst, c.index, c.cols, T, i)
+    end
+    if c.target !== nothing && inst isa TiledStMan        # narrowed read: decode straight into the narrow type (Phase 427)
+        return getcell(inst, c.index, c.desc, i, c.cols; astype = _narrowtype(juliatype(c.desc.type), c.target))
     end
     v = getcell(c.inst, c.index, c.desc, i, c.cols)
     c.target === nothing ? v : _narrowvalue(v, c.target)   # single cell: cheap post-convert
@@ -373,17 +390,32 @@ getcolumn(t::AbstractTable, name::AbstractString; precision::Union{Nothing,Symbo
 
 Read one cell (`row` is 1-based).
 
-Each call re-resolves `name` to a [`Column`](@ref) (a `columndesc` lookup +
-opening/looking up the bound data-manager instance) -- cheap once, but
-repeated in a `for row in ...; getcell(t, name, row); end` loop it can
-dominate the actual per-cell read cost. For repeated access to the same
-column, cache the lazy column once and index into that instead:
-`col = column(t, name); for row in ...; col[row]; end` (Phase 237 --
-live-measured ~2.5x faster over a real MS's tiled `DATA` column, purely
-from not re-resolving `name` on every row).
+Each call resolves `name` to a [`Column`](@ref) (a `columndesc` lookup +
+opening/looking up the bound data-manager instance), which in a
+`for row in ...; getcell(t, name, row); end` loop used to dominate the actual per-cell read
+cost -- it no longer does for a plain `Table`
+(Phase 426: the `Column` is kept with the table, so a repeated `getcell` costs
+about a cached `column(t, name)[row]` plus a dictionary lookup, ~40 ns instead of
+~470 ns); other table kinds (`RefTable`, `ConcatTable`, ...) still resolve the
+name on every call, so for those cache the lazy column once and index into that:
+`col = column(t, name); for row in ...; col[row]; end`.
 """
 getcell(t::AbstractTable, name::AbstractString, row::Integer;
         precision::Union{Nothing,Symbol,Type}=nothing) = _pcolumn(t, name, precision)[row]
+
+# Phase 428: a RefTable / ConcatTable cell goes straight to the underlying table's `getcell` (which keeps its
+# `Column` cached) instead of building a MappedColumn / ConcatColumn -- and every part's column for the latter --
+# for each call.
+function getcell(t::RefTable, name::AbstractString, row::Integer; precision::Union{Nothing,Symbol,Type}=nothing)
+    haskey(t.namemap, name) || throw(KeyError(name))
+    1 <= row <= length(t.rows) || throw(BoundsError(t, row))
+    return getcell(t.parent, t.namemap[name], t.rows[row]; precision)
+end
+function getcell(t::ConcatTable, name::AbstractString, row::Integer; precision::Union{Nothing,Symbol,Type}=nothing)
+    1 <= row <= t.offsets[end] || throw(BoundsError(t, row))
+    k = searchsortedlast(t.offsets, row - 1)               # last part starting before `row` (skips empty parts)
+    return getcell(t.parts[k], name, row - t.offsets[k]; precision)
+end
 
 Base.getindex(t::AbstractTable, name::AbstractString) = column(t, name)
 Base.getindex(t::AbstractTable, name::Symbol) = column(t, String(name))

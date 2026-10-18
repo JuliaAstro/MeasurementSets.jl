@@ -23,7 +23,7 @@ function _doc_blocks(file)
 end
 
 @testset "documentation examples run (Phase 396)" begin
-    files = ["README.md", joinpath("docs", "src", "index.md"), joinpath("docs", "src", "concepts.md"), joinpath("docs", "src", "guide.md")]
+    files = ["README.md", joinpath("docs", "src", "index.md"), joinpath("docs", "src", "concepts.md"), joinpath("docs", "src", "guide.md"), joinpath("docs", "src", "performance.md")]
     sample = joinpath(@__DIR__, "data", "sample.ms")
     if all(f -> isfile(joinpath(_DOC_ROOT, f)), files) && isdir(sample)
         for f in files
