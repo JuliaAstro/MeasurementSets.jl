@@ -225,6 +225,41 @@ end
 _pb_offset(actual_azel::NTuple{2}, nominal_azel::NTuple{2}) =
     pointing_offset(MDirection{AZEL}(actual_azel...), MDirection{AZEL}(nominal_azel...))
 
+# Phase 432: the per-(position, direction, TIME) geometry of an `mscal.*` query.  Each quantity is converted the first
+# time a function asks for it: `mscal.last1()` used to pay for the HADEC, AZEL and ITRF conversions (each with its
+# own SOFA astrometry context) that only the angle functions need.
+mutable struct _MscalGeom
+    fr::MeasFrame
+    dj::MDirection
+    _hadec::Union{Nothing,NTuple{2,Float64}}
+    _azel::Union{Nothing,NTuple{2,Float64}}
+    _pole::Union{Nothing,NTuple{2,Float64}}
+    _last::Union{Nothing,Float64}
+    _itrf::Union{Nothing,MDirection}
+end
+_MscalGeom(fr::MeasFrame, dj::MDirection) = _MscalGeom(fr, dj, nothing, nothing, nothing, nothing, nothing)
+function Base.getproperty(g::_MscalGeom, s::Symbol)
+    fr = getfield(g, :fr); dj = getfield(g, :dj)
+    if s === :hadec
+        getfield(g, :_hadec) === nothing && (h = measconvert(dj, HADEC; frame = fr); setfield!(g, :_hadec, (h.lon, h.lat)))
+        return getfield(g, :_hadec)
+    elseif s === :azel
+        getfield(g, :_azel) === nothing && (a = measconvert(dj, AZEL; frame = fr); setfield!(g, :_azel, (a.lon, a.lat)))
+        return getfield(g, :_azel)
+    elseif s === :pole      # casacore MSCalEngine: the pole is HADEC(0, π/2) -> AZEL
+        getfield(g, :_pole) === nothing && (p = measconvert(MDirection{HADEC}(0.0, pi / 2), AZEL; frame = fr); setfield!(g, :_pole, (p.lon, p.lat)))
+        return getfield(g, :_pole)
+    elseif s === :last
+        getfield(g, :_last) === nothing && setfield!(g, :_last, _lst(fr))
+        return getfield(g, :_last)
+    elseif s === :itrf_ll || s === :itrf_xyz
+        getfield(g, :_itrf) === nothing && setfield!(g, :_itrf, measconvert(dj, ITRF; frame = fr))
+        it = getfield(g, :_itrf)
+        return s === :itrf_ll ? (it.lon, it.lat) : _dir_xyz(it)
+    end
+    return getfield(g, s)
+end
+
 """
     _mscal_columns(t, fns) -> Dict{String,AbstractVector}
 
@@ -469,21 +504,13 @@ function _mscal_columns(t::AbstractTable, fns::AbstractVector{<:AbstractString})
     # lookup with a single engine-wide `centrepos`; `_antid` never
     # produces anything other than `-1` for the array-centre case, and
     # nothing in this file decodes a negative `antid` any other way.
-    memo = Dict{Tuple{Int,Any,Float64},NamedTuple}()
+    memo = Dict{Tuple{Int,Any,Float64},_MscalGeom}()
     function _cache(antid::Int, dir::AbstractString, i::Int)
         dj, dkey = _djfor(dir, i)
         pkey = antid >= 0 ? antid : -1
         get!(memo, (pkey, dkey, tsec[i])) do
             pos = antid >= 0 ? antpos[antid + 1] : centrepos
-            fr = MeasFrame(epoch = epochs[i], position = pos, direction = dj)
-            hd = measconvert(dj, HADEC; frame = fr)
-            ae = measconvert(dj, AZEL; frame = fr)
-            it = measconvert(dj, ITRF; frame = fr)
-            # casacore MSCalEngine: the pole is HADEC(0, π/2) -> AZEL
-            pl = measconvert(MDirection{HADEC}(0.0, pi / 2), AZEL; frame = fr)
-            (; hadec = (hd.lon, hd.lat), azel = (ae.lon, ae.lat),
-               pole = (pl.lon, pl.lat), last = _lst(fr),
-               itrf_ll = (it.lon, it.lat), itrf_xyz = _dir_xyz(it))
+            _MscalGeom(MeasFrame(epoch = epochs[i], position = pos, direction = dj), dj)
         end
     end
 
