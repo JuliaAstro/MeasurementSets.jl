@@ -59,6 +59,7 @@ makedocs(
         "Home"          => "index.md",
         "Concepts"      => "concepts.md",
         "Guide"         => "guide.md",
+        "Performance"   => "performance.md",
         "API reference" => ["api.md", "Part 2" => "api-2.md", "Primary beams" => "api-beams.md", "Measures" => "api-measures.md"],
         "Changelog"     => changelog_pages,
     ],
