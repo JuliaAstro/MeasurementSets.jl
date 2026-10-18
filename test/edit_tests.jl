@@ -1002,3 +1002,21 @@ end
         @test column(r, "K")[:] == mk && column(r, "B")[:] == mb && column(r, "S")[:] == ms_
     end
 end
+
+# Phase 439: a scalar column pulled into the session stays a typed vector (the writers' memcpy path, no boxed values)
+@testset "edit — overridden scalar columns stay typed (Phase 439)" begin
+    n = 300; p = joinpath(mktempdir(), "t")
+    write_table(p, "T", Pair{String,Any}["K" => Int32.(1:n), "B" => collect(1.0:n), "S" => string.(1:n), "F" => iseven.(1:n)]; nrow = n)
+    e = edit(p)
+    for (nm, J) in (("K", Int32), ("B", Float64), ("S", String), ("F", Bool))
+        e[nm][2] = nm == "S" ? "x" : nm == "F" ? false : J(7)
+        @test eltype(e.override[nm]) === J
+    end
+    @test_throws ArgumentError e[:K][3] = 2.5            # still refused where it is assigned
+    @test_throws ArgumentError e[:K][3] = "no"
+    addrows!(e, 2); e[:K][n + 1] = 9; removerows!(e, [1])
+    flush(e)
+    r = readtable(p; precision = :full)
+    @test column(r, "K")[:] == Int32[7; 3:n; 9; 0] && column(r, "S")[:][1] == "x" && column(r, "B")[:][1] == 7.0 && column(r, "F")[:][1] == false
+    @test nrow(r) == n + 1
+end

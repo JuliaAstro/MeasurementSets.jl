@@ -30,7 +30,7 @@
 mutable struct EditTable
     reader::Table
     rowmap::Vector{Int}                    # per current row: reader-row index, or 0 = appended
-    override::Dict{String,Vector{Any}}     # SSM/ISM: whole materialised columns (len == length(rowmap))
+    override::Dict{String,AbstractVector}  # SSM/ISM: whole materialised columns (len == length(rowmap)); a scalar column stays a typed vector
     tsmedit::Dict{String,Dict{Int,Any}}    # TSM: column -> (current-row index -> new cell)
     addcols::Vector{Tuple{ColumnDesc,Symbol,Vector{Any}}}   # (desc, :ssm|:ism|:tsm, data)
     dropcols::Set{String}
@@ -103,7 +103,7 @@ function edit(path::AbstractString)
                   "TaQL expression — edit the source columns instead")
         # the session keeps one row-map entry per row (8 bytes each)
         _check_row_budget(r.rows, 8, "edit")
-        return EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
+        return EditTable(r, collect(1:r.rows), Dict{String,AbstractVector}(),
                   Dict{String,Dict{Int,Any}}(),
                   Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false,
                   lk, false, Dict{String,Union{Nothing,Vector{Int}}}())
@@ -400,7 +400,8 @@ end
 # pull the whole column into `t.override`, aligned with `t.rowmap`
 function _materialize!(t::EditTable, name::AbstractString)
     haskey(t.override, name) && return
-    t.override[name] = _read_cells_any(t, columndesc(t.reader, name), name)
+    # Phase 439: a scalar column stays a typed vector (the writers' memcpy path, no boxes); everything else is boxed
+    t.override[name] = _read_cells_any(t, columndesc(t.reader, name), name; concrete = true)
 end
 
 _gather_default(bulk::AbstractVector{T}, rowmap::Vector{Int}, d::T) where {T} =
