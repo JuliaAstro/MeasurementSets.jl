@@ -5792,3 +5792,38 @@ end
     # index lookup with a missing left key
     @test MeasurementSets._join_matchrow(GroupedTable([:I], AbstractVector[Union{Missing,Int}[0, missing, 5, 1]]), R, "I") == [1, 0, 0, 2]
 end
+
+# Phase 434: the compiled IN [...] search over a short literal list agrees with the interpreter
+@testset "compiled IN list == interpreted (Phase 434)" begin
+    rng = MersenneTwister(434); n = 3000
+    p = joinpath(mktempdir(), "t")
+    write_table(p, "T", Pair{String,Any}["K" => rand(rng, Int32(0):Int32(9), n), "S" => rand(rng, ["a", "b", "cc", ""], n),
+                                         "F" => rand(rng, [0.0, 1.5, NaN, -0.0], n), "V" => [rand(rng, 1:3, 2) for _ in 1:n]]; nrow = n)
+    t = readtable(p)
+    for w in ("K IN [1,2,3]", "K NOT IN [4]", "K IN [1.0, 2.5]", "S IN ['a','cc']", "S IN ['zz']", "F IN [0.0, 1.5]", "F IN [-0.0]",
+              "K IN [1:3]", "K IN [2, 5:7]", "K IN [K, 3]", "any(V IN [1])", "K IN [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18]")
+        got = query(t, w).rows
+        ast = MSv2._taqllite_parse(w, Set(columnnames(t)))
+        cols = Dict{String,AbstractVector}(c => MSv2._load_col(column(t, c)) for c in columnnames(t))
+        want = [i for i in 1:n if MSv2._tql_truthy(MSv2._tqleval(ast, cols, i))]
+        @test got == want
+    end
+end
+
+# Phase 436: string sort keys with few distinct values are sorted through integer ranks (same order, stable)
+@testset "ORDER BY string keys == direct string sort (Phase 436)" begin
+    rng = MersenneTwister(436)
+    ref(rows, kvs, desc) = (for j in length(kvs):-1:1; v = kvs[j][rows]; rows = rows[sortperm(v; rev = desc[j])]; end; rows)
+    for pool in (["b", "a", "", "é", "Z", "ab", "a "], [string(i) for i in 1:5000])
+        n = 12_000
+        S = rand(rng, pool, n); K = rand(rng, Int32(0):Int32(3), n)
+        for (kvs, desc) in (([S], [false]), ([S], [true]), ([S, K], [false, true]), ([K, S], [true, false]), ([S, S], [false, true]))
+            rows = collect(1:n)
+            @test MSv2._sorted_rows(rows, kvs, desc) == ref(rows, kvs, desc)
+            sub = sort!(rand(rng, 1:n, 11_000))
+            @test MSv2._sorted_rows(sub, kvs, desc) == ref(sub, kvs, desc)
+        end
+    end
+    @test MSv2._string_ranks(repeat(["b", "a", "b"], 100)) == repeat([2, 1, 2], 100)
+    @test MSv2._string_ranks(["b", "a", "c"]) == ["b", "a", "c"]            # mostly distinct: unchanged
+end

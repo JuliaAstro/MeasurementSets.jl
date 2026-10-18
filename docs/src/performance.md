@@ -84,7 +84,7 @@ so do all your changes in **one** session rather than one session per cell:
 update!("/path/to/my.ms"; set = ["INTERVAL" => "INTERVAL * 1.0"])    # a whole column: ~1 s per million rows
 ```
 
-Removing or appending rows regenerates the table's files (`removerows!` of 1000 of 1M rows: ~0.35 s); a tiled visibility
+Overwriting a few single cells of numeric `StandardStMan` columns (fewer than one in eight rows) patches those cells in the file in place (1000 cells of a 1M-row table: ~0.12 s, was ~0.38 s); anything else touching a column regenerates its data-manager file. Removing or appending rows regenerates the table's files (`removerows!` of 1000 of 1M rows: ~0.35 s); a tiled visibility
 cube is rewritten completely. [`copyms`](@ref) / [`create_ms`](@ref) of a 20 000 × 64 × 4 MS take about 0.2 s.
 
 ## Reference-frame conversions

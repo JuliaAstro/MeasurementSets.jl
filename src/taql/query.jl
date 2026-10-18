@@ -127,9 +127,28 @@ function _sorted_rows(rows::Vector{Int}, keyvecs::AbstractVector, desc::Abstract
     for j in length(keyvecs):-1:1
         kv = keyvecs[j]
         vals = eltype(kv) === Any ? identity.([kv[i] for i in rows]) : kv[rows]
+        vals isa AbstractVector{String} && length(vals) >= 10_000 && (vals = _string_ranks(vals))
         rows = rows[sortperm(vals; rev=desc[j])]
     end
     return rows
+end
+
+# Phase 436: many rows, few distinct strings (names, modes, ...): sort the distinct values once and sort the rows by
+# their integer rank, which is the same order as sorting the strings themselves.  Falls back to the strings when
+# they are mostly distinct (the dictionary would not pay).
+function _string_ranks(vals::AbstractVector{String})
+    seen = Dict{String,Int32}()
+    ids = Vector{Int32}(undef, length(vals))
+    for (i, v) in enumerate(vals)
+        id = get!(seen, v, Int32(length(seen) + 1))
+        ids[i] = id
+        length(seen) * 8 > length(vals) && return vals            # mostly distinct: keep the strings
+    end
+    order = sortperm(collect(keys(seen)))
+    rank = Vector{Int32}(undef, length(seen))
+    uniq = collect(keys(seen))
+    for (r, k) in enumerate(order); rank[seen[uniq[k]]] = Int32(r); end
+    return rank[ids]
 end
 
 # A query result's `path` is `""` (in-memory, never persisted on its

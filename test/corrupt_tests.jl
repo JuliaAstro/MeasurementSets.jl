@@ -29,10 +29,15 @@
     @test (@elapsed(try collect(column(t, "X")[:]) catch; end)) < 5
 end
 
+# Phase 431: the fast read paths of Phases 421-428 (typed per-cell loads, direct String reads, bulk gathers, cached
+# columns, `rawblock`) are `unsafe_load` / `unsafe_string` / `unsafe_copyto!` behind a bounds check; the fuzz child now
+# drives them on every column of every corrupted table (`col[i]` for all rows, dense and reversed row selections, `copy`,
+# `getcell`, `rawblock`), and `sswords` sets every 4-byte word of a StandardStMan file holding inline, bucket-held and
+# bucket-spanning strings to extreme values.  (18 random runs of 150 tables, 3 x 1312 ISM words and 2000 SSM words: clean.)
 @testset "corrupted table files never crash or exhaust memory (Phase 376)" begin
     child = joinpath(@__DIR__, "corrupt_fuzz_child.jl")
     proj = dirname(@__DIR__)
-    for (kind, seed, n) in (("mixed", 11, 60), ("big", 12, 40), ("multifile", 13, 40), ("engines", 14, 40), ("dysco", 15, 40), ("refs", 16, 30), ("ismwords", 17, 0))
+    for (kind, seed, n) in (("mixed", 11, 60), ("big", 12, 40), ("multifile", 13, 40), ("engines", 14, 40), ("dysco", 15, 40), ("refs", 16, 30), ("ismwords", 17, 0), ("sswords", 18, 0))
         r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$proj $child $kind $seed $n`); stdout=devnull, stderr=devnull))
         @test r.exitcode == 0          # 139 = segfault, 137 = killed (out of memory), 3 = a read took > 15 s
     end

@@ -36,6 +36,13 @@ function readall(p)
         col = column(t, c)
         try collect(col[:]) catch; end
         for i in (1, 7, MSv2.nrow(t)); try col[i] catch; end; end
+        # Phase 431: the typed per-cell paths, the bulk-gather paths and the table-level cached column of Phases 421-428
+        try for i in 1:MSv2.nrow(t); col[i]; end catch; end
+        try col[collect(1:MSv2.nrow(t))] catch; end
+        try col[collect(MSv2.nrow(t):-1:1)] catch; end
+        try copy(col) catch; end
+        try for i in (1, 7, MSv2.nrow(t)); MSv2.getcell(t, c, i); end catch; end
+        try MSv2.rawblock(t, c) catch; end
     end
     try MSv2.keywords(t); MSv2.subtables(t) catch; end
     try query(t, "TRUE"); catch; end
@@ -50,6 +57,18 @@ if kind == "ismwords"     # deterministic: every 4-byte word of the used part of
         try readall(root) catch e; end
     end
     println("DONE ismwords $(length(spots) * 4)"); exit(0)
+end
+if kind == "sswords"      # deterministic (Phase 431): every 4-byte word of a StandardStMan file with inline / bucket-held / bucket-spanning strings
+    root = joinpath(mktempdir(), "t")
+    strs = [i % 9 == 0 ? "L" * "y"^(300 + i) : i % 4 == 0 ? "m" * "x"^(20 + i % 11) : "s$i" for i in 1:N]
+    write_table(root, "T", Pair{String,Any}["S" => strs, "X" => rand(rng, N), "Y" => Int32.(rand(rng, 1:5, N)), "Z" => rand(rng, ComplexF32, N)]; nrow=N)
+    f = joinpath(root, "table.f0"); orig = read(f)
+    spots = vcat(collect(1:4:min(length(orig), 1200)), collect(max(1, length(orig) - 400):4:length(orig) - 3))
+    for pos in spots, val in (0xffffffff, 0x7fffffff, 0x00100000, 0x00000000, 0x000000ff)
+        b = copy(orig); b[pos:pos+3] .= reinterpret(UInt8, [val]); write(f, b)
+        try readall(root) catch e; end
+    end
+    println("DONE sswords $(length(spots) * 5)"); exit(0)
 end
 base = joinpath(mktempdir(), "base"); builders[kind](base)
 isdir(base) || (base = base)

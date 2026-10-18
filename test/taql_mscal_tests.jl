@@ -2147,3 +2147,18 @@ end
     @test isempty(forbidden)
     isempty(forbidden) || println(forbidden)
 end
+
+# Phase 432: the per-(antenna, field, TIME) geometry is converted lazily, so a function that needs one quantity pays
+# for that one conversion only (mscal.last1() used to also do the HADEC, AZEL and ITRF conversions).
+@testset "mscal.* geometry is computed lazily (Phase 432)" begin
+    if isdir(SAMPLE_MS)
+        ms = readtable(SAMPLE_MS)
+        for e in ("mscal.last1() > 0", "mscal.el1() > 0.3"); query(ms, e); end         # compile
+        cost(e) = (query(ms, e); @allocated query(ms, e))
+        @test cost("mscal.last1() > 0") < 0.6 * cost("mscal.el1() > 0.3")
+        @test cost("mscal.itrf()[1] > 0") < 0.8 * cost("mscal.pa1() > 0")
+        # asking for two functions in one query shares the per-key frame: cheaper than two queries
+        both = cost("mscal.el1() > 0.3 AND mscal.ha1() > 0")
+        @test both < cost("mscal.el1() > 0.3") + cost("mscal.ha1() > 0")
+    end
+end
