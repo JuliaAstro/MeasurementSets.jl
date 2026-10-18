@@ -965,3 +965,40 @@ validate_dir_leftovers(p) = [x for x in readdir(p) if endswith(x, "_tmp") || sta
         @test column(readtable(p; precision = :full), "K")[:] == K
     end
 end
+
+# Phase 437: the edit session remembers which cells were set one by one, so the in-place patch looks at those alone;
+# whatever mixes of single-cell, whole-column and structural edits follow, the result matches a plain model
+@testset "edit — touched-cell tracking vs a model (Phase 437)" begin
+    rng = MersenneTwister(437)
+    for trial in 1:24
+        n = rand(rng, [900, 2500]); d = mktempdir(); p = joinpath(d, "t")
+        K = rand(rng, Int32(0):Int32(9), n); B = rand(rng, n); S = rand(rng, ["a", "b"], n)
+        ism = rand(rng, Bool)
+        write_table(p, "T", Pair{String,Any}["K" => copy(K), "B" => copy(B), "S" => copy(S)]; nrow = n, ism = ism ? ["K"] : String[])
+        mk, mb, ms_ = copy(K), copy(B), copy(S)
+        edit(p) do e
+            for step in 1:rand(rng, 1:6)
+                op = rand(rng, 1:7); m = length(mk)
+                if op <= 3                                    # single cells, some back to the stored value
+                    for _ in 1:rand(rng, 1:5)
+                        i = rand(rng, 1:m)
+                        if rand(rng) < 0.5; e[:K][i] = Int32(50 + step); mk[i] = Int32(50 + step)
+                        else; v = rand(rng) < 0.3 ? mb[i] : rand(rng); e[:B][i] = v; mb[i] = v; end
+                    end
+                elseif op == 4                                # a whole column, then one more cell
+                    nv = rand(rng, m); e[:B][:] = nv; mb .= nv
+                    i = rand(rng, 1:m); e[:B][i] = -1.0; mb[i] = -1.0
+                elseif op == 5                                # a string cell (regeneration path)
+                    i = rand(rng, 1:m); e[:S][i] = "zz"; ms_[i] = "zz"
+                elseif op == 6 && m > 20                      # rows removed after cells were set
+                    rr = sort!(unique(rand(rng, 1:m, 3))); removerows!(e, rr)
+                    deleteat!(mk, rr); deleteat!(mb, rr); deleteat!(ms_, rr)
+                else                                          # rows appended
+                    addrows!(e, 2); append!(mk, Int32[0, 0]); append!(mb, [0.0, 0.0]); append!(ms_, ["", ""])
+                end
+            end
+        end
+        r = readtable(p; precision = :full)
+        @test column(r, "K")[:] == mk && column(r, "B")[:] == mb && column(r, "S")[:] == ms_
+    end
+end
