@@ -1043,3 +1043,19 @@ end
         end
     end
 end
+
+# Phase 447: a whole-column assignment that changes only a few cells still patches those cells in place (the plan
+# falls back to comparing the column), and one that changes many regenerates -- same table either way
+@testset "edit — whole-column assignment with few differences (Phase 447)" begin
+    rng = MersenneTwister(447); n = 4000
+    for (nchg, inplace) in ((3, true), (900, false))
+        p = joinpath(mktempdir(), "t"); B = rand(rng, n); K = rand(rng, Int32, n)
+        write_table(p, "T", Pair{String,Any}["B" => copy(B), "K" => copy(K), "S" => fill("s", n)]; nrow = n)
+        f = only(filter(x -> startswith(x, "table.f") && !contains(x, "_"), readdir(p))); ino0 = stat(joinpath(p, f)).inode
+        nb = copy(B); idx = unique!(rand(rng, 100:n, nchg)); nb[idx] .= -1.0
+        edit(p) do e; e[:B][:] = nb; end
+        r = readtable(p; precision = :full)
+        @test column(r, "B")[:] == nb && column(r, "K")[:] == K && column(r, "S")[:] == fill("s", n)
+        @test (stat(joinpath(p, f)).inode == ino0) == inplace
+    end
+end

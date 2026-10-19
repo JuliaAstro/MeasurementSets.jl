@@ -229,6 +229,14 @@ end
             @test_throws BoundsError cc[n + 1]
         end
     end
+    # a TiledColumnStMan column (the MS `UVW` layout: fixed cell shape, one hypercube, no row map) is chunked too
+    n = 9000; p4 = joinpath(mktempdir(), "t"); U = [rand(rng, 3) for _ in 1:n]
+    write_table(p4, "T", Pair{String,Any}["U" => U]; nrow = n, tcm = [["U"]])
+    t4 = readtable(p4); col4 = column(t4, "U")
+    @test only(t4.managers).name == "TiledColumnStMan"
+    cc4 = MSv2._chunked(col4)
+    @test cc4 isa MSv2.ChunkedColumn && all(cc4[i] == U[i] for i in 1:n)
+    cc4 = MSv2._chunked(col4); @test all(cc4[i] == U[i] for i in rand(rng, 1:n, 300))
     # a short column and a column that is not tiled are not chunked
     p2 = joinpath(mktempdir(), "t"); write_table(p2, "T", Pair{String,Any}["A" => [rand(rng, 3) for _ in 1:100]]; nrow = 100)
     @test !(MSv2._chunked(column(readtable(p2), "A")) isa MSv2.ChunkedColumn)
