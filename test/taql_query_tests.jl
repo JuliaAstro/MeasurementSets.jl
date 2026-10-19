@@ -5827,3 +5827,25 @@ end
     @test MSv2._string_ranks(repeat(["b", "a", "b"], 100)) == repeat([2, 1, 2], 100)
     @test MSv2._string_ranks(["b", "a", "c"]) == ["b", "a", "c"]            # mostly distinct: unchanged
 end
+
+# Phase 440: COL[...] indexes the stored cell and widens only the selection -- same values and types as widening first
+@testset "COL[...] widens the selection, not the cell (Phase 440)" begin
+    rng = MersenneTwister(440); n = 500; p = joinpath(mktempdir(), "t")
+    write_table(p, "T", Pair{String,Any}["C" => [rand(rng, ComplexF32, 3, 4) for _ in 1:n], "F" => [rand(rng, Float32, 5) for _ in 1:n],
+                                         "I" => [rand(rng, Int16(-5):Int16(5), 4) for _ in 1:n]]; nrow = n)
+    t = readtable(p); cols = Dict{String,AbstractVector}(c => column(t, c) for c in columnnames(t))
+    for ex in ("C[1,2]", "C[2:3,1]", "C[:,4]", "F[3]", "F[end]", "F[2:4]", "I[1]", "I[2:3]", "F[F>0.5]", "I[I>0]", "C[1,1] + 1", "abs(C[:,2])", "sum(F[1:3])")
+        ast = MSv2._taqllite_parse(ex, Set(columnnames(t)))
+        for i in (1, 7, n)
+            got = MSv2._tqleval(ast, cols, i)
+            # reference: widen the whole base cell first (the old behaviour)
+            widened = Dict{String,AbstractVector}(c => (w = Vector{Any}(undef, i); w[i] = MSv2._widen(cols[c][i]); w) for c in keys(cols))
+            want = MSv2._tqleval(ast, widened, i)
+            g = got isa MSv2.TQLMArray ? (got.data, got.mask) : got; w = want isa MSv2.TQLMArray ? (want.data, want.mask) : want
+            @test g == w
+            @test eltype(got isa MSv2.TQLMArray ? got.data : got) === eltype(want isa MSv2.TQLMArray ? want.data : want)
+        end
+    end
+    @test eltype(MSv2._tqleval(MSv2._taqllite_parse("C[1,2]", Set(columnnames(t))), cols, 1)) === ComplexF64
+    @test eltype(MSv2._tqleval(MSv2._taqllite_parse("I[2:3]", Set(columnnames(t))), cols, 1)) === Int64
+end

@@ -511,6 +511,33 @@ function getcolumn(tsm::TiledStMan, colidx::Int, c::ColumnDesc, nrow::Integer, :
     return [astype.(getcell(tsm, colidx, c, r, 1)) for r in 1:nrow]
 end
 
+"""
+    getrows(tsm, colidx, coldesc, nrow, first, maxrows, maxbytes; astype=nothing) -> BlockColumn | nothing
+
+A block of up to `maxrows` consecutive rows starting at row `first` (at most `maxbytes` of decoded data, at least
+one row) of a tiled column, decoded in one pass into one backing buffer; `nothing` when the column is not on the
+single-hypercube fast path (the caller then reads cell by cell).  Phase 441: query loops stream a big array column
+through blocks like this instead of decoding one cell per row.
+"""
+function getrows(tsm::TiledStMan, colidx::Int, ::ColumnDesc, nrow::Integer, first::Integer, maxrows::Integer,
+                 maxbytes::Integer; astype::Union{Nothing,Type}=nothing)
+    (tsm.kind === :cell || alldefined_none(tsm)) && return nothing
+    real = findall(!isnull, tsm.cubes)
+    length(real) == 1 || return nothing
+    cube = tsm.cubes[real[1]]
+    base = if tsm.kind === :column
+        identity
+    elseif length(tsm.row) == 1 && tsm.row[1] >= nrow
+        r -> tsm.pos[1] - (tsm.row[1] - r)
+    else
+        return nothing
+    end
+    T = juliatype(tsm.types[colidx]); Tout = astype === nothing ? T : astype
+    planebytes = max(prod(cube.cubeshape[1:end-1]; init = 1) * (Tout === Bool ? 1 : sizeof(Tout)), 1)
+    k = clamp(min(Int(maxrows), max(1, Int(maxbytes) ÷ planebytes)), 1, Int(nrow) - Int(first) + 1)
+    return _read_cube_bulk(tsm, cube, r -> base(Int(first) + r - 1), k, colidx; astype)
+end
+
 # =====================  writer  ====================================
 
 # --- header building -------------------------------------------

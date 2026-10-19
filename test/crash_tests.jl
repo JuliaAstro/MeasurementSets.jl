@@ -160,3 +160,39 @@ end
     rm(joinpath(d, ".table.dat.tmp"); recursive=true, force=true)
     @test _cr_same(_cr_snap(d), old)
 end
+
+# Phase 444: the in-place patch of single cells (Phases 435/443) writes straight into the data-manager file, outside
+# the journaled commit group; a kill between two cells leaves each cell old or new, never torn, and the table usable
+@testset "a killed in-place cell patch leaves every cell old or new (Phase 444)" begin
+    rng = MersenneTwister(444); n = 2000; root = mktempdir()
+    mk(d) = (rm(d; recursive = true, force = true);
+             write_table(d, "T", Pair{String,Any}["K" => Int32.(1:n), "B" => collect(1.0:n), "F" => iseven.(1:n), "S" => ["s$i" for i in 1:n]]; nrow = n); d)
+    rows = sort!(unique(rand(rng, 1:n, 14)))
+    function op(d)
+        edit(d) do e
+            for i in rows
+                e[:K][i] = Int32(-i); e[:B][i] = -0.5i; e[:F][i] = !iseven(i)
+            end
+        end
+    end
+    d0 = mk(joinpath(root, "old")); old = _cr_snap(d0)
+    d1 = mk(joinpath(root, "new")); op(d1); new = _cr_snap(d1)
+    @test new["K"][rows] == Int32.(-rows) && new["F"][rows] == .!iseven.(rows)          # the fixture really patches
+    events = 0
+    d = mk(joinpath(root, "ev")); MSv2._COMMIT_HOOK[] = (st, i) -> (st === :patch && (events += 1)); try op(d) finally MSv2._COMMIT_HOOK[] = nothing end
+    @test events >= 3 * length(rows)                                                      # one event per patched cell
+    for k in 1:events
+        d = mk(joinpath(root, "k"))
+        cnt = Ref(0)
+        MSv2._COMMIT_HOOK[] = (st, i) -> (st === :patch && (cnt[] += 1; cnt[] == k && throw(_CrashSim())))
+        try op(d) catch e; e isa _CrashSim || rethrow() finally MSv2._COMMIT_HOOK[] = nothing end
+        s = _cr_snap(d)
+        @test all(s[c][i] == old[c][i] || s[c][i] == new[c][i] for c in ("K", "B", "F") for i in 1:n)
+        @test s["S"] == old["S"] && all(s[c][i] == old[c][i] for c in ("K", "B", "F") for i in setdiff(1:n, rows))
+        # the cells written before the "kill" are new, the later ones still old (each is one small write)
+        if k in (1, events)
+            edit(d) do e; e[:K][1] = Int32(77); end                                      # and the table can be edited again
+            @test column(readtable(d), "K")[1] == 77
+        end
+    end
+end

@@ -573,10 +573,21 @@ function ssm_patch_scalars!(ssm::StandardStMan, ssmcol::Int, ::Type{J}, rows::Ab
         for k in eachindex(rows)
             r = rows[k]
             off, first = locate(ssm, ssmcol, r)
+            if J === Bool                      # bit-packed, least significant bit first, one bit per row of the bucket
+                bit = r - first
+                p = off + (bit >> 3)
+                (p >= 0 && p < length(ssm.data)) || throw(BoundsError(ssm.data, p + 1))
+                m = UInt8(1) << (bit & 7)
+                ssm.data[p+1] = vals[k] ? (ssm.data[p+1] | m) : (ssm.data[p+1] & ~m)
+                seek(io, p); write(io, ssm.data[p+1])
+                _commit_hook(:patch, k)
+                continue
+            end
             p = off + (r - first) * sizeof(J)
             _wrbytes!(ssm.data, p, J(vals[k]), ssm.endian)
             seek(io, p)
             write(io, view(ssm.data, p+1:p+sizeof(J)))
+            _commit_hook(:patch, k)                 # test seam: a simulated kill between two patched cells
         end
     end
     return nothing

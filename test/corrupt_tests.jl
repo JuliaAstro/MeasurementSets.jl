@@ -37,7 +37,7 @@ end
 @testset "corrupted table files never crash or exhaust memory (Phase 376)" begin
     child = joinpath(@__DIR__, "corrupt_fuzz_child.jl")
     proj = dirname(@__DIR__)
-    for (kind, seed, n) in (("mixed", 11, 60), ("big", 12, 40), ("multifile", 13, 40), ("engines", 14, 40), ("dysco", 15, 40), ("refs", 16, 30), ("ismwords", 17, 0), ("sswords", 18, 0))
+    for (kind, seed, n) in (("mixed", 11, 60), ("big", 12, 40), ("multifile", 13, 40), ("engines", 14, 40), ("dysco", 15, 40), ("refs", 16, 30), ("ismwords", 17, 0), ("sswords", 18, 0), ("tsmwords", 19, 0))
         r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$proj $child $kind $seed $n`); stdout=devnull, stderr=devnull))
         @test r.exitcode == 0          # 139 = segfault, 137 = killed (out of memory), 3 = a read took > 15 s
     end

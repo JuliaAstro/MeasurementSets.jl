@@ -268,6 +268,8 @@ end
 # rather than trying to hold the whole column in memory.
 _load_col(c::Vector) = c
 _load_col(c::AbstractVector) = eltype(c) <: AbstractArray ? c : c[:]
+# Phase 441: a tiled array column is streamed through blocks (see `ChunkedColumn`) instead of one cell read per row
+_load_col(c::Column) = eltype(c) <: AbstractArray ? _chunked(c) : c[:]
 
 # --- masked arrays (TaQL `MArray`): data + a Bool mask, `true` = invalid.
 # Produced by `V[boolexpr]`, `marray(d, m)`, and a masked reduction's
@@ -415,8 +417,14 @@ _tqleval(::TQLGrouping, cols, i) = throw(ArgumentError(
     "TaQL-lite: GROUPING() is only valid in a groupby select / having"))
 _tqleval(::TQLAggr, cols, i) = throw(ArgumentError(
     "TaQL-lite: aggregate functions (g*) are only valid in groupby(...), not query(...)"))
-_tqleval(e::TQLIndex, cols, i) = _tql_do_index(_tqleval(e.base, cols, i), e.axes,
-                                               (x -> _tqleval(x, cols, i)))
+# Phase 440: `COL[...]` indexes the cell as stored and widens only what the subscript selects (widening the whole
+# 2 KiB visibility cell to double complex just to read one element doubled the memory of the query)
+function _tqleval(e::TQLIndex, cols, i)
+    ev = x -> _tqleval(x, cols, i)
+    e.base isa TQLCol || return _tql_do_index(_tqleval(e.base, cols, i), e.axes, ev)
+    r = _tql_do_index(cols[e.base.name][i], e.axes, ev)
+    return r isa TQLMArray ? TQLMArray(_widen(r.data), r.mask) : _widen(r)
+end
 _tqleval(e::TQLBetween, cols, i) = _tql_between(
     _tqleval(e.lhs, cols, i), _tqleval(e.lo, cols, i), _tqleval(e.hi, cols, i), e.negate)
 

@@ -30,13 +30,14 @@
 mutable struct EditTable
     reader::Table
     rowmap::Vector{Int}                    # per current row: reader-row index, or 0 = appended
-    override::Dict{String,Vector{Any}}     # SSM/ISM: whole materialised columns (len == length(rowmap))
+    override::Dict{String,AbstractVector}  # SSM/ISM: whole materialised columns (len == length(rowmap)); a scalar column stays a typed vector
     tsmedit::Dict{String,Dict{Int,Any}}    # TSM: column -> (current-row index -> new cell)
     addcols::Vector{Tuple{ColumnDesc,Symbol,Vector{Any}}}   # (desc, :ssm|:ism|:tsm, data)
     dropcols::Set{String}
     flushed::Bool
     lk::TableLock         # the write lock, held for the WHOLE session -- see `edit`'s docstring
     released::Bool        # guards against releasing `lk` twice (flush + an error path)
+    touched::Dict{String,Union{Nothing,Vector{Int}}}   # Phase 437: cells set one by one in `override` columns (nothing = unknown)
 end
 
 # A flushed (or aborted) session has released its lock and committed its
@@ -102,10 +103,10 @@ function edit(path::AbstractString)
                   "TaQL expression — edit the source columns instead")
         # the session keeps one row-map entry per row (8 bytes each)
         _check_row_budget(r.rows, 8, "edit")
-        return EditTable(r, collect(1:r.rows), Dict{String,Vector{Any}}(),
+        return EditTable(r, collect(1:r.rows), Dict{String,AbstractVector}(),
                   Dict{String,Dict{Int,Any}}(),
                   Tuple{ColumnDesc,Symbol,Vector{Any}}[], Set{String}(), false,
-                  lk, false)
+                  lk, false, Dict{String,Union{Nothing,Vector{Int}}}())
     catch
         _release_edit_lock!(lk)
         rethrow()
@@ -272,8 +273,17 @@ function Base.setindex!(c::EditColumn, v, i::Int)
     elseif _kind(t, n) in _TILED_KINDS
         get!(() -> Dict{Int,Any}(), t.tsmedit, n)[i] = v
     else
+        fresh = !haskey(t.override, n)
         _materialize!(t, n)
         t.override[n][i] = v
+        tl = get(t.touched, n, nothing)
+        if fresh
+            t.touched[n] = Int[i]
+        elseif tl !== nothing
+            push!(tl, i)
+        else
+            t.touched[n] = nothing                # the column was replaced as a whole earlier
+        end
     end
     return v
 end
@@ -289,6 +299,7 @@ function Base.setindex!(c::EditColumn, vals, ::Colon)
             _check_scalar_cell(c.desc, v)
         end
         t.override[n] = Any[v for v in vals]
+        t.touched[n] = nothing
         return vals
     end
     for (i, v) in enumerate(vals)
@@ -389,7 +400,8 @@ end
 # pull the whole column into `t.override`, aligned with `t.rowmap`
 function _materialize!(t::EditTable, name::AbstractString)
     haskey(t.override, name) && return
-    t.override[name] = _read_cells_any(t, columndesc(t.reader, name), name)
+    # Phase 439: a scalar column stays a typed vector (the writers' memcpy path, no boxes); everything else is boxed
+    t.override[name] = _read_cells_any(t, columndesc(t.reader, name), name; concrete = true)
 end
 
 _gather_default(bulk::AbstractVector{T}, rowmap::Vector{Int}, d::T) where {T} =
@@ -444,6 +456,7 @@ function addrows!(t::EditTable, n::Integer)
     n == 0 && return t
     _check_row_budget(n, 8 * (1 + length(t.override) + length(t.addcols)), "addrows!")
     append!(t.rowmap, zeros(Int, Int(n)))
+    foreach(k -> t.touched[k] = nothing, collect(keys(t.touched)))
     for (name, v) in t.override
         c = columndesc(t.reader, name)
         for _ in 1:n; push!(v, _default_cell(c, t)); end
@@ -468,6 +481,7 @@ function removerows!(t::EditTable, rows)
     (idx[1] >= 1 && idx[end] <= length(t.rowmap)) ||
         throw(BoundsError(t, idx))
     deleteat!(t.rowmap, idx)
+    foreach(k -> t.touched[k] = nothing, collect(keys(t.touched)))
     for (_, v) in t.override; deleteat!(v, idx); end
     for (_, _, data) in t.addcols; deleteat!(data, idx); end
     dropset = Set(idx)
@@ -710,29 +724,40 @@ function _ssm_patch_plan(t::EditTable)
     for (name, newvals) in t.override
         c = try columndesc(rd, name) catch; return nothing end
         J = juliatype(c.type)
-        (c.shape isa Dims && isempty(c.shape) && J <: Union{Integer,AbstractFloat} && J !== Bool) || return nothing
+        (c.shape isa Dims && isempty(c.shape) && J <: Union{Integer,AbstractFloat}) || return nothing
         inst = _dm_instance(rd, c.sequ)
         (inst isa StandardStMan && inst.container === nothing) || return nothing
         length(newvals) == rd.rows || return nothing
         idx, _ = _dm_local(rd, c)
         limit = rd.rows ÷ 8                   # more changes than this: one regeneration is cheaper
-        # a quick look at the first rows: a whole-column rewrite differs almost everywhere, so skip the full read
         col = column(rd, name; precision = :full)
-        probe = min(rd.rows, 64); ndiff = 0
-        for i in 1:probe
-            v = newvals[i]; v isa Number || return nothing
-            x = try J(v) catch; return nothing end
-            isequal(x, col[i]) || (ndiff += 1)
-        end
-        ndiff > max(probe ÷ 8, 1) && rd.rows > 8 * probe && return nothing
-        old = col[:]
         rows = Int[]; vals = J[]
-        for i in 1:rd.rows
-            v = newvals[i]
-            v isa Number || return nothing
-            x = try J(v) catch; return nothing end
-            isequal(x, old[i]) || (push!(rows, i); push!(vals, x))
-            length(rows) > limit && return nothing
+        tl = get(t.touched, name, nothing)
+        if tl !== nothing
+            # only cells set one by one: look at those, not at the whole column (Phase 437)
+            length(unique(tl)) > limit && return nothing
+            for i in sort!(unique(tl))
+                v = newvals[i]; v isa Number || return nothing
+                x = try J(v) catch; return nothing end
+                isequal(x, col[i]) || (push!(rows, i); push!(vals, x))
+            end
+        else
+            # a quick look at the first rows: a whole-column rewrite differs almost everywhere, so skip the full read
+            probe = min(rd.rows, 64); ndiff = 0
+            for i in 1:probe
+                v = newvals[i]; v isa Number || return nothing
+                x = try J(v) catch; return nothing end
+                isequal(x, col[i]) || (ndiff += 1)
+            end
+            ndiff > max(probe ÷ 8, 1) && rd.rows > 8 * probe && return nothing
+            old = col[:]
+            for i in 1:rd.rows
+                v = newvals[i]
+                v isa Number || return nothing
+                x = try J(v) catch; return nothing end
+                isequal(x, old[i]) || (push!(rows, i); push!(vals, x))
+                length(rows) > limit && return nothing
+            end
         end
         isempty(rows) || push!(get!(() -> Any[], plan, c.sequ), (name, idx, J, rows, vals))
     end
@@ -740,12 +765,20 @@ function _ssm_patch_plan(t::EditTable)
     for m in rd.managers
         m.sequ in keys(plan) && continue
         for c in rd.desc.columns
-            c.sequ == m.sequ && haskey(t.override, c.name) && !isequal(t.override[c.name], column(rd, c.name; precision = :full)[:]) && return nothing
+            c.sequ == m.sequ && haskey(t.override, c.name) && _override_changed(t, c.name) && return nothing
         end
     end
     total = sum(sum(length(p[4]) for p in ps) for ps in values(plan); init = 0)
     total * 8 <= rd.rows || return nothing          # many changes: one regeneration is cheaper
     return plan
+end
+
+# does an overridden column differ from what is stored?  (cells set one by one are looked at alone)
+function _override_changed(t::EditTable, name::AbstractString)
+    rd = t.reader; v = t.override[name]; col = column(rd, name; precision = :full)
+    tl = get(t.touched, name, nothing)
+    tl === nothing && return !isequal(v, col[:])
+    return any(i -> !isequal(v[i], col[i]), tl)
 end
 
 function _append_only(t::EditTable)

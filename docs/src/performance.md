@@ -36,7 +36,7 @@ total(column(t, "TIME"))
 | a tiled `DATA` cell, `precision = :full` | ~0.5 µs |
 | `DataFrame(t)` of 1M rows × 4 columns | ~40 ms |
 
-A column of array cells (`UVW`, `DATA`, `FLAG`, ...) comes back from `[:]` as a lazy [`BlockColumn`](@ref) over one buffer, and
+A `query` / `groupby` over a tiled array column (`DATA`, `FLAG`) streams it in 8 MiB blocks instead of decoding one cell per row (memory stays bounded; `any(FLAG)` over 100 000 rows: 31 → 9 ms, `real(DATA[1,1]) > 0.9`: 115 → 73 ms). A column of array cells (`UVW`, `DATA`, `FLAG`, ...) comes back from `[:]` as a lazy [`BlockColumn`](@ref) over one buffer, and
 [`rawblock`](@ref) gives you that buffer as a single dense array with the cell axes first — the cheapest way to hand a column to
 numerical code:
 
@@ -84,7 +84,7 @@ so do all your changes in **one** session rather than one session per cell:
 update!("/path/to/my.ms"; set = ["INTERVAL" => "INTERVAL * 1.0"])    # a whole column: ~1 s per million rows
 ```
 
-Overwriting a few single cells of numeric `StandardStMan` columns (fewer than one in eight rows) patches those cells in the file in place (1000 cells of a 1M-row table: ~0.12 s, was ~0.38 s); anything else touching a column regenerates its data-manager file. Removing or appending rows regenerates the table's files (`removerows!` of 1000 of 1M rows: ~0.35 s); a tiled visibility
+Overwriting a few single cells of numeric or `Bool` (flag) `StandardStMan` columns (fewer than one in eight rows) patches those cells in the file in place (1000 cells of a 1M-row table: ~12 ms, a single cell ~10 ms; it was ~0.38 s); anything else touching a column regenerates its data-manager file. Removing or appending rows regenerates the table's files (`removerows!` of 1000 of 1M rows: ~0.35 s); a tiled visibility
 cube is rewritten completely. [`copyms`](@ref) / [`create_ms`](@ref) of a 20 000 × 64 × 4 MS take about 0.2 s.
 
 ## Reference-frame conversions

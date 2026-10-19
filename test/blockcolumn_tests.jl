@@ -5,6 +5,8 @@
 # one call PER TILE (live-measured to close nearly all of `UVW`'s
 # remaining allocation/wall-clock gap against real casacore C++).
 
+using Random        # (Phase 441's ChunkedColumn test; this file runs before any other that loads it)
+
 @testset "BlockColumn — structural (Phase 236)" begin
     t = readtable(SAMPLE_MS; precision=:full)
     n = nrow(t)
@@ -201,4 +203,40 @@ end
     GC.gc()
     a_rb = @allocated rawblock(t, "UVW")
     @test a_rb < 2 * a_theoretical
+end
+
+# Phase 441: ChunkedColumn streams a tiled array column through blocks for a query loop
+@testset "ChunkedColumn — sequential, skipping and random access == per-cell reads (Phase 441)" begin
+    rng = MersenneTwister(441)
+    for endian in (:little, :big), shape in ((4, 8), (3,))
+        n = 9000; d = mktempdir(); p = joinpath(d, "t")
+        C = [rand(rng, ComplexF32, shape...) for _ in 1:n]; F = [rand(rng, Bool, shape...) for _ in 1:n]
+        write_table(p, "T", Pair{String,Any}["C" => C, "F" => F]; nrow = n, tsm = [["C", "F"]], endian)
+        t = readtable(p; precision = :full)
+        for nm in ("C", "F")
+            col = column(t, nm); cc = MSv2._chunked(col)
+            @test cc isa MSv2.ChunkedColumn && length(cc) == n
+            ref = nm == "C" ? C : F
+            @test all(cc[i] == ref[i] for i in 1:n)                                   # sequential, crosses every block boundary
+            cc = MSv2._chunked(col)
+            @test all(cc[i] == ref[i] for i in 1:3:n)                                 # forward with small gaps
+            cc = MSv2._chunked(col)
+            idx = rand(rng, 1:n, 400); @test all(cc[i] == ref[i] for i in idx)        # random order: cell by cell
+            cc = MSv2._chunked(col)
+            @test all(cc[i] == ref[i] for i in vcat(1:50, 8990:9000 .- 1, 30:-1:20)) # backwards after forwards
+            @test cc[:] == ref && eltype(cc[1]) == eltype(ref[1])
+            @test_throws BoundsError cc[0]
+            @test_throws BoundsError cc[n + 1]
+        end
+    end
+    # a short column and a column that is not tiled are not chunked
+    p2 = joinpath(mktempdir(), "t"); write_table(p2, "T", Pair{String,Any}["A" => [rand(rng, 3) for _ in 1:100]]; nrow = 100)
+    @test !(MSv2._chunked(column(readtable(p2), "A")) isa MSv2.ChunkedColumn)
+    # a query over a chunked column gives the same rows as one over the materialised column
+    n = 5000; p3 = joinpath(mktempdir(), "t")
+    write_table(p3, "T", Pair{String,Any}["C" => [rand(rng, ComplexF32, 2, 4) for _ in 1:n], "K" => collect(1:n)]; nrow = n, tsm = [["C"]])
+    t3 = readtable(p3)
+    @test query(t3, "abs(C[1,2]) > 0.8").rows == [i for i in 1:n if abs(column(t3, "C")[i][1, 2]) > 0.8]
+    @test query(t3, "mean(abs(C)) > 0.6 AND K % 3 == 0").rows ==
+          [i for i in 1:n if sum(abs.(column(t3, "C")[i])) / 8 > 0.6 && i % 3 == 0]
 end
