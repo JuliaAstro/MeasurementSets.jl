@@ -7,6 +7,12 @@
 # write_command / lock / container tests carried its own copy of the
 # StdVector / ConstCxxPtr / GC.@preserve boilerplate.
 
+# Phase 446: the seeded random-fuzz loops against real TaQL are the bulk of the suite (about 20 of its 41 minutes).
+# `MS_TEST_FUZZ_SCALE` (0.05 .. 1, default 1) scales their iteration counts; CI runs the full counts on one Julia
+# version and a fraction on the others, where the same seeds have already passed.
+const _FUZZ_SCALE = clamp(something(tryparse(Float64, get(ENV, "MS_TEST_FUZZ_SCALE", "1")), 1.0), 0.05, 1.0)
+_fz(n::Integer) = max(1, round(Int, n * _FUZZ_SCALE))
+
 const _HAVE_TAQL = _HAVE_CASACORE && try
     @eval import CxxWrap
     true

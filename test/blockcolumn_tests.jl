@@ -229,6 +229,14 @@ end
             @test_throws BoundsError cc[n + 1]
         end
     end
+    # a TiledColumnStMan column (the MS `UVW` layout: fixed cell shape, one hypercube, no row map) is chunked too
+    n = 9000; p4 = joinpath(mktempdir(), "t"); U = [rand(rng, 3) for _ in 1:n]
+    write_table(p4, "T", Pair{String,Any}["U" => U]; nrow = n, tcm = [["U"]])
+    t4 = readtable(p4); col4 = column(t4, "U")
+    @test only(t4.managers).name == "TiledColumnStMan"
+    cc4 = MSv2._chunked(col4)
+    @test cc4 isa MSv2.ChunkedColumn && all(cc4[i] == U[i] for i in 1:n)
+    cc4 = MSv2._chunked(col4); @test all(cc4[i] == U[i] for i in rand(rng, 1:n, 300))
     # a short column and a column that is not tiled are not chunked
     p2 = joinpath(mktempdir(), "t"); write_table(p2, "T", Pair{String,Any}["A" => [rand(rng, 3) for _ in 1:100]]; nrow = 100)
     @test !(MSv2._chunked(column(readtable(p2), "A")) isa MSv2.ChunkedColumn)
@@ -239,4 +247,38 @@ end
     @test query(t3, "abs(C[1,2]) > 0.8").rows == [i for i in 1:n if abs(column(t3, "C")[i][1, 2]) > 0.8]
     @test query(t3, "mean(abs(C)) > 0.6 AND K % 3 == 0").rows ==
           [i for i in 1:n if sum(abs.(column(t3, "C")[i])) / 8 > 0.6 && i % 3 == 0]
+end
+
+# Phase 450: `col[a:b]` on a tiled array column decodes the run a block at a time (the Julia-vs-C++ comparison showed a
+# 20 000-visibility slice slower than casacore's); the result is the owned arrays the cell-by-cell read gave.
+@testset "tiled array column: consecutive-row slices (Phase 450)" begin
+    rng = Random.MersenneTwister(450)
+    n = 9000
+    for endian in (:little, :big), grp in ((; tsm = [["D", "F"]]), (; tsm = [["D"]], tcm = [["F"]]))
+        d = joinpath(mktempdir(), "t")
+        D = [rand(rng, ComplexF32, 2, 3) for _ in 1:n]; F = [rand(rng, Bool, 2, 3) for _ in 1:n]
+        write_table(d, "T", Pair{String,Any}["D" => D, "F" => F]; nrow = n, endian = endian, grp...)
+        t = readtable(d)
+        for nm in ("D", "F"), full in (true, false)
+            c = full ? column(t, nm; precision = :full) : column(t, nm)
+            ref = nm == "D" ? D : F
+            for r in (1:63, 1:64, 100:163, 4000:4200, 4090:4100 .+ 0, 3000:8500, 1:n, n-64:n, 7:7, 5:4)
+                got = c[r]
+                @test length(got) == length(r)
+                @test typeof(got) == typeof([c[i] for i in first(r):min(first(r), last(r))])  || length(r) == 0
+                @test all(got[k] == c[first(r) + k - 1] for k in eachindex(got))
+            end
+            @test_throws BoundsError c[n-10:n+100]
+            @test_throws BoundsError c[0:70]
+        end
+        # owned cells: changing a returned cell does not change what the next read gives
+        c = column(t, "D"; precision = :full)
+        a = c[1:100]; a[3][1] = 99; @test c[1:100][3] == D[3]
+    end
+    # several hypercubes -> the block reader declines, the cell-by-cell result is returned
+    d = joinpath(mktempdir(), "t")
+    V = [rand(rng, Float32, 2, 1 + (i > 100)) for i in 1:300]
+    write_table(d, "T", Pair{String,Any}["V" => V]; nrow = 300, tsm = [["V"]])
+    c = column(readtable(d), "V"; precision = :full)
+    @test c[50:250] == [c[i] for i in 50:250]
 end

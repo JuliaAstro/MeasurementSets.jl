@@ -40,13 +40,13 @@ using Random
         end
         rng = MersenneTwister(277)
         badrows = String[]; badvals = String[]
-        for _ in 1:150
+        for _ in 1:_fz(150)
             ex = bool(rng, rand(rng, 0:3))
             ours = try Int.(column(query(t, ex), "ID")[:]) catch e; :err end
             real = try (rt = _taqlcmd("SELECT FROM \$1 WHERE $ex", d); size(rt, 1) == 0 ? Int[] : Int.(collect(rt[:ID][:]))) catch e; :err end
             ours == real || push!(badrows, ex)
         end
-        for _ in 1:100
+        for _ in 1:_fz(100)
             ex = val(rng, rand(rng, 0:3))
             ours = try Vector{Float64}(column(query(t, "ID > 0"; select=["X" => ex]), "X")[:]) catch e; :err end
             real = try (rt = _taqlcmd("SELECT $ex AS X FROM \$1", d); Vector{Float64}(collect(rt[:X][:]))) catch e; :err end
@@ -133,7 +133,7 @@ end
         num(r) = pick(r, ("I", "D", "E", "(I + D)", "(D * E)", "abs(D)", "(I % 3)", "ID"))
         fns = ["gcount()", "gsum", "gmean", "gmin", "gvariance", "gstddev", "grms", "gmedian", "gsamplevariance", "gsamplestddev", "gfirst", "glast"]
         r = MersenneTwister(284); bad = String[]
-        for _ in 1:60
+        for _ in 1:_fz(60)
             kk = pick(r, (["K"], ["L"], ["K", "L"], ["S"], ["B"], ["K", "S"]))
             aggs = ["A$i" => (a = pick(r, fns); a == "gcount()" ? a : "$a($(num(r)))") for i in 1:rand(r, 1:3)]
             wh = rand(r) < 0.4 ? pick(r, ("I > -3", "B", "D < 2.0", "S != 'z'", "ID % 2 == 0")) : nothing
@@ -237,7 +237,7 @@ end
             (a isa AbstractArray && b isa AbstractArray && size(a) == size(b) && all(same.(a, b))) :
             (a == b || (a isa Real && b isa Real && (isnan(a) && isnan(b) || isapprox(a, b; rtol=1e-6, atol=1e-8))))
         r = MersenneTwister(285); bad = String[]
-        for _ in 1:150
+        for _ in 1:_fz(150)
             ex = gen(r, pick(r, (:sc, :sc, :s34, :s34, :v4, :v3, :b34, :s43, :bsc, :bv)), rand(r, 1:3))
             ours = try collect(column(query(t, "rownumber() > 0"; select = ["R" => ex]), "R")[:]) catch; nothing end
             real = try collect(_taqlcmd("SELECT $ex AS R FROM \$1", d)[:R][:]) catch; nothing end
@@ -276,7 +276,7 @@ end
             return "sums(A, $(rand(r, 1:2)))[$(rand(r, 1:2))]"
         end
         r = MersenneTwister(286); bad = String[]
-        for _ in 1:300
+        for _ in 1:_fz(300)
             agg = pick(r, aggfns); arg = argexpr(r)
             wh = rand(r) < 0.4 ? pick(r, ("D > 0.0", "K == 1", "sum(A) > 0")) : nothing
             cmd = "SELECT K, $agg($arg) AS X FROM \$1" * (wh === nothing ? "" : " WHERE $wh") * " GROUP BY K"

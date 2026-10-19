@@ -1043,3 +1043,96 @@ end
         end
     end
 end
+
+# Phase 447: a whole-column assignment that changes only a few cells still patches those cells in place (the plan
+# falls back to comparing the column), and one that changes many regenerates -- same table either way
+@testset "edit — whole-column assignment with few differences (Phase 447)" begin
+    rng = MersenneTwister(447); n = 4000
+    for (nchg, inplace) in ((3, true), (900, false))
+        p = joinpath(mktempdir(), "t"); B = rand(rng, n); K = rand(rng, Int32, n)
+        write_table(p, "T", Pair{String,Any}["B" => copy(B), "K" => copy(K), "S" => fill("s", n)]; nrow = n)
+        f = only(filter(x -> startswith(x, "table.f") && !contains(x, "_"), readdir(p))); ino0 = stat(joinpath(p, f)).inode
+        nb = copy(B); idx = unique!(rand(rng, 100:n, nchg)); nb[idx] .= -1.0
+        edit(p) do e; e[:B][:] = nb; end
+        r = readtable(p; precision = :full)
+        @test column(r, "B")[:] == nb && column(r, "K")[:] == K && column(r, "S")[:] == fill("s", n)
+        @test (stat(joinpath(p, f)).inode == ino0) == inplace
+    end
+end
+
+using Random
+
+# Phase 449: random edit sessions against a model.  Cell sets, whole-column sets, addrows! and removerows!, several
+# sessions in a row, on tables of 50..30000 rows (one to many SSM buckets, so the in-place cell patch of Phases 435/443
+# fires for some sessions and the regenerating path for others), both byte orders, SSM and ISM scalars, shared tiled
+# hypercube / TiledColumnStMan / ragged arrays.  Nothing differed from the model.  (An appended ragged cell is zeros of
+# the previous row's shape -- the documented addrows! default, unlike casacore's undefined cell.)
+@testset "random edit sessions vs a model (Phase 449)" begin
+    rng = Random.MersenneTwister(449)
+    for seed in 1:14
+        N = rand(rng, (50, 700, 5000, 30000)); endian = rand(rng, (:little, :big))
+        d = joinpath(mktempdir(), "t")
+        cols = Pair{String,Any}["I" => Int32.(rand(rng, -100:100, N)), "X" => rand(rng, N), "B" => rand(rng, Bool, N),
+                                "S" => ["s$(rand(rng, 1:9))" for _ in 1:N], "F" => Float32.(rand(rng, N))]
+        write_table(d, "T", cols; nrow = N, endian = endian, (rand(rng, Bool) ? (; ism = ["I"]) : (;))...)
+        m = Dict(c => copy(v) for (c, v) in cols)
+        defs = Dict("I" => Int32(0), "X" => 0.0, "B" => false, "S" => "", "F" => Float32(0))
+        gen = Dict("I" => () -> Int32(rand(rng, -100:100)), "X" => () -> rand(rng), "B" => () -> rand(rng, Bool),
+                   "S" => () -> "v$(rand(rng, 1:99))", "F" => () -> Float32(rand(rng)))
+        for session in 1:rand(rng, 1:3)
+            edit(d) do t
+                for _ in 1:rand(rng, 1:12)
+                    n = length(m["I"]); op = rand(rng, 1:6); c = rand(rng, ("I", "X", "B", "S", "F"))
+                    if op <= 3 && n > 0
+                        for _ in 1:rand(rng, 1:max(1, n ÷ 20)); i = rand(rng, 1:n); v = gen[c](); t[Symbol(c)][i] = v; m[c][i] = v; end
+                    elseif op == 4 && n > 0
+                        nv = [gen[c]() for _ in 1:n]; t[Symbol(c)][:] = nv; m[c] = nv
+                    elseif op == 5
+                        k = rand(rng, 1:5); addrows!(t, k)
+                        for (cc, v) in m; append!(v, fill(defs[cc], k)); end
+                    elseif op == 6 && n > 3
+                        r = sort(unique(rand(rng, 1:n, rand(rng, 1:3)))); removerows!(t, r)
+                        for (_, v) in m; deleteat!(v, r); end
+                    end
+                end
+            end
+            tt = readtable(d)
+            for c in keys(m)
+                @test column(tt, c; precision = :full)[:] == m[c]
+            end
+        end
+    end
+    for seed in 1:10
+        N = rand(rng, (30, 400, 6000)); endian = rand(rng, (:little, :big))
+        d = joinpath(mktempdir(), "t")
+        cols = Pair{String,Any}["K" => Int32.(rand(rng, 1:9, N)), "A" => [rand(rng, Float32, 2, 3) for _ in 1:N],
+                                "Z" => [rand(rng, ComplexF32, 2, 3) for _ in 1:N], "V" => [rand(rng, 1:4) |> k -> rand(rng, k) for _ in 1:N]]
+        grp = rand(rng, Bool) ? (; tsm = [["A", "Z"]]) : (; tsm = [["A"]], tcm = [["Z"]])
+        write_table(d, "T", cols; nrow = N, endian = endian, grp...)
+        m = Dict{String,Any}(c => copy(v) for (c, v) in cols)
+        gen = Dict("K" => () -> Int32(rand(rng, 1:9)), "A" => () -> rand(rng, Float32, 2, 3),
+                   "Z" => () -> rand(rng, ComplexF32, 2, 3), "V" => () -> rand(rng, rand(rng, 1:4)))
+        dflt(c, v) = c == "K" ? Int32(0) : c == "A" ? zeros(Float32, 2, 3) : c == "Z" ? zeros(ComplexF32, 2, 3) : zeros(length(v[end]))
+        for session in 1:rand(rng, 1:3)
+            edit(d) do t
+                for _ in 1:rand(rng, 1:8)
+                    n = length(m["K"]); op = rand(rng, 1:5); c = rand(rng, ("K", "A", "Z", "V"))
+                    if op <= 3 && n > 0
+                        for _ in 1:rand(rng, 1:5); i = rand(rng, 1:n); v = gen[c](); t[Symbol(c)][i] = v; m[c][i] = v; end
+                    elseif op == 4
+                        k = rand(rng, 1:4); addrows!(t, k)
+                        for (cc, v) in m; for _ in 1:k; push!(v, dflt(cc, v)); end; end
+                    elseif op == 5 && n > 3
+                        r = sort(unique(rand(rng, 1:n, rand(rng, 1:3)))); removerows!(t, r)
+                        for (_, v) in m; deleteat!(v, r); end
+                    end
+                end
+            end
+            tt = readtable(d)
+            for c in keys(m)
+                got = column(tt, c; precision = :full)[:]
+                @test length(got) == length(m[c]) && all(collect(got[i]) == collect(m[c][i]) for i in eachindex(got))
+            end
+        end
+    end
+end

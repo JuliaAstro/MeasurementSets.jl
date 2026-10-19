@@ -210,6 +210,35 @@ function Base.getindex(c::Column{T}, r::AbstractVector{<:Integer}) where {T}
     end
     return [c[i] for i in r]
 end
+# Phase 450: a run of consecutive rows of a tiled array column (`col[a:b]`: "read these 20 000 visibilities") was one
+# storage-manager cell read per row, the loop a query already avoids with the block reader.  A run of at least 64 rows
+# is now decoded a block at a time (`getrows`, the same single pass `[:]` uses) and each cell copied out as an owned
+# array, so the result is exactly what the cell-by-cell read gave.
+function Base.getindex(c::Column{T}, r::AbstractUnitRange{<:Integer}) where {T<:AbstractArray}
+    n = length(r)
+    if n >= 64 && c.inst isa TiledStMan && first(r) >= 1 && last(r) <= length(c)
+        astype = c.target === nothing ? nothing : _narrowtype(juliatype(c.desc.type), c.target)
+        out = Vector{T}(undef, n)
+        i = 0
+        while i < n
+            blk = getrows(c.inst, c.index, c.desc, length(c), first(r) + i, CHUNK_ROWS, CHUNK_BYTES; astype)
+            blk === nothing && break
+            k = min(blk.n, n - i)
+            for j in 1:k
+                out[i + j] = Array(blk[j])
+            end
+            i += k
+        end
+        if i >= n
+            return out
+        end
+        for q in i+1:n                                   # the block reader declined (several hypercubes, ...): cell reads
+            out[q] = c[first(r) + q - 1]
+        end
+        return out
+    end
+    return [c[i] for i in r]
+end
 # copying a whole scalar column is the bulk read as well (`copy` of an AbstractVector goes through `getindex` cell
 # by cell; `collect` already forwards to `c[:]` below)
 Base.copy(c::Column{T}) where {T} = T <: AbstractArray ? [c[i] for i in eachindex(c)] : c[:]

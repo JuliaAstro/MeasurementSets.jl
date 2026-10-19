@@ -53,6 +53,8 @@ rows = findall(>(0), column(t, "ANTENNA1")[:])
 sel  = column(t, "TIME")[rows]
 ```
 
+A run of consecutive rows of a tiled array column — `column(t, "DATA")[a:b]` — is decoded a block at a time as well (20 000 visibilities: 18.6 → 6.3 ms; the cells are owned arrays, as before).
+
 ### Precision
 
 A MAIN table reads its `ComplexF32` columns (`DATA`, `MODEL_DATA`, `CORRECTED_DATA`) as `ComplexF16` by default, which halves
