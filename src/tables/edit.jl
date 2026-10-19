@@ -724,7 +724,7 @@ function _ssm_patch_plan(t::EditTable)
     for (name, newvals) in t.override
         c = try columndesc(rd, name) catch; return nothing end
         J = juliatype(c.type)
-        (c.shape isa Dims && isempty(c.shape) && J <: Union{Integer,AbstractFloat} && J !== Bool) || return nothing
+        (c.shape isa Dims && isempty(c.shape) && J <: Union{Integer,AbstractFloat}) || return nothing
         inst = _dm_instance(rd, c.sequ)
         (inst isa StandardStMan && inst.container === nothing) || return nothing
         length(newvals) == rd.rows || return nothing

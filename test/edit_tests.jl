@@ -1020,3 +1020,26 @@ end
     @test column(r, "K")[:] == Int32[7; 3:n; 9; 0] && column(r, "S")[:][1] == "x" && column(r, "B")[:][1] == 7.0 && column(r, "F")[:][1] == false
     @test nrow(r) == n + 1
 end
+
+# Phase 443: a few Bool cells of a StandardStMan column (FLAG_ROW-style flagging) are patched bit by bit in place
+@testset "edit — Bool SSM cells are patched in place (Phase 443)" begin
+    rng = MersenneTwister(443)
+    for endian in (:little, :big), n in (3000, 20000)
+        d = mktempdir(); p = joinpath(d, "t")
+        F = rand(rng, Bool, n); K = rand(rng, Int32, n); S = rand(rng, ["a", "bb"], n)
+        write_table(p, "T", Pair{String,Any}["F" => copy(F), "K" => copy(K), "S" => copy(S)]; nrow = n, endian)
+        f = only(filter(x -> startswith(x, "table.f") && !contains(x, "_"), readdir(p)))
+        ino0 = stat(joinpath(p, f)).inode
+        rows = unique!(vcat([1, 2, 7, 8, 9, n - 1, n], rand(rng, 1:n, 20)))
+        edit(p) do e
+            for i in rows; F[i] = !F[i]; e[:F][i] = F[i]; end
+            e[:F][rows[end]] = F[rows[end]]                       # set again to the same value
+        end
+        r = readtable(p; precision = :full)
+        @test column(r, "F")[:] == F && column(r, "K")[:] == K && column(r, "S")[:] == S
+        @test stat(joinpath(p, f)).inode == ino0                  # in place
+        if _HAVE_CASACORE
+            ct = CCT.Table(p); @test collect(ct[:F][:]) == F && collect(ct[:K][:]) == K
+        end
+    end
+end
