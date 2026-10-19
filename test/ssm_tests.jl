@@ -98,6 +98,8 @@ end
     @test parent(c[1]) === parent(c[end])
 end
 
+using Random
+
 # Phase 451: the SSM index used to set the size of EVERY bucket, so once it outgrew a data bucket (more than about
 # 2 * 1024^2 rows of two Float64 columns) the file grew with the square of the row count (12M rows: 1 GiB for 180 MiB of
 # data).  A long index is now chained over several index buckets like casacore's writer does; the file is linear in the rows.
