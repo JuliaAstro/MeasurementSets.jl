@@ -102,7 +102,7 @@ _ismkind(c::ColumnDesc) = :ind
 function Base.open(::Type{IncrementalStMan}, t::Table, dm::DataManagerInfo)
     name = "table.f$(dm.sequ)"
     path = joinpath(t.path, name)
-    bytes = _dmfile_read(t, name)
+    bytes = _dmfile_mmap(t, name)      # Phase 453: mapped, not read
     endian = t.endian
 
     h = AipsIO(IOBuffer(bytes); endian)

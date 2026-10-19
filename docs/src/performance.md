@@ -55,6 +55,8 @@ sel  = column(t, "TIME")[rows]
 
 A run of consecutive rows of a tiled array column — `column(t, "DATA")[a:b]` — is decoded a block at a time as well (20 000 visibilities: 18.6 → 6.3 ms; the cells are owned arrays, as before).
 
+The `StandardStMan`, `IncrementalStMan` and tile files are memory-mapped, not read: opening a table and reading one cell or one column touches only the pages it needs (the first cell of a 20M-row table: 35 ms and 611 MB → 0.2 ms and 1 MB; a fresh `query` on it 108 → 26 ms).
+
 ### Precision
 
 A MAIN table reads its `ComplexF32` columns (`DATA`, `MODEL_DATA`, `CORRECTED_DATA`) as `ComplexF16` by default, which halves

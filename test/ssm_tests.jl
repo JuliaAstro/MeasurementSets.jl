@@ -135,3 +135,26 @@ end
     @test filesize(joinpath(d, "table.f0")) < 1.05 * 16 * n + 100_000
     @test column(readtable(d), "Y")[end] == 0.0
 end
+
+# Phase 453: StandardStMan and IncrementalStMan files are mapped, not read: the first cell read of a 20M-row table read
+# the whole 610 MB file (0.4 s, 800 MB) and now touches the pages it needs (0.2 ms, 1 MB).  The table still sees an
+# in-place cell patch (the mapping is shared) and a table replaced by an edit keeps reading the file it opened.
+@testset "SSM / ISM files are mapped, not read (Phase 453)" begin
+    n = 2_000_000
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["K" => Int32.(rand(1:50, n)), "B" => rand(n), "I" => Int32.(div.(0:n-1, 500))]; nrow = n, ism = ["I"])
+    sz = sum(filesize(joinpath(d, f)) for f in readdir(d) if startswith(f, "table.f"))
+    t = readtable(d); getcell(t, "K", 1); getcell(t, "I", 1)            # compile
+    t = readtable(d)
+    a = @allocated (getcell(t, "K", 12345); getcell(t, "B", 99); getcell(t, "I", n))
+    @test a < 0.2 * sz           # the file is 24 MB; reading it whole allocated more than that
+    # a cell patched in place is seen by the table that is already open (shared mapping)
+    t = readtable(d)
+    k0 = getcell(t, "K", 777)
+    edit(d) do e; e[:K][777] = k0 + Int32(1); end
+    @test getcell(t, "K", 777) == k0 + 1 && getcell(readtable(d), "K", 777) == k0 + 1
+    # a structural edit replaces the files; the table opened before keeps reading the old ones
+    t = readtable(d); B0 = column(t, "B")[:]
+    edit(d) do e; addrows!(e, 5); removerows!(e, [1]); end
+    @test column(t, "B")[:] == B0 && nrow(readtable(d)) == n + 4
+end

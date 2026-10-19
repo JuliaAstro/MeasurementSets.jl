@@ -139,7 +139,7 @@ end
 function Base.open(::Type{StandardStMan}, t::Table, dm::DataManagerInfo)
     name = "table.f$(dm.sequ)"
     path = joinpath(t.path, name)
-    bytes = _dmfile_read(t, name)
+    bytes = _dmfile_mmap(t, name)      # Phase 453: mapped, not read -- a cell read touches its own pages only
     endian = t.endian
 
     # header lives in the first SSM_LEADER bytes
@@ -565,7 +565,8 @@ function _wrbytes!(buf::Vector{UInt8}, off::Integer, x::T, endian) where {T<:Uni
 end
 
 # Phase 435: overwrite single numeric scalar cells of an existing StandardStMan file in place (the cells keep their
-# size, so no bucket moves): the bytes are patched in the in-memory image and written at their file offsets.
+# size, so no bucket moves): the bytes are written at their file offsets (the table's own image is a shared mapping of
+# the file, so it sees them; Phase 453).
 function ssm_patch_scalars!(ssm::StandardStMan, ssmcol::Int, ::Type{J}, rows::AbstractVector{<:Integer},
                             vals::AbstractVector) where {J}
     ssm.container === nothing || error("ssm_patch_scalars!: the file lives inside a container")
@@ -578,15 +579,16 @@ function ssm_patch_scalars!(ssm::StandardStMan, ssmcol::Int, ::Type{J}, rows::Ab
                 p = off + (bit >> 3)
                 (p >= 0 && p < length(ssm.data)) || throw(BoundsError(ssm.data, p + 1))
                 m = UInt8(1) << (bit & 7)
-                ssm.data[p+1] = vals[k] ? (ssm.data[p+1] | m) : (ssm.data[p+1] & ~m)
-                seek(io, p); write(io, ssm.data[p+1])
+                seek(io, p); cur = read(io, UInt8)          # (the file is mapped read-only: patch the file, not the image)
+                seek(io, p); write(io, vals[k] ? (cur | m) : (cur & ~m))
                 _commit_hook(:patch, k)
                 continue
             end
             p = off + (r - first) * sizeof(J)
-            _wrbytes!(ssm.data, p, J(vals[k]), ssm.endian)
+            (p >= 0 && p + sizeof(J) <= length(ssm.data)) || throw(BoundsError(ssm.data, p + 1:p + sizeof(J)))
+            cell = zeros(UInt8, sizeof(J)); _wrbytes!(cell, 0, J(vals[k]), ssm.endian)
             seek(io, p)
-            write(io, view(ssm.data, p+1:p+sizeof(J)))
+            write(io, cell)
             _commit_hook(:patch, k)                 # test seam: a simulated kill between two patched cells
         end
     end
