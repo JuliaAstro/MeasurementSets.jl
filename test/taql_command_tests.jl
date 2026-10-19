@@ -1222,7 +1222,7 @@ if _HAVE_TAQL
         a[i] isa AbstractFloat && b[i] isa AbstractFloat ?
             (isnan(a[i]) && isnan(b[i]) || isapprox(a[i], b[i]; rtol=1e-9)) : isequal(a[i], b[i])
     end
-    for case in 1:12
+    for case in 1:_fz(12)
         na = rand(rng, 1:30); nb = rand(rng, 1:12); nc = rand(rng, 1:6)
         kr = Int32.(1:rand(rng, 3:10))
         # typed Pair{String,Any}[...] literals: a bare [...] would promote the Int32 keys (Phase 210)
@@ -1281,7 +1281,7 @@ if _HAVE_TAQL
         a[i] isa AbstractFloat && b[i] isa AbstractFloat ?
             (isnan(a[i]) && isnan(b[i]) || isapprox(a[i], b[i]; rtol=1e-9)) : isequal(a[i], b[i])
     end
-    for case in 1:12
+    for case in 1:_fz(12)
         n = rand(rng, (1, 2, 8, 25, 60))
         cols = Pair{String,Any}["I" => Int32.(rand(rng, 0:3, n)), "D" => Float64.(rand(rng, -2:2, n)),
                                 "S" => [rand(rng, ("a", "b", "c")) for _ in 1:n], "R" => Int32.(1:n),

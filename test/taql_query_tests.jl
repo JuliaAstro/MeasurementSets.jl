@@ -4805,7 +4805,7 @@ if _HAVE_TAQL
     globpat() = join([(r = rand(rng); r < 0.2 ? "*" : r < 0.35 ? "?" : r < 0.45 ? "[ab]" : r < 0.52 ? "[!a]" :
                        r < 0.6 ? "{a,bx}" : string(rand(rng, alpha))) for _ in 1:rand(rng, 1:5)])
     nbad = 0
-    for _ in 1:150
+    for _ in 1:_fz(150)
         kind = rand(rng, 1:6)
         sp, gp = sqlpat(), globpat()
         # the regex forms reuse the glob text; stacked quantifiers (`?*`, `**`) are invalid in PCRE but accepted by

@@ -38,9 +38,18 @@ jobs:
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
+      # Phase 446: the suite is dominated by seeded random-fuzz loops against real TaQL and runs ~1.5x slower with code
+      # coverage, so coverage and the full fuzz counts run on one Julia version (the lowest supported) and the others
+      # run a fraction of the fuzz iterations (`test/taql_helpers.jl`, `_fz`).
       - uses: julia-actions/julia-runtest@v1
+        with:
+          coverage: ${{ matrix.version == '1.10' }}
+        env:
+          MS_TEST_FUZZ_SCALE: ${{ matrix.version == '1.10' && '1' || '0.35' }}
       - uses: julia-actions/julia-processcoverage@v1
+        if: matrix.version == '1.10'
       - uses: codecov/codecov-action@v7
+        if: matrix.version == '1.10'
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
