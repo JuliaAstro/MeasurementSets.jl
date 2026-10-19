@@ -267,6 +267,51 @@ Base.getindex(bc::BlockColumn, ::Colon) = bc
 Base.collect(bc::BlockColumn) = [bc[i] for i in 1:bc.n]   # concrete eltype, inferred
 
 """
+    ChunkedColumn
+
+A lazy view of a tiled array column for a loop that walks its rows in order (a `query` over `DATA`): rows are
+decoded a block at a time into one buffer (`getrows`) and handed out as views, instead of one storage-manager
+cell read per row; memory stays bounded by the block (8 MiB), unlike `column(t, name)[:]` over a huge column.  An
+access that is not (nearly) sequential is read cell by cell, so a sparse row selection never decodes whole blocks.
+Not thread safe: one loop owns it.
+"""
+mutable struct ChunkedColumn <: AbstractVector{AbstractArray}
+    col::Column
+    n::Int
+    lo::Int
+    hi::Int
+    block::Any
+    last::Int
+end
+const CHUNK_BYTES = 8 * 1024 * 1024
+const CHUNK_ROWS = 4096
+ChunkedColumn(col::Column) = ChunkedColumn(col, length(col), 1, 0, nothing, 0)
+Base.size(cc::ChunkedColumn) = (cc.n,)
+Base.IndexStyle(::Type{<:ChunkedColumn}) = IndexLinear()
+function Base.getindex(cc::ChunkedColumn, i::Int)
+    @boundscheck checkbounds(cc, i)
+    if cc.lo <= i <= cc.hi
+        cc.last = i
+        return cc.block[i - cc.lo + 1]
+    end
+    seq = 0 < i - cc.last <= 8                    # the loop is walking forward (a gap of a few skipped rows is fine)
+    cc.last = i
+    if seq
+        c = cc.col
+        blk = getrows(c.inst, c.index, c.desc, cc.n, i, CHUNK_ROWS, CHUNK_BYTES)
+        if blk !== nothing
+            cc.lo = i; cc.hi = i + blk.n - 1; cc.block = blk
+            return blk[1]
+        end
+    end
+    return cc.col[i]
+end
+Base.getindex(cc::ChunkedColumn, ::Colon) = cc.col[:]
+
+# the lazy form a query loop uses for an array column
+_chunked(c::Column) = c.inst isa TiledStMan && c.target === nothing && length(c) >= 64 ? ChunkedColumn(c) : c
+
+"""
     rawblock(t, name; precision=nothing) -> Array
 
 The raw `(cellshape..., nrow)` block underlying a fixed-shape array

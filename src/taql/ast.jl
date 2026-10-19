@@ -268,6 +268,8 @@ end
 # rather than trying to hold the whole column in memory.
 _load_col(c::Vector) = c
 _load_col(c::AbstractVector) = eltype(c) <: AbstractArray ? c : c[:]
+# Phase 441: a tiled array column is streamed through blocks (see `ChunkedColumn`) instead of one cell read per row
+_load_col(c::Column) = eltype(c) <: AbstractArray ? _chunked(c) : c[:]
 
 # --- masked arrays (TaQL `MArray`): data + a Bool mask, `true` = invalid.
 # Produced by `V[boolexpr]`, `marray(d, m)`, and a masked reduction's

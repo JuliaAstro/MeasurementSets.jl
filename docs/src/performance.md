@@ -36,7 +36,7 @@ total(column(t, "TIME"))
 | a tiled `DATA` cell, `precision = :full` | ~0.5 µs |
 | `DataFrame(t)` of 1M rows × 4 columns | ~40 ms |
 
-A column of array cells (`UVW`, `DATA`, `FLAG`, ...) comes back from `[:]` as a lazy [`BlockColumn`](@ref) over one buffer, and
+A `query` / `groupby` over a tiled array column (`DATA`, `FLAG`) streams it in 8 MiB blocks instead of decoding one cell per row (memory stays bounded; `any(FLAG)` over 100 000 rows: 31 → 9 ms, `real(DATA[1,1]) > 0.9`: 115 → 73 ms). A column of array cells (`UVW`, `DATA`, `FLAG`, ...) comes back from `[:]` as a lazy [`BlockColumn`](@ref) over one buffer, and
 [`rawblock`](@ref) gives you that buffer as a single dense array with the cell axes first — the cheapest way to hand a column to
 numerical code:
 
