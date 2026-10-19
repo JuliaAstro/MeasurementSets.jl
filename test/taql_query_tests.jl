@@ -5849,3 +5849,51 @@ end
     @test eltype(MSv2._tqleval(MSv2._taqllite_parse("C[1,2]", Set(columnnames(t))), cols, 1)) === ComplexF64
     @test eltype(MSv2._tqleval(MSv2._taqllite_parse("I[2:3]", Set(columnnames(t))), cols, 1)) === Int64
 end
+
+# Phase 456: `COL[1]`, `DATA[1,2]`, `V[end-1:end]` with row-independent subscripts are compiled (the column is resolved
+# once and an in-range integer subscript reads the element directly) instead of going through the interpreter for every
+# row -- `UVW[1]*UVW[1]+UVW[2]*UVW[2]+UVW[3]*UVW[3] > 1e6` took 25 s over the 9.8M rows of the real MS, now 4 s -- and
+# two plain 64-bit operands are combined without the widening / shape-check / MethodError net.  The compiled and the
+# interpreted evaluation must agree; this checks 5000-row tables (above the compile threshold) against references
+# computed from the raw arrays.
+using Random
+@testset "compiled static array subscripts and 64-bit operands (Phase 456)" begin
+    rng = Random.MersenneTwister(456)
+    n = 5000
+    V = [rand(rng, 3) for _ in 1:n]; M = [rand(rng, Float32, 2, 3) for _ in 1:n]
+    S = [Int16.(rand(rng, 1:30000, 2)) for _ in 1:n]; Z = [rand(rng, ComplexF32, 2) for _ in 1:n]
+    R = [rand(rng, 1:4) for _ in 1:n] |> r -> [rand(rng, k) for k in r]
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["V" => V, "M" => M, "S" => S, "Z" => Z, "R" => R, "K" => Int32.(1:n)]; nrow = n, tsm = [["V"], ["M"]])
+    t = readtable(d)
+    sel(q) = column(query(t, q), "K")[:]
+    ref(f) = Int32[k for k in 1:n if f(k)]
+    w(x) = Float64(x)
+    @test sel("V[1]*V[2]+V[3] > 1.0") == ref(k -> V[k][1] * V[k][2] + V[k][3] > 1.0)
+    @test sel("V[1]*V[1]+V[2]*V[2]+V[3]*V[3] > 1.5") == ref(k -> V[k][1]^2 + V[k][2]^2 + V[k][3]^2 > 1.5)
+    @test sel("M[2,3] > 0.5") == ref(k -> w(M[k][2, 3]) > 0.5)
+    @test sel("M[1,1] + M[2,2] < 1") == ref(k -> w(M[k][1, 1]) + w(M[k][2, 2]) < 1)
+    @test sel("V[end] > 0.5") == ref(k -> V[k][3] > 0.5)
+    @test sel("V[-1] > 0.5") == ref(k -> V[k][3] > 0.5)
+    @test sel("V[0] > 0.5") == ref(k -> V[k][3] > 0.5)               # real TaQL: 0 is the last element too
+    @test sel("sum(V[1:2]) > 1.0") == ref(k -> V[k][1] + V[k][2] > 1.0)
+    @test sel("M[1,1] > 0.5 OR V[1] < 0.2") == ref(k -> w(M[k][1, 1]) > 0.5 || V[k][1] < 0.2)
+    @test sel("S[1] * 100000 > 1.5e9") == ref(k -> Int64(S[k][1]) * 100000 > 1_500_000_000)     # Int16 widened: no overflow
+    @test sel("real(Z[1]) > 0.5") == ref(k -> w(real(Z[k][1])) > 0.5)
+    @test sel("abs(Z[2]) < 0.7") == ref(k -> abs(ComplexF64(Z[k][2])) < 0.7)
+    # a cell that does not have the element: the same error as the interpreter's (ragged column, a subscript out of range)
+    @test_throws ArgumentError query(t, "R[4] > 0")
+    @test_throws ArgumentError query(t, "V[4] > 0")
+    @test_throws ArgumentError query(t, "M[3,1] > 0")
+    # and the compiled closure equals the interpreter row by row
+    for q in ("V[1] > 0.3", "M[2,1] * 2.0 - V[2] > 0.1")
+        ast = MSv2._taqllite_parse(q, Set(columnnames(t)))
+        cols = MSv2._tql_cols(t, ["V", "M"], ast)
+        f = MSv2._compile(ast, cols)
+        @test all(i -> MSv2._tql_truthy(f(i)) == MSv2._tql_truthy(MSv2._tqleval(ast, cols, i)), 1:n)
+    end
+    # plain 64-bit operands: values and the error behaviour are those of the general path
+    @test MSv2._bcast(+, 1.5, 2.0) === 3.5 && MSv2._bcast(*, 3, 4) === 12 && MSv2._bcast(/, 1, 4) === 0.25
+    @test MSv2._bcast(+, Int32(1), 2.0) === 3.0 && MSv2._bcast(+, 1.0f0, 2.0) === 3.0
+    @test_throws DomainError MSv2._bcast(^, 2, -1)
+end

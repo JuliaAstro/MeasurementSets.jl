@@ -375,3 +375,14 @@ end
     @test MSv2.columndesc(t, "X").keywords["QuantumUnits"] == ["uJy"]
     @test columnunit(t, "X") == up("uJy")
 end
+
+# Phase 455: a Unitful column handed to `addcolumn!` is stored as numbers with its unit (the added-column twin of write_table)
+@testset "addcolumn! of a Unitful column (Phase 455)" begin
+    up = Base.get_extension(MSv2, :UnitfulExt)._ms_uparse
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["K" => Int32.(1:5)]; nrow = 5)
+    edit(d) do t; addcolumn!(t, "Q", collect(1.0:5.0) .* up("GHz")); end
+    r = readtable(d)
+    @test column(r, "Q")[:] == collect(1.0:5.0) && columnunit(r, "Q") == up("GHz")
+    @test qcolumn(r, "Q")[2] == 2.0 * up("GHz")
+end

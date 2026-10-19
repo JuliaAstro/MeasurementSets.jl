@@ -963,7 +963,8 @@ end
 
 # ---- Phase 347: `CREATE TABLE` / `DROP TABLE` (live-probed against real TaQL) -----------------------------------------
 # `CREATE TABLE path [AS [storage="multifile", blocksize=n]] [name type [[NDIM=n, SHAPE=[..], UNIT="m", COMMENT=".."]], ...]
-#  [LIMIT nrow] [DMINFO [TYPE="IncrementalStMan", COLUMNS=["A", ..]]]` makes a new table of default-valued rows (zeros, empty
+#  [LIMIT nrow] [DMINFO [TYPE="IncrementalStMan", COLUMNS=["A", ..]]]` (TYPE is StandardStMan, IncrementalStMan, or -- Phase 455 --
+#  TiledShapeStMan / TiledColumnStMan / TiledCellStMan for array columns; the tile shape in SPEC is ignored) makes a new table of default-valued rows (zeros, empty
 # strings, `false`; undefined cells for an NDIM-only array column); `DROP TABLE path` deletes one.  Both work without a target
 # table: `taql("CREATE TABLE ...")`.
 function _bracket_group(s::AbstractString, i::Int)       # s[i] == '[' -> (inner text, index after the matching ']')
@@ -1072,7 +1073,7 @@ function _taql_create(command::AbstractString)
         end
         push!(cols, name => data)
     end
-    ism = String[]
+    ism = String[]; tsm = Vector{Vector{String}}(); tcm = Vector{Vector{String}}(); tcell = Vector{Vector{String}}()
     if dminfo !== nothing
         dt = match(r"TYPE\s*=\s*[\"']([^\"']+)[\"']"i, dminfo)
         dcols = match(r"COLUMNS\s*=\s*\[(.*?)\]"is, dminfo)
@@ -1080,12 +1081,21 @@ function _taql_create(command::AbstractString)
         if dtype == "IncrementalStMan"
             ism = dcols === nothing ? String[first(c) for c in cols] :
                   String[String(strip(x, [' ', '"', '\''])) for x in split(dcols.captures[1], ',')]
+        elseif dtype in ("TiledShapeStMan", "TiledColumnStMan", "TiledCellStMan")
+            # the tile shape in SPEC is ours to choose (the writers size tiles themselves); the columns default to every array column
+            tcols = dcols === nothing ? String[first(c) for c in cols if haskey(shapes, first(c))] :
+                    String[String(strip(x, [' ', '"', '\''])) for x in split(dcols.captures[1], ',')]
+            for c in tcols
+                any(p -> first(p) == c, cols) || throw(ArgumentError("taql: CREATE TABLE DMINFO names the unknown column \"$c\""))
+                haskey(shapes, c) || throw(ArgumentError("taql: $dtype can only hold array columns (\"$c\" is a scalar)"))
+            end
+            isempty(tcols) || push!(dtype == "TiledShapeStMan" ? tsm : dtype == "TiledColumnStMan" ? tcm : tcell, tcols)
         elseif dtype != "StandardStMan"
-            throw(ArgumentError("taql: CREATE TABLE DMINFO TYPE \"$dtype\" is not supported (StandardStMan / IncrementalStMan)"))
+            throw(ArgumentError("taql: CREATE TABLE DMINFO TYPE \"$dtype\" is not supported (StandardStMan / IncrementalStMan / TiledShapeStMan / TiledColumnStMan / TiledCellStMan)"))
         end
     end
     ispath(path) && throw(ArgumentError("taql: $path already exists"))
-    write_table(path, "", cols; nrow=nrows, units, shapes, comments, ism, storage, blocksize)
+    write_table(path, "", cols; nrow=nrows, units, shapes, comments, ism, tsm, tcm, tcell, storage, blocksize)
     return path
 end
 

@@ -836,3 +836,48 @@ end
     f() = (for r in 1:length(rt.rows); getcell(rt, "A", r); end)
     f(); @test (@allocated f()) < length(rt.rows) * 400
 end
+
+# Phase 455: small paths a coverage run of the whole suite found never executed: `$VAR` / `${VAR}` in a stored table
+# path, renaming a column named by a `Hypercolumn_*` declaration, a literal beyond the double range, validate() of an MS
+# with a broken subtable, resync() of an MS with opened subtables, and an unknown subtable name.
+@testset "stored-path variables, hypercolumn rename, float literals, MS validate / resync (Phase 455)" begin
+    withenv("MS455_DIR" => "/data/x", "MS455_SUB" => "sub") do
+        @test MSv2._expandpath("\$MS455_DIR/tab") == "/data/x/tab"
+        @test MSv2._expandpath("\${MS455_DIR}/\$MS455_SUB/tab") == "/data/x/sub/tab"
+        @test MSv2._expandpath("\$MS455_UNSET_VARIABLE/tab") == "\$MS455_UNSET_VARIABLE/tab"     # unknown variables stay
+    end
+    # a stored parent path with a variable resolves to the parent (hand-written RefTable)
+    parent = joinpath(mktempdir(), "p"); write_table(parent, "T", Pair{String,Any}["A" => Int32.(1:6)]; nrow = 6)
+    rdir = joinpath(mktempdir(), "r"); mkpath(rdir)
+    withenv("MS455_PARENT" => parent) do
+        MSv2._atomic_write(joinpath(rdir, "table.dat"),
+            MSv2.reftable_dat_bytes("\$MS455_PARENT", [1, 3, 5], Dict("A" => "A"), ["A"], 6, 3))
+        MSv2._atomic_write(joinpath(rdir, "table.info"), codeunits("Type = \nSubType = \n\n"))
+        rt = readtable(rdir)
+        @test column(rt, "A")[:] == Int32[2, 4, 6]
+    end
+    # renaming a column renames the Hypercolumn_* declaration that names it
+    hc = MSv2.Record()
+    MSv2._kwpush!(hc, "HCndim", MSv2.TpInt, Int32(1))
+    MSv2._kwpush!(hc, "HCdatanames", MSv2.TpArrayString, ["A", "B"])
+    priv = MSv2.Record(); MSv2._kwpush!(priv, "Hypercolumn_A", MSv2.TpRecord, hc)
+    d = joinpath(mktempdir(), "t")
+    MSv2._write_table_core(d, ColumnDesc[MSv2._mkdesc("A", MSv2.TpInt, ()), MSv2._mkdesc("B", MSv2.TpInt, ())],
+                           Any[Int32[1, 2], Int32[3, 4]]; nrow = 2, private = priv, tablename = "T")
+    renamecolumn!(d, "A", "Z")
+    pr = readtable(d).desc.private
+    @test haskey(pr, "Hypercolumn_Z") && !haskey(pr, "Hypercolumn_A") && collect(String, pr["Hypercolumn_Z"]["HCdatanames"]) == ["Z", "B"]
+    # a literal beyond the double range saturates (real TaQL: +-Inf, 0)
+    @test MSv2._tql_parse_float("1e999") == Inf && MSv2._tql_parse_float("1e-999") == 0.0
+    @test MSv2._tql_parse_float("1e999999999999999999999") == Inf && MSv2._tql_parse_float("1e-999999999999999999999") == 0.0
+    @test MSv2._tql_parse_float("0e999999999999999999999") == 0.0
+    # validate(ms) reports a broken subtable under its name; resync(ms) with opened subtables; unknown subtable
+    ms0 = joinpath(mktempdir(), "m.ms"); create_ms(ms0; nrow = 4, nchan = 2, ncorr = 2, nant = 3)
+    edit(joinpath(ms0, "ANTENNA")) do t; removecolumn!(t, "DISH_DIAMETER"); end
+    ms = MeasurementSet(ms0)
+    @test any(startswith("ANTENNA: "), validate(ms))
+    @test_throws KeyError subtable(ms, "NOT_A_SUBTABLE")
+    subtable(ms, "FIELD"); subtable(ms, "ANTENNA")
+    edit(ms0) do t; t[:TIME][1] = 1.0e9; end
+    @test is_stale(ms) && resync(ms) isa MeasurementSet
+end

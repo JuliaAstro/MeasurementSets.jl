@@ -55,6 +55,8 @@ sel  = column(t, "TIME")[rows]
 
 A run of consecutive rows of a tiled array column — `column(t, "DATA")[a:b]` — is decoded a block at a time as well (20 000 visibilities: 18.6 → 6.3 ms; the cells are owned arrays, as before).
 
+The `StandardStMan`, `IncrementalStMan` and tile files are memory-mapped, not read: opening a table and reading one cell or one column touches only the pages it needs (the first cell of a 20M-row table: 35 ms and 611 MB → 0.2 ms and 1 MB; a fresh `query` on it 108 → 26 ms).
+
 ### Precision
 
 A MAIN table reads its `ComplexF32` columns (`DATA`, `MODEL_DATA`, `CORRECTED_DATA`) as `ComplexF16` by default, which halves
@@ -76,6 +78,8 @@ unless you pass `cols=`.
 r = query(t, "ANTENNA1 == 3 AND sqrt(TIME) > 0 ORDER BY TIME")
 g = groupby(t, "ANTENNA1"; select = ["ANTENNA1" => "ANTENNA1", "n" => "gcount()", "m" => "gmean(TIME)"])
 ```
+
+On the real 9.8M-row MS a `WHERE` on scalar columns takes 5–40 ms (0.03–0.15 of real TaQL's time; `FIELD_ID == 1` 5 ms, `ANTENNA1 != ANTENNA2` 40 ms), and one that reads an array column such as `UVW` or `FLAG` is bounded by the block read: `UVW[1] > 100` 1.3 s (real TaQL 2.0 s), `sumsqr(UVW) > 1e6` 1.6 s (2.1 s), `UVW[1]*UVW[1]+UVW[2]*UVW[2]+UVW[3]*UVW[3] > 1e6` 5.4 s (11.7 s). A subscript that does not depend on the row (`UVW[1]`, `DATA[1,2]`, `V[end]`) is compiled like the rest of the condition.
 
 ## Editing and writing
 

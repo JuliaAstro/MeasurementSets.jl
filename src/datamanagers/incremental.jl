@@ -102,7 +102,7 @@ _ismkind(c::ColumnDesc) = :ind
 function Base.open(::Type{IncrementalStMan}, t::Table, dm::DataManagerInfo)
     name = "table.f$(dm.sequ)"
     path = joinpath(t.path, name)
-    bytes = _dmfile_read(t, name)
+    bytes = _dmfile_mmap(t, name)      # Phase 453: mapped, not read
     endian = t.endian
 
     h = AipsIO(IOBuffer(bytes); endian)
@@ -443,6 +443,51 @@ function _ism_default(c::ColumnDesc, kind::Symbol)
     return T[]                                              # :ind -- undefined array
 end
 
+# Phase 452: bytes `_ism_encode!` appends for one stored value (so a bucket can be filled to its real size)
+function _ism_valsize(c::ColumnDesc, kind::Symbol, v)
+    kind === :ind && return sizeof(Int64)
+    n() = kind === :scalar ? 1 : prod(_dims(c))
+    c.type == TpBool && return cld(n(), 8)
+    if c.type == TpString
+        kind === :direct && return ISM_UINT + sum(ISM_UINT + ncodeunits(x) for x in vec(v); init = 0)
+        return ISM_UINT + ncodeunits(String(v))
+    end
+    return sizeof(juliatype(c.type)) * (v isa AbstractArray ? length(v) : 1)
+end
+
+# first row of each bucket (1-based, plus nrow+1): rows are added to a bucket until its data + index part would not
+# fit in `bucketsize`.  The old fixed rows-per-bucket came from the worst case (every value of every row changes), so a
+# column of long runs (a TIME that changes every 300 rows) took 28 bytes a row instead of a fraction of a byte.
+function _ism_bucket_starts(cols, kinds, coldata, nrow::Int, bucketsize::Int)
+    ncol = length(cols)
+    starts = Int[1]
+    nrow == 0 && return push!(starts, 1)
+    prev = Vector{Any}(undef, ncol)
+    used = 0                                              # data bytes + index entries of the open bucket
+    firstrow = true
+    for r in 1:nrow
+        add = 0
+        for i in 1:ncol
+            v = coldata[i][r]
+            if firstrow || !isequal(v, prev[i])
+                add += _ism_valsize(cols[i], kinds[i], v) + ISM_INDEX_ENTRY
+            end
+        end
+        if !firstrow && ISM_UINT + ISM_UINT * ncol + used + add > bucketsize
+            push!(starts, r)                              # close the bucket before this row
+            used = 0
+            add = sum(_ism_valsize(cols[i], kinds[i], coldata[i][r]) + ISM_INDEX_ENTRY for i in 1:ncol)
+        end
+        used += add
+        for i in 1:ncol
+            prev[i] = coldata[i][r]
+        end
+        firstrow = false
+    end
+    push!(starts, nrow + 1)
+    return starts
+end
+
 """
     write_incrementalstman(dir, sequ, cols, coldata, nrow, endian) -> Vector{UInt8}
 
@@ -460,8 +505,9 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
     perrow = sum(_ism_fixedsize(cols[i], kinds[i]) for i in 1:ncol; init=0)  # ~worst case
     bucketsize = clamp(headersize + ISM_TARGET_ROWS * perrow,
                        ISM_MIN_BUCKET, ISM_MAX_BUCKET)
-    rpb = max(1, (bucketsize - headersize) ÷ max(perrow, 1))
-    nbucket = max(1, cld(nrow, rpb))
+    bucketsize = max(bucketsize, headersize + 2 * perrow)
+    starts = _ism_bucket_starts(cols, kinds, coldata, nrow, bucketsize)
+    nbucket = length(starts) - 1
 
     afw = ArrayFileWriter(; endian, version=1)               # ISM array files are version 1
     have_ind = any(k -> k === :ind, kinds)
@@ -469,8 +515,8 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
     # build every bucket
     bkts = Vector{Tuple{Vector{UInt8},Vector{Vector{Tuple{Int,Int}}}}}(undef, nbucket)
     for b in 0:nbucket-1
-        r0 = b * rpb
-        r1 = min(nrow, r0 + rpb)
+        r0 = starts[b + 1] - 1
+        r1 = starts[b + 2] - 1
         databuf = UInt8[]
         entries = [Tuple{Int,Int}[] for _ in 1:ncol]
         for i in 1:ncol
@@ -512,7 +558,7 @@ function write_incrementalstman(dir::AbstractString, sequ::Int,
     iw = AipsWriter(; endian)
     putstart(iw, "ISMIndex", ISMINDEX_VERSION)
     wr_u32(iw, nbucket)                                      # nused
-    startrows = UInt32[b * rpb for b in 0:nbucket-1]
+    startrows = UInt32[starts[b + 1] - 1 for b in 0:nbucket-1]
     push!(startrows, UInt32(nrow))                           # sentinel
     wr_block(iw, startrows)                                  # 0-based bucket start rows
     wr_block(iw, UInt32.(0:nbucket-1))                       # bucket numbers

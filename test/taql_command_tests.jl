@@ -2045,3 +2045,48 @@ end
     r = taql(t, "SELECT DISTINCT K, S"); @test nrow(r) == length(unique(zip(column(t, "K")[:], column(t, "S")[:])))
     @test nrow(taql(t, "SELECT DISTINCT K")) == 10
 end
+
+# Phase 455: a coverage run of the whole suite left these taql() forms unexecuted.  CREATE TABLE ... DMINFO with a tiled
+# manager (real TaQL accepts all three; ours only knew StandardStMan / IncrementalStMan -- the tile shape in SPEC is ours to
+# choose), ALTER TABLE ADD COLUMN with a SHAPE, and the error forms.
+@testset "taql CREATE TABLE tiled DMINFO, ALTER ADD COLUMN SHAPE, error forms (Phase 455)" begin
+    for (nm, spec) in (("TiledColumnStMan", "SPEC=[TILESHAPE=[4,8,2]], "), ("TiledShapeStMan", "SPEC=[DEFAULTTILESHAPE=[4,8,2]], "),
+                       ("TiledCellStMan", "SPEC=[DEFAULTTILESHAPE=[4,8]], "))
+        cmd(p) = "CREATE TABLE $p [A R8 [SHAPE=[4,8]], K I4] LIMIT 5 DMINFO [TYPE=\"$nm\", NAME=\"X\", $(spec)COLUMNS=[\"A\"]]"
+        q = joinpath(mktempdir(), "o"); taql(cmd("'$q'"))
+        r = readtable(q)
+        @test sort([m.name for m in r.managers]) == sort([nm, "StandardStMan"]) && nrow(r) == 5
+        @test MSv2.columndesc(r, "A").shape == (4, 8) && column(r, "A")[3] == zeros(4, 8) && column(r, "K")[:] == zeros(Int32, 5)
+        if _HAVE_TAQL
+            real = joinpath(mktempdir(), "r")
+            tc = _taql_create(cmd(real)); CCT.flush(tc); tc = nothing; GC.gc(); GC.gc()
+            rr = readtable(real)
+            @test sort([m.name for m in rr.managers]) == sort([m.name for m in r.managers])        # same managers as real TaQL
+            @test MSv2.columndesc(rr, "A").shape == MSv2.columndesc(r, "A").shape
+            # and casacore reads ours (not TiledCellStMan: casacore itself fails on its own same-shape cell-managed table here, 'calcCacheSize: invalid arguments')
+            nm == "TiledCellStMan" || @test size(CCT.Table(q)[:A][:, :, 1]) == (4, 8)
+        end
+    end
+    # without COLUMNS every array column goes to the manager; a scalar column cannot be tiled; unknown names are errors
+    q = joinpath(mktempdir(), "o")
+    taql("CREATE TABLE '$q' [A R8 [SHAPE=[2,3]], B R4 [SHAPE=[2,3]], K I4] LIMIT 2 DMINFO [TYPE=\"TiledShapeStMan\", NAME=\"X\"]")
+    @test [m.name for m in readtable(q).managers] |> sort == ["StandardStMan", "TiledShapeStMan"]
+    @test_throws ArgumentError taql("CREATE TABLE '$(joinpath(mktempdir(), "z"))' [K I4] LIMIT 2 DMINFO [TYPE=\"TiledShapeStMan\", NAME=\"X\", COLUMNS=[\"K\"]]")
+    @test_throws ArgumentError taql("CREATE TABLE '$(joinpath(mktempdir(), "z"))' [K I4] LIMIT 2 DMINFO [TYPE=\"TiledShapeStMan\", NAME=\"X\", COLUMNS=[\"NOPE\"]]")
+    @test_throws ArgumentError taql("CREATE TABLE '$(joinpath(mktempdir(), "z"))' [K I4] LIMIT 2 DMINFO [TYPE=\"BogusStMan\", NAME=\"X\"]")
+    @test_throws ArgumentError taql("CREATE TABLE '$(joinpath(mktempdir(), "z"))' [K I4] LIMIT 2 AS [bogus=1]")      # unsupported option
+    # ALTER TABLE ... ADD COLUMN with a fixed SHAPE (and NDIM): like real TaQL
+    for (cmd, shape, typ) in (("C R8 [SHAPE=[2,3]]", (2, 3), MSv2.TpDouble), ("C I4 [SHAPE=[3]]", (3,), MSv2.TpInt),
+                              ("C R8 [NDIM=2]", MSv2.VariableShape(2), MSv2.TpDouble))
+        full = "ALTER TABLE \$1 ADD COLUMN $cmd DMINFO [TYPE=\"StandardStMan\", NAME=\"S2\"]"
+        d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["K" => Int32.(1:4)]; nrow = 4)
+        taql(d, full)
+        c = MSv2.columndesc(readtable(d), "C")
+        @test c.shape == shape && c.type == typ
+        if _HAVE_TAQL
+            e = joinpath(mktempdir(), "t"); write_table(e, "T", Pair{String,Any}["K" => Int32.(1:4)]; nrow = 4)
+            tc = _taqlcmd(full, CCT.Table(e)); CCT.flush(tc); tc = nothing; GC.gc(); GC.gc()
+            cr = MSv2.columndesc(readtable(e), "C"); @test cr.shape == shape && cr.type == typ
+        end
+    end
+end

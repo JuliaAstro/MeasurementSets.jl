@@ -171,7 +171,9 @@ end
 @testset "ISM writer — random independent run-length patterns, multi-column, multi-bucket, vs Casacore.jl (Phase 312)" begin
     rng = MersenneTwister(312)
     for case in 1:5
-        n = rand(rng, 2000:6000)
+        # Phase 452: buckets are filled to their real size now, so multiple buckets need real volume: the first column
+        # changes on half of the rows and there are 20-30 thousand rows
+        n = rand(rng, 20000:30000)
         ncol = rand(rng, 2:4)
         cols = Pair{String,Any}[]
         names = String[]
@@ -179,7 +181,7 @@ end
         for c in 1:ncol
             J = rand(rng, (Int32, Float64, Bool, String))
             nm = "g$c"
-            holdp = rand(rng, 0.5:0.05:0.98)    # probability the value STAYS the same as the previous row
+            holdp = c == 1 ? 0.5 : rand(rng, 0.5:0.05:0.98)    # probability the value STAYS the same as the previous row
             vals = Vector{Any}(undef, n)
             cur = J === String ? randstring(rng, rand(rng, 0:6)) :
                   J === Bool  ? rand(rng, Bool) :
@@ -362,7 +364,7 @@ end
 # small committed sample MS fixture, which (by design, Phase 45) has too
 # few rows to build more than one small, low-entry-count ISM bucket.
 @testset "ISM random-access getcell — correctness + allocation (Phase 237)" begin
-    n = 4000
+    n = 12000       # (Phase 452: buckets fill to their real size, so this many rows are needed for several buckets)
     # `A` changes almost every row (worst case for the per-entry scan,
     # like a real MS's TIME column); `B` changes rarely (a distinct
     # run-length pattern, so the two columns' entry counts differ).
@@ -424,7 +426,7 @@ end
 # on-disk element type is a compile-time constant inside the fill loop
 # instead of a boxed runtime value (Phase 238).
 @testset "ISM getcolumn — whole-column allocation regression (Phase 238)" begin
-    n = 40_000
+    n = 1_200_000   # (Phase 452: with runs this long a 32 KiB bucket holds ~500 000 rows)
     # a long-ish run length (changes every ~250 rows, like a real MS's
     # `TIME` column averaging ~325 rows/value on the real 9.8M-row ALMA
     # MS) -- NOT the "changes almost every row" pattern the Phase 237
@@ -473,4 +475,57 @@ end
     @test all(i -> cf[i] == fast[i], 1:n)
     @test all(i -> cs[i] == slow[i], 1:n)
     @test cf[:] == fast && cs[:] == slow
+end
+
+# Phase 452: an ISM bucket was sized for the worst case (every value of every row changes), so a column of long runs --
+# a TIME that changes every few hundred rows -- took as much space as one of random numbers (28 bytes a row for two
+# columns; casacore's own file is a fraction of a byte).  Rows are now added to a bucket until its data and index would
+# not fit, so buckets hold different numbers of rows.  Values, casacore's reading of the file, casacore editing it, and
+# our own edit of it must all be unchanged.
+@testset "ISM buckets fill to their real size (Phase 452)" begin
+    rng = MersenneTwister(452)
+    for endian in (:little, :big)
+        n = 400_000
+        A = Float64.(div.(0:n-1, 137)); B = Int32.(div.(0:n-1, 61)); S = ["s$(div(i, 523))" ^ (1 + div(i, 4000) % 5) for i in 0:n-1]
+        Fb = Bool[div(i, 301) % 2 == 0 for i in 0:n-1]
+        d = joinpath(mktempdir(), "t")
+        cols = Pair{String,Any}["A" => A, "B" => B, "S" => S, "FL" => Fb]
+        write_table(d, "T", cols; nrow = n, endian = endian, ism = ["A", "B", "S", "FL"])
+        sz = filesize(joinpath(d, "table.f0"))
+        @test sz < 4 * n                                   # was ~39 bytes a row
+        t = readtable(d)
+        inst = MSv2._dm_instance(t, 0)
+        @test inst.index.used > 1
+        starts = inst.index.rows
+        @test length(unique(diff(starts[1:end-1]))) > 1 || inst.index.used == 2   # buckets of different sizes (not a fixed rows-per-bucket)
+        for (nm, v) in cols
+            @test column(t, nm)[:] == v
+        end
+        for i in rand(rng, 1:n, 300), (nm, v) in cols
+            @test getcell(t, nm, i) == v[i]
+        end
+        if _HAVE_CASACORE
+            ct = CCT.Table(d)
+            for (nm, v) in cols
+                @test ct[Symbol(nm)][:] == v
+            end
+        end
+        if _HAVE_TAQL && endian === :little
+            tc = _taqlcmd("UPDATE \$1 SET A = -1.0, S = 'zz', FL = TRUE WHERE rownumber() IN [7, 100000, 250001, 399999]", CCT.Table(d))
+            CCT.flush(tc); tc = nothing; GC.gc(); GC.gc()
+            t2 = readtable(d)
+            for i in (7, 100000, 250001, 399999)                 # rownumber() counts from 1
+                @test getcell(t2, "A", i) == -1.0 && getcell(t2, "S", i) == "zz" && getcell(t2, "FL", i) == true
+                A[i] = -1.0; S[i] = "zz"; Fb[i] = true
+            end
+            @test column(t2, "A")[:] == A && column(t2, "S")[:] == S && column(t2, "FL")[:] == Fb && column(t2, "B")[:] == B
+        end
+        edit(d) do e                                          # our own edit regenerates through the same writer
+            e[:A][3] = 9.5; e[:S][n] = "last"; e[:B][200_000] = Int32(-7); addrows!(e, 2)
+        end
+        t3 = readtable(d)
+        A3 = copy(A); A3[3] = 9.5; B3 = copy(B); B3[200_000] = -7; S3 = copy(S); S3[n] = "last"
+        @test column(t3, "A")[:] == vcat(A3, fill(0.0, 2)) && column(t3, "B")[:] == vcat(B3, fill(Int32(0), 2))
+        @test column(t3, "S")[:] == vcat(S3, ["", ""])
+    end
 end
