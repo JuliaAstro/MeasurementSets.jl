@@ -1136,3 +1136,42 @@ using Random
         end
     end
 end
+
+# Phase 455: edit-session paths the coverage run found never executed: a column added in the session sees appended rows
+# (and the in-session read of an appended row is the default cell), removing a column added in the same session, a
+# non-standard column name without data, and removing an engine column removes its stored / scale / offset companions;
+# an autoscaled engine column is re-encoded when a cell changes.
+@testset "edit: added columns and engine columns in one session (Phase 455)" begin
+    n = 40
+    fresh(kw...) = (d = joinpath(mktempdir(), "t");
+        write_table(d, "T", Pair{String,Any}["A" => collect(1.0:n), "K" => Int32.(1:n)]; nrow = n, kw...); d)
+    d = fresh()
+    edit(d) do t
+        addcolumn!(t, "X", [fill(Float64(i), 3) for i in 1:n])
+        addrows!(t, 2)
+        @test t[:X][n + 1] == zeros(3) && t[:A][n + 2] == 0.0 && t[:K][n + 1] == 0      # defaults, read before the flush
+        t[:X][n + 2] = [7.0, 8.0, 9.0]
+    end
+    r = readtable(d)
+    @test nrow(r) == n + 2 && column(r, "X")[n] == fill(Float64(n), 3) && column(r, "X")[n + 1] == zeros(3) && column(r, "X")[n + 2] == [7.0, 8.0, 9.0]
+    d = fresh()
+    edit(d) do t; addcolumn!(t, "X", rand(n)); removecolumn!(t, "X"); end                  # added and removed: never written
+    @test columnnames(readtable(d)) == ["A", "K"]
+    d = fresh()
+    edit(d) do t; @test_throws ErrorException addcolumn!(t, "NOT_A_STANDARD_COLUMN"); end
+    rng = Random.MersenneTwister(455)
+    for eng in ((; kind = MSv2.ScaledArray(), scale = 0.5, offset = 1.0, stored_type = MSv2.TpInt),
+                (; kind = MSv2.CompressFloat(), autoscale = true))
+        d = joinpath(mktempdir(), "t")
+        V = [Float32.(rand(rng, 2, 3)) for _ in 1:n]
+        write_table(d, "T", Pair{String,Any}["K" => Int32.(1:n), "V" => V]; nrow = n, engines = Dict("V" => eng))
+        before = columnnames(readtable(d)); v4 = column(readtable(d), "V")[4]      # (as decoded: the engine quantises)
+        @test "V_COMPRESSED" in before
+        edit(d) do t; t[:V][3] = fill(Float32(0.25), 2, 3); addrows!(t, 1); end            # re-encodes (and the scale / offset columns of an autoscale)
+        r = readtable(d); v3 = column(r, "V")[3]
+        @test nrow(r) == n + 1 && columnnames(r) == before && all(abs.(v3 .- 0.25) .<= 0.5)
+        @test column(r, "V")[4] ≈ v4 atol = 0.05                                          # untouched cells survive the re-encode
+        edit(d) do t; removecolumn!(t, "V"); end                                          # companions go with it
+        @test columnnames(readtable(d)) == ["K"] && sort(filter(f -> startswith(f, "table.f"), readdir(d))) == ["table.f0"]
+    end
+end
