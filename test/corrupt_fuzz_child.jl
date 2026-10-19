@@ -46,6 +46,10 @@ function readall(p)
     end
     try MSv2.keywords(t); MSv2.subtables(t) catch; end
     try query(t, "TRUE"); catch; end
+    # Phase 442: the query loops stream tiled array columns through blocks (`ChunkedColumn`)
+    for c in MSv2.columnnames(t)
+        try query(t, "nelements($c) >= 0"); catch; end
+    end
 end
 if kind == "ismwords"     # deterministic: every 4-byte word of the used part of an ISM file set to extreme values
     root = joinpath(mktempdir(), "t")
@@ -69,6 +73,17 @@ if kind == "sswords"      # deterministic (Phase 431): every 4-byte word of a St
         try readall(root) catch e; end
     end
     println("DONE sswords $(length(spots) * 5)"); exit(0)
+end
+if kind == "tsmwords"     # deterministic (Phase 442): every 4-byte word of the header of a tiled file (>= 64 rows, so queries stream blocks)
+    root = joinpath(mktempdir(), "t"); n2 = 200
+    write_table(root, "T", Pair{String,Any}["K" => Int32.(1:n2), "TS" => [rand(rng, ComplexF32, 2, 3) for _ in 1:n2], "TF" => [rand(rng, Bool, 2, 3) for _ in 1:n2]];
+                nrow=n2, tsm=[["TS", "TF"]])
+    f = joinpath(root, "table.f1"); orig = read(f)
+    for pos in 1:4:length(orig)-3, val in (0xffffffff, 0x7fffffff, 0x00100000, 0x00000000, 0x00000001)
+        b = copy(orig); b[pos:pos+3] .= reinterpret(UInt8, [val]); write(f, b)
+        try readall(root) catch e; end
+    end
+    println("DONE tsmwords $(length(1:4:length(orig)-3) * 5)"); exit(0)
 end
 base = joinpath(mktempdir(), "base"); builders[kind](base)
 isdir(base) || (base = base)
