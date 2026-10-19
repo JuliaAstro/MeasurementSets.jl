@@ -670,7 +670,13 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     putend(iw)
     idxbytes = bytes(iw)
 
-    size = max(datasize, length(idxbytes) + SSM_IDXBUCKET_HEADER, SSM_LEADER)
+    # Phase 451: the index no longer sets the bucket size.  Every bucket has the same size, so an index longer than a data
+    # bucket (more than 2 * rows-per-bucket^2 rows: 2M rows of two Float64 columns) made every bucket as large as the index
+    # and the file grew with the SQUARE of the row count (12M rows: 1 GiB instead of 180 MiB).  A long index is chained
+    # over several index buckets instead, as casacore's writer does (`SSMBase::writeIndex`).
+    size = max(datasize, SSM_LEADER)
+    idxcap = size - SSM_IDXBUCKET_HEADER
+    nidx = max(1, cld(length(idxbytes), idxcap))
     strchar = size - SSM_STRBUCKET_HEADER
 
     for i in 1:ncol
@@ -693,7 +699,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     idxbase = ndata + nstr                # index bucket number
 
     # --- data buckets -----------------------------------------------
-    file = zeros(UInt8, SSM_LEADER + (ndata + nstr + 1) * size)
+    file = zeros(UInt8, SSM_LEADER + (ndata + nstr + nidx) * size)
     _bp(n) = SSM_LEADER + n * size
     for k in 0:ndata-1
         base = _bp(k)
@@ -763,21 +769,25 @@ function write_standardstman(dir::AbstractString, sequ::Int,
     end
 
     # --- index bucket ------------------------------------------------
-    ibase = _bp(idxbase)
-    _wrbytes!(file, ibase,           Int32(idxbase), :big)  # check number
-    _wrbytes!(file, ibase + SSM_INT, Int32(-1), :big)       # next index bucket
-    copyto!(file, ibase + SSM_IDXBUCKET_HEADER + 1, idxbytes, 1, length(idxbytes))
+    for j in 0:nidx-1
+        ibase = _bp(idxbase + j)
+        nextb = j < nidx - 1 ? idxbase + j + 1 : -1
+        _wrbytes!(file, ibase,           Int32(j == 0 ? idxbase : idxbase + j), :big)   # check number
+        _wrbytes!(file, ibase + SSM_INT, Int32(nextb), :big)                           # next index bucket
+        i0 = j * idxcap
+        copyto!(file, ibase + SSM_IDXBUCKET_HEADER + 1, idxbytes, i0 + 1, min(idxcap, length(idxbytes) - i0))
+    end
 
     # --- header (zero-padded to SSM_LEADER) -----------------------
     hw = AipsWriter(; endian)
     putstart(hw, "StandardStMan", SSM_HDR_VERSION)
     wr_scalar(hw, endian === :big)
     wr_u32(hw, size)
-    wr_u32(hw, ndata + nstr + 1)          # nrBuckets
+    wr_u32(hw, ndata + nstr + nidx)       # nrBuckets
     wr_u32(hw, 2)                         # persCacheSize (casacore default)
     wr_u32(hw, 0)                         # nFreeBucket
     wr_i32(hw, -1)                        # firstFreeBucket
-    wr_u32(hw, 1)                         # nrIdxBuckets
+    wr_u32(hw, nidx)                      # nrIdxBuckets
     wr_i32(hw, idxbase)                   # firstIdxBucket
     wr_u32(hw, 0)                         # idxBucketOffset
     wr_i32(hw, nstr > 0 ? strbase + nstr - 1 : -1)   # lastStringBucket

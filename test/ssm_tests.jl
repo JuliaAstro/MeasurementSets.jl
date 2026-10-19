@@ -97,3 +97,41 @@ end
     # is for large tiled cells (`FLAG`), covered in `tsm_tests.jl`.)
     @test parent(c[1]) === parent(c[end])
 end
+
+# Phase 451: the SSM index used to set the size of EVERY bucket, so once it outgrew a data bucket (more than about
+# 2 * 1024^2 rows of two Float64 columns) the file grew with the square of the row count (12M rows: 1 GiB for 180 MiB of
+# data).  A long index is now chained over several index buckets like casacore's writer does; the file is linear in the rows.
+@testset "SSM index spanning several buckets; file size linear in the rows (Phase 451)" begin
+    rng = Random.MersenneTwister(451)
+    for endian in (:little, :big)
+        n = 300_000                                   # 293 data buckets: an index of ~2.4 KB in 1152-byte buckets
+        B = rand(rng, Bool, n); U = UInt8.(rand(rng, 0:255, n))
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["B" => B, "U" => U]; nrow = n, endian = endian)
+        h = MeasurementSets.read_ssm_header!(MeasurementSets.AipsIO(IOBuffer(read(joinpath(d, "table.f0"))); endian = endian))
+        @test h.indices >= 3                                        # the chain is really used
+        t = readtable(d)
+        @test column(t, "B")[:] == B && column(t, "U")[:] == U
+        for i in rand(rng, 1:n, 200)
+            @test getcell(t, "B", i) == B[i] && getcell(t, "U", i) == U[i]
+        end
+        # the file is the data plus a few buckets (it was 12x larger with an index-sized bucket)
+        @test filesize(joinpath(d, "table.f0")) < 1.2 * (n ÷ 8 + n) + 20_000
+        if @isdefined(_HAVE_CASACORE) && _HAVE_CASACORE
+            ct = CCT.Table(d)
+            @test ct[:B][:] == B && ct[:U][:] == U
+        end
+        edit(d) do e                                                # regenerate through the same writer
+            e[:U][5] = 0x07; e[:B][n] = !B[n]; addrows!(e, 3)
+        end
+        t2 = readtable(d)
+        U2 = copy(U); U2[5] = 0x07; B2 = copy(B); B2[n] = !B[n]
+        @test column(t2, "U")[:] == vcat(U2, zeros(UInt8, 3)) && column(t2, "B")[:] == vcat(B2, falses(3))
+    end
+    # a strict upper bound on bytes per row for a two-Float64 column table well past the old quadratic knee
+    n = 4_500_000
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["X" => zeros(n), "Y" => zeros(n)]; nrow = n)
+    @test filesize(joinpath(d, "table.f0")) < 1.05 * 16 * n + 100_000
+    @test column(readtable(d), "Y")[end] == 0.0
+end
