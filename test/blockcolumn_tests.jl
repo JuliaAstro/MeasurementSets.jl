@@ -5,6 +5,8 @@
 # one call PER TILE (live-measured to close nearly all of `UVW`'s
 # remaining allocation/wall-clock gap against real casacore C++).
 
+using Random        # (Phase 441's ChunkedColumn test; this file runs before any other that loads it)
+
 @testset "BlockColumn — structural (Phase 236)" begin
     t = readtable(SAMPLE_MS; precision=:full)
     n = nrow(t)
