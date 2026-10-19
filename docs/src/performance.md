@@ -79,6 +79,8 @@ r = query(t, "ANTENNA1 == 3 AND sqrt(TIME) > 0 ORDER BY TIME")
 g = groupby(t, "ANTENNA1"; select = ["ANTENNA1" => "ANTENNA1", "n" => "gcount()", "m" => "gmean(TIME)"])
 ```
 
+On the real 9.8M-row MS a `WHERE` on scalar columns takes 5–40 ms (0.03–0.15 of real TaQL's time; `FIELD_ID == 1` 5 ms, `ANTENNA1 != ANTENNA2` 40 ms), and one that reads an array column such as `UVW` or `FLAG` is bounded by the block read: `UVW[1] > 100` 1.3 s (real TaQL 2.0 s), `sumsqr(UVW) > 1e6` 1.6 s (2.1 s), `UVW[1]*UVW[1]+UVW[2]*UVW[2]+UVW[3]*UVW[3] > 1e6` 5.4 s (11.7 s). A subscript that does not depend on the row (`UVW[1]`, `DATA[1,2]`, `V[end]`) is compiled like the rest of the condition.
+
 ## Editing and writing
 
 An [`edit`](@ref) session rewrites the storage-manager file of every column it touches (and the columns that share the file),

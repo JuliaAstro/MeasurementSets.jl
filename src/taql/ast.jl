@@ -250,6 +250,11 @@ function _bcast(f, x, y)
     end
 end
 
+# Phase 456: two plain 64-bit numbers (already what a column is widened to) need no widening, no shape check and no
+# MethodError net: the operator is just applied (a million-row WHERE spends most of its time here)
+const _Num64 = Union{Float64,Int64}
+_bcast(f, x::_Num64, y::_Num64) = f(x, y)
+
 function _bcast_raw(f, x, y)
     x = _widen(x); y = _widen(y)
     if x isa AbstractArray && y isa AbstractArray
@@ -818,6 +823,45 @@ function _compile(e::TQLIn, cols)
         return i -> (x = fl(i); x isa AbstractArray ? _tql_in(x, vals) : x in tv)
     end
     return i -> _tql_in(fl(i), vals)
+end
+
+# Phase 456: `COL[1]`, `DATA[1,2]`, `V[end-1:end,1]`: an index whose subscripts do not depend on the row.  The interpreter
+# looked the column up in the dictionary, rebuilt the subscript closure and the index tuple for every row (2.5 us and
+# 2.9 KB a row on the real MS: `UVW[1]*UVW[1]+UVW[2]*UVW[2]+UVW[3]*UVW[3] > 1e6` took 25 s over 9.8M rows against 1.8 s for
+# `sumsqr(UVW) > 1e6`).  The column is resolved once, a plain in-range integer subscript reads the element directly,
+# and everything else goes through the same `_tql_do_index` as before.
+_is_static_subscript(e::Union{TQLLit,TQLEnd}) = true
+_is_static_subscript(e::TQLNeg) = _is_static_subscript(e.a)
+_is_static_subscript(e::TQLArith) = _is_static_subscript(e.lhs) && _is_static_subscript(e.rhs)
+_is_static_subscript(e::TQLExpr) = false
+_is_static_subscript(ax::NamedTuple) = all(x -> x === nothing || _is_static_subscript(x), (ax.lo, ax.hi, ax.step))
+const _NOCOLS = Dict{String,AbstractVector}()
+_widen_index(r) = r isa TQLMArray ? TQLMArray(_widen(r.data), r.mask) : _widen(r)
+# (function barriers: the column type and the number of subscripts are known inside, so the per-row closure is type stable)
+_index_closure(v::V, axes, ev) where {V} = i -> _widen_index(_tql_do_index(v[i], axes, ev))
+# one dynamic dispatch on the runtime cell type (a chunked column's element type is abstract), everything else specialised
+_try_int_index(cell::AbstractArray{T,N}, ints::NTuple{N,Int}) where {T,N} =
+    checkbounds(Bool, cell, ints...) ? (@inbounds cell[ints...]) : nothing
+_try_int_index(cell, ints) = nothing
+function _index_closure(v::V, ints::NTuple{N,Int}, axes, ev) where {V,N}
+    return i -> begin
+        cell = v[i]
+        r = _try_int_index(cell, ints)
+        r === nothing ? _widen_index(_tql_do_index(cell, axes, ev)) : _widen(r)
+    end
+end
+function _compile(e::TQLIndex, cols)
+    all(_is_static_subscript, e.axes) || return i -> _tqleval(e, cols, i)
+    axes = e.axes
+    ev = x -> _tqleval(x, _NOCOLS, 1)
+    ints = all(a -> a isa TQLLit && a.value isa Integer && a.value >= 1, axes) ? Tuple(Int(a.value) for a in axes) : nothing
+    if e.base isa TQLCol
+        v = cols[e.base.name]
+        ints === nothing && return _index_closure(v, axes, ev)
+        return _index_closure(v, ints, axes, ev)
+    end
+    fb = _compile(e.base, cols)
+    return i -> _tql_do_index(fb(i), axes, ev)
 end
 
 # number of AST nodes (an upper bound is enough: only used to keep absurdly
