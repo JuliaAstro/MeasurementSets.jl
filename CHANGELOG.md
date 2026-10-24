@@ -11427,3 +11427,11 @@ block of each column (replaced as a whole, so tasks reading at once are safe; bl
 bigger than 64 MiB are not kept). Cells are copies, so a caller can change one without
 affecting later reads. 2,000 consecutive cells: 800 ms -> 3 ms. Whole-column reads,
 writes (47 us/row) and `copytable` are unchanged. Test in `dysco_tests.jl`.
+
+### Phase 458 — per-cell cost of every column kind; Dysco cache under threads (clean)
+
+Read times per cell of one 100,000-row table with a column of each kind (Int32, Float64, String,
+Bool, ISM, fixed and tiled arrays, TiledColumnStMan, ragged, complex SSM, CompressFloat engine,
+string array): sequential, random, whole-column and slice reads are all 0.001-0.8 us/cell once
+compiled; no outlier. The Phase 457 block cache read by 32 tasks x 300 random cells x 30 rounds at
+`julia -t 4` and `-t 16`: no mismatch. No code change.
