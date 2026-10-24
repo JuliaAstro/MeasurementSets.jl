@@ -427,7 +427,7 @@ _compress_expected_vtype(::CompressComplexSD)         = TpComplex
 
 # --- encode (inverse of decode): one method per engine, same pattern --
 
-function _encode(::ScaledArray, cell::AbstractArray, scale, offset, T::Type)
+function _encode(::ScaledArray, cell::AbstractArray, scale, offset, ::Type{T}) where {T}
     out = Array{T}(undef, size(cell))
     @inbounds for i in eachindex(cell)
         out[i] = trunc(T, (cell[i] - offset) / scale)      # C++ static_cast: toward zero
@@ -435,7 +435,7 @@ function _encode(::ScaledArray, cell::AbstractArray, scale, offset, T::Type)
     return out
 end
 
-function _encode(::ScaledComplex, cell::AbstractArray, scale, offset, T::Type)
+function _encode(::ScaledComplex, cell::AbstractArray, scale, offset, ::Type{T}) where {T}
     sre, sim = real(scale), imag(scale)
     ore, oim = real(offset), imag(offset)
     out = Array{T}(undef, 2, size(cell)...)
@@ -497,7 +497,7 @@ end
 
 # BitFlagsEngine: casacore's actual `putArray` writes raw 0/1 (the write
 # mask is not applied, no read-modify-write -- see BitFlagsEngine.tcc).
-function _encode(::BitFlags, cell::AbstractArray, readmask, writemask, T::Type)
+function _encode(::BitFlags, cell::AbstractArray, readmask, writemask, ::Type{T}) where {T}
     return T.(cell .!= 0)
 end
 

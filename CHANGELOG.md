@@ -11460,3 +11460,14 @@ goes through a typed function barrier (`_dysco_fill_block!`). 12-17 us/row witho
 normalisation alike), 10 KiB/row. The files written are byte-identical (checked for the three normalisations). A
 ragged column given to `dysco=` is now an `ArgumentError` naming the column (it was a `MethodError` on the shape).
 Tests in `dysco_tests.jl`.
+
+### Phase 462 — writer survey: fixed-shape array cells 23x faster, engine encode 95x
+
+Writing 50,000 rows of each column kind (us/row): every writer was at 0.03-0.9 except three. A fixed-shape
+array column in `StandardStMan` took 2.56 (it wrote the cell element by element from an untyped `Vector{Any}`
+entry); the cell is now copied by a typed method with one `memcpy` on a little-endian host (0.11 us/row, bytes
+identical, other byte orders and strided cells keep the element writer). The `ScaledArray` / `ScaledComplex` /
+`BitFlags` encoders took the stored type as a bare `::Type` argument, which Julia does not specialise on:
+26 ns instead of 2.5 us for a 4x8 cell, whole-column writes 3.56 -> 0.87 and 1.57 -> 0.76 us/row. Reads of
+engine columns were already fine. Tests in `ssm_tests.jl` (fast path equals element writer for 9 element types,
+both byte orders, dense and strided cells).
