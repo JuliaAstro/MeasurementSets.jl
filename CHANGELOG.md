@@ -11482,3 +11482,13 @@ written through one mapping per hypercube with one sync (`tsm_setcells!`), and a
 45 ms, 1,000 scattered cells 43 -> 2 ms; the other column kinds were already between 1 and 100 ms. Test in
 `tsm_multicol_tests.jl` (6 element types, both byte orders, a shared hypercube, a plane of another element type,
 a wrong-shape write leaves the file alone). A copytable survey of the same kinds found nothing (0.03-2 us/row).
+
+### Phase 464 — query-engine cost survey on array columns (nothing to fix)
+
+Thirty-three queries over 100,000 rows with 4x16 float, complex and Bool tiled array cells, a ragged column,
+strings and an ISM key. Scalar conditions cost 0.00-0.07 us/row, string functions 0.03-0.07, array reductions
+on a cell 0.15-0.5 (`mean(A)` 0.23 = 3.5 ns per element), sort-based ones (`median`) about 1, the masked
+`mean(A[F])` 1.4, `ORDER BY` 0.03. One ratio stands out and is left open: `gmean(mean(A))` grouped by a key that
+is not in row order costs 0.84 us/row against 0.23 for the same expression in a `WHERE`, because each group's rows
+are spread over the table and the block reader decodes a block per access; grouping by a key in row order, or
+evaluating the argument for all rows in row order first, would remove it. No code change.
