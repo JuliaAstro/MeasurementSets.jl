@@ -11451,3 +11451,12 @@ reads the rewritten table (a copy at a fresh path — casacore keeps an opened t
 session at the same path in one process would read the old ones) and agrees with the model: 40 random
 tables, no difference. Dysco has no casacore decoder in Casacore.jl and is checked against the model only.
 The check is part of the Phase 459 test in `edit_tests.jl`.
+
+### Phase 461 — the Dysco writer is 3-4x faster
+
+Profiling the writer (8,400 rows of 4x64 visibilities, 10-bit data): 47 us/row, 26 KiB allocated per row. The block
+fill read every element of every cell through an untyped `Vector{Any}` element (a dynamic dispatch per value); it now
+goes through a typed function barrier (`_dysco_fill_block!`). 12-17 us/row without dither and 20-23 with (AF/RF/Row
+normalisation alike), 10 KiB/row. The files written are byte-identical (checked for the three normalisations). A
+ragged column given to `dysco=` is now an `ArgumentError` naming the column (it was a `MethodError` on the shape).
+Tests in `dysco_tests.jl`.

@@ -788,3 +788,26 @@ end
     dh = column(th, "DATA")
     @test all(dh[i] == ComplexF16.(full[i]) for i in 1:nr)
 end
+
+# Phase 461: the writer reads each block's cells through a typed function barrier.  A cell of the wrong shape is a clear
+# error, and the written file does not depend on the element type of the input cells (Float64 / Float32 / views).
+@testset "dysco -- writer cell shapes (Phase 461)" begin
+    nant = 3; bl = [(a, b) for a in 0:nant-1 for b in a:nant-1]; nbl = length(bl); nr = 2nbl
+    a1 = Int32[bl[mod1(i, nbl)][1] for i in 1:nr]; a2 = Int32[bl[mod1(i, nbl)][2] for i in 1:nr]
+    rng = Random.MersenneTwister(461)
+    cells = [randn(rng, ComplexF32, 2, 4) for _ in 1:nr]
+    wts = [abs.(randn(rng, Float32, 2, 4)) .+ 0.1f0 for _ in 1:nr]
+    function wr(d, data, w)
+        write_table(d, "T", Pair{String,Any}["TIME" => collect(5e9 .+ (1:nr)), "ANTENNA1" => a1, "ANTENNA2" => a2,
+                "DATA" => data, "WEIGHT_SPECTRUM" => w]; nrow = nr, ism = ["TIME", "ANTENNA1", "ANTENNA2"],
+            dysco = [["DATA", "WEIGHT_SPECTRUM"]],
+            dysco_spec = Dict("DATA" => (; normalization = MSv2.RowNorm(), distribution = MSv2.TruncatedGaussian(),
+                dataBitCount = 10, weightBitCount = 12, antenna1 = Int.(a1), antenna2 = Int.(a2), rowsPerBlock = nbl, dither = false)))
+        return read(joinpath(d, "table.f1"))
+    end
+    ref = wr(joinpath(mktempdir(), "a"), cells, wts)
+    @test wr(joinpath(mktempdir(), "b"), [ComplexF64.(c) for c in cells], [Float64.(w) for w in wts]) == ref
+    @test wr(joinpath(mktempdir(), "c"), [view(hcat(c, c), :, 1:4) for c in cells], wts) == ref
+    bad = copy(cells); bad[3] = zeros(ComplexF32, 3, 4)
+    @test_throws ArgumentError wr(joinpath(mktempdir(), "d"), bad, wts)       # ragged cells: no fixed (npol, nchan)
+end

@@ -631,6 +631,23 @@ function _dysco_symbols_for_data(vis::Array{ComplexF64,3}, boundaries::Vector{Fl
     return syms
 end
 
+# Copy one block's cells into the (npol, nchan, rows) work array.  The column arrives as a `Vector{Any}`, so the
+# per-element reads sit behind a function barrier on the concrete cell type (Phase 461).
+function _dysco_fill_block!(dest::AbstractArray{T,3}, cells, r0::Int, n::Int) where {T}
+    for r in 1:n
+        _dysco_fill_cell!(dest, r, cells[r0+r])
+    end
+    return dest
+end
+function _dysco_fill_cell!(dest::AbstractArray{T,3}, r::Int, cell::AbstractMatrix) where {T}
+    npol, nchan = size(dest, 1), size(dest, 2)
+    size(cell) == (npol, nchan) || throw(DimensionMismatch("Dysco cell has shape $(size(cell)), expected ($npol, $nchan)"))
+    @inbounds for ch in 1:nchan, pl in 1:npol
+        dest[pl, ch, r] = T(cell[pl, ch])
+    end
+    return nothing
+end
+
 # --- weight encode (weightblockencoder.h:40-68) ------------------------
 
 """
@@ -1000,6 +1017,10 @@ function write_dyscostman(dir::AbstractString, sequ::Int, cols::Vector{<:ColumnD
     maxQ = dict[end-1]                       # largest finite centroid
 
     colKind  = [c.name == "WEIGHT_SPECTRUM" ? :weight : :data for c in cols]
+    for c in cols
+        (c.shape isa Dims && length(c.shape) == 2) || throw(ArgumentError(
+            "DyscoStMan column \"$(c.name)\" needs the same (npol, nchan) shape in every row; got $(c.shape)"))
+    end
     colShape = [(c.shape[1], c.shape[2]) for c in cols]
 
     nblocks = cld(nrow, rpb)
@@ -1071,12 +1092,7 @@ function write_dyscostman(dir::AbstractString, sequ::Int, cols::Vector{<:ColumnD
             colstart = blockstart + colOffset[i]
             if colKind[i] === :data
                 vis = zeros(ComplexF64, npol, nchan, rpb)
-                @inbounds for r in 1:nInBlock
-                    cell = coldata[i][r0+r]
-                    for ch in 1:nchan, pl in 1:npol
-                        vis[pl, ch, r] = ComplexF64(cell[pl, ch])
-                    end
-                end
+                _dysco_fill_block!(vis, coldata[i], r0, nInBlock)
                 metaN = _dysco_metacount(normalization, npol, nchan, rpb, antennaCount)
                 meta = zeros(Float64, metaN)
                 _dysco_normalize!(normalization, vis, meta, a1full, a2full, antennaCount, maxQ)
@@ -1089,12 +1105,7 @@ function write_dyscostman(dir::AbstractString, sequ::Int, cols::Vector{<:ColumnD
                 buf[off2+1:off2+length(packed)] = packed
             else
                 w = zeros(Float32, npol, nchan, rpb)
-                @inbounds for r in 1:nInBlock
-                    cell = coldata[i][r0+r]
-                    for ch in 1:nchan, pl in 1:npol
-                        w[pl, ch, r] = Float32(cell[pl, ch])
-                    end
-                end
+                _dysco_fill_block!(w, coldata[i], r0, nInBlock)
                 maxv, wsyms = _dysco_encode_weight_block(w, weightBits)
                 packed = _dysco_pack(weightBits, wsyms)
                 _dy_put!(buf, colstart, Float32(maxv))
