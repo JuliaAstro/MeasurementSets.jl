@@ -11435,3 +11435,11 @@ Bool, ISM, fixed and tiled arrays, TiledColumnStMan, ragged, complex SSM, Compre
 string array): sequential, random, whole-column and slice reads are all 0.001-0.8 us/cell once
 compiled; no outlier. The Phase 457 block cache read by 32 tasks x 300 random cells x 30 rounds at
 `julia -t 4` and `-t 16`: no mismatch. No code change.
+
+### Phase 459 — random edit sessions on engine and Dysco columns (clean)
+
+Phase 449's model-checked edit sessions only covered plain storage managers. The same fuzz (cell sets,
+`addrows!`, `removerows!`, one to three sessions, both byte orders, 24-150 rows) now runs on a table whose
+array column is a `ScaledArrayEngine`, `CompressFloat`, `BitFlagsEngine` or a Dysco column
+(RowNorm, 16 bits), against a model: exact for the lossless cases, within quantisation for the others. 80
+random tables, no difference. Test in `edit_tests.jl`.
