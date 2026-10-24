@@ -1236,6 +1236,12 @@ for iter in 1:_fz(24)
         ok = gK == mK && length(gV) == length(mV) && all(size(gV[i]) == size(mV[i]) && maximum(abs.(gV[i] .- mV[i]), init=0.0) <= tol + 1e-6 for i in eachindex(gV))
         @test ok
         ok || break
+        if _HAVE_CASACORE && kind in (:compress, :bitflags)       # casacore decodes the engines (Dysco: not built in)
+            dd = joinpath(mktempdir(), "c"); cp(d, dd)               # a fresh path: casacore keeps an opened table's files
+            ct = CCT.Table(dd)
+            @test ct[:K][:] == mK
+            @test all(maximum(abs.(Float64.(ct[:V][i]) .- mV[i]), init = 0.0) <= tol + 1e-6 for i in eachindex(mV))
+        end
     end
     catch e
         @test false

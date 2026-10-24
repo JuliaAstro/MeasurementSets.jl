@@ -11443,3 +11443,11 @@ Phase 449's model-checked edit sessions only covered plain storage managers. The
 array column is a `ScaledArrayEngine`, `CompressFloat`, `BitFlagsEngine` or a Dysco column
 (RowNorm, 16 bits), against a model: exact for the lossless cases, within quantisation for the others. 80
 random tables, no difference. Test in `edit_tests.jl`.
+
+### Phase 460 — real casacore reads the engine tables our edit sessions rewrite (clean)
+
+After every random edit session of Phase 459 on a `CompressFloat` or `BitFlagsEngine` table, Casacore.jl
+reads the rewritten table (a copy at a fresh path — casacore keeps an opened table's files, so a second
+session at the same path in one process would read the old ones) and agrees with the model: 40 random
+tables, no difference. Dysco has no casacore decoder in Casacore.jl and is checked against the model only.
+The check is part of the Phase 459 test in `edit_tests.jl`.
