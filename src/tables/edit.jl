@@ -911,9 +911,8 @@ function _flush_fast(t::EditTable)
         if kind in _TILED_KINDS
             added > 0 && kind !== :tcell && tsm_extend_rows!(inst, cols, oldrows, newrows)
             for (li, c) in enumerate(cols)             # li = binding column index
-                for (row, plane) in get(t.tsmedit, c.name, Dict{Int,Any}())
-                    tsm_setcell!(inst, li, row, plane)
-                end
+                ed = get(t.tsmedit, c.name, nothing)
+                ed === nothing || isempty(ed) || tsm_setcells!(inst, li, ed)
             end
         elseif touched || added > 0
             data = Any[_resolve(t, c.name) for c in cols]

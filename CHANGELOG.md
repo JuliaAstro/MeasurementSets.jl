@@ -11471,3 +11471,14 @@ identical, other byte orders and strided cells keep the element writer). The `Sc
 26 ns instead of 2.5 us for a 4x8 cell, whole-column writes 3.56 -> 0.87 and 1.57 -> 0.76 us/row. Reads of
 engine columns were already fine. Tests in `ssm_tests.jl` (fast path equals element writer for 9 element types,
 both byte orders, dense and strided cells).
+
+### Phase 463 — assigning a whole tiled column in an edit session is 70x faster
+
+A survey of edit-session operations (1,000 cell sets, a whole-column set, `addrows!`, `removerows!`) on 50,000-row
+tables of every column kind found one outlier: `t[:A][:] = values` on a tiled array column took 3.2 s. The flush
+wrote the cells one at a time and each write opened the tile file, mapped it, wrote and synced it. Cells are now
+written through one mapping per hypercube with one sync (`tsm_setcells!`), and a cell whose leading axes are untiled
+(the usual layout) is one contiguous run (`_wr_run!`, one `memcpy` on a little-endian host). Whole column 3.2 s ->
+45 ms, 1,000 scattered cells 43 -> 2 ms; the other column kinds were already between 1 and 100 ms. Test in
+`tsm_multicol_tests.jl` (6 element types, both byte orders, a shared hypercube, a plane of another element type,
+a wrong-shape write leaves the file alone). A copytable survey of the same kinds found nothing (0.03-2 us/row).

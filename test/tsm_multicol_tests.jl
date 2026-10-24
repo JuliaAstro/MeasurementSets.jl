@@ -658,3 +658,35 @@ end
     end
     _HAVE_CASACORE && @test ncasacore > 0
 end
+
+# Phase 463: in-place tiled cell writes.  A whole-column assignment used to open, map and sync the tile file once per
+# cell (3 s for 50,000 cells); the cells of a column are written through one mapping, and a cell whose leading axes are
+# untiled is one contiguous run.  Results must equal a model for every element type, both byte orders, a shared
+# hypercube (column offsets inside the tile), a plane of another element type, and a failed (wrong-shape) write.
+@testset "tiled in-place cell writes (Phase 463)" begin
+    rng = Random.MersenneTwister(463)
+    for J in (Float32, Float64, ComplexF32, Int32, Int16, Bool), endian in (:little, :big)
+        n = 300
+        gen() = J === Bool ? rand(rng, Bool, 3, 2) : J <: Complex ? rand(rng, J, 3, 2) : J <: AbstractFloat ? J.(rand(rng, 3, 2)) : rand(rng, J, 3, 2)
+        cols = Pair{String,Any}["A" => [gen() for _ in 1:n], "B" => [Float32.(rand(rng, 3, 2)) for _ in 1:n]]
+        d = joinpath(mktempdir(), "t"); write_table(d, "T", cols; nrow = n, tsm = [["A", "B"]], endian = endian)
+        mA = [copy(x) for x in cols[1][2]]; mB = [copy(x) for x in cols[2][2]]
+        edit(d) do t
+            for i in rand(rng, 1:n, 40); v = gen(); t[:A][i] = v; mA[i] = v; end            # scattered cells
+            for i in rand(rng, 1:n, 20); v = Float32.(rand(rng, 3, 2)); t[:B][i] = v; mB[i] = v; end
+        end
+        r = readtable(d)
+        @test column(r, "A"; precision = :full)[:] == mA && column(r, "B"; precision = :full)[:] == mB
+        new = [gen() for _ in 1:n]
+        edit(d) do t; t[:A][:] = new; end                                                   # the whole column
+        r = readtable(d)
+        @test column(r, "A"; precision = :full)[:] == new && column(r, "B"; precision = :full)[:] == mB   # sibling untouched
+    end
+    # a plane of another element type is converted; a wrong-shape plane fails and leaves the file alone
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", ["A" => [rand(Float32, 3, 2) for _ in 1:10]]; nrow = 10, tsm = [["A"]])
+    edit(d) do t; t[:A][4] = fill(2.0, 3, 2); end
+    @test column(readtable(d), "A")[4] == fill(2.0f0, 3, 2)
+    before = read(joinpath(d, first(filter(f -> occursin("_TSM", f), readdir(d)))))
+    @test_throws Exception edit(d) do t; t[:A][2] = zeros(Float32, 5, 5); end
+    @test read(joinpath(d, first(filter(f -> occursin("_TSM", f), readdir(d))))) == before
+end
