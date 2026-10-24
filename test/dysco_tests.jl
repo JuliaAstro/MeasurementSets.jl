@@ -746,3 +746,45 @@ end
         @test all(ws[r] == wd[r] for r in 1:nr)
     end
 end
+
+# Phase 457: getcell keeps the last decoded block of each column.  Results must be
+# identical to a fresh decode for any access order, cells must be the caller's own
+# (mutating one must not change what a later read returns), and several tasks
+# reading different blocks at once must each see correct data.
+@testset "dysco -- getcell block cache (Phase 457)" begin
+    dir = joinpath(mktempdir(), "c.tab")
+    nr, vdata, vweight = _dysco_synth_ms(dir; nant=5, ntime=6)
+    t = readtable(dir)
+    dc = column(t, "DATA"); wc = column(t, "WEIGHT_SPECTRUM")
+    full = dc[:]; fullw = wc[:]                       # block-at-a-time reference
+    inst = dc.inst
+    @test inst.rowsPerBlock < nr
+    # sequential, reversed, strided and random orders agree with the whole-column decode
+    for order in (1:nr, nr:-1:1, 1:7:nr, shuffle(MersenneTwister(457), 1:nr))
+        @test all(dc[i] == full[i] for i in order)
+        @test all(wc[i] == fullw[i] for i in order)
+    end
+    # the cell handed out is the caller's: scribbling on it does not leak into later reads
+    a = dc[3]; a .= 0
+    @test dc[3] == full[3]
+    @test dc[3] !== dc[3]
+    # an unrelated column has its own cache slot
+    @test dc[1] == full[1] && wc[1] == fullw[1] && dc[2] == full[2]
+    # tasks reading different blocks at the same time
+    rpb = inst.rowsPerBlock
+    ok = fill(false, 8)
+    @sync for k in 1:8
+        Threads.@spawn begin
+            rng = MersenneTwister(k)
+            ok[k] = all(1:400) do _
+                i = rand(rng, 1:nr)
+                dc[i] == full[i] && wc[i] == fullw[i]
+            end
+        end
+    end
+    @test all(ok)
+    # a narrowed (Float16) column read goes through the same cache and stays correct
+    th = readtable(dir; precision=Float16)
+    dh = column(th, "DATA")
+    @test all(dh[i] == ComplexF16.(full[i]) for i in 1:nr)
+end

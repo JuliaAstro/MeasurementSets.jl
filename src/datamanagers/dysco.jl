@@ -249,7 +249,17 @@ mutable struct DyscoStMan
     dict::Vector{Float64}          # decode (centroid) dictionary, length 2^dataBitCount
     ant1::Vector{Int}              # 0-based antenna ids, from the table's own ANTENNA1/2
     ant2::Vector{Int}
+    # Per bound column: the last block `getcell` decoded, as an immutable
+    # `(blockIndex, cells)` tuple (or `nothing`).  A cell read decodes a whole
+    # block (every slot of every baseline), so a loop over consecutive rows
+    # would otherwise redo that for each row.  Slots are replaced whole, so
+    # readers on several tasks see either the old or the new tuple.
+    blockcache::Vector{Any}
 end
+
+# Blocks above this many cells' bytes are not retained (a wideband block can
+# be hundreds of MB; one-off reads of those keep the previous behaviour).
+const DYSCO_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
 DATAMANAGERS["DyscoStMan"] = DyscoStMan
 
@@ -350,7 +360,8 @@ function Base.open(::Type{DyscoStMan}, t::Table, dm::DataManagerInfo)
     return DyscoStMan(data, t.rows, headerSize, rowsPerBlock, antennaCount, blockSize,
                       nBlocksInFile, dataBitCount, weightBitCount, normalization,
                       distribution, studentTNu, distributionTruncation,
-                      colOffset, colKind, colShape, dict, ant1, ant2)
+                      colOffset, colKind, colShape, dict, ant1, ant2,
+                      Any[nothing for _ in colOffset])
 end
 
 # --- per-normalization metadata layout + decode factor -----------------
@@ -482,10 +493,11 @@ end
 """
     getcell(dm::DyscoStMan, colidx, c, row, cols) -> Array
 
-Decode `row`'s block and return that one cell (1-based `row`).  Re-decodes
-the whole block on every call -- the same trade-off `StandardStMan`'s
-`getcell` indirect-array branch already accepts.  A whole-column caller
-should prefer [`getcolumn`](@ref).  `cols` is unused (see `StandardStMan`'s
+Decode `row`'s block and return that one cell (1-based `row`).  The last
+decoded block of each column is kept, so reading the rows of one block in
+turn decodes it once (`rowsPerBlock` consecutive rows, or the rows of a
+`RefTable` that fall in one block); a jump to another block decodes that one.
+A whole-column caller should prefer [`getcolumn`](@ref).  `cols` is unused (see `StandardStMan`'s
 `getcell` docstring for why every data manager's `getcell` shares one
 signature).
 """
@@ -497,8 +509,16 @@ function getcell(dm::DyscoStMan, colidx::Int, ::ColumnDesc, row::Integer, ::Inte
     row0 = Int(row) - 1
     blockIndex = row0 ÷ rpb
     within = row0 % rpb
+    slot = dm.blockcache[colidx]
+    if slot !== nothing && slot[1] == blockIndex
+        return copy(slot[2][within+1])        # the caller owns its cell
+    end
     nvalid = min(rpb, dm.nrow - blockIndex * rpb)
     block = _dysco_decode_block(dm, colidx, blockIndex, nvalid)
+    if rpb * npol * nchan * sizeof(T) <= DYSCO_CACHE_MAX_BYTES
+        dm.blockcache[colidx] = (blockIndex, block)
+        return copy(block[within+1])
+    end
     return block[within+1]
 end
 

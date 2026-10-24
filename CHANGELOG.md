@@ -11415,3 +11415,15 @@ The full suite (21 730 checks, 41 minutes with coverage) executes 98.4% of the 1
 ### Phase 456 — TaQL-lite against real TaQL on the real MS; array subscripts are compiled
 
 Ten `WHERE` queries on the 9 817 600 rows of the real MS (scalar columns, `IN`, `BETWEEN`, `abs(…)`, `FLAG_ROW`, an array column) were timed against real TaQL (`tableCommand`, best of 3): the selected rows agree in every case and ours is 3–30 times faster on scalar conditions (`ANTENNA1==0 AND ANTENNA2==5` 18 vs 186 ms, `FIELD_ID==1` 5 vs 172 ms, `ANTENNA1 != ANTENNA2` 40 vs 260 ms; geometric mean 0.06), and 0.8 on `sumsqr(UVW) > 1e6` (1.8 vs 2.3 s). The same condition written with subscripts, `UVW[1]*UVW[1]+UVW[2]*UVW[2]+UVW[3]*UVW[3] > 1e6`, took 25–32 s (2.5–3 µs and 3 KB per row): an index node was not compiled, so every row looked the column up in a dictionary, rebuilt the subscript closure and index tuple, and each of the five operators went through the widening and `MethodError` net of `_bcast`. Now a `COL[…]` whose subscripts do not depend on the row is compiled (`_compile(::TQLIndex)`: the column is resolved once and an in-range positive integer subscript reads the element after one dynamic dispatch on the cell type, because a chunked column's element type is abstract; everything else is the same `_tql_do_index` as before), and `_bcast` of two plain `Float64` / `Int64` values just applies the operator (they need no widening or shape check). The indexed condition takes 5.4 s (real TaQL 11.7 s), `UVW[1] > 100` 1.3 s (2.0 s), 0.43–0.75 of real TaQL's time. A test on 5000-row tables (above the compile threshold) compares 12 forms — scalar and 2-D subscripts, `end`, negative and 0 subscripts, slices, `Int16` and complex cells, `OR`, masked and ragged cells and the error for an out-of-range subscript — with references computed from the raw arrays, and the compiled closure with the interpreter row by row. The TaQL query, command, fuzz-against-real-TaQL, mscal and allocation-guard files pass (7466 checks).
+
+### Phase 457 — reading single cells of a Dysco column
+
+A scale check of Dysco-compressed tables (24,000 rows of 4x64 visibilities, 300 baselines
+per block) showed whole-column reads, writes and copies scaling linearly, but a single
+`column(t, "DATA")[i]` taking 400 us: a cell read decodes the whole block it lives in
+(every baseline of an integration), and a loop over rows decoded it again for each row,
+so the cost grew with the table's baseline count. `DyscoStMan` now keeps the last decoded
+block of each column (replaced as a whole, so tasks reading at once are safe; blocks
+bigger than 64 MiB are not kept). Cells are copies, so a caller can change one without
+affecting later reads. 2,000 consecutive cells: 800 ms -> 3 ms. Whole-column reads,
+writes (47 us/row) and `copytable` are unchanged. Test in `dysco_tests.jl`.
