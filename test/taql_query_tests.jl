@@ -5897,3 +5897,42 @@ using Random
     @test MSv2._bcast(+, Int32(1), 2.0) === 3.0 && MSv2._bcast(+, 1.0f0, 2.0) === 3.0
     @test_throws DomainError MSv2._bcast(^, 2, -1)
 end
+
+# Phase 465: a scalar aggregate argument is evaluated once for all grouped rows in row order (groups are spread over the
+# table, so evaluating group by group read a tiled array column in jumps).  Results must equal a direct computation, for
+# several aggregates in one query, with WHERE, ROLLUP and HAVING, string arguments, and the closure path unchanged.
+@testset "groupby: aggregate arguments evaluated in row order (Phase 465)" begin
+    rng = Random.MersenneTwister(465); n = 5000
+    K = Int32.(rand(rng, 1:7, n)); J = Int32.(rand(rng, 1:3, n)); X = rand(rng, n)
+    A = [rand(rng, Float32, 2, 3) for _ in 1:n]; S = [string("s", rand(rng, 1:4)) for _ in 1:n]
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["K" => K, "J" => J, "X" => X, "A" => A, "S" => S];
+                                                  nrow = n, tsm = [["A"]])
+    t = readtable(d)
+    keys = sort(unique(K))
+    r = groupby(t, "K"; select = ["K" => :K, "m" => "gmean(mean(A))", "s" => "gsum(X * 2.0)", "mx" => "gmax(A[1,2])",
+                                  "ns" => "gmin(strlength(S))", "n" => "gcount()"])
+    o = sortperm(collect(r.K))
+    @test collect(r.K)[o] == keys
+    @test collect(r.m)[o] ≈ [Statistics.mean(Statistics.mean(Float64.(a)) for a in A[K .== k]) for k in keys]
+    @test collect(r.s)[o] ≈ [sum(2 .* X[K .== k]) for k in keys]
+    @test collect(r.mx)[o] ≈ [maximum(Float64(a[1, 2]) for a in A[K .== k]) for k in keys]
+    @test collect(r.ns)[o] == [minimum(length.(S[K .== k])) for k in keys]
+    @test collect(r.n)[o] == [count(==(k), K) for k in keys]
+    # WHERE keeps a subset; HAVING drops groups; ROLLUP evaluates several levels
+    r2 = groupby(t, "K"; where = "X > 0.5", having = "gcount() > 100", select = ["K" => :K, "m" => "gmean(mean(A))"])
+    sel = X .> 0.5; k2 = [k for k in keys if count(sel .& (K .== k)) > 100]
+    @test sort(collect(r2.K)) == k2
+    @test collect(r2.m)[sortperm(collect(r2.K))] ≈ [Statistics.mean(Statistics.mean(Float64.(a)) for a in A[sel .& (K .== k)]) for k in k2]
+    r3 = groupby(t, ["K", "J"]; rollup = true, select = ["K" => :K, "J" => :J, "m" => "gmean(mean(A))", "n" => "gcount()"])
+    tot = only(i for i in eachindex(r3.n) if ismissing(r3.K[i]) && ismissing(r3.J[i]))
+    @test r3.n[tot] == n && r3.m[tot] ≈ Statistics.mean(Statistics.mean(Float64.(a)) for a in A)
+    i1 = only(i for i in eachindex(r3.n) if r3.K[i] === Int32(3) && ismissing(r3.J[i]))
+    @test r3.m[i1] ≈ Statistics.mean(Statistics.mean(Float64.(a)) for a in A[K .== 3])
+    # per-element (array-valued) aggregates are not primed and still right
+    r4 = groupby(t, "K"; select = ["K" => :K, "m" => "gmeans(A)"])
+    k1 = findfirst(==(Int32(1)), collect(r4.K))
+    @test r4.m[k1] ≈ Statistics.mean(map(a -> Float64.(a), A[K .== 1]))
+    # a group of one row and a table below the compile threshold
+    r5 = groupby(t, "K"; where = "rownumber() <= 3", select = ["K" => :K, "m" => "gsum(X)"])
+    @test sum(r5.m) ≈ sum(X[1:3])
+end

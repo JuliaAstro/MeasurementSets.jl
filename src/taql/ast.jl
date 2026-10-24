@@ -170,8 +170,9 @@ struct TQLAggr <: TQLExpr           # g*(arg) -- reduces over a group's rows (gr
     arg::Union{Nothing,TQLExpr}     # nothing only for gcount()
     mode::Symbol                    # :scalar (g*) or :perelem (gs*)
     compiled::Base.RefValue{Any}    # `(cols, closure)` of the compiled argument, kept with the node (Phase 417/429)
+    rowvals::Base.RefValue{Any}     # `(cols, values by row)` of a scalar argument evaluated once in row order (Phase 465)
 end
-TQLAggr(fn, arg, mode::Symbol) = TQLAggr(fn, arg, mode, Ref{Any}(nothing))
+TQLAggr(fn, arg, mode::Symbol) = TQLAggr(fn, arg, mode, Ref{Any}(nothing), Ref{Any}(nothing))
 struct TQLGrouping <: TQLExpr       # GROUPING(k) -- true if key `k` is rolled up in this group
     name::String
 end

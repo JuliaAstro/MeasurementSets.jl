@@ -11492,3 +11492,12 @@ on a cell 0.15-0.5 (`mean(A)` 0.23 = 3.5 ns per element), sort-based ones (`medi
 is not in row order costs 0.84 us/row against 0.23 for the same expression in a `WHERE`, because each group's rows
 are spread over the table and the block reader decodes a block per access; grouping by a key in row order, or
 evaluating the argument for all rows in row order first, would remove it. No code change.
+
+### Phase 465 — grouped aggregates over an array expression read the table in row order
+
+The open item of Phase 464: `gmean(mean(A))` grouped by a key not in row order cost 0.84 us/row against 0.23
+in a `WHERE`, because each group's rows are spread over the table and the block reader decoded a block per
+row. A scalar aggregate argument (`gmean(mean(A))`, `gsum(X*2)`, `gmax(A[1,2])`, ...) is now evaluated once for
+every row that survived `where`, in row order, and each group takes its values from that (`_prime_aggrs!`;
+array-valued arguments such as `gmeans(A)` are not kept per row and behave as before). 100,000 rows, 50 groups:
+80 -> 21 ms. Test in `taql_query_tests.jl` against direct computations (several aggregates, WHERE, HAVING, ROLLUP).

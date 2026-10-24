@@ -28,11 +28,39 @@ function _agg_vals(f, g)
     return eltype(v) === Any ? identity.(v) : v      # un-inferable closure: narrow so the reduction is typed
 end
 
+# Phase 465: a group's rows are spread over the table, so evaluating an aggregate argument group by group reads the
+# table in jumps (for a tiled array column, a block decoded per row).  A scalar argument is evaluated once for every
+# grouped row in row order, and each group picks its values from that.  `rows` are the rows that survived `where`.
+function _prime_aggrs!(e::TQLAggr, cols, rows)
+    e.arg === nothing && return nothing
+    f = _agg_compiled(e, cols)
+    (f === nothing || length(rows) < 2) && return nothing
+    r = e.rowvals[]
+    (r !== nothing && r[1] === cols) && return nothing
+    first_v = _widen(f(rows[1]))
+    (first_v isa Number || first_v isa AbstractString) || return nothing      # array cells would be kept for every row
+    vals = identity.([_widen(f(i)) for i in rows])
+    full = Vector{eltype(vals)}(undef, length(first(values(cols))))
+    full[rows] = vals
+    e.rowvals[] = (cols, full)
+    return nothing
+end
+function _prime_aggrs!(e::TQLExpr, cols, rows)           # any other node: look at its sub-expressions
+    for fld in fieldnames(typeof(e))
+        _prime_aggrs!(getfield(e, fld), cols, rows)
+    end
+    return nothing
+end
+_prime_aggrs!(e::AbstractVector, cols, rows) = foreach(x -> _prime_aggrs!(x, cols, rows), e)
+_prime_aggrs!(::Any, cols, rows) = nothing
+
 function _geval(e::TQLAggr, cols, g)
     e.arg === nothing && return e.fn(g)                    # gcount()
     # Phase 339: real TaQL aggregates in 64-bit / double (`gsum(UInt8)` is Int64, `gmean(Float32)` Float64)
     f = _agg_compiled(e, cols)
-    vals = f === nothing ? Any[_widen(_tqleval(e.arg, cols, i)) for i in g] : _agg_vals(f, g)
+    rv = e.rowvals[]
+    vals = f === nothing ? Any[_widen(_tqleval(e.arg, cols, i)) for i in g] :
+           (rv !== nothing && rv[1] === cols) ? [rv[2][i] for i in g] : _agg_vals(f, g)
     try
         e.mode === :perelem && return _perelem_reduce(e.fn, vals)
         any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
@@ -515,6 +543,9 @@ function groupby(t::AbstractTable, groupcols;
         rolled = _gb_rolled(keys, active)
         # resolve GROUPING(k) in each string select expr for this set
         lvl = Tuple{Symbol,Any}[k === :ast ? (:ast, _sg(v, rolled)) : (k, v) for (k, v) in kinds]
+        for (k, v) in lvl
+            k === :ast && _prime_aggrs!(v, loaded, rows)
+        end
         groups, seen = _group_rows(keys[active], loaded, rows)
         for key in seen
             g = groups[key]
