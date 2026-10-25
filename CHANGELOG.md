@@ -11562,3 +11562,14 @@ type. A range or selection of a scalar column now comes from the column's own ty
 `Vector{Int32}` / `Vector{Float64}` / ... . Output files are byte-identical (checked on the real MAIN); 3,000,000 rows
 of the real MAIN: physical footprint 2.5 -> 2.2 GB, 66,000 -> 77,000 rows/s (with `--heap-size-hint=600M`: 1.5 GB).
 `docs/src/performance.md` has a section on copying large tables. Test in `writer_tests.jl`.
+
+### Phase 472 — corruption fuzz of the chunked copy (no bug found)
+
+The streaming copy of Phases 469-471 reads tiled files through lazy `RowsView` columns and appends whole-tile chunks to
+a `.tmp` file, so a corrupted tile header or tile file reaches code the earlier fuzzes (Phases 376, 431, 442) never
+drove. 8 seeds x 150 randomly corrupted tiled tables (a shared hypercube, a `TiledColumnStMan`, an all-undefined
+`TiledCellStMan`; chunks forced to a few rows) and every 4-byte word of the three tiled headers set to five extreme
+values (18,360 tables), each copied whole and as a row range: every copy either worked or raised an ordinary error —
+no crash, no run-away allocation, no hang, and a failed copy leaves no directory (nor `.tmp` file) behind. The fuzz
+child (`test/corrupt_fuzz_child.jl`) gained `copy` and `copywords` modes, run from `corrupt_tests.jl`; its random mode
+now skips empty files.

@@ -37,9 +37,9 @@ end
 @testset "corrupted table files never crash or exhaust memory (Phase 376)" begin
     child = joinpath(@__DIR__, "corrupt_fuzz_child.jl")
     proj = dirname(@__DIR__)
-    for (kind, seed, n) in (("mixed", 11, 60), ("big", 12, 40), ("multifile", 13, 40), ("engines", 14, 40), ("dysco", 15, 40), ("refs", 16, 30), ("ismwords", 17, 0), ("sswords", 18, 0), ("tsmwords", 19, 0))
+    for (kind, seed, n) in (("mixed", 11, 60), ("big", 12, 40), ("multifile", 13, 40), ("engines", 14, 40), ("dysco", 15, 40), ("refs", 16, 30), ("ismwords", 17, 0), ("sswords", 18, 0), ("tsmwords", 19, 0), ("copy", 20, 60), ("copywords", 21, 0))
         r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$proj $child $kind $seed $n`); stdout=devnull, stderr=devnull))
-        @test r.exitcode == 0          # 139 = segfault, 137 = killed (out of memory), 3 = a read took > 15 s
+        @test r.exitcode == 0          # 139 = segfault, 137 = killed (out of memory), 3 = a read took > 15 s, 4 = a failed copy left a directory
     end
 end
 
@@ -59,3 +59,8 @@ end
     t2 = readtable(mk((3, 4)))
     @test (@elapsed(@test_throws ErrorException collect(column(t2, "WEIGHT_SPECTRUM")[:]))) < 5
 end
+
+# Phase 472: the chunked copy of Phases 469-471 reads corrupted tiled files through lazy `RowsView` columns and appends
+# whole-tile chunks to a `.tmp` file; the fuzz child's `copy` / `copywords` modes copy randomly corrupted tiled tables and
+# every 4-byte word of the tiled headers (with the streaming thresholds lowered so several chunks are written) -- a failed
+# copy must leave no directory behind.  (8 seeds x 150 tables and 2 x 18360 words: clean.)
