@@ -11573,3 +11573,10 @@ values (18,360 tables), each copied whole and as a row range: every copy either 
 no crash, no run-away allocation, no hang, and a failed copy leaves no directory (nor `.tmp` file) behind. The fuzz
 child (`test/corrupt_fuzz_child.jl`) gained `copy` and `copywords` modes, run from `corrupt_tests.jl`; its random mode
 now skips empty files.
+
+### Phase 473 — thread stress of the chunked copy (no bug found)
+
+Ten tasks copying the same source table at once — whole, by row range, and through a selection, with the streaming
+thresholds lowered so every copy appends several chunks — plus readers on the source: every copy equals the serial
+result and no `.tmp` file is left (4 and 8 threads x 4 rounds, 16 threads x 10). `test/threads_copy_child.jl`, run from
+`robustness_tests.jl`.
