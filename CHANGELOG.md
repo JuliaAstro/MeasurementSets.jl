@@ -11553,3 +11553,12 @@ and written as a header with no cube (`_write_tsm_all_undefined`; a defined cell
 path). Copying 150,000 rows of the real MAIN with and without streaming gives byte-identical files in every table
 directory. Physical footprint copying 3,000,000 rows: 3.4 -> 2.5 GB (about 0.8 KB per row, the scalar columns and
 their writers); 66,000 rows/s. Tests in `tsm_multicol_tests.jl`.
+
+### Phase 471 — partial copies keep the element type of scalar columns
+
+`copytable(...; rows = 1:n)` of a scalar column (and the rows of a `RefTable` selection) built a `Vector{Any}` of
+boxed values (8-24 bytes a cell) and used the writers' slow generic loops; only a copy of the whole column kept its
+type. A range or selection of a scalar column now comes from the column's own typed `getindex`, so the writers see a
+`Vector{Int32}` / `Vector{Float64}` / ... . Output files are byte-identical (checked on the real MAIN); 3,000,000 rows
+of the real MAIN: physical footprint 2.5 -> 2.2 GB, 66,000 -> 77,000 rows/s (with `--heap-size-hint=600M`: 1.5 GB).
+`docs/src/performance.md` has a section on copying large tables. Test in `writer_tests.jl`.

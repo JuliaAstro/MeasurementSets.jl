@@ -441,6 +441,13 @@ function _read_cells(c::AbstractVector, r)
     if full && vals isa Vector && eltype(vals) <: Union{Number,AbstractString} && isconcretetype(eltype(vals))
         return vals
     end
+    # Phase 471: a row range / selection of a scalar column keeps its element type too (the column's own `getindex` of
+    # a vector of rows), instead of one boxed `Any` per cell (8-24 bytes each, and the writers' slow generic loops)
+    T = eltype(c)
+    if r isa AbstractVector{<:Integer} && isconcretetype(T) && T <: Union{Number,AbstractString}
+        out = c[r]
+        out isa Vector{T} && return out
+    end
     out = Vector{Any}(undef, length(r))
     @inbounds for (k, v) in enumerate(vals)
         out[k] = v isa AbstractArray ? Array(v) : v

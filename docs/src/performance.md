@@ -108,3 +108,14 @@ azel = [measconvert(d, AZEL; frame = fr) for d in dirs]
 
 The caches (the per-table `Column` objects, the data managers, the compiled expressions, the astrometry context) are safe to
 use from several tasks at once; concurrent reads, queries and conversions are tested under `julia -t 8`.
+
+## Copying a table larger than memory
+
+`copytable` and `copyms` of a plain table copy the tiled array columns (`DATA`, `FLAG`, `WEIGHT`, `UVW`, ...) in
+chunks of rows: each chunk is read with one block decode, packed and appended to the new tile file, so the memory
+needed no longer grows with the size of the visibilities. On the real 9.8-million-row MAIN table (20 GB of `DATA`) a
+copy of 3 million rows peaks at about 2.2 GB (physical footprint) and runs at roughly 75,000 rows/s; the scalar
+columns (`TIME`, `ANTENNA1`, ... about 0.4 KB per row) are still held whole. Columns are chunked when they have
+100,000 rows or more and the table is written to plain files (not `storage=:multifile`). Julia's garbage collector
+lets the heap grow well past what is live; starting Julia with `--heap-size-hint=2G` keeps a long copy near the live
+size (1.5 GB in the same test) at some cost in time.

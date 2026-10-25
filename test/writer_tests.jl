@@ -465,3 +465,26 @@ end
     w(joinpath(d, "ok3"); measures = Dict("X" => (; kind = :epoch, ref = "TAI")))
     @test measinfo(readtable(joinpath(d, "ok3")), "X").fixedref == "TAI"
 end
+
+# Phase 471: copying a row range or a selection of a scalar column keeps the column's element type (it used to be a
+# `Vector{Any}` of boxed values: 8-24 bytes per cell and the slow generic writer loops).
+@testset "scalar columns keep their element type in a partial copy (Phase 471)" begin
+    rng = Random.MersenneTwister(471); n = 3000
+    cols = Pair{String,Any}["I" => Int32.(rand(rng, 1:100, n)), "X" => rand(rng, n), "S" => ["s$(rand(rng, 1:9))" for _ in 1:n],
+                            "B" => rand(rng, Bool, n), "U" => UInt8.(rand(rng, 0:255, n)), "A" => [rand(rng, 2) for _ in 1:n]]
+    d = joinpath(mktempdir(), "s"); write_table(d, "T", cols; nrow = n)
+    t = readtable(d)
+    for (nm, T) in (("I", Int32), ("X", Float64), ("S", String), ("B", Bool), ("U", UInt8))
+        c = MSv2._pcolumn(t, nm, :full)
+        for r in (1:n, 1:1500, 100:2000, [5, 3, 9, 1], 2500:2500)
+            v = MSv2._read_cells(c, r)
+            @test v isa Vector{T} && v == [cols[findfirst(p -> first(p) == nm, cols)][2][i] for i in r]
+        end
+    end
+    @test MSv2._read_cells(MSv2._pcolumn(t, "A", :full), 1:10) isa Vector{Any}      # array cells: owned arrays, unchanged
+    # a copy of a prefix equals the copy of the same rows through a RefTable selection
+    d1 = joinpath(mktempdir(), "a"); copytable(d1, t; rows = 1:1500)
+    d2 = joinpath(mktempdir(), "b"); copytable(d2, query(t, "rownumber() <= 1500"))
+    r1 = readtable(d1); r2 = readtable(d2)
+    @test all(column(r1, c)[:] == column(r2, c)[:] for c in ("I", "X", "S", "B", "U")) && column(r1, "I")[:] == cols[1][2][1:1500]
+end
