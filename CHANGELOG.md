@@ -11501,3 +11501,12 @@ row. A scalar aggregate argument (`gmean(mean(A))`, `gsum(X*2)`, `gmax(A[1,2])`,
 every row that survived `where`, in row order, and each group takes its values from that (`_prime_aggrs!`;
 array-valued arguments such as `gmeans(A)` are not kept per row and behave as before). 100,000 rows, 50 groups:
 80 -> 21 ms. Test in `taql_query_tests.jl` against direct computations (several aggregates, WHERE, HAVING, ROLLUP).
+
+### Phase 466 — tests that need real IERS data skip when it cannot be downloaded
+
+On 2026-10-25 `datacenter.iers.org` answered every request with HTTP 400 ("Request Rejected", from a laptop and from
+a container alike), so `EarthOrientation` could not fetch `finals2000A` and its cache file was overwritten by the
+error page. Three assertions compare against values computed with real dUT1 / polar motion (the `EarthOrientationExt`
+in-range lookup of Phase 220, `meas.last` of Phase 249, the random `meas.epoch` sidereal comparison of Phase 344) and
+failed for a reason outside the package. The test helpers now define `_HAVE_EOP` (a 2024 date returns real values)
+and those assertions run only then; the zero-fallback assertions still run. No change to `src/`.

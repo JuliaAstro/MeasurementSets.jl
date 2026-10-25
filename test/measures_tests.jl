@@ -1298,10 +1298,12 @@ end
     # coverage): real, plausible-magnitude values, NOT the zero
     # fallback -- confirms the fix has no effect on ordinary usage.
     r_ok = eoext._eop_lookup(60454.0)
-    @test !(r_ok.dut1 == 0.0 && r_ok.xp == 0.0 && r_ok.yp == 0.0)
-    @test abs(r_ok.dut1) < 1.0                      # ΔUT1 is IERS-bounded to ±0.9 s
-    @test abs(r_ok.xp) < 2000 * MSv2.ARCSEC          # real polar motion is O(0.1-0.3″)
-    @test abs(r_ok.yp) < 2000 * MSv2.ARCSEC
+    if _HAVE_EOP                                    # (no download possible -> the lookup is the zero fallback)
+        @test !(r_ok.dut1 == 0.0 && r_ok.xp == 0.0 && r_ok.yp == 0.0)
+        @test abs(r_ok.dut1) < 1.0                      # ΔUT1 is IERS-bounded to ±0.9 s
+        @test abs(r_ok.xp) < 2000 * MSv2.ARCSEC          # real polar motion is O(0.1-0.3″)
+        @test abs(r_ok.yp) < 2000 * MSv2.ARCSEC
+    end
 
     # far future (~year 4500) -- always past the IERS table's forward
     # bound no matter when this test runs -- falls back to zeros.
