@@ -11516,3 +11516,14 @@ and those assertions run only then; the zero-fallback assertions still run. No c
 The Julia `pre` (1.14) job failed on the Phase 457-465 merge after 2.5 minutes: the test-only dependency Casacore.jl
 does not precompile there (`casacorecxx_jll` has no `get_libcasacorecxx_path`). It is upstream, so the job is now
 `continue-on-error` (still run, still visible, no longer decides whether the workflow is red). No change to `src/`.
+
+### Phase 468 — copying the real MAIN table: time and memory at scale (investigation only)
+
+`copyms` of the first 200,000 / 400,000 / 800,000 rows of the real ALMA MAIN table (2 KB of DATA per row):
+10 s / 13-17 s / 20 s (20,000-40,000 rows/s, so about 5-8 minutes for all 9.8 million rows) and the copy reads
+back equal. Peak resident memory was 2.3 / 3.8 / 6.9 GB, i.e. about 3-4 times the size of the output and linear in the
+rows (a `--heap-size-hint` of 1 GB or 3 GB changed it by 5%, so it is live data, not garbage): every column is read
+whole, then the tiled writer builds the complete tile file in memory before writing it. Copying a whole 20 GB MS would
+need on the order of 60-85 GB of memory. A copy that works in row chunks (reading, packing and appending a few
+hundred thousand rows at a time to the tile file, with the index written at the end) would remove that limit;
+it needs the tiled and SSM/ISM writers to accept appended chunks and is left as a candidate. No code change.
