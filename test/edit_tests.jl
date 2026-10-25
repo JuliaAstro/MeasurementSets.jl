@@ -1175,3 +1175,77 @@ end
         @test columnnames(readtable(d)) == ["K"] && sort(filter(f -> startswith(f, "table.f"), readdir(d))) == ["table.f0"]
     end
 end
+
+# Phase 459: random edit sessions on tables whose array column is a virtual engine (ScaledArray, CompressFloat, BitFlags)
+# or a Dysco column: cell sets, addrows!, removerows!, one to three sessions, both byte orders, against a model (exact
+# for the lossless cases, within the codec's quantisation for CompressFloat / Dysco).  An appended cell is zeros.
+@testset "random edit sessions on engine and Dysco columns (Phase 459)" begin
+    rng = Random.MersenneTwister(459)
+for iter in 1:_fz(24)
+    N = rand(rng, (24, 60, 150)); endian = rand(rng, (:little, :big))
+    kind = rand(rng, (:scaled, :compress, :bitflags, :dysco))
+    d = joinpath(mktempdir(), "t")
+    sh = (2, 3)
+    if kind === :bitflags
+        gen = () -> rand(rng, Bool, sh...); dflt = falses(sh...) |> collect
+        eng = Dict("V" => (; kind = MSv2.BitFlags(), stored_type = MSv2.TpInt)); tol = 0.0
+        V = [gen() for _ in 1:N]
+    elseif kind === :scaled
+        gen = () -> Float32.(rand(rng, -20:20, sh...) .* 0.5 .+ 1.0); dflt = zeros(Float32, sh...)
+        eng = Dict("V" => (; kind = MSv2.ScaledArray(), scale = 0.5, offset = 1.0, stored_type = MSv2.TpInt)); tol = 1e-5
+        V = [gen() for _ in 1:N]
+    elseif kind === :compress
+        gen = () -> Float32.(rand(rng, -500:500, sh...) .* 0.01); dflt = zeros(Float32, sh...)
+        eng = Dict("V" => (; kind = MSv2.CompressFloat(), scale = 0.01, offset = 0.0)); tol = 2e-2
+        V = [gen() for _ in 1:N]
+    else
+        gen = () -> ComplexF32.(randn(rng, 2, 3), randn(rng, 2, 3)); dflt = zeros(ComplexF32, 2, 3); eng = nothing; tol = 0.05
+        V = [gen() for _ in 1:N]
+    end
+    K = Int32.(rand(rng, 1:9, N))
+    if kind === :dysco
+        nant = 4; bl = [(a,b) for a in 0:nant-1 for b in a:nant-1]; nbl = length(bl)
+        N = nbl * cld(N, nbl); K = Int32.(rand(rng, 1:9, N)); V = [gen() for _ in 1:N]
+        a1 = Int32[bl[mod1(i,nbl)][1] for i in 1:N]; a2 = Int32[bl[mod1(i,nbl)][2] for i in 1:N]
+        write_table(d, "T", Pair{String,Any}["K"=>K, "ANTENNA1"=>a1, "ANTENNA2"=>a2, "TIME"=>collect(5e9 .+ (1:N)),
+            "V"=>V]; nrow=N, endian=endian, ism=["ANTENNA1","ANTENNA2","TIME"], dysco=[["V"]],
+            dysco_spec=Dict("V"=>(; normalization=MSv2.RowNorm(), distribution=MSv2.TruncatedGaussian(), dataBitCount=16,
+              weightBitCount=12, antenna1=Int.(a1), antenna2=Int.(a2), rowsPerBlock=nbl, dither=false)))
+    else
+        write_table(d, "T", Pair{String,Any}["K"=>K, "V"=>V]; nrow=N, endian=endian, engines=eng)
+    end
+    mK = copy(K); mV = [copy(x) for x in V]
+    try
+    for session in 1:rand(rng, 1:3)
+        edit(d) do t
+            for _ in 1:rand(rng, 1:6)
+                n = length(mK); op = rand(rng, 1:5)
+                if op <= 2 && n > 0
+                    for _ in 1:rand(rng,1:4); i = rand(rng,1:n); v = gen(); t[:V][i] = v; mV[i] = v; end
+                elseif op == 3 && n > 0
+                    i = rand(rng,1:n); v = Int32(rand(rng,1:9)); t[:K][i] = v; mK[i] = v
+                elseif op == 4
+                    k = rand(rng,1:3); addrows!(t, k); for _ in 1:k; push!(mK, Int32(0)); push!(mV, copy(dflt)); end
+                elseif op == 5 && n > 6
+                    r = sort(unique(rand(rng,1:n,rand(rng,1:3)))); removerows!(t, r); deleteat!(mK, r); deleteat!(mV, r)
+                end
+            end
+        end
+        tt = readtable(d)
+        gK = column(tt,"K")[:]; gV = column(tt,"V"; precision=:full)[:]
+        ok = gK == mK && length(gV) == length(mV) && all(size(gV[i]) == size(mV[i]) && maximum(abs.(gV[i] .- mV[i]), init=0.0) <= tol + 1e-6 for i in eachindex(gV))
+        @test ok
+        ok || break
+        if _HAVE_CASACORE && kind in (:compress, :bitflags)       # casacore decodes the engines (Dysco: not built in)
+            dd = joinpath(mktempdir(), "c"); cp(d, dd)               # a fresh path: casacore keeps an opened table's files
+            ct = CCT.Table(dd)
+            @test ct[:K][:] == mK
+            @test all(maximum(abs.(Float64.(ct[:V][i]) .- mV[i]), init = 0.0) <= tol + 1e-6 for i in eachindex(mV))
+        end
+    end
+    catch e
+        @test false
+        @info "random engine edit failed" iter kind exception = e
+    end
+    end
+end

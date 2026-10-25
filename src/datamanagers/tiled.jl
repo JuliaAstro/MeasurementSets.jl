@@ -905,6 +905,20 @@ function _tsm_writable(tsm::TiledStMan, sequ::Int)
     return m
 end
 
+# write the elements of `v` (a dense array of `T`) at byte offset `o`: one memcpy on a little-endian host
+function _wr_run!(bytes::AbstractVector{UInt8}, o::Int, ::Type{T}, v::DenseArray{T}, endian::Symbol) where {T}
+    n = length(v)
+    (o >= 0 && o + n * sizeof(T) <= length(bytes)) || throw(BoundsError(bytes, o+1:o+n*sizeof(T)))
+    if endian === :little && Base.ENDIAN_BOM == 0x04030201 && bytes isa DenseArray{UInt8}
+        GC.@preserve bytes v unsafe_copyto!(Ptr{T}(pointer(bytes, o + 1)), pointer(v), n)
+    else
+        for e in 1:n
+            _wrbytes!(bytes, o + (e - 1) * sizeof(T), v[e], endian)
+        end
+    end
+    return nothing
+end
+
 # byte-exact inverse of `read_plane`: write `plane` into `bytes` at
 # last-axis index `lastpos` (0-based) of `cube` for the `colidx`-th column.
 function write_plane!(bytes::AbstractVector{UInt8}, tsm::TiledStMan, cube::TSMCube,
@@ -923,6 +937,15 @@ function write_plane!(bytes::AbstractVector{UInt8}, tsm::TiledStMan, cube::TSMCu
     esz = T === Bool ? 0 : sizeof(T)
     tlast_tile = lastpos ÷ ts[nd]
     tlast_in   = lastpos % ts[nd]
+
+    # Leading axes untiled (the usual layout): the cell is one contiguous run inside its tile -- the mirror of the
+    # single `_rd_run!` of `read_plane` (Phase 463).
+    if T !== Bool && nd >= 2 && all(d -> ts[d] == cs[d], 1:nd-1)
+        tilenr = _colmajor_offset(ntuple(d -> d < nd ? 0 : tlast_tile, nd), tpd)
+        o = cube.offset + tilenr * bbytes + coloff + tlast_in * length(v) * esz
+        _wr_run!(bytes, o, T, plane isa DenseArray{T} ? plane : T.(v), tsm.endian)
+        return bytes
+    end
 
     for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, nd-1))
         tilecoord = ntuple(d -> d < nd ? lt[d] : tlast_tile, nd)
@@ -954,19 +977,35 @@ Overwrite one tiled cell (1-based `row`, binding column index `colidx`) in
 place.  `plane` must match the existing cell shape.
 """
 function tsm_setcell!(tsm::TiledStMan, colidx::Int, row::Integer, plane)
-    cube, p = _cube_for_row(tsm, row)
-    isnull(cube) && error("row $row of this column has no stored cube to write into")
-    m = _tsm_writable(tsm, cube.sequ)
-    if p === nothing                                 # :cell -> whole cube
-        nd = length(cube.cubeshape)
-        for lp in 0:cube.cubeshape[nd]-1
-            write_plane!(m, tsm, cube, lp, selectdim(plane, nd, lp+1), colidx)
+    return tsm_setcells!(tsm, colidx, ((Int(row), plane),))
+end
+
+"""
+    tsm_setcells!(tsm, colidx, cells)
+
+Overwrite many tiled cells in place; `cells` iterates `(row, plane)` pairs.  Each
+hypercube's file is mapped once and synced once, however many cells are written
+(Phase 463: a whole-column assignment used to open, map and sync the file for every cell).
+"""
+function tsm_setcells!(tsm::TiledStMan, colidx::Int, cells)
+    maps = Dict{Int,Vector{UInt8}}()
+    for (row, plane) in cells
+        cube, p = _cube_for_row(tsm, row)
+        isnull(cube) && error("row $row of this column has no stored cube to write into")
+        m = get!(() -> _tsm_writable(tsm, cube.sequ), maps, cube.sequ)
+        if p === nothing                                 # :cell -> whole cube
+            nd = length(cube.cubeshape)
+            for lp in 0:cube.cubeshape[nd]-1
+                write_plane!(m, tsm, cube, lp, selectdim(plane, nd, lp+1), colidx)
+            end
+        else
+            write_plane!(m, tsm, cube, p - 1, plane, colidx)
         end
-    else
-        write_plane!(m, tsm, cube, p - 1, plane, colidx)
     end
-    Mmap.sync!(m)
-    tsm.data[cube.sequ] = m                          # refresh the read cache
+    for (sequ, m) in maps
+        Mmap.sync!(m)
+        tsm.data[sequ] = m                               # refresh the read cache
+    end
     return tsm
 end
 

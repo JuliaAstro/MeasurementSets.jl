@@ -249,7 +249,17 @@ mutable struct DyscoStMan
     dict::Vector{Float64}          # decode (centroid) dictionary, length 2^dataBitCount
     ant1::Vector{Int}              # 0-based antenna ids, from the table's own ANTENNA1/2
     ant2::Vector{Int}
+    # Per bound column: the last block `getcell` decoded, as an immutable
+    # `(blockIndex, cells)` tuple (or `nothing`).  A cell read decodes a whole
+    # block (every slot of every baseline), so a loop over consecutive rows
+    # would otherwise redo that for each row.  Slots are replaced whole, so
+    # readers on several tasks see either the old or the new tuple.
+    blockcache::Vector{Any}
 end
+
+# Blocks above this many cells' bytes are not retained (a wideband block can
+# be hundreds of MB; one-off reads of those keep the previous behaviour).
+const DYSCO_CACHE_MAX_BYTES = 64 * 1024 * 1024
 
 DATAMANAGERS["DyscoStMan"] = DyscoStMan
 
@@ -350,7 +360,8 @@ function Base.open(::Type{DyscoStMan}, t::Table, dm::DataManagerInfo)
     return DyscoStMan(data, t.rows, headerSize, rowsPerBlock, antennaCount, blockSize,
                       nBlocksInFile, dataBitCount, weightBitCount, normalization,
                       distribution, studentTNu, distributionTruncation,
-                      colOffset, colKind, colShape, dict, ant1, ant2)
+                      colOffset, colKind, colShape, dict, ant1, ant2,
+                      Any[nothing for _ in colOffset])
 end
 
 # --- per-normalization metadata layout + decode factor -----------------
@@ -482,10 +493,11 @@ end
 """
     getcell(dm::DyscoStMan, colidx, c, row, cols) -> Array
 
-Decode `row`'s block and return that one cell (1-based `row`).  Re-decodes
-the whole block on every call -- the same trade-off `StandardStMan`'s
-`getcell` indirect-array branch already accepts.  A whole-column caller
-should prefer [`getcolumn`](@ref).  `cols` is unused (see `StandardStMan`'s
+Decode `row`'s block and return that one cell (1-based `row`).  The last
+decoded block of each column is kept, so reading the rows of one block in
+turn decodes it once (`rowsPerBlock` consecutive rows, or the rows of a
+`RefTable` that fall in one block); a jump to another block decodes that one.
+A whole-column caller should prefer [`getcolumn`](@ref).  `cols` is unused (see `StandardStMan`'s
 `getcell` docstring for why every data manager's `getcell` shares one
 signature).
 """
@@ -497,8 +509,16 @@ function getcell(dm::DyscoStMan, colidx::Int, ::ColumnDesc, row::Integer, ::Inte
     row0 = Int(row) - 1
     blockIndex = row0 ÷ rpb
     within = row0 % rpb
+    slot = dm.blockcache[colidx]
+    if slot !== nothing && slot[1] == blockIndex
+        return copy(slot[2][within+1])        # the caller owns its cell
+    end
     nvalid = min(rpb, dm.nrow - blockIndex * rpb)
     block = _dysco_decode_block(dm, colidx, blockIndex, nvalid)
+    if rpb * npol * nchan * sizeof(T) <= DYSCO_CACHE_MAX_BYTES
+        dm.blockcache[colidx] = (blockIndex, block)
+        return copy(block[within+1])
+    end
     return block[within+1]
 end
 
@@ -609,6 +629,23 @@ function _dysco_symbols_for_data(vis::Array{ComplexF64,3}, boundaries::Vector{Fl
         end
     end
     return syms
+end
+
+# Copy one block's cells into the (npol, nchan, rows) work array.  The column arrives as a `Vector{Any}`, so the
+# per-element reads sit behind a function barrier on the concrete cell type (Phase 461).
+function _dysco_fill_block!(dest::AbstractArray{T,3}, cells, r0::Int, n::Int) where {T}
+    for r in 1:n
+        _dysco_fill_cell!(dest, r, cells[r0+r])
+    end
+    return dest
+end
+function _dysco_fill_cell!(dest::AbstractArray{T,3}, r::Int, cell::AbstractMatrix) where {T}
+    npol, nchan = size(dest, 1), size(dest, 2)
+    size(cell) == (npol, nchan) || throw(DimensionMismatch("Dysco cell has shape $(size(cell)), expected ($npol, $nchan)"))
+    @inbounds for ch in 1:nchan, pl in 1:npol
+        dest[pl, ch, r] = T(cell[pl, ch])
+    end
+    return nothing
 end
 
 # --- weight encode (weightblockencoder.h:40-68) ------------------------
@@ -980,6 +1017,10 @@ function write_dyscostman(dir::AbstractString, sequ::Int, cols::Vector{<:ColumnD
     maxQ = dict[end-1]                       # largest finite centroid
 
     colKind  = [c.name == "WEIGHT_SPECTRUM" ? :weight : :data for c in cols]
+    for c in cols
+        (c.shape isa Dims && length(c.shape) == 2) || throw(ArgumentError(
+            "DyscoStMan column \"$(c.name)\" needs the same (npol, nchan) shape in every row; got $(c.shape)"))
+    end
     colShape = [(c.shape[1], c.shape[2]) for c in cols]
 
     nblocks = cld(nrow, rpb)
@@ -1051,12 +1092,7 @@ function write_dyscostman(dir::AbstractString, sequ::Int, cols::Vector{<:ColumnD
             colstart = blockstart + colOffset[i]
             if colKind[i] === :data
                 vis = zeros(ComplexF64, npol, nchan, rpb)
-                @inbounds for r in 1:nInBlock
-                    cell = coldata[i][r0+r]
-                    for ch in 1:nchan, pl in 1:npol
-                        vis[pl, ch, r] = ComplexF64(cell[pl, ch])
-                    end
-                end
+                _dysco_fill_block!(vis, coldata[i], r0, nInBlock)
                 metaN = _dysco_metacount(normalization, npol, nchan, rpb, antennaCount)
                 meta = zeros(Float64, metaN)
                 _dysco_normalize!(normalization, vis, meta, a1full, a2full, antennaCount, maxQ)
@@ -1069,12 +1105,7 @@ function write_dyscostman(dir::AbstractString, sequ::Int, cols::Vector{<:ColumnD
                 buf[off2+1:off2+length(packed)] = packed
             else
                 w = zeros(Float32, npol, nchan, rpb)
-                @inbounds for r in 1:nInBlock
-                    cell = coldata[i][r0+r]
-                    for ch in 1:nchan, pl in 1:npol
-                        w[pl, ch, r] = Float32(cell[pl, ch])
-                    end
-                end
+                _dysco_fill_block!(w, coldata[i], r0, nInBlock)
                 maxv, wsyms = _dysco_encode_weight_block(w, weightBits)
                 packed = _dysco_pack(weightBits, wsyms)
                 _dy_put!(buf, colstart, Float32(maxv))

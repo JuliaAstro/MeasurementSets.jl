@@ -618,6 +618,31 @@ function _ssm_put_scalars_generic!(file, co, ext, r0, nr, col, ::Type{J}, endian
     end
 end
 
+# Direct (fixed-shape) array cells.  The column is a `Vector{Any}`, so each cell is handed to a typed method; a
+# little-endian host with a dense `J` array copies the cell's bytes in one go (Phase 462).
+function _ssm_put_arrays!(file, co, ext, r0, nr, cells, ::Type{J}, nel, endian) where {J}
+    for lr in 0:nr-1
+        _ssm_put_array!(file, co + lr * ext, cells[r0 + lr + 1], J, nel, endian)
+    end
+    return nothing
+end
+function _ssm_put_array!(file::Vector{UInt8}, o::Int, v::DenseArray{J}, ::Type{J}, nel::Int, endian) where {J<:Union{Integer,AbstractFloat,Complex{<:AbstractFloat}}}
+    if J !== Bool && endian === :little && Base.ENDIAN_BOM == 0x04030201 && length(v) >= nel
+        (o >= 0 && o + nel * sizeof(J) <= length(file)) || throw(BoundsError(file, o+1:o+nel*sizeof(J)))
+        GC.@preserve file v unsafe_copyto!(Ptr{J}(pointer(file, o + 1)), pointer(v), nel)
+        return nothing
+    end
+    return _ssm_put_array_generic!(file, o, v, J, nel, endian)
+end
+_ssm_put_array!(file, o, v, ::Type{J}, nel, endian) where {J} = _ssm_put_array_generic!(file, o, v, J, nel, endian)
+function _ssm_put_array_generic!(file, o, v, ::Type{J}, nel, endian) where {J}
+    vv = vec(v)
+    for e in 1:nel
+        _wrbytes!(file, o + (e-1)*sizeof(J), J(vv[e]), endian)
+    end
+    return nothing
+end
+
 """
     write_standardstman(dir, sequ, cols, coldata, nrow, endian) -> Vector{UInt8}
 
@@ -742,14 +767,7 @@ function write_standardstman(dir::AbstractString, sequ::Int,
                 if nel == 1
                     _ssm_put_scalars!(file, co, ext, r0, nr, coldata[i], J, endian)
                 else
-                    for lr in 0:nr-1
-                        v = coldata[i][r0 + lr + 1]
-                        o = co + lr * ext
-                        vv = vec(v)
-                        for e in 1:nel
-                            _wrbytes!(file, o + (e-1)*sizeof(J), J(vv[e]), endian)
-                        end
-                    end
+                    _ssm_put_arrays!(file, co, ext, r0, nr, coldata[i], J, nel, endian)
                 end
             end
         end

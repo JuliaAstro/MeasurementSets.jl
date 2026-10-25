@@ -160,3 +160,27 @@ end
     edit(d) do e; addrows!(e, 5); removerows!(e, [1]); end
     @test column(t, "B")[:] == B0 && nrow(readtable(d)) == n + 4
 end
+
+# Phase 462: fixed-shape array cells are copied with one memcpy on a little-endian host.  The bytes must equal the
+# element-by-element writer for every element type, both byte orders, dense and strided cells, and a short cell fails.
+@testset "SSM direct array cells -- fast path equals the element writer (Phase 462)" begin
+    rng = Random.MersenneTwister(462)
+    for J in (Int16, Int32, Int64, UInt8, UInt32, Float32, Float64, ComplexF32, ComplexF64), endian in (:little, :big)
+        shp = (3, 4); nel = 12
+        v = J <: Complex ? rand(rng, J, shp...) : J <: AbstractFloat ? J.(rand(rng, shp...)) : rand(rng, J, shp...)
+        for cell in (v, view(rand(rng, J, 3, 8), :, 1:2:8), reshape(vec(v), 4, 3), collect(vec(v)))
+            a = zeros(UInt8, 16 * nel + 16); b = copy(a)
+            MSv2._ssm_put_array!(a, 5, cell, J, nel, endian)
+            MSv2._ssm_put_array_generic!(b, 5, cell, J, nel, endian)
+            @test a == b
+        end
+    end
+    @test_throws BoundsError MSv2._ssm_put_array!(zeros(UInt8, 40), 5, rand(Float64, 3, 4), Float64, 12, :little)
+    @test_throws BoundsError MSv2._ssm_put_array!(zeros(UInt8, 400), 5, rand(Float64, 2, 2), Float64, 12, :little)
+    # end to end: a table of fixed-shape array cells reads back in both byte orders
+    for endian in (:little, :big)
+        d = joinpath(mktempdir(), "t"); cells = [rand(rng, Float32, 4, 8) for _ in 1:3000]
+        write_table(d, "T", ["A" => cells]; nrow = 3000, endian = endian)
+        @test column(readtable(d), "A")[:] == cells
+    end
+end

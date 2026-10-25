@@ -746,3 +746,68 @@ end
         @test all(ws[r] == wd[r] for r in 1:nr)
     end
 end
+
+# Phase 457: getcell keeps the last decoded block of each column.  Results must be
+# identical to a fresh decode for any access order, cells must be the caller's own
+# (mutating one must not change what a later read returns), and several tasks
+# reading different blocks at once must each see correct data.
+@testset "dysco -- getcell block cache (Phase 457)" begin
+    dir = joinpath(mktempdir(), "c.tab")
+    nr, vdata, vweight = _dysco_synth_ms(dir; nant=5, ntime=6)
+    t = readtable(dir)
+    dc = column(t, "DATA"); wc = column(t, "WEIGHT_SPECTRUM")
+    full = dc[:]; fullw = wc[:]                       # block-at-a-time reference
+    inst = dc.inst
+    @test inst.rowsPerBlock < nr
+    # sequential, reversed, strided and random orders agree with the whole-column decode
+    for order in (1:nr, nr:-1:1, 1:7:nr, shuffle(MersenneTwister(457), 1:nr))
+        @test all(dc[i] == full[i] for i in order)
+        @test all(wc[i] == fullw[i] for i in order)
+    end
+    # the cell handed out is the caller's: scribbling on it does not leak into later reads
+    a = dc[3]; a .= 0
+    @test dc[3] == full[3]
+    @test dc[3] !== dc[3]
+    # an unrelated column has its own cache slot
+    @test dc[1] == full[1] && wc[1] == fullw[1] && dc[2] == full[2]
+    # tasks reading different blocks at the same time
+    rpb = inst.rowsPerBlock
+    ok = fill(false, 8)
+    @sync for k in 1:8
+        Threads.@spawn begin
+            rng = MersenneTwister(k)
+            ok[k] = all(1:400) do _
+                i = rand(rng, 1:nr)
+                dc[i] == full[i] && wc[i] == fullw[i]
+            end
+        end
+    end
+    @test all(ok)
+    # a narrowed (Float16) column read goes through the same cache and stays correct
+    th = readtable(dir; precision=Float16)
+    dh = column(th, "DATA")
+    @test all(dh[i] == ComplexF16.(full[i]) for i in 1:nr)
+end
+
+# Phase 461: the writer reads each block's cells through a typed function barrier.  A cell of the wrong shape is a clear
+# error, and the written file does not depend on the element type of the input cells (Float64 / Float32 / views).
+@testset "dysco -- writer cell shapes (Phase 461)" begin
+    nant = 3; bl = [(a, b) for a in 0:nant-1 for b in a:nant-1]; nbl = length(bl); nr = 2nbl
+    a1 = Int32[bl[mod1(i, nbl)][1] for i in 1:nr]; a2 = Int32[bl[mod1(i, nbl)][2] for i in 1:nr]
+    rng = Random.MersenneTwister(461)
+    cells = [randn(rng, ComplexF32, 2, 4) for _ in 1:nr]
+    wts = [abs.(randn(rng, Float32, 2, 4)) .+ 0.1f0 for _ in 1:nr]
+    function wr(d, data, w)
+        write_table(d, "T", Pair{String,Any}["TIME" => collect(5e9 .+ (1:nr)), "ANTENNA1" => a1, "ANTENNA2" => a2,
+                "DATA" => data, "WEIGHT_SPECTRUM" => w]; nrow = nr, ism = ["TIME", "ANTENNA1", "ANTENNA2"],
+            dysco = [["DATA", "WEIGHT_SPECTRUM"]],
+            dysco_spec = Dict("DATA" => (; normalization = MSv2.RowNorm(), distribution = MSv2.TruncatedGaussian(),
+                dataBitCount = 10, weightBitCount = 12, antenna1 = Int.(a1), antenna2 = Int.(a2), rowsPerBlock = nbl, dither = false)))
+        return read(joinpath(d, "table.f1"))
+    end
+    ref = wr(joinpath(mktempdir(), "a"), cells, wts)
+    @test wr(joinpath(mktempdir(), "b"), [ComplexF64.(c) for c in cells], [Float64.(w) for w in wts]) == ref
+    @test wr(joinpath(mktempdir(), "c"), [view(hcat(c, c), :, 1:4) for c in cells], wts) == ref
+    bad = copy(cells); bad[3] = zeros(ComplexF32, 3, 4)
+    @test_throws ArgumentError wr(joinpath(mktempdir(), "d"), bad, wts)       # ragged cells: no fixed (npol, nchan)
+end
