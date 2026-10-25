@@ -11510,3 +11510,9 @@ error page. Three assertions compare against values computed with real dUT1 / po
 in-range lookup of Phase 220, `meas.last` of Phase 249, the random `meas.epoch` sidereal comparison of Phase 344) and
 failed for a reason outside the package. The test helpers now define `_HAVE_EOP` (a 2024 date returns real values)
 and those assertions run only then; the zero-fallback assertions still run. No change to `src/`.
+
+### Phase 467 — the nightly CI job no longer fails the run
+
+The Julia `pre` (1.14) job failed on the Phase 457-465 merge after 2.5 minutes: the test-only dependency Casacore.jl
+does not precompile there (`casacorecxx_jll` has no `get_libcasacorecxx_path`). It is upstream, so the job is now
+`continue-on-error` (still run, still visible, no longer decides whether the workflow is red). No change to `src/`.

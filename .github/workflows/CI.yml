@@ -16,6 +16,10 @@ jobs:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
+    # Phase 467: the nightly ('pre') job is informational.  On 2026-10-25 it failed in 2.5 minutes because the test-only
+    # dependency Casacore.jl does not precompile on Julia 1.14 (casacorecxx_jll lacks get_libcasacorecxx_path) -- not
+    # something this repository can fix, and it should not turn the whole run red.
+    continue-on-error: ${{ matrix.version == 'pre' }}
     permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
       actions: write
       contents: read
