@@ -672,6 +672,77 @@ end
 
 # --- TiledShapeStMan ------------------------------------------
 
+# --- chunked writing (Phase 469) -------------------------------------------------------------------------------------
+#
+# A column given as a lazy `AbstractVector` (not a `Vector`: a `RowsView` of a source `Column`, ...) is written to the
+# tile file a chunk of rows at a time, so a table far larger than memory can be copied: the tile file is appended to as
+# each chunk is read and packed, and only the small header is written at the end.  Only the common case streams -- one
+# cell shape in every row and column, plain files (not a container, not inside an edit commit); anything else
+# (a different shape, an undefined cell) returns `nothing` and the caller materialises the columns as before.
+
+const TSM_STREAM_MIN_ROWS = Ref(100_000)   # copytable: tiled-shape columns of at least this many rows are streamed
+const TSM_STREAM_BYTES = Ref(64 << 20)     # tile-file bytes packed per chunk (a Ref so a test can force several chunks)
+
+_is_lazy_column(c) = c isa AbstractVector && !(c isa Vector)
+_materialize_column(c::Vector) = c
+_materialize_column(c) = Any[x for x in c[1:length(c)]]
+_can_stream_tiles(dir) = get(task_local_storage(), _MF_SINK_KEY, nothing) === nothing && _active_commit(dir) === nothing
+
+function _write_tsm_streaming(dir::AbstractString, sequ::Int, cols::Vector{<:ColumnDesc}, coldata::Vector,
+                              nrow::Int, endian::Symbol)
+    ncol = length(cols)
+    types = CasaType[c.type for c in cols]
+    first_cells = ntuple(k -> coldata[k][1], ncol)
+    s = size(first_cells[1])
+    (all(c -> size(c) == s, first_cells) && !_undefined_shape(s)) || return nothing
+    cell = Dims(s)
+    planelen = prod(cell; init=1)
+    trow = _tsm_trow(cell, types, nrow)
+    tileshape = (cell..., trow)
+    cubeshape = (cell..., nrow)
+    bbytes, offs = _tile_layout(types, tileshape)
+    crow = max(1, TSM_STREAM_BYTES[] ÷ bbytes) * trow            # rows per chunk: whole tiles
+    final = joinpath(dir, "table.f$(sequ)_TSM1")
+    tmp = joinpath(dir, ".table.f$(sequ)_TSM1.tmp")
+    uniform = true
+    try
+        open(tmp, "w") do io
+            a = 1
+            while a <= nrow && uniform
+                b = min(nrow, a + crow - 1)
+                n = b - a + 1
+                chunks = ntuple(k -> coldata[k][a:b], ncol)
+                length(chunks[1]) == n || error("tiled copy: a column returned ", length(chunks[1]), " cells for ", n, " rows")
+                buf = zeros(UInt8, cld(n, trow) * bbytes)
+                for p in 0:n-1
+                    planes = ntuple(k -> chunks[k][p+1], ncol)
+                    if !all(c -> size(c) == s, planes)
+                        uniform = false; break
+                    end
+                    _pack_planes!(buf, (p ÷ trow) * bbytes, (p % trow) * planelen, planelen, types, offs,
+                                  ntuple(k -> vec(planes[k]), ncol), endian)
+                end
+                uniform && write(io, buf)
+                a = b + 1
+            end
+        end
+    catch
+        rm(tmp; force=true)
+        rethrow()
+    end
+    if !uniform
+        rm(tmp; force=true)
+        return nothing
+    end
+    mv(tmp, final; force=true)
+    files = _TSMFileSpec[_TSMFileSpec(false, 0, 0), _TSMFileSpec(true, 1, cld(nrow, trow) * bbytes)]
+    cubes = _TSMCubeSpec[_TSMCubeSpec((), (), -1, 0), _TSMCubeSpec(cubeshape, tileshape, 1, 0)]
+    _dmfile_write!(dir, "table.f$sequ",
+        _tiledshape_header_bytes(sequ, types, _hyper_name(cols), length(cell) + 1, cubes, files, tileshape,
+                                 [nrow - 1], [1], [nrow - 1], nrow, endian))
+    return UInt8[]
+end
+
 """
     write_tiledshapestman(dir, sequ, cols, coldata, nrow, endian) -> UInt8[]
 
@@ -682,6 +753,11 @@ Returns the empty table.dat column-set block.
 function write_tiledshapestman(dir::AbstractString, sequ::Int,
                                cols::Vector{<:ColumnDesc}, coldata::Vector,
                                nrow::Int, endian::Symbol)
+    if nrow > 0 && !isempty(coldata) && all(_is_lazy_column, coldata) && _can_stream_tiles(dir)
+        r = _write_tsm_streaming(dir, sequ, cols, coldata, nrow, endian)
+        r === nothing || return r
+    end
+    coldata = Any[_materialize_column(c) for c in coldata]
     ncol = length(cols)
     types = CasaType[c.type for c in cols]
 

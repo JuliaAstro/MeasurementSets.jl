@@ -776,7 +776,7 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
                           storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE)
     _check_nrow_limit(length(rows), "copytable")      # before any column is read
     descs = ColumnDesc[]
-    data = Vector{Any}[]
+    data = AbstractVector[]
     ism = Set{String}()
     tiled = Dict{Int,Vector{String}}()       # source sequ -> output column names (desc order)
     tiledkind = Dict{Int,String}()           # source sequ -> manager type string
@@ -809,8 +809,19 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
         catch
             push!(skipped, outname); continue
         end
+        dm0 = _source_dm(dmsrc, sc)
+        # Phase 469: a large tiled-shape column is not read up front; the writer pulls it a chunk of rows at a time
+        # (a table bigger than memory can then be copied).  One cell at each end is read here so a column that cannot
+        # be read is still skipped with a warning, as before.
+        lazy = storage === :sepfile && dm0 == "TiledShapeStMan" && rows isa AbstractUnitRange{<:Integer} &&
+               length(rows) >= TSM_STREAM_MIN_ROWS[] && col isa Column && !_is_engine_dm(dm0)
         vals = try
-            _read_cells(col, rows)
+            if lazy
+                col[first(rows)]; col[last(rows)]
+                RowsView(col, rows)
+            else
+                _read_cells(col, rows)
+            end
         catch
             push!(skipped, outname); continue
         end
@@ -867,7 +878,7 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
     for (sequ, names) in sort(collect(tiled); by = first)
         # zero rows have no cells to compare: uniform iff the column declares a
         # fixed cell shape (what a TiledColumnStMan needs)
-        uniform = all(names) do nm
+        uniform = tiledkind[sequ] == "TiledColumnStMan" && all(names) do nm      # (only a TiledColumnStMan needs it: don't scan a lazy column)
             r = _rows(nm)
             isempty(r) ? (d = descs[findfirst(d -> d.name == nm, descs)];
                           d.shape isa Dims && !isempty(d.shape)) :

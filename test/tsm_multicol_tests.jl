@@ -690,3 +690,56 @@ end
     @test_throws Exception edit(d) do t; t[:A][2] = zeros(Float32, 5, 5); end
     @test read(joinpath(d, first(filter(f -> occursin("_TSM", f), readdir(d))))) == before
 end
+
+# Phase 469: a tiled-shape column of a large copy is read, packed and appended to the tile file a chunk of rows at a
+# time (so a table bigger than memory can be copied).  The files must equal what the whole-column writer makes, for a
+# shared hypercube of mixed types, a row range, several chunks (small chunk size forced), a column whose cells differ
+# in shape (falls back to the whole-column path), a container (never streams), and leave no temporary file behind.
+@testset "tiled copy in chunks (Phase 469)" begin
+    rng = Random.MersenneTwister(469); n = 5000
+    A = [rand(rng, ComplexF32, 3, 4) for _ in 1:n]; F = [rand(rng, Bool, 3, 4) for _ in 1:n]; K = Int32.(1:n)
+    src = joinpath(mktempdir(), "s"); write_table(src, "T", ["K" => K, "A" => A, "F" => F]; nrow = n, tsm = [["A", "F"]])
+    st = readtable(src)
+    function copy_with(minrows, chunkbytes; rows = 1:n, kw...)
+        old = (MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[])
+        MSv2.TSM_STREAM_MIN_ROWS[] = minrows; MSv2.TSM_STREAM_BYTES[] = chunkbytes
+        try
+            d = joinpath(mktempdir(), "d"); copytable(d, st; rows = rows, kw...); return d
+        finally
+            MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[] = old
+        end
+    end
+    tilefiles(d) = sort(filter(f -> occursin("_TSM", f) || startswith(f, "table.f"), readdir(d)))
+    same(a, b) = tilefiles(a) == tilefiles(b) && all(read(joinpath(a, f)) == read(joinpath(b, f)) for f in tilefiles(a))
+    ref = copy_with(10^9, 64 << 20)                                   # whole columns
+    for chunk in (64 << 20, 40_000, 5_000)                            # one chunk, a few, many
+        s = copy_with(10, chunk)
+        @test same(s, ref)
+        @test isempty(filter(f -> endswith(f, ".tmp"), readdir(s; join = false)))
+    end
+    r = readtable(copy_with(10, 40_000))
+    @test column(r, "A")[:] == A && column(r, "F")[:] == F && column(r, "K")[:] == K
+    # a row range
+    refr = copy_with(10^9, 64 << 20; rows = 101:3100); sr = copy_with(10, 40_000; rows = 101:3100)
+    @test same(sr, refr) && column(readtable(sr), "A")[:] == A[101:3100]
+    # cells that differ in shape cannot stream: the whole-column writer takes over, no temporary file left
+    R = [rand(rng, Float32, 2, rand(rng, 1:3)) for _ in 1:n]
+    src2 = joinpath(mktempdir(), "s2"); write_table(src2, "T", ["R" => R]; nrow = n, tsm = [["R"]])
+    old = MSv2.TSM_STREAM_MIN_ROWS[]; MSv2.TSM_STREAM_MIN_ROWS[] = 10
+    d2 = joinpath(mktempdir(), "d2")
+    try; copytable(d2, readtable(src2)); finally; MSv2.TSM_STREAM_MIN_ROWS[] = old; end
+    @test column(readtable(d2), "R")[:] == R && isempty(filter(f -> endswith(f, ".tmp"), readdir(d2)))
+    # a container is never streamed
+    dm = copy_with(10, 40_000; storage = :multifile)
+    @test isfile(joinpath(dm, "table.mf")) && column(readtable(dm), "A")[:] == A
+    # the chunked path really is the one taken (and declines a ragged column)
+    cols = readtable(src).desc.columns; cd = [c for c in cols if c.name in ("A", "F")]
+    dd = mktempdir()
+    @test MSv2._write_tsm_streaming(dd, 7, cd, Any[MSv2.RowsView(column(st, "A"), 1:n), MSv2.RowsView(column(st, "F"), 1:n)], n, :little) == UInt8[]
+    @test isfile(joinpath(dd, "table.f7")) && isfile(joinpath(dd, "table.f7_TSM1"))
+    rt = readtable(src2); rcd = [c for c in rt.desc.columns if c.name == "R"]
+    @test MSv2._write_tsm_streaming(mktempdir(), 7, rcd, Any[MSv2.RowsView(column(rt, "R"), 1:n)], n, :little) === nothing
+    # RowsView
+    v = MSv2.RowsView(column(st, "K"), 11:20)
+    @test v == K[11:20] && v[3:5] == K[13:15] && size(v) == (10,) && length(MSv2.RowsView(column(st, "A"), 1:0)) == 0
+end

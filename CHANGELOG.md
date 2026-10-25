@@ -11527,3 +11527,18 @@ whole, then the tiled writer builds the complete tile file in memory before writ
 need on the order of 60-85 GB of memory. A copy that works in row chunks (reading, packing and appending a few
 hundred thousand rows at a time to the tile file, with the index written at the end) would remove that limit;
 it needs the tiled and SSM/ISM writers to accept appended chunks and is left as a candidate. No code change.
+
+### Phase 469 — copying a large table in chunks
+
+`copytable` / `copyms` of a plain table read every column whole and the tiled writer built the complete tile file in
+memory, so a copy needed 3-4 times the size of its output (Phase 468). A tiled-shape column (`DATA`, `FLAG`, ...) of
+100,000 rows or more is now handed to the writer as a lazy `RowsView` of the source column and written a chunk of
+rows at a time: each chunk (64 MiB of tile file, whole tiles) is read with one block decode, packed and appended to
+`.table.f<n>_TSM1.tmp`, which is renamed at the end, and only the small header is written last. The files are
+byte-identical to the whole-column writer's. A column whose cells differ in shape (or are undefined), a container
+(`storage=:multifile`), and a copy inside an edit commit fall back to the old path (the partial file is removed).
+Real MAIN table, rows copied -> peak resident memory: 400,000: 4.0 -> 2.2 GB, 3,000,000: 3.4 GB physical footprint
+(7 GB resident, of which 2.3 KB/row is the mapped source file) at 60,000 rows/s; the remaining memory grows by about
+1 KB per row (the other columns are still read whole: a whole 9.8-million-row MAIN would need about 11 GB instead
+of 60-85). Tests in `tsm_multicol_tests.jl` (several chunk sizes, a row range, shared hypercube of mixed types, ragged
+fallback, container, no leftover temporary file). Open: the same for the SSM/ISM scalar columns and `TiledColumnStMan`.
