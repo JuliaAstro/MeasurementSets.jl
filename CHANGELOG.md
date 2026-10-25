@@ -11580,3 +11580,9 @@ Ten tasks copying the same source table at once — whole, by row range, and thr
 thresholds lowered so every copy appends several chunks — plus readers on the source: every copy equals the serial
 result and no `.tmp` file is left (4 and 8 threads x 4 rounds, 16 threads x 10). `test/threads_copy_child.jl`, run from
 `robustness_tests.jl`.
+
+### Phase 474 — random differential test of `copytable` (no bug found)
+
+600 random tables (1-600 rows, 1-3 axis cells of seven element types, undefined cells, shared/single tiled-shape,
+`TiledColumnStMan` and scalar columns) copied whole and by random row range under random streaming thresholds (chunks of
+one tile up to the whole column) equal the selected source rows in every column. Seeded test in `tsm_multicol_tests.jl`.

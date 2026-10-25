@@ -773,3 +773,41 @@ end
     mixed = Any[[i == 2000 ? Float32[1] : Float32[] for i in 1:n]]
     @test MSv2._write_tsm_all_undefined(mktempdir(), 3, ed, Any[MSv2.RowsView(mixed[1], 1:n)], n, :little) === nothing
 end
+
+# Phase 474: random differential test of `copytable` (the chunked paths of Phases 469-471 included): random row counts,
+# cell shapes/types, undefined cells, shared/single tiled-shape, TiledColumnStMan and scalar columns, random row ranges and
+# random streaming thresholds (chunks of one tile up to the whole column).  The copy must equal the selected source rows.
+@testset "copytable: random tables, ranges and chunk sizes (Phase 474)" begin
+    rng = MersenneTwister(474)
+    saved = (MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[])
+    nbad = 0
+    try
+        for _ in 1:_fz(60)
+            N = rand(rng, [1, 2, 7, 33, 64, 100, 257])
+            MSv2.TSM_STREAM_MIN_ROWS[] = rand(rng, [1, 5, 50, 10^6]); MSv2.TSM_STREAM_BYTES[] = rand(rng, [1, 64, 600, 5000, 1 << 20])
+            shp = Tuple(rand(rng, 1:5, rand(rng, 1:3)))
+            T = rand(rng, [Float32, Float64, ComplexF32, Int32, Bool, Int16, UInt8])
+            mk() = rand(rng, T, shp...)
+            ur = rand(rng) < 0.3 ? Set(rand(rng, 1:N, rand(rng, 1:3))) : Set{Int}()
+            A = [i in ur ? Array{T}(undef, ntuple(_ -> 0, length(shp))...) : mk() for i in 1:N]
+            B = [mk() for _ in 1:N]
+            cols = Pair{String,Any}["K" => Int32.(rand(rng, 1:5, N)), "S" => [randstring(rng, rand(rng, 0:30)) for _ in 1:N], "UV" => [rand(rng, 3) for _ in 1:N]]
+            kw = Dict{Symbol,Any}(:tcm => [["UV"]])
+            kind = isempty(ur) ? rand(rng, [:tsm2, :tsm1, :tcm, :none]) : rand(rng, [:tsm1, :none])
+            kind == :tsm2 && (push!(cols, "A" => A, "B" => B); kw[:tsm] = [["A", "B"]])
+            kind == :tsm1 && (push!(cols, "A" => A); kw[:tsm] = [["A"]])
+            kind == :tcm && (push!(cols, "B" => B); kw[:tcm] = [["UV"], ["B"]])
+            d = joinpath(mktempdir(), "t"); write_table(d, "T", cols; nrow=N, kw...)
+            t = readtable(d)
+            a = rand(rng, 1:N); rows = rand(rng) < 0.5 ? (1:N) : (a:rand(rng, a:N))
+            dst = joinpath(mktempdir(), "o"); copytable(dst, t; rows)
+            u = readtable(dst)
+            for c in MSv2.columnnames(t)
+                collect(column(t, c)[:])[collect(rows)] == collect(column(u, c)[:]) || (nbad += 1)
+            end
+        end
+    finally
+        MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[] = saved
+    end
+    @test nbad == 0
+end
