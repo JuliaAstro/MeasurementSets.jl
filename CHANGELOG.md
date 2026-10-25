@@ -11542,3 +11542,14 @@ Real MAIN table, rows copied -> peak resident memory: 400,000: 4.0 -> 2.2 GB, 3,
 1 KB per row (the other columns are still read whole: a whole 9.8-million-row MAIN would need about 11 GB instead
 of 60-85). Tests in `tsm_multicol_tests.jl` (several chunk sizes, a row range, shared hypercube of mixed types, ragged
 fallback, container, no leftover temporary file). Open: the same for the SSM/ISM scalar columns and `TiledColumnStMan`.
+
+### Phase 470 — the chunked copy covers `TiledColumnStMan` and never-written tiled columns
+
+Phase 469 streamed only `TiledShapeStMan` groups that have a defined cell. The real MAIN table's `UVW`
+(`TiledColumnStMan`) was still read whole, and `FLAG_CATEGORY` / `WEIGHT_SPECTRUM` (declared, never written: every
+cell undefined) were materialised as millions of empty arrays. The tile-file loop is shared (`_stream_tilefile!`) and
+`UVW`-style columns stream to `table.f<n>_TSM0`; a group in which no cell is defined is checked a million rows at a time
+and written as a header with no cube (`_write_tsm_all_undefined`; a defined cell found anywhere declines to the old
+path). Copying 150,000 rows of the real MAIN with and without streaming gives byte-identical files in every table
+directory. Physical footprint copying 3,000,000 rows: 3.4 -> 2.5 GB (about 0.8 KB per row, the scalar columns and
+their writers); 66,000 rows/s. Tests in `tsm_multicol_tests.jl`.

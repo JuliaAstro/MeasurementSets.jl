@@ -743,3 +743,33 @@ end
     v = MSv2.RowsView(column(st, "K"), 11:20)
     @test v == K[11:20] && v[3:5] == K[13:15] && size(v) == (10,) && length(MSv2.RowsView(column(st, "A"), 1:0)) == 0
 end
+
+# Phase 470: the chunked copy also covers a TiledColumnStMan (UVW) and a group in which no cell is defined
+# (FLAG_CATEGORY / WEIGHT_SPECTRUM of a real MS); files byte-identical to the whole-column writer's.
+@testset "tiled copy in chunks: TiledColumnStMan and undefined columns (Phase 470)" begin
+    rng = Random.MersenneTwister(470); n = 3000
+    U = [rand(rng, 3) for _ in 1:n]; V = [rand(rng, Float32, 2, 2) for _ in 1:n]; E = [Float32[] for _ in 1:n]
+    src = joinpath(mktempdir(), "s")
+    write_table(src, "T", ["U" => U, "V" => V, "E" => E]; nrow = n, tcm = [["U"]], tsm = [["V"], ["E"]])
+    st = readtable(src)
+    function cp(minrows, chunk)
+        old = (MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[])
+        MSv2.TSM_STREAM_MIN_ROWS[] = minrows; MSv2.TSM_STREAM_BYTES[] = chunk
+        try; d = joinpath(mktempdir(), "d"); copytable(d, st); return d
+        finally; MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[] = old; end
+    end
+    files(d) = sort(filter(f -> startswith(f, "table.f"), readdir(d)))
+    ref = cp(10^9, 64 << 20); s = cp(10, 20_000)
+    @test files(s) == files(ref) && all(read(joinpath(s, f)) == read(joinpath(ref, f)) for f in files(ref))
+    @test isempty(filter(f -> endswith(f, ".tmp"), readdir(s)))
+    r = readtable(s)
+    @test column(r, "U")[:] == U && column(r, "V")[:] == V && length(column(r, "E")[:]) == n && all(isempty, column(r, "E")[:])
+    # the streaming writers themselves
+    cd = [c for c in st.desc.columns if c.name == "U"]
+    @test MSv2._write_tcm_streaming(mktempdir(), 3, cd, Any[MSv2.RowsView(column(st, "U"), 1:n)], n, :little) == UInt8[]
+    ed = [c for c in st.desc.columns if c.name == "E"]
+    @test MSv2._write_tsm_streaming(mktempdir(), 3, ed, Any[MSv2.RowsView(column(st, "E"), 1:n)], n, :little) == UInt8[]
+    # an all-undefined scan finds a defined cell: declines
+    mixed = Any[[i == 2000 ? Float32[1] : Float32[] for i in 1:n]]
+    @test MSv2._write_tsm_all_undefined(mktempdir(), 3, ed, Any[MSv2.RowsView(mixed[1], 1:n)], n, :little) === nothing
+end

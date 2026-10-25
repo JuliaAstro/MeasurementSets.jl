@@ -813,7 +813,7 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
         # Phase 469: a large tiled-shape column is not read up front; the writer pulls it a chunk of rows at a time
         # (a table bigger than memory can then be copied).  One cell at each end is read here so a column that cannot
         # be read is still skipped with a warning, as before.
-        lazy = storage === :sepfile && dm0 == "TiledShapeStMan" && rows isa AbstractUnitRange{<:Integer} &&
+        lazy = storage === :sepfile && dm0 in ("TiledShapeStMan", "TiledColumnStMan") && rows isa AbstractUnitRange{<:Integer} &&
                length(rows) >= TSM_STREAM_MIN_ROWS[] && col isa Column && !_is_engine_dm(dm0)
         vals = try
             if lazy
@@ -878,8 +878,9 @@ function _copy_table_cols(dir::AbstractString, dmsrc::Table, valsrc::AbstractTab
     for (sequ, names) in sort(collect(tiled); by = first)
         # zero rows have no cells to compare: uniform iff the column declares a
         # fixed cell shape (what a TiledColumnStMan needs)
-        uniform = tiledkind[sequ] == "TiledColumnStMan" && all(names) do nm      # (only a TiledColumnStMan needs it: don't scan a lazy column)
+        uniform = tiledkind[sequ] == "TiledColumnStMan" && all(names) do nm      # (only a TiledColumnStMan needs it)
             r = _rows(nm)
+            r isa Vector || return true            # a lazy column (Phase 469): a TiledColumnStMan's cells all have its one fixed shape
             isempty(r) ? (d = descs[findfirst(d -> d.name == nm, descs)];
                           d.shape isa Dims && !isempty(d.shape)) :
                          length(unique(size.(r))) == 1
