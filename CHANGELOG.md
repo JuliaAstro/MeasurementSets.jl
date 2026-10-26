@@ -11586,3 +11586,10 @@ result and no `.tmp` file is left (4 and 8 threads x 4 rounds, 16 threads x 10).
 600 random tables (1-600 rows, 1-3 axis cells of seven element types, undefined cells, shared/single tiled-shape,
 `TiledColumnStMan` and scalar columns) copied whole and by random row range under random streaming thresholds (chunks of
 one tile up to the whole column) equal the selected source rows in every column. Seeded test in `tsm_multicol_tests.jl`.
+
+### Phase 475 — static analysis (JET) pass; junk `taql` target
+
+`JET.report_package` gives 283 reports (251 in Phase 399); the growth is `match(...)` results used without a `nothing`
+check in the `taql()` command parser, which cannot fail because the regex has just matched. One report was real:
+`taql(nothing, "UPDATE ...")` (or a number as the target) raised a bare `MethodError` deep inside; it is now an
+`ArgumentError` naming the problem. Test in `taql_command_tests.jl`.

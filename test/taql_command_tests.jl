@@ -2090,3 +2090,12 @@ end
         end
     end
 end
+
+# Phase 475 (JET): a target that is not a path or a table (nothing, a number) gave a bare MethodError.
+@testset "taql: a junk target is an ArgumentError (Phase 475)" begin
+    for t in (nothing, 5, :x), c in ("UPDATE t SET A=1", "DELETE FROM t", "INSERT INTO t SET A=1", "SELECT FROM t", "ALTER TABLE t DROP COLUMN A")
+        @test_throws ArgumentError taql(t, c)
+    end
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["A" => Int32.(1:3)]; nrow=3)
+    @test taql(d, "UPDATE t SET A = 9 WHERE A == 1") == 1                # real targets still work
+end
