@@ -529,3 +529,27 @@ end
         @test column(t3, "S")[:] == vcat(S3, ["", ""])
     end
 end
+
+# Phase 477: IncrementalStMan files of several buckets: row counts around the points where the number of buckets changes
+# (columns that change on every row, so buckets fill by size), read by us / Casacore.jl, edited in place and extended.
+@testset "ISM multi-bucket boundary sweep and edits (Phase 477)" begin
+    rng = MersenneTwister(477)
+    for N in vcat(collect(2640:2.:2700), collect(5380:5.:5420), [8100])
+        N = Int(N)
+        d = joinpath(mktempdir(), "t")
+        X = Int32.(1:N); Y = rand(rng, N); R = Int32.(rand(rng, 1:3, N))
+        write_table(d, "T", Pair{String,Any}["X" => X, "Y" => Y, "R" => R]; nrow=N, ism=["X", "Y", "R"])
+        t = readtable(d)
+        @test column(t, "X")[:] == X && column(t, "Y")[:] == Y && column(t, "R")[:] == R
+        idx = sort(unique(vcat(rand(rng, 1:N, 10), 1, N)))
+        edit(d) do e; for i in idx; e[:X][i] = Int32(-i); e[:R][i] = Int32(9); end; end
+        for i in idx; X[i] = Int32(-i); R[i] = Int32(9); end
+        edit(d) do e; addrows!(e, 2); end
+        t = readtable(d)
+        @test MSv2.nrow(t) == N + 2 && column(t, "X")[1:N] == X && column(t, "R")[1:N] == R && column(t, "Y")[1:N] == Y
+        if _HAVE_CASACORE
+            c = joinpath(mktempdir(), "c"); cp(d, c); u = CCT.Table(c)
+            @test collect(u[:X][1:N]) == X && collect(u[:R][1:N]) == R
+        end
+    end
+end

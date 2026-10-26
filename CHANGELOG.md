@@ -11600,3 +11600,9 @@ The index of a long `StandardStMan` table is chained over several index buckets 
 512-byte buckets, so the chain starts near 60,000 rows. 408 tables of 5-140 x 1024 rows (+-1), both byte orders, read by
 us and (every seventh, with 100,000 rows) by Casacore.jl, and 10 tables edited in place (cell patches, `addrows!`) all
 agree. Seeded test in `ssm_tests.jl`.
+
+### Phase 477 — IncrementalStMan multi-bucket boundary sweep (no bug found)
+
+803 tables of 2,500-8,200 rows with columns that change on every row (3 to 10 buckets, buckets filled by size), read by us
+and (every 13th) Casacore.jl, and every 7th edited in place and extended with `addrows!` (also read by Casacore.jl): all
+agree. Seeded test in `ism_writer_tests.jl`.
