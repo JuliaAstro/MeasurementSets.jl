@@ -11593,3 +11593,10 @@ one tile up to the whole column) equal the selected source rows in every column.
 check in the `taql()` command parser, which cannot fail because the regex has just matched. One report was real:
 `taql(nothing, "UPDATE ...")` (or a number as the target) raised a bare `MethodError` deep inside; it is now an
 `ArgumentError` naming the problem. Test in `taql_command_tests.jl`.
+
+### Phase 476 — chained SSM index buckets: boundary sweep (no bug found)
+
+The index of a long `StandardStMan` table is chained over several index buckets (Phase 451); a one-Bool-column table has
+512-byte buckets, so the chain starts near 60,000 rows. 408 tables of 5-140 x 1024 rows (+-1), both byte orders, read by
+us and (every seventh, with 100,000 rows) by Casacore.jl, and 10 tables edited in place (cell patches, `addrows!`) all
+agree. Seeded test in `ssm_tests.jl`.
