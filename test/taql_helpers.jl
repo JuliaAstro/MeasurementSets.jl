@@ -13,6 +13,20 @@
 const _FUZZ_SCALE = clamp(something(tryparse(Float64, get(ENV, "MS_TEST_FUZZ_SCALE", "1")), 1.0), 0.05, 1.0)
 _fz(n::Integer) = max(1, round(Int, n * _FUZZ_SCALE))
 
+# Phase 466: whether real IERS Earth-orientation data can be had (EarthOrientation downloads `finals2000A` on first
+# use).  datacenter.iers.org rejected every request on 2026-10-25 (HTTP 400, from a laptop and a container alike), which
+# made three tests that compare against values computed with real dUT1 / polar motion fail for a reason outside the
+# package.  Those assertions run only when a 2024 date returns real values.
+const _HAVE_EOP = try
+    @eval import SOFA, EarthOrientation
+    ext = Base.get_extension(MSv2, :EarthOrientationExt)
+    r = ext._eop_lookup(60454.0)
+    !(r.dut1 == 0.0 && r.xp == 0.0 && r.yp == 0.0)
+catch
+    false
+end
+_HAVE_EOP || @info "No IERS Earth-orientation data; skipping the assertions that need real dUT1 / polar motion"
+
 const _HAVE_TAQL = _HAVE_CASACORE && try
     @eval import CxxWrap
     true

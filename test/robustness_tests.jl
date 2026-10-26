@@ -383,6 +383,21 @@ end
   end
 end
 
+# Phase 473: the chunked copy of Phases 469-471 under many tasks -- the same source table copied whole, by row range and
+# through a selection by several tasks at once (streaming thresholds lowered), with readers on the source.  Every copy
+# equals the serial result and no `.tmp` file is left.  No race found (4, 8 threads x 4 rounds, 16 x 10).
+@testset "parallel chunked copies of one table (Phase 473)" begin
+  if !_threads_usable()
+    @info "skipping: multi-threaded Julia is unreliable under Rosetta emulation (an x86-64 container on Apple silicon)"
+  else
+    child = joinpath(@__DIR__, "threads_copy_child.jl")
+    out = IOBuffer()
+    r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) -t 4 --project=$(dirname(@__DIR__)) --startup-file=no $child 2`); stdout=out, stderr=out))
+    @test r.exitcode == 0
+    @test occursin("ALL OK", String(take!(out)))
+  end
+end
+
 # Phase 394: a table that is no longer referenced is garbage collected.  The opened data managers (with their
 # mmaps and whole-file buffers) were kept in a global `IdDict{Table,...}`, so every table ever read -- and
 # everything it had opened -- stayed alive for the life of the process (2000 opens leaked 1.6 GB).  The cache

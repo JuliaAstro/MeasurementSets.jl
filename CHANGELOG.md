@@ -11501,3 +11501,88 @@ row. A scalar aggregate argument (`gmean(mean(A))`, `gsum(X*2)`, `gmax(A[1,2])`,
 every row that survived `where`, in row order, and each group takes its values from that (`_prime_aggrs!`;
 array-valued arguments such as `gmeans(A)` are not kept per row and behave as before). 100,000 rows, 50 groups:
 80 -> 21 ms. Test in `taql_query_tests.jl` against direct computations (several aggregates, WHERE, HAVING, ROLLUP).
+
+### Phase 466 — tests that need real IERS data skip when it cannot be downloaded
+
+On 2026-10-25 `datacenter.iers.org` answered every request with HTTP 400 ("Request Rejected", from a laptop and from
+a container alike), so `EarthOrientation` could not fetch `finals2000A` and its cache file was overwritten by the
+error page. Three assertions compare against values computed with real dUT1 / polar motion (the `EarthOrientationExt`
+in-range lookup of Phase 220, `meas.last` of Phase 249, the random `meas.epoch` sidereal comparison of Phase 344) and
+failed for a reason outside the package. The test helpers now define `_HAVE_EOP` (a 2024 date returns real values)
+and those assertions run only then; the zero-fallback assertions still run. No change to `src/`.
+
+### Phase 467 — the nightly CI job no longer fails the run
+
+The Julia `pre` (1.14) job failed on the Phase 457-465 merge after 2.5 minutes: the test-only dependency Casacore.jl
+does not precompile there (`casacorecxx_jll` has no `get_libcasacorecxx_path`). It is upstream, so the job is now
+`continue-on-error` (still run, still visible, no longer decides whether the workflow is red). No change to `src/`.
+
+### Phase 468 — copying the real MAIN table: time and memory at scale (investigation only)
+
+`copyms` of the first 200,000 / 400,000 / 800,000 rows of the real ALMA MAIN table (2 KB of DATA per row):
+10 s / 13-17 s / 20 s (20,000-40,000 rows/s, so about 5-8 minutes for all 9.8 million rows) and the copy reads
+back equal. Peak resident memory was 2.3 / 3.8 / 6.9 GB, i.e. about 3-4 times the size of the output and linear in the
+rows (a `--heap-size-hint` of 1 GB or 3 GB changed it by 5%, so it is live data, not garbage): every column is read
+whole, then the tiled writer builds the complete tile file in memory before writing it. Copying a whole 20 GB MS would
+need on the order of 60-85 GB of memory. A copy that works in row chunks (reading, packing and appending a few
+hundred thousand rows at a time to the tile file, with the index written at the end) would remove that limit;
+it needs the tiled and SSM/ISM writers to accept appended chunks and is left as a candidate. No code change.
+
+### Phase 469 — copying a large table in chunks
+
+`copytable` / `copyms` of a plain table read every column whole and the tiled writer built the complete tile file in
+memory, so a copy needed 3-4 times the size of its output (Phase 468). A tiled-shape column (`DATA`, `FLAG`, ...) of
+100,000 rows or more is now handed to the writer as a lazy `RowsView` of the source column and written a chunk of
+rows at a time: each chunk (64 MiB of tile file, whole tiles) is read with one block decode, packed and appended to
+`.table.f<n>_TSM1.tmp`, which is renamed at the end, and only the small header is written last. The files are
+byte-identical to the whole-column writer's. A column whose cells differ in shape (or are undefined), a container
+(`storage=:multifile`), and a copy inside an edit commit fall back to the old path (the partial file is removed).
+Real MAIN table, rows copied -> peak resident memory: 400,000: 4.0 -> 2.2 GB, 3,000,000: 3.4 GB physical footprint
+(7 GB resident, of which 2.3 KB/row is the mapped source file) at 60,000 rows/s; the remaining memory grows by about
+1 KB per row (the other columns are still read whole: a whole 9.8-million-row MAIN would need about 11 GB instead
+of 60-85). Tests in `tsm_multicol_tests.jl` (several chunk sizes, a row range, shared hypercube of mixed types, ragged
+fallback, container, no leftover temporary file). Open: the same for the SSM/ISM scalar columns and `TiledColumnStMan`.
+
+### Phase 470 — the chunked copy covers `TiledColumnStMan` and never-written tiled columns
+
+Phase 469 streamed only `TiledShapeStMan` groups that have a defined cell. The real MAIN table's `UVW`
+(`TiledColumnStMan`) was still read whole, and `FLAG_CATEGORY` / `WEIGHT_SPECTRUM` (declared, never written: every
+cell undefined) were materialised as millions of empty arrays. The tile-file loop is shared (`_stream_tilefile!`) and
+`UVW`-style columns stream to `table.f<n>_TSM0`; a group in which no cell is defined is checked a million rows at a time
+and written as a header with no cube (`_write_tsm_all_undefined`; a defined cell found anywhere declines to the old
+path). Copying 150,000 rows of the real MAIN with and without streaming gives byte-identical files in every table
+directory. Physical footprint copying 3,000,000 rows: 3.4 -> 2.5 GB (about 0.8 KB per row, the scalar columns and
+their writers); 66,000 rows/s. Tests in `tsm_multicol_tests.jl`.
+
+### Phase 471 — partial copies keep the element type of scalar columns
+
+`copytable(...; rows = 1:n)` of a scalar column (and the rows of a `RefTable` selection) built a `Vector{Any}` of
+boxed values (8-24 bytes a cell) and used the writers' slow generic loops; only a copy of the whole column kept its
+type. A range or selection of a scalar column now comes from the column's own typed `getindex`, so the writers see a
+`Vector{Int32}` / `Vector{Float64}` / ... . Output files are byte-identical (checked on the real MAIN); 3,000,000 rows
+of the real MAIN: physical footprint 2.5 -> 2.2 GB, 66,000 -> 77,000 rows/s (with `--heap-size-hint=600M`: 1.5 GB).
+`docs/src/performance.md` has a section on copying large tables. Test in `writer_tests.jl`.
+
+### Phase 472 — corruption fuzz of the chunked copy (no bug found)
+
+The streaming copy of Phases 469-471 reads tiled files through lazy `RowsView` columns and appends whole-tile chunks to
+a `.tmp` file, so a corrupted tile header or tile file reaches code the earlier fuzzes (Phases 376, 431, 442) never
+drove. 8 seeds x 150 randomly corrupted tiled tables (a shared hypercube, a `TiledColumnStMan`, an all-undefined
+`TiledCellStMan`; chunks forced to a few rows) and every 4-byte word of the three tiled headers set to five extreme
+values (18,360 tables), each copied whole and as a row range: every copy either worked or raised an ordinary error —
+no crash, no run-away allocation, no hang, and a failed copy leaves no directory (nor `.tmp` file) behind. The fuzz
+child (`test/corrupt_fuzz_child.jl`) gained `copy` and `copywords` modes, run from `corrupt_tests.jl`; its random mode
+now skips empty files.
+
+### Phase 473 — thread stress of the chunked copy (no bug found)
+
+Ten tasks copying the same source table at once — whole, by row range, and through a selection, with the streaming
+thresholds lowered so every copy appends several chunks — plus readers on the source: every copy equals the serial
+result and no `.tmp` file is left (4 and 8 threads x 4 rounds, 16 threads x 10). `test/threads_copy_child.jl`, run from
+`robustness_tests.jl`.
+
+### Phase 474 — random differential test of `copytable` (no bug found)
+
+600 random tables (1-600 rows, 1-3 axis cells of seven element types, undefined cells, shared/single tiled-shape,
+`TiledColumnStMan` and scalar columns) copied whole and by random row range under random streaming thresholds (chunks of
+one tile up to the whole column) equal the selected source rows in every column. Seeded test in `tsm_multicol_tests.jl`.

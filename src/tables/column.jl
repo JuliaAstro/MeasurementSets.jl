@@ -441,6 +441,13 @@ function _read_cells(c::AbstractVector, r)
     if full && vals isa Vector && eltype(vals) <: Union{Number,AbstractString} && isconcretetype(eltype(vals))
         return vals
     end
+    # Phase 471: a row range / selection of a scalar column keeps its element type too (the column's own `getindex` of
+    # a vector of rows), instead of one boxed `Any` per cell (8-24 bytes each, and the writers' slow generic loops)
+    T = eltype(c)
+    if r isa AbstractVector{<:Integer} && isconcretetype(T) && T <: Union{Number,AbstractString}
+        out = c[r]
+        out isa Vector{T} && return out
+    end
     out = Vector{Any}(undef, length(r))
     @inbounds for (k, v) in enumerate(vals)
         out[k] = v isa AbstractArray ? Array(v) : v
@@ -542,3 +549,25 @@ const _ReadOnlyColumn = Union{Column,BlockColumn,MappedColumn,ConcatColumn}
 Base.setindex!(c::_ReadOnlyColumn, v, i...) = throw(ArgumentError(
     "columns read from a table are read-only; change the data in an edit session: " *
     "edit(path) do t; t[:COLUMN][i] = value; end"))
+
+# --- a row range of a column, read lazily (Phase 469) ---------------------------------------------------------------
+
+"""
+    RowsView(col, rows)
+
+The cells `rows` (a `UnitRange`) of the lazy column `col`, not read until asked for.  A slice of it is one slice of the
+source (`col[a:b]`, a block decode for a tiled column), which lets the tiled writer copy a table far larger than memory
+a chunk of rows at a time.
+"""
+struct RowsView{T,C<:AbstractVector{T}} <: AbstractVector{T}
+    col::C
+    rows::UnitRange{Int}
+end
+RowsView(col::C, rows::AbstractUnitRange{<:Integer}) where {T,C<:AbstractVector{T}} = RowsView{T,C}(col, UnitRange{Int}(rows))
+Base.size(v::RowsView) = (length(v.rows),)
+Base.getindex(v::RowsView, i::Int) = (@boundscheck checkbounds(v, i); v.col[first(v.rows) + i - 1])
+function Base.getindex(v::RowsView, q::AbstractUnitRange{<:Integer})
+    checkbounds(v, q)
+    o = first(v.rows) - 1
+    return v.col[(o + first(q)):(o + last(q))]
+end

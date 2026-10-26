@@ -4184,7 +4184,7 @@ end
         @test ev("meas.app([1.2, 0.5], 'J2000', 60454.0*86400, 'VLA')") ≈ ev("meas.app([1.2, 0.5], 'J2000', 60454.0*86400)")
         @test ev("meas.j2000([1.2, 0.5], 'AZEL', 60454.0*86400, 'VLA')") ≈       # source frame needs epoch+pos
               [-2.633725693988767, 0.5622498577253711] atol = 5e-5
-        @test ev("meas.last(60454.0*86400, 'VLA')") ≈ 32271.87519581057 atol = 1e-2   # seconds
+        _HAVE_EOP && @test ev("meas.last(60454.0*86400, 'VLA')") ≈ 32271.87519581057 atol = 1e-2   # seconds (real dUT1)
     end
 
     if _HAVE_TAQL && Base.get_extension(MSv2, :SOFAExt) !== nothing
@@ -5128,7 +5128,7 @@ end
         @test ev("meas.epoch('LAST', 5.2e9, 'UTC', 'VLA')") != ev("meas.epoch('GAST', 5.2e9)")
         # the local sidereal time differs from the Greenwich one by the observatory longitude (in seconds of sidereal day)
         @test ev("meas.epoch('GMST1', 5.2e9)") ≈ ev("meas.epoch('LMST', 5.2e9, 'UTC', [6378137.0, 0.0, 0.0])") atol = 1e-6
-        if _HAVE_TAQL
+        if _HAVE_TAQL && _HAVE_EOP
             cref(e) = collect(_taqlcmd("SELECT $e AS V FROM \$1", dir)[:V][:])[1]
             rng = MersenneTwister(344)
             scales = ["UTC", "TAI", "TT", "TDT", "TDB", "UT1", "GMST1", "GAST", "LMST", "LAST"]

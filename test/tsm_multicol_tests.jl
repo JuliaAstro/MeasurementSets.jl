@@ -690,3 +690,124 @@ end
     @test_throws Exception edit(d) do t; t[:A][2] = zeros(Float32, 5, 5); end
     @test read(joinpath(d, first(filter(f -> occursin("_TSM", f), readdir(d))))) == before
 end
+
+# Phase 469: a tiled-shape column of a large copy is read, packed and appended to the tile file a chunk of rows at a
+# time (so a table bigger than memory can be copied).  The files must equal what the whole-column writer makes, for a
+# shared hypercube of mixed types, a row range, several chunks (small chunk size forced), a column whose cells differ
+# in shape (falls back to the whole-column path), a container (never streams), and leave no temporary file behind.
+@testset "tiled copy in chunks (Phase 469)" begin
+    rng = Random.MersenneTwister(469); n = 5000
+    A = [rand(rng, ComplexF32, 3, 4) for _ in 1:n]; F = [rand(rng, Bool, 3, 4) for _ in 1:n]; K = Int32.(1:n)
+    src = joinpath(mktempdir(), "s"); write_table(src, "T", ["K" => K, "A" => A, "F" => F]; nrow = n, tsm = [["A", "F"]])
+    st = readtable(src)
+    function copy_with(minrows, chunkbytes; rows = 1:n, kw...)
+        old = (MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[])
+        MSv2.TSM_STREAM_MIN_ROWS[] = minrows; MSv2.TSM_STREAM_BYTES[] = chunkbytes
+        try
+            d = joinpath(mktempdir(), "d"); copytable(d, st; rows = rows, kw...); return d
+        finally
+            MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[] = old
+        end
+    end
+    tilefiles(d) = sort(filter(f -> occursin("_TSM", f) || startswith(f, "table.f"), readdir(d)))
+    same(a, b) = tilefiles(a) == tilefiles(b) && all(read(joinpath(a, f)) == read(joinpath(b, f)) for f in tilefiles(a))
+    ref = copy_with(10^9, 64 << 20)                                   # whole columns
+    for chunk in (64 << 20, 40_000, 5_000)                            # one chunk, a few, many
+        s = copy_with(10, chunk)
+        @test same(s, ref)
+        @test isempty(filter(f -> endswith(f, ".tmp"), readdir(s; join = false)))
+    end
+    r = readtable(copy_with(10, 40_000))
+    @test column(r, "A")[:] == A && column(r, "F")[:] == F && column(r, "K")[:] == K
+    # a row range
+    refr = copy_with(10^9, 64 << 20; rows = 101:3100); sr = copy_with(10, 40_000; rows = 101:3100)
+    @test same(sr, refr) && column(readtable(sr), "A")[:] == A[101:3100]
+    # cells that differ in shape cannot stream: the whole-column writer takes over, no temporary file left
+    R = [rand(rng, Float32, 2, rand(rng, 1:3)) for _ in 1:n]
+    src2 = joinpath(mktempdir(), "s2"); write_table(src2, "T", ["R" => R]; nrow = n, tsm = [["R"]])
+    old = MSv2.TSM_STREAM_MIN_ROWS[]; MSv2.TSM_STREAM_MIN_ROWS[] = 10
+    d2 = joinpath(mktempdir(), "d2")
+    try; copytable(d2, readtable(src2)); finally; MSv2.TSM_STREAM_MIN_ROWS[] = old; end
+    @test column(readtable(d2), "R")[:] == R && isempty(filter(f -> endswith(f, ".tmp"), readdir(d2)))
+    # a container is never streamed
+    dm = copy_with(10, 40_000; storage = :multifile)
+    @test isfile(joinpath(dm, "table.mf")) && column(readtable(dm), "A")[:] == A
+    # the chunked path really is the one taken (and declines a ragged column)
+    cols = readtable(src).desc.columns; cd = [c for c in cols if c.name in ("A", "F")]
+    dd = mktempdir()
+    @test MSv2._write_tsm_streaming(dd, 7, cd, Any[MSv2.RowsView(column(st, "A"), 1:n), MSv2.RowsView(column(st, "F"), 1:n)], n, :little) == UInt8[]
+    @test isfile(joinpath(dd, "table.f7")) && isfile(joinpath(dd, "table.f7_TSM1"))
+    rt = readtable(src2); rcd = [c for c in rt.desc.columns if c.name == "R"]
+    @test MSv2._write_tsm_streaming(mktempdir(), 7, rcd, Any[MSv2.RowsView(column(rt, "R"), 1:n)], n, :little) === nothing
+    # RowsView
+    v = MSv2.RowsView(column(st, "K"), 11:20)
+    @test v == K[11:20] && v[3:5] == K[13:15] && size(v) == (10,) && length(MSv2.RowsView(column(st, "A"), 1:0)) == 0
+end
+
+# Phase 470: the chunked copy also covers a TiledColumnStMan (UVW) and a group in which no cell is defined
+# (FLAG_CATEGORY / WEIGHT_SPECTRUM of a real MS); files byte-identical to the whole-column writer's.
+@testset "tiled copy in chunks: TiledColumnStMan and undefined columns (Phase 470)" begin
+    rng = Random.MersenneTwister(470); n = 3000
+    U = [rand(rng, 3) for _ in 1:n]; V = [rand(rng, Float32, 2, 2) for _ in 1:n]; E = [Float32[] for _ in 1:n]
+    src = joinpath(mktempdir(), "s")
+    write_table(src, "T", ["U" => U, "V" => V, "E" => E]; nrow = n, tcm = [["U"]], tsm = [["V"], ["E"]])
+    st = readtable(src)
+    function cp(minrows, chunk)
+        old = (MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[])
+        MSv2.TSM_STREAM_MIN_ROWS[] = minrows; MSv2.TSM_STREAM_BYTES[] = chunk
+        try; d = joinpath(mktempdir(), "d"); copytable(d, st); return d
+        finally; MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[] = old; end
+    end
+    files(d) = sort(filter(f -> startswith(f, "table.f"), readdir(d)))
+    ref = cp(10^9, 64 << 20); s = cp(10, 20_000)
+    @test files(s) == files(ref) && all(read(joinpath(s, f)) == read(joinpath(ref, f)) for f in files(ref))
+    @test isempty(filter(f -> endswith(f, ".tmp"), readdir(s)))
+    r = readtable(s)
+    @test column(r, "U")[:] == U && column(r, "V")[:] == V && length(column(r, "E")[:]) == n && all(isempty, column(r, "E")[:])
+    # the streaming writers themselves
+    cd = [c for c in st.desc.columns if c.name == "U"]
+    @test MSv2._write_tcm_streaming(mktempdir(), 3, cd, Any[MSv2.RowsView(column(st, "U"), 1:n)], n, :little) == UInt8[]
+    ed = [c for c in st.desc.columns if c.name == "E"]
+    @test MSv2._write_tsm_streaming(mktempdir(), 3, ed, Any[MSv2.RowsView(column(st, "E"), 1:n)], n, :little) == UInt8[]
+    # an all-undefined scan finds a defined cell: declines
+    mixed = Any[[i == 2000 ? Float32[1] : Float32[] for i in 1:n]]
+    @test MSv2._write_tsm_all_undefined(mktempdir(), 3, ed, Any[MSv2.RowsView(mixed[1], 1:n)], n, :little) === nothing
+end
+
+# Phase 474: random differential test of `copytable` (the chunked paths of Phases 469-471 included): random row counts,
+# cell shapes/types, undefined cells, shared/single tiled-shape, TiledColumnStMan and scalar columns, random row ranges and
+# random streaming thresholds (chunks of one tile up to the whole column).  The copy must equal the selected source rows.
+@testset "copytable: random tables, ranges and chunk sizes (Phase 474)" begin
+    rng = MersenneTwister(474)
+    saved = (MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[])
+    nbad = 0
+    try
+        for _ in 1:_fz(60)
+            N = rand(rng, [1, 2, 7, 33, 64, 100, 257])
+            MSv2.TSM_STREAM_MIN_ROWS[] = rand(rng, [1, 5, 50, 10^6]); MSv2.TSM_STREAM_BYTES[] = rand(rng, [1, 64, 600, 5000, 1 << 20])
+            shp = Tuple(rand(rng, 1:5, rand(rng, 1:3)))
+            T = rand(rng, [Float32, Float64, ComplexF32, Int32, Bool, Int16, UInt8])
+            mk() = rand(rng, T, shp...)
+            ur = rand(rng) < 0.3 ? Set(rand(rng, 1:N, rand(rng, 1:3))) : Set{Int}()
+            A = [i in ur ? Array{T}(undef, ntuple(_ -> 0, length(shp))...) : mk() for i in 1:N]
+            B = [mk() for _ in 1:N]
+            cols = Pair{String,Any}["K" => Int32.(rand(rng, 1:5, N)), "S" => [randstring(rng, rand(rng, 0:30)) for _ in 1:N], "UV" => [rand(rng, 3) for _ in 1:N]]
+            kw = Dict{Symbol,Any}(:tcm => [["UV"]])
+            kind = isempty(ur) ? rand(rng, [:tsm2, :tsm1, :tcm, :none]) : rand(rng, [:tsm1, :none])
+            kind == :tsm2 && (push!(cols, "A" => A, "B" => B); kw[:tsm] = [["A", "B"]])
+            kind == :tsm1 && (push!(cols, "A" => A); kw[:tsm] = [["A"]])
+            kind == :tcm && (push!(cols, "B" => B); kw[:tcm] = [["UV"], ["B"]])
+            d = joinpath(mktempdir(), "t"); write_table(d, "T", cols; nrow=N, kw...)
+            t = readtable(d)
+            a = rand(rng, 1:N); rows = rand(rng) < 0.5 ? (1:N) : (a:rand(rng, a:N))
+            dst = joinpath(mktempdir(), "o"); copytable(dst, t; rows)
+            u = readtable(dst)
+            for c in MSv2.columnnames(t)
+                collect(column(t, c)[:])[collect(rows)] == collect(column(u, c)[:]) || (nbad += 1)
+            end
+        end
+    finally
+        MSv2.TSM_STREAM_MIN_ROWS[], MSv2.TSM_STREAM_BYTES[] = saved
+    end
+    @test nbad == 0
+end
