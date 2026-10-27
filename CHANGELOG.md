@@ -11672,3 +11672,10 @@ relative error 2·10⁻⁴, 99th percentile 4·10⁻⁴; 22,728 values lie below
 The behaviour outside that range was undocumented: a part above 65504 reads back as `Inf` and one below 6·10⁻⁸ as `0`,
 without a warning. `docs/src/guide.md` now says so (with `BFloat16` / `:full` for uncalibrated data) and
 `precision_tests.jl` pins the stated overflow, underflow and error bound. No behaviour change.
+
+### Phase 487 — where the CI time goes (investigation only)
+
+Per-file times of the last green CI run (`TEST FILE` lines): Julia 1.12 takes 7,309 s of test files against 4,746 s on 1.10 (which also runs coverage and the
+full fuzz counts), a uniform ~1.5x with no single outlier — `taql_query_tests` 2,027 vs 1,224 s, `taql_command_tests` 1,532 vs 872,
+`corrupt_tests` 685 vs 376. These are the real-TaQL cross-checks (the same file runs in 88 s locally without Casacore). The
+job needs about 122 of its 180 minutes, so nothing was changed.
