@@ -278,12 +278,14 @@ columnnames(t::Table) = [c.name for c in t.desc.columns]
 
 The [`ColumnDesc`](@ref) (type, cell shape, keywords, storage-manager
 binding) for column `name` of table `t`. Throws `KeyError` if there is no
-such column.
+such column. The keyword record of the result is a copy: changing an array inside it does not
+change the table.
 """
 function columndesc(t::Table, name::AbstractString)
     i = findfirst(c -> c.name == name, t.desc.columns)
     i === nothing && throw(KeyError(name))
-    t.desc.columns[i]
+    c = t.desc.columns[i]
+    isempty(c.keywords.names) ? c : _with_desc_keywords(c, deepcopy(c.keywords))
 end
 
 """

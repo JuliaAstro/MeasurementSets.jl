@@ -11642,3 +11642,10 @@ Probing the metadata accessors for leaks: `columnnames`, `subtables` and `column
 table (and what a later `copytable` would write), and `stdcolumns(name)` returned the global MS schema's own vector, so
 changing it changed the schema for the whole process. Both now return copies. Tests in `api_tests.jl`,
 `schema_tests.jl` (the old test asserted identity).
+
+### Phase 483 — `columndesc(t, name)` returns a copy of the column keywords
+
+The last metadata accessor that handed out the table's own state: changing the `QuantumUnits` array in
+`columndesc(t, name).keywords` changed the table's units for every later read. The keyword record of the result is now a
+copy (a column without keywords costs nothing). One internal comparison in `_dm_local` relied on the identity of the
+descriptor and now compares names. Test in `api_tests.jl`.

@@ -240,3 +240,15 @@ end
     v = stdcolumns("MAIN"); push!(v, v[1]); v[1] = v[2]
     @test length(stdcolumns("MAIN")) == n && stdcolumns("MAIN")[1].name == first
 end
+
+# Phase 483: `columndesc(t, name).keywords` was the table's own record: changing the `QuantumUnits` array in it changed
+# the table's units for every later read.
+@testset "columndesc() returns a copy of the keywords (Phase 483)" begin
+    spw = readtable(joinpath(SAMPLE_MS, "SPECTRAL_WINDOW"))
+    kw = columndesc(spw, "CHAN_FREQ").keywords
+    before = copy(kw["QuantumUnits"])
+    kw["QuantumUnits"][1] = "XX"
+    @test columndesc(spw, "CHAN_FREQ").keywords["QuantumUnits"] == before
+    @test columndesc(spw, "CHAN_FREQ").name == "CHAN_FREQ"
+    @test_throws KeyError columndesc(spw, "NOPE")
+end
