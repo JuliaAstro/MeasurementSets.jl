@@ -5936,3 +5936,28 @@ end
     r5 = groupby(t, "K"; where = "rownumber() <= 3", select = ["K" => :K, "m" => "gsum(X)"])
     @test sum(r5.m) ≈ sum(X[1:3])
 end
+
+# Phase 488: string literals that touch are ONE string in real TaQL ('a''b' == "ab", "a"'b', 'a''' == "a"); a space
+# between them is an error.  (Phase 244 had left this out.)
+@testset "adjacent string literals concatenate (Phase 488)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["S" => ["ab", "a'b", "plain", "a", "abc", "ab''"], "K" => Int32.(1:6)]; nrow=6)
+    t = readtable(d)
+    ks(f) = Int32.(sort(column(query(t, f), "K")[:]))
+    @test ks("S == 'a''b'") == [1] && ks("S == \"a\"\"b\"") == [1] && ks("S == 'a'\"b\"") == [1]
+    @test ks("S IN ['a''b','plain']") == [1, 3]
+    @test ks("S LIKE 'a''%'") == [1, 2, 4, 5, 6]
+    @test ks("S == 'a''b''c'") == [5] && ks("S == 'a''b' + 'c'") == [5]
+    @test ks("S == 'a'''") == [4] && ks("S == '''a'") == [4]
+    @test ks("strlength('a''bc') == 3") == 1:6
+    for bad in ("S == 'a' 'b'", "S == \"a\" 'b'", "S IN ['a' 'b','plain']", "S LIKE 'a' '%'", "S == 'ab' 'c' ")
+        @test_throws ArgumentError query(t, bad)
+    end
+    if _HAVE_TAQL
+        for f in ("S == 'a''b'", "S == \"a\"\"b\"", "S IN ['a''b','plain']", "S LIKE 'a''%'", "S == 'a''b''c'", "S == 'a'''", "S == '''a'")
+            o = joinpath(mktempdir(), "o")
+            real = sort(collect(_taqlcmd("SELECT FROM \$1 WHERE $f GIVING '$o'", CCT.Table(d))[:K][:]))
+            @test ks(f) == real
+        end
+    end
+end

@@ -521,11 +521,15 @@ end
 # paren-aware comma split (so `iif(a, b, c)` survives)
 function _split_commas(s::AbstractString)
     out = String[]
-    depth = 0
+    depth = 0; q = '\0'
     start = firstindex(s)
     for i in eachindex(s)
         c = s[i]
-        if c == '(' || c == '['
+        if q != '\0'                      # Phase 488: inside a string literal nothing counts
+            c == q && (q = '\0')
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '(' || c == '['
             depth += 1
         elseif c == ')' || c == ']'
             depth -= 1
@@ -1357,10 +1361,16 @@ end
 # inside of each top-level (…) / […] group, in order
 function _paren_groups(s::AbstractString)
     out = String[]
-    depth = 0
+    depth = 0; q = '\0'
     buf = IOBuffer()
     for c in s
-        if c == '(' || c == '['
+        if q != '\0'                      # Phase 488: brackets inside a string literal are text
+            c == q && (q = '\0')
+            depth >= 1 && print(buf, c)
+            continue
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '(' || c == '['
             depth += 1
             depth == 1 && continue
         elseif c == ')' || c == ']'

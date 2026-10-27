@@ -11679,3 +11679,12 @@ Per-file times of the last green CI run (`TEST FILE` lines): Julia 1.12 takes 7,
 full fuzz counts), a uniform ~1.5x with no single outlier — `taql_query_tests` 2,027 vs 1,224 s, `taql_command_tests` 1,532 vs 872,
 `corrupt_tests` 685 vs 376. These are the real-TaQL cross-checks (the same file runs in 88 s locally without Casacore). The
 job needs about 122 of its 180 minutes, so nothing was changed.
+
+### Phase 488 — string literals: adjacent literals concatenate; separators inside a literal
+
+Probing string literals against real TaQL (22 + 18 forms): (1) literals that touch — `'a''b'`, `"a"'b'`, `'a'''` — are ONE
+string in real TaQL (`"ab"`, `"a"`; a quote is written with the other quote type, a space between literals is an error);
+TaQL-lite raised a parse error, so `'it''s'` could not be used in a `WHERE`, an `IN [...]` list or a `LIKE` pattern. (2)
+The `INSERT` / `UPDATE` splitters were not quote-aware: `VALUES ('a,b', 3)` counted three values, `VALUES ('f(x', 5)` found no
+value tuple and `SET S = 'u,v'` a malformed assignment. Both fixed; the 18 forms agree with real TaQL. Tests in
+`taql_query_tests.jl` (with the real-TaQL cross-check) and `taql_command_tests.jl`.

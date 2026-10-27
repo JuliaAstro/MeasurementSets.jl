@@ -2099,3 +2099,20 @@ end
     d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["A" => Int32.(1:3)]; nrow=3)
     @test taql(d, "UPDATE t SET A = 9 WHERE A == 1") == 1                # real targets still work
 end
+
+# Phase 488: commas, brackets and parentheses INSIDE a string literal broke the INSERT / UPDATE splitters
+# (`VALUES ('a,b', 3)` counted three values, `SET S = 'u,v'` found a malformed assignment); touching literals concatenate.
+@testset "taql: separators inside string literals (Phase 488)" begin
+    mk() = (d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["S" => ["x", "y", "z"], "K" => Int32[1, 2, 3]]; nrow=3); d)
+    d = mk()
+    taql(d, "INSERT INTO t (S,K) VALUES ('a,b', 3)")
+    taql(d, "INSERT INTO t SET S = 'c,d', K = 4")
+    taql(d, "INSERT INTO t (S,K) VALUES ('f(x', 5), ('p)q', 6), ('r]s', 7), ('it''s', 8)")
+    @test column(readtable(d), "S")[:] == ["x", "y", "z", "a,b", "c,d", "f(x", "p)q", "r]s", "its"]
+    d = mk()
+    taql(d, "UPDATE t SET S = 'u,v' WHERE K == 1")
+    taql(d, "UPDATE t SET S = 'w[1' , K = 9 WHERE K == 3")
+    @test column(readtable(d), "S")[:] == ["u,v", "y", "w[1"] && column(readtable(d), "K")[:] == Int32[1, 2, 9]
+    @test MSv2._split_commas("'a,b', (1,2), \"c,d\"") == ["'a,b'", "(1,2)", "\"c,d\""]
+    @test MSv2._paren_groups("('p)q', 6), ('r]s', 7)") == ["'p)q', 6", "'r]s', 7"]
+end

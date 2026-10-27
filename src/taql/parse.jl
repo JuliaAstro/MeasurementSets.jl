@@ -75,7 +75,16 @@ function _taqllite_tokenize(s::AbstractString)
             end
             j > n && throw(ArgumentError("TaQL-lite: unterminated string literal in \"$s\""))
             val = join(cs[i+1:j-1])
-            push!(toks, TQLToken(:str, join(cs[i:j]), val))
+            k0 = i
+            # Phase 488 (live-checked vs real TaQL): string literals that touch ('a''b', "a"'b', 'a''') are one
+            # string, "ab" -- a quote is written with the other quote type; a space between them is an error
+            while j < n && (cs[j+1] == '\'' || cs[j+1] == '"')
+                q2 = cs[j+1]; j2 = j + 2
+                while j2 <= n && cs[j2] != q2; j2 += 1; end
+                j2 > n && throw(ArgumentError("TaQL-lite: unterminated string literal in \"$s\""))
+                val *= join(cs[j+2:j2-1]); j = j2
+            end
+            push!(toks, TQLToken(:str, join(cs[k0:j]), val))
             i = j + 1
         elseif c == '0' && i + 2 <= n && (cs[i+1] == 'x' || cs[i+1] == 'X') && isxdigit(cs[i+2])
             # hex integer literal `0x1F` (real TaQL accepts it; Phase 244)
