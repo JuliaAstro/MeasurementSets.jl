@@ -173,3 +173,55 @@ end
     end
     @test column(t, "A")[:] == [1, 2, 3]
 end
+
+# Phase 481: cells handed out by reads must be independent -- no two cells of one `col[:]` / selection share memory
+# (Phase 480 found run-length ISM cells that did) and changing a returned cell never changes a later read.  Identical
+# cells in every column kind: SSM / ISM fixed and ragged, the three tiled managers, engines, VirtualTaQL, forwarded,
+# a RefTable repeating rows, a ConcatTable.
+@testset "returned cells are independent (Phase 481)" begin
+    bad = String[]; N = 6
+    same = [fill(1.5f0, 3) for _ in 1:N]          # identical cells => run-length / repeated data
+    function chk(name, d, col; narrow=false)
+        t = readtable(d); c = column(t, col)
+        truth = [deepcopy(c[i]) for i in 1:N]
+        a = c[:]
+        # alias among returned cells
+        for i in 1:N, j in i+1:N
+            a[i] isa AbstractArray && a[j] isa AbstractArray && Base.mightalias(a[i], a[j]) && (push!(bad, "alias [:] $name"); return)
+        end
+        # mutate every cell of [:]; later reads must be unchanged
+        for x in a; x isa AbstractArray && (x .= zero(eltype(x))); end
+        b = column(readtable(d), col)[:]
+        all(i -> b[i] == truth[i], 1:N) || push!(bad, "MUTATION LEAKS into later [:] $name")
+        # getcell mutation
+        x = c[1]; x isa AbstractArray && (x .= zero(eltype(x)))
+        c[1] == truth[1] || push!(bad, "MUTATION LEAKS into later getcell $name")
+        # getcell twice not aliased
+        c[2] === c[2] && push!(bad, "getcell returns same object $name")
+        # selection
+        s = c[[1, 1, 2]]; s[1] isa AbstractArray && Base.mightalias(s[1], s[2]) && push!(bad, "ALIAS in selection [1,1,2] $name")
+    end
+    mk(f; kw...) = (d = joinpath(mktempdir(), "t"); f(d); d)
+    specs = Dict(
+     "ssm-fixed" => d -> write_table(d, "T", Pair{String,Any}["V" => same]; nrow=N),
+     "ssm-ragged" => d -> write_table(d, "T", Pair{String,Any}["V" => vcat([Float32[1,2], Float32[1,2]], [fill(1f0, 3) for _ in 1:N-2])]; nrow=N),
+     "ism-fixed" => d -> write_table(d, "T", Pair{String,Any}["V" => same]; nrow=N, ism=["V"]),
+     "ism-ragged" => d -> write_table(d, "T", Pair{String,Any}["V" => vcat([Float32[1,2], Float32[1,2]], [fill(1f0, 3) for _ in 1:N-2])]; nrow=N, ism=["V"]),
+     "tsm" => d -> write_table(d, "T", Pair{String,Any}["V" => same]; nrow=N, tsm=[["V"]]),
+     "tcm" => d -> write_table(d, "T", Pair{String,Any}["V" => same]; nrow=N, tcm=[["V"]]),
+     "tcell" => d -> write_table(d, "T", Pair{String,Any}["V" => same]; nrow=N, tcell=[["V"]]),
+     "scaled" => d -> write_table(d, "T", Pair{String,Any}["V" => [fill(1.5, 3) for _ in 1:N]]; nrow=N, engines=Dict("V" => (; kind=MSv2.ScaledArray(), scale=0.5, offset=0.0, stored_type=MSv2.TpInt))),
+     "compress" => d -> write_table(d, "T", Pair{String,Any}["V" => same]; nrow=N, engines=Dict("V" => (; kind=MSv2.CompressFloat(), scale=0.01f0, offset=0f0))),
+     "bitflags" => d -> write_table(d, "T", Pair{String,Any}["V" => [trues(3) for _ in 1:N]]; nrow=N, engines=Dict("V" => (; kind=MSv2.BitFlags(), stored_type=MSv2.TpInt))),
+     "virtualtaql" => d -> write_table(d, "T", Pair{String,Any}["W" => same, "V" => same]; nrow=N, virtualtaql=Dict("V" => "W * 2.0")),
+    )
+    for nm in sort(collect(keys(specs))); chk(nm, mk(specs[nm]), "V"); end
+    # forward
+    src = mk(specs["ssm-fixed"]); fw = joinpath(mktempdir(), "f"); reference_copy(fw, readtable(src)); chk("forward", fw, "V")
+    # RefTable with repeated rows, ConcatTable
+    rd = joinpath(mktempdir(), "r"); write_reftable(rd, readtable(src), [1,1,1,2,2,3]); chk("reftable-repeat", rd, "V")
+    cd_ = joinpath(mktempdir(), "c"); write_concattable(cd_, [readtable(src), readtable(mk(specs["ssm-fixed"]))]); 
+    t = readtable(cd_); c = column(t, "V"); a = c[:]; Base.mightalias(a[1], a[2]) && push!(bad, "ALIAS concat")
+
+    @test isempty(bad)
+end

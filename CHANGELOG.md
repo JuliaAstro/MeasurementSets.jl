@@ -11627,3 +11627,10 @@ found no storage bug, but a whole-column read of an array-valued IncrementalStMa
 (StandardStMan gives a concrete element type) and the cells of one stored run were the SAME array object, so changing
 one returned cell changed its neighbours. Both fixed; a stored run now yields one array per row. Tests in
 `ism_writer_tests.jl` (including a seeded copy of the fuzz).
+
+### Phase 481 — returned cells are independent in every column kind (no bug found)
+
+After Phase 480's find, every other column kind was probed for the same defect: identical cells in SSM / ISM fixed and
+ragged arrays, the three tiled managers, ScaledArray / CompressFloat / BitFlags engines, VirtualTaQL, a forwarded
+column, a RefTable repeating rows and a ConcatTable. No two cells of one `col[:]` or selection share memory, and
+changing a returned cell never changes a later read. The test (`api_tests.jl`) fails on the Phase 479 code.
