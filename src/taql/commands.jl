@@ -637,17 +637,23 @@ end
 const _JOIN_SIDE = raw"(\w+)\.(\w+(?:\(\))?)"
 function _taql_join_from(target, body::AbstractString, others)
     m = match(Regex("\\bFROM\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+JOIN\\b", "i"), body)
-    m === nothing && return target, body
     tab(k) = (i = parse(Int, k);
               i == 1 ? (target isa AbstractTable ? target : readtable(_cmd_path(target))) :
               (i - 1 <= length(others) ? (o = others[i-1]; o isa AbstractTable ? o : readtable(_cmd_path(o))) :
                throw(ArgumentError("taql: no table \$$i (pass it as an extra argument)"))))
+    if m === nothing
+        # Phase 493: `FROM $2` (no JOIN) queries the second table, not the first
+        fm = match(r"\bFROM\s+\$(\d+)\b"i, body)
+        fm !== nothing && fm.captures[1] != "1" && return tab(fm.captures[1]), body
+        return target, body
+    end
     left = tab(m.captures[1]); la = String(m.captures[2])
     names = String[la * "." * n for n in columnnames(left)]
     cols = AbstractVector[collect(column(left, n)[:]) for n in columnnames(left)]
     jun = Dict{Symbol,Vector{String}}(); jep = Set{Symbol}()
     for n in columnnames(left); _join_meta!(jun, jep, left, n, la * "." * n); end
     push!(names, la * ".__rowid"); push!(cols, collect(0:nrow(left)-1))
+    aliascols = Pair{String,Vector{String}}[la => columnnames(left)]            # for `*` / `alias.*` (Phase 493)
     pos = m.offset + ncodeunits(m.match) - length("JOIN")       # start of the first JOIN
     jre = Regex("^JOIN\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+ON\\s+" * _JOIN_SIDE *
                 "\\s*(?:==|=|\\bIN\\b)\\s*" * _JOIN_SIDE * "\\s*", "i")
@@ -686,12 +692,17 @@ function _taql_join_from(target, body::AbstractString, others)
                         _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) : T[rcx[r] for r in mr])
         end
         push!(names, ra * ".__rowid")
+        push!(aliascols, ra => columnnames(right))
         push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])
         rest = rest[ncodeunits(jm.match)+1:end]
     end
     joined = GroupedTable(Symbol.(names), cols, jun, jep)
     body = body[1:m.offset-1] * "FROM __join " * rest
     body = replace(body, r"\b(\w+)\.rowid\(\)" => s"\1.__rowid")
+    # `SELECT *` is the columns of the FIRST table, `alias.*` those of that table (real TaQL; Phase 493)
+    expand(a) = join(("$a.$n AS $n" for n in last(aliascols[findfirst(p -> first(p) == a, aliascols)])), ", ")
+    body = replace(body, r"\b(\w+)\.\*" => (x -> (a = x[1:findfirst('.', x)-1]; any(p -> first(p) == a, aliascols) ? expand(a) : x)))
+    body = replace(body, r"^(SELECT\s+(?:DISTINCT\s+|ALL\s+)?)\*(?=\s|,|$)"i => (x -> x[1:end-1] * expand(first(first(aliascols)))))
     return joined, body
 end
 
@@ -725,20 +736,20 @@ _sub_literal(x::Bool) = x ? "TRUE" : "FALSE"
 _sub_literal(x) = repr(x)
 
 # `x [NOT] IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` -> literals (evaluated on `target`)
-function _taql_subst_subqueries(target, body::AbstractString)
+function _taql_subst_subqueries(target, body::AbstractString, others=())
     body = String(body)
     while (m = match(r"\b(NOT\s+)?(IN|EXISTS)\s*\(\s*SELECT\b"i, body)) !== nothing
         open = findnext('(', body, m.offset)
         close = _matching_paren(body, open)
         inner = String(strip(body[open+1:close-1]))
-        r = taql(target, inner)
+        r = taql(target, inner, others...)
         r isa AbstractTable || throw(ArgumentError("a sub-query must be a SELECT that returns rows (got $(typeof(r))): $inner"))
         neg = m.captures[1] !== nothing
         if uppercase(m.captures[2]) == "EXISTS"
             v = nrow(r) > 0
             # real TaQL treats `EXISTS (... LIMIT n)` as empty when fewer than n rows match (a positive one errors)
             lm = match(r"^(.*)\bLIMIT\s+(\d+)\s*$"is, inner)
-            lm !== nothing && nrow(taql(target, String(lm.captures[1]))) < parse(Int, lm.captures[2]) && (v = false)
+            lm !== nothing && nrow(taql(target, String(lm.captures[1]), others...)) < parse(Int, lm.captures[2]) && (v = false)
             body = body[1:m.offset-1] * (xor(v, neg) ? "TRUE" : "FALSE") * body[close+1:end]
         else
             names = columnnames(r)
@@ -765,7 +776,7 @@ function _taql_preprocess_write(target, cmd::AbstractString)
     return cmd
 end
 
-function _taql_preprocess_select(target, body::AbstractString)
+function _taql_preprocess_select(target, body::AbstractString, others=())
     body = String(body)
     # `SELECT FROM t ...` / `SELECT WHERE ...` (no column list) = `SELECT *`
     body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
@@ -782,7 +793,7 @@ function _taql_preprocess_select(target, body::AbstractString)
         target = taql(target, inner)
         body = body[1:m.offset-1] * "FROM __sub" * body[close+1:end]
     end
-    body = _taql_subst_subqueries(orig, body)
+    body = _taql_subst_subqueries(orig, body, others)
     # `FROM name [AS] alias` -> drop the alias and its `alias.` qualifiers
     am = match(r"\bFROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|INTO|GIVING)\b)(\w+)"i, body)
     if am !== nothing
@@ -1233,7 +1244,7 @@ function taql(target, command::AbstractString, others...)
         body = into === nothing ? cmd : String(strip(into.captures[1]))
         dst = into === nothing ? nothing : String(into.captures[2])
         target, body = _taql_join_from(target, body, others)
-        target, body = _taql_preprocess_select(target, body)
+        target, body = _taql_preprocess_select(target, body, others)
         # Phase 242: SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
         # and `DISTINCT` all mis-parsed or errored).
@@ -1269,6 +1280,8 @@ function taql(target, command::AbstractString, others...)
                     # a bare column keeps its name; any other expression is named `Col_<position>` like real TaQL (Phase 492)
                     if occursin(_TAQL_NAME_RE, src) && !occursin(r"^\d", src)
                         push!(select, _taql_unescape(src) => src)
+                    elseif (qm = match(r"^\w+\.(\w+)$", src)) !== nothing        # `a.K` is the column K (real TaQL)
+                        push!(select, String(qm.captures[1]) => src)
                     else
                         push!(select, "Col_$ci" => src)
                     end

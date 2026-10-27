@@ -11721,3 +11721,13 @@ column names and values. One gap: an expression without `AS` is called `Col_<pos
 `A`, `Col_2`; `SELECT 1` -> `Col_1`); it was an error, or for a literal named `1`. Not matched: real TaQL's persisted result of
 `GROUP BY ... ORDER BY` is not sorted (and with `LIMIT` has odd counts), where ours is sorted as intended. Tests in
 `taql_command_tests.jl` (cross-checked) and `taql_query_tests.jl`.
+
+### Phase 493 — JOIN output names, `*` under a JOIN, `FROM $2`
+
+32 JOIN command variants against real TaQL (aliases with or without `AS`, case, newlines, `;`, comments, the order of the two sides in `ON`, `=` / `==` / `IN`, `rowid()`,
+`WHERE` / `ORDER BY` / `LIMIT` / `GROUP BY`, sub-queries on a second table). Fixed: a qualified projection `a.K` is the column `K` (it
+became `Col_1` after Phase 492); `SELECT *` under a JOIN is the columns of the FIRST table and `alias.*` those of that table (we returned every
+column, prefixed); `FROM $2` without a JOIN queries the second table (it used the first), so `x IN (SELECT .. FROM $2)` now works. Not
+matched: real TaQL's `SELECT DISTINCT` over a join does not de-duplicate, its `ORDER BY` puts NaN (an unmatched float) mid-sequence, and it rejects
+`a.*, b.Y`; the Phase 492 note on `GROUP BY ... ORDER BY` was a misreading of the saved result (the table real TaQL returns IS sorted; the
+persisted file is the unsorted aggregate). Test in `taql_command_tests.jl`, cross-checked.

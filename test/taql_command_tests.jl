@@ -2160,3 +2160,31 @@ end
     end
     @test column(readtable((p = joinpath(mktempdir(), "o"); taql(d, "SELECT A+1 FROM t INTO '$p'"); p)), "Col_1")[:] == [6, 4, 10]
 end
+
+# Phase 493: 32 JOIN command variants vs real TaQL (aliases with/without AS, case, newlines, `;`, comments, ON orders, `=`,
+# `IN`, rowid(), WHERE/ORDER BY/LIMIT/GROUP BY, sub-queries on a second table).  Found: a qualified projection `a.K` is the
+# column `K` (it was called `Col_1` after Phase 492 / an error before); `SELECT *` under a JOIN is the FIRST table's
+# columns and `alias.*` that table's; `FROM $2` (no JOIN) queries the second table; `IN (SELECT .. FROM $2)` sees it.
+@testset "taql JOIN output names, * expansion, FROM \$2 (Phase 493)" begin
+    d1 = joinpath(mktempdir(), "l"); d2 = joinpath(mktempdir(), "r")
+    write_table(d1, "L", Pair{String,Any}["K" => Int32[1, 2, 3, 2, 9], "X" => [1.5, 2.5, 3.5, 4.5, 5.5]]; nrow=5)
+    write_table(d2, "R", Pair{String,Any}["K" => Int32[1, 2, 3, 4], "Y" => ["a", "b", "c", "d"], "Z" => [10.0, 20.0, 30.0, 40.0]]; nrow=4)
+    rd(cmd) = (p = joinpath(mktempdir(), "o"); taql(d1, cmd * " INTO '$p'", d2); t = readtable(p); [(c, collect(column(t, c)[:])) for c in MSv2.columnnames(t)])
+    j = "FROM \$1 a JOIN \$2 b ON a.K == b.K"
+    @test rd("SELECT a.K, b.Y $j") == [("K", Int32[1, 2, 3, 2, 9]), ("Y", ["a", "b", "c", "b", "none"])]
+    @test rd("select a.K AS KK, upcase(b.Y) AS U $j")[2] == ("U", ["A", "B", "C", "B", "NONE"])
+    @test MSv2.columnnames(readtable((p = joinpath(mktempdir(), "o"); taql(d1, "SELECT * $j INTO '$p'", d2); p))) == ["K", "X"]
+    @test [c for (c, _) in rd("SELECT b.* $j")] == ["K", "Y", "Z"]
+    @test [c for (c, _) in rd("SELECT b.Y, gcount() AS N $j GROUP BY b.Y")] == ["Y", "N"]
+    @test rd("SELECT K FROM \$2") == [("K", Int32[1, 2, 3, 4])] && rd("SELECT K FROM \$2 WHERE Z > 15")[1][2] == Int32[2, 3, 4]
+    @test rd("SELECT a.K FROM \$1 a WHERE a.K IN (SELECT K FROM \$2 WHERE Z > 15)") == [("K", Int32[2, 3, 2])]
+    @test rd("SELECT K FROM \$1 WHERE K NOT IN (SELECT K FROM \$2)") == [("K", Int32[9])]
+    if _HAVE_TAQL
+        for cmd in ("SELECT a.K, b.Y $j", "SELECT * $j", "SELECT b.Y, gcount() AS N $j GROUP BY b.Y", "SELECT K FROM \$2 WHERE Z > 15",
+                    "SELECT a.K FROM \$1 a WHERE a.K IN (SELECT K FROM \$2 WHERE Z > 15)")
+            pr = joinpath(mktempdir(), "r"); _taqlcmd(cmd * " GIVING '$pr'", CCT.Table(d1), CCT.Table(d2))
+            tr = readtable(pr)
+            @test rd(cmd) == [(c, collect(column(tr, c)[:])) for c in MSv2.columnnames(tr)]
+        end
+    end
+end
