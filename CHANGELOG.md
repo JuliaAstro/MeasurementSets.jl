@@ -11606,3 +11606,9 @@ agree. Seeded test in `ssm_tests.jl`.
 803 tables of 2,500-8,200 rows with columns that change on every row (3 to 10 buckets, buckets filled by size), read by us
 and (every 13th) Casacore.jl, and every 7th edited in place and extended with `addrows!` (also read by Casacore.jl): all
 agree. Seeded test in `ism_writer_tests.jl`.
+
+### Phase 478 — tiled tables: tile-boundary sweep with edits (no bug found)
+
+220 tables (shared hypercube and `TiledColumnStMan`, 1000-element Float32 + Bool cells, 1-1050 rows around the 254- and
+262-row tile boundaries) read back, edited in place, extended with `addrows!` and shortened with `removerows!`; the
+shared-hypercube ones are also read by Casacore.jl: all agree. Seeded test in `tsm_multicol_tests.jl`.

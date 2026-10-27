@@ -811,3 +811,36 @@ end
     end
     @test nbad == 0
 end
+
+# Phase 478: row counts around tile boundaries (1000-element Float32 + Bool cells: about 254 rows per tile in a shared
+# hypercube, 262 in a TiledColumnStMan), read, edited in place, extended with `addrows!` (zero tiles appended) and
+# shortened with `removerows!`; the shared-hypercube tables are also read by Casacore.jl.
+@testset "tiled tables: tile-boundary sweep with edits (Phase 478)" begin
+    rng = MersenneTwister(478); cell = 1000
+    for kind in (:tsm, :tcm), N in vcat(252:256, 261:264, 507:510, 523:526, [1])
+        d = joinpath(mktempdir(), "t")
+        A = [rand(rng, Float32, cell) for _ in 1:N]; B = [rand(rng, Bool, cell) for _ in 1:N]
+        kw = kind == :tsm ? (; tsm=[["A", "B"]]) : (; tcm=[["A"], ["B"]])
+        write_table(d, "T", Pair{String,Any}["A" => A, "B" => B, "K" => Int32.(1:N)]; nrow=N, kw...)
+        t = readtable(d)
+        @test collect(column(t, "A")[:]) == A && collect(column(t, "B")[:]) == B
+        idx = sort(unique(vcat(rand(rng, 1:N, 5), 1, N)))
+        edit(d) do e; for i in idx; e[:A][i] = fill(Float32(i), cell); e[:B][i] = trues(cell); end; end
+        for i in idx; A[i] = fill(Float32(i), cell); B[i] = trues(cell); end
+        edit(d) do e; addrows!(e, 3); e[:A][N+1] = fill(1f0, cell); end
+        t = readtable(d)
+        @test MSv2.nrow(t) == N + 3 && collect(column(t, "A")[1:N]) == A && collect(column(t, "B")[1:N]) == B && column(t, "A")[N+1] == fill(1f0, cell)
+        if N > 3
+            del = sort(unique(rand(rng, 1:N, 3)))
+            edit(d) do e; removerows!(e, del); end
+            keep = setdiff(1:N+3, del)
+            A2 = vcat(A, [fill(1f0, cell)], [zeros(Float32, cell) for _ in 1:2]); B2 = vcat(B, [falses(cell) for _ in 1:3])
+            t = readtable(d)
+            @test collect(column(t, "A")[:]) == A2[keep] && collect(column(t, "B")[:]) == B2[keep]
+        end
+        if _HAVE_CASACORE && kind === :tsm
+            c = joinpath(mktempdir(), "c"); cp(d, c)
+            @test collect(CCT.Table(c)[:K][:]) == column(readtable(c), "K")[:]
+        end
+    end
+end
