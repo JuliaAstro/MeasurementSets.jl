@@ -11618,3 +11618,12 @@ shared-hypercube ones are also read by Casacore.jl: all agree. Seeded test in `t
 610 tables with `String` cells around the inline limit (8 bytes) and the 512-byte string-bucket size (with and without
 extra numeric columns, 1 to 300 strings), then one string grown by 700 bytes in an edit session: our reader and
 Casacore.jl (a third of the tables) agree and the other cells are unchanged. Seeded test in `ssm_tests.jl`.
+
+### Phase 480 — array-valued IncrementalStMan columns: concrete element type, independent cells
+
+A random edit fuzz of ragged array columns (180 tables: five element types, StandardStMan or IncrementalStMan indirect
+arrays, both byte orders, one to three sessions of cell sets, `addrows!`, `removerows!`; every fourth read by Casacore.jl)
+found no storage bug, but a whole-column read of an array-valued IncrementalStMan column returned a `Vector{Any}`
+(StandardStMan gives a concrete element type) and the cells of one stored run were the SAME array object, so changing
+one returned cell changed its neighbours. Both fixed; a stored run now yields one array per row. Tests in
+`ism_writer_tests.jl` (including a seeded copy of the fuzz).

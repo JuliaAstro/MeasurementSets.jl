@@ -553,3 +553,43 @@ end
         end
     end
 end
+
+# Phase 480: a whole-column read of an array-valued IncrementalStMan column returned `Vector{Any}` (StandardStMan gives a
+# concrete element type) and the cells of one stored run were the SAME array, so changing one changed its neighbours.
+@testset "ISM array column: concrete eltype, independent cells (Phase 480)" begin
+    V = [Float64[1, 2], Float64[1, 2], Float64[1, 2], Float64[3, 4, 5], Float64[]]
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["V" => V]; nrow=5, ism=["V"])
+    a = column(readtable(d), "V")[:]
+    @test a isa Vector{Vector{Float64}} && a == V
+    @test !(a[1] === a[2]) && !(a[2] === a[3])
+    a[1][1] = 99.0
+    @test a[2] == [1.0, 2.0] && column(readtable(d), "V")[:][1] == [1.0, 2.0]
+    S = [["a", "b"], ["a", "b"], ["c"]]
+    d2 = joinpath(mktempdir(), "t"); write_table(d2, "T", Pair{String,Any}["V" => S]; nrow=3, ism=["V"])
+    b = column(readtable(d2), "V")[:]
+    @test b isa Vector{Vector{String}} && b == S && !(b[1] === b[2])
+    # random edit sessions on ragged SSM-/ISM-indirect columns (all element types, both byte orders) equal a model
+    rng = MersenneTwister(480)
+    gen(T, n) = T === String ? [randstring(rng, rand(rng, 0:6)) for _ in 1:n] : T === Bool ? rand(rng, Bool, n) : rand(rng, T, n)
+    for _ in 1:_fz(24)
+        T = rand(rng, (Float64, Int32, ComplexF32, Bool, String)); N = rand(rng, [2, 5, 40, 700]); mgr = rand(rng, (:ssm, :ism))
+        M = Vector{T}[rand(rng) < 0.15 ? T[] : gen(T, rand(rng, 1:12)) for _ in 1:N]; M[1] = gen(T, 3); M[2] = gen(T, 5)
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["V" => copy(M)]; nrow=N, endian=rand(rng, (:little, :big)), (mgr === :ism ? (; ism=["V"]) : (;))...)
+        for _ in 1:rand(rng, 1:3)
+            edit(d) do e
+                for _ in 1:rand(rng, 1:25)
+                    i = rand(rng, 1:length(M)); v = rand(rng) < 0.2 ? T[] : gen(T, rand(rng, 1:15)); e[:V][i] = v; M[i] = v
+                end
+                if rand(rng) < 0.5
+                    k = rand(rng, 1:3); addrows!(e, k)
+                    for _ in 1:k; v = rand(rng) < 0.3 ? T[] : gen(T, rand(rng, 1:15)); push!(M, v); e[:V][length(M)] = v; end
+                end
+                if rand(rng) < 0.4 && length(M) > 3
+                    del = sort(unique(rand(rng, 1:length(M), 2))); removerows!(e, del); deleteat!(M, del)
+                end
+            end
+        end
+        @test collect(column(readtable(d), "V")[:]) == M
+    end
+end
