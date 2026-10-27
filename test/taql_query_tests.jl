@@ -5961,3 +5961,22 @@ end
         end
     end
 end
+
+# Phase 489 (command-syntax probe vs real TaQL, 48 forms): `# ...` comments to the end of the line, a parenthesised set
+# `K IN (1,2)`, and keywords in mixed case (`SeLeCt FrOm .. WhErE`: a case-insensitive regex built by concatenating regex
+# literals silently kept only the first literal's flags).
+@testset "comments, IN (...) and keyword case (Phase 489)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["S" => ["a#b", "x", "y"], "K" => Int32.(1:3)]; nrow=3)
+    t = readtable(d)
+    ks(f) = Int32.(sort(column(query(t, f), "K")[:]))
+    @test ks("K > 1 # a comment") == [2, 3] && ks("K > 1 # c\n AND K < 3") == [2]
+    @test ks("S == 'a#b'") == [1]                                       # '#' inside a literal is text
+    @test ks("K IN (1,2)") == [1, 2] && ks("K NOT IN (1,2)") == [3] && ks("K IN ()") == Int32[]
+    for f in ("SeLeCt FrOm $d WhErE K > 1", "select from $d where K > 1 # c", "SELECT\tFROM\t$d\tWHERE\tK > 1 ;; ")
+        r = taql(d, f)
+        @test Int32.(sort(column(r, "K")[:])) == [2, 3]
+    end
+    @test Int32.(sort(column(taql(d, "SELECT K ORDER BY K DESC # c"), "K")[:])) == [1, 2, 3]
+    @test column(taql(d, "select S from $d where S == 'a#b' # not here"), "S")[:] == ["a#b"]
+end

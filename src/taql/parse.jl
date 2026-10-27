@@ -67,6 +67,9 @@ function _taqllite_tokenize(s::AbstractString)
             twochar = i < n && cs[i+1] == '/'
             push!(toks, TQLToken(:arithop, twochar ? "//" : "/", nothing))
             i += twochar ? 2 : 1
+        elseif c == '#'
+            # a comment runs to the end of the line (real TaQL; Phase 489)
+            while i <= n && cs[i] != '\n'; i += 1; end
         elseif c == '\'' || c == '"'
             q = c
             j = i + 1
@@ -481,13 +484,16 @@ function _parse_in_element!(p::TQLParser)
 end
 
 function _parse_in_list!(p::TQLParser, lhs::TQLExpr, negate::Bool)
-    _expect_kind!(p, :lbracket, "'['")
-    vals = _peek(p).kind === :rbracket ? Any[] : Any[_parse_in_element!(p)]   # `IN []` matches nothing
+    # Phase 489: real TaQL also takes a parenthesised set, `K IN (1,2)` (a sub-query `IN (SELECT ..)` is replaced earlier)
+    paren = _peek(p).kind === :lparen
+    paren ? _advance!(p) : _expect_kind!(p, :lbracket, "'['")
+    close = paren ? :rparen : :rbracket
+    vals = _peek(p).kind === close ? Any[] : Any[_parse_in_element!(p)]   # `IN []` matches nothing
     while _peek(p).kind === :comma
         _advance!(p)
         push!(vals, _parse_in_element!(p))
     end
-    _expect_kind!(p, :rbracket, "']'")
+    _expect_kind!(p, close, paren ? "')'" : "']'")
     e = TQLIn(lhs, vals)
     return negate ? TQLNot(e) : e
 end

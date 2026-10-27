@@ -11688,3 +11688,11 @@ TaQL-lite raised a parse error, so `'it''s'` could not be used in a `WHERE`, an 
 The `INSERT` / `UPDATE` splitters were not quote-aware: `VALUES ('a,b', 3)` counted three values, `VALUES ('f(x', 5)` found no
 value tuple and `SET S = 'u,v'` a malformed assignment. Both fixed; the 18 forms agree with real TaQL. Tests in
 `taql_query_tests.jl` (with the real-TaQL cross-check) and `taql_command_tests.jl`.
+
+### Phase 489 — command syntax: comments, `IN (...)`, keyword case, trailing `;`
+
+A probe of 48 command-syntax variants against real TaQL found four gaps. `# ...` to the end of the line is a comment
+(ignored inside a string literal); `K IN (1,2)` is a set like `K IN [1,2]`; a trailing `;` ends a `taql()` command; and
+keywords in mixed or lower case (`select from t where ..`) were not recognised in `SELECT` and `INSERT ... SELECT`: a
+case-insensitive regex built by concatenating regex literals keeps only the first literal's flags, so the `i` flag was
+lost (now built once by `_rxis`). The one remaining difference is the known leniency `NOT K==3`. Tests in `taql_query_tests.jl`.

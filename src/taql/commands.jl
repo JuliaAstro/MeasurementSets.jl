@@ -13,6 +13,10 @@ function _apply_limit(rows::Vector{Int}, limit::Integer)
     limit >= 0 ? rows[1:min(limit, n)] : rows[max(1, n + limit + 1):n]
 end
 
+# Phase 489: `r"a" * r"b"is` keeps the flags of the FIRST regex only, so a case-insensitive pattern built by
+# concatenating literals silently became case-sensitive; join the sources and set the flags once
+_rxis(parts::Regex...) = Regex(join((p.pattern for p in parts), ""), "is")
+
 _cmd_path(x::AbstractString) = String(rstrip(x, '/'))
 function _cmd_path(t::AbstractTable)
     t isa Table ||
@@ -1161,8 +1165,29 @@ string are not supported (use `copytable(dst, groupby(…))`, or
 """
 taql(command::AbstractString) = taql(nothing, command)    # target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
 
+# `# ...` to the end of the line is a comment in TaQL (Phase 489); one inside a string literal is text
+function _tql_strip_comments(s::AbstractString)
+    occursin('#', s) || return s
+    io = IOBuffer(); q = '\0'; skipping = false
+    for c in s
+        if skipping
+            c == '\n' || continue
+            skipping = false
+        end
+        if q != '\0'
+            c == q && (q = '\0')
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '#'
+            skipping = true; continue
+        end
+        print(io, c)
+    end
+    return String(take!(io))
+end
+
 function taql(target, command::AbstractString, others...)
-    cmd = strip(command)
+    cmd = strip(rstrip(strip(_tql_strip_comments(command)), ';'))      # a trailing `;` ends the command (real TaQL accepts it after GIVING)
     isempty(cmd) && throw(ArgumentError("taql: empty command"))
     _taql_check_tablerefs(cmd, (target === nothing ? 0 : 1) + length(others))
     kw = uppercase(String(first(split(cmd; limit=2))))
@@ -1212,9 +1237,9 @@ function taql(target, command::AbstractString, others...)
         # Phase 242: SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
         # and `DISTINCT` all mis-parsed or errored).
-        bm = match(r"^SELECT\s+(DISTINCT\s+)?(.*?)(?:\s+FROM\s+\S+)?(?:\s+WHERE\s+(.+?))?" *
-                   r"(?:\s+GROUP\s+BY\s+(.+?))?(?:\s+HAVING\s+(.+?))?" *
-                   r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+((?:LIMIT|OFFSET)\s+.+?))?\s*$"is, body)
+        bm = match(_rxis(r"^SELECT\s+(DISTINCT\s+)?(.*?)(?:\s+FROM\s+\S+)?(?:\s+WHERE\s+(.+?))?",
+                         r"(?:\s+GROUP\s+BY\s+(.+?))?(?:\s+HAVING\s+(.+?))?",
+                         r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+((?:LIMIT|OFFSET)\s+.+?))?\s*$"), body)
         bm === nothing && throw(ArgumentError("taql: malformed SELECT command"))
         distinct = bm.captures[1] !== nothing
         groupstr = bm.captures[4] === nothing ? nothing : String(strip(bm.captures[4]))
@@ -1432,8 +1457,8 @@ function _taql_insert(target, cmd::AbstractString)
         limit = Int(_taql_const(tm.captures[2]))
         cmd = String(tm.captures[1])
     end
-    msel = match(r"^INSERT\s+INTO\s+\S+\s*(?:\(([^)]*)\)\s*)?SELECT(?:\s+(.*?))?\s+FROM\s+(?:'([^']+)'|(\w+))\s*" *
-                r"(?:WHERE\s+(.+))?\s*$"is, cmd)
+    msel = match(_rxis(r"^INSERT\s+INTO\s+\S+\s*(?:\(([^)]*)\)\s*)?SELECT(?:\s+(.*?))?\s+FROM\s+(?:'([^']+)'|(\w+))\s*",
+                       r"(?:WHERE\s+(.+))?\s*$"), cmd)
     if msel !== nothing
         tcols = msel.captures[1] === nothing ? nothing : _taql_unescape.(strip.(split(msel.captures[1], ',')))
         collist = msel.captures[2] === nothing ? "*" : String(strip(msel.captures[2]))     # `SELECT FROM 'p'`: every column
