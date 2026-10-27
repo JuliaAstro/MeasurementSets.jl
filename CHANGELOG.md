@@ -11612,3 +11612,9 @@ agree. Seeded test in `ism_writer_tests.jl`.
 220 tables (shared hypercube and `TiledColumnStMan`, 1000-element Float32 + Bool cells, 1-1050 rows around the 254- and
 262-row tile boundaries) read back, edited in place, extended with `addrows!` and shortened with `removerows!`; the
 shared-hypercube ones are also read by Casacore.jl: all agree. Seeded test in `tsm_multicol_tests.jl`.
+
+### Phase 479 — SSM string boundaries (no bug found)
+
+610 tables with `String` cells around the inline limit (8 bytes) and the 512-byte string-bucket size (with and without
+extra numeric columns, 1 to 300 strings), then one string grown by 700 bytes in an edit session: our reader and
+Casacore.jl (a third of the tables) agree and the other cells are unchanged. Seeded test in `ssm_tests.jl`.
