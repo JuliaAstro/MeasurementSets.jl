@@ -1254,7 +1254,7 @@ function taql(target, command::AbstractString, others...)
             select = [n => n for n in columnnames(t)]
         else
             select = Pair{String,String}[]
-            for piece in _split_commas(collist)
+            for (ci, piece) in enumerate(_split_commas(collist))
                 mp = match(r"^(.+?)\s+AS\s+\(\s*(\w+)\s*,\s*(\w+)\s*\)$"is, piece)
                 if mp !== nothing              # expr AS (valname, maskname)
                     push!(select, "($(mp.captures[2]), $(mp.captures[3]))" =>
@@ -1266,9 +1266,12 @@ function taql(target, command::AbstractString, others...)
                 src = String(strip(cm.captures[1]))
                 alias = cm.captures[2]
                 if alias === nothing
-                    occursin(_TAQL_NAME_RE, src) ||
-                        throw(ArgumentError("taql: computed SELECT column \"$src\" needs an AS alias"))
-                    push!(select, _taql_unescape(src) => src)
+                    # a bare column keeps its name; any other expression is named `Col_<position>` like real TaQL (Phase 492)
+                    if occursin(_TAQL_NAME_RE, src) && !occursin(r"^\d", src)
+                        push!(select, _taql_unescape(src) => src)
+                    else
+                        push!(select, "Col_$ci" => src)
+                    end
                 else
                     push!(select, String(alias) => src)
                 end

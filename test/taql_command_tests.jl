@@ -2140,3 +2140,23 @@ end
     d = mk(); @test update!(d; set=["A" => "A + 1"], limit=0) == 6
     d = mk(); @test update!(d; set=["A" => "A + 1"], limit=-2) == 4
 end
+
+# Phase 492: an unnamed computed SELECT column is called `Col_<position>` in real TaQL (`SELECT A, B*2` -> `A`, `Col_2`,
+# `SELECT 1` -> `Col_1`); it was an error ("needs an AS alias") or, for a literal, named "1".  61 more SELECT output forms
+# (aliases with `AS`/quotes, `DISTINCT`, `t.A`, `t.*`, aggregates, `HAVING`, ...) agree with real TaQL.
+@testset "unnamed computed SELECT columns are Col_<position> (Phase 492)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => Int32[5, 3, 9], "B" => [1.5, 2.5, 0.5], "G" => Bool[1, 0, 1]]; nrow=3)
+    names(p) = MSv2.columnnames(readtable(p))
+    for (cmd, want) in (("SELECT A+1 FROM t", ["Col_1"]), ("SELECT A, B*2, sqrt(B) FROM t", ["A", "Col_2", "Col_3"]),
+                        ("SELECT A+1, A+2 FROM t", ["Col_1", "Col_2"]), ("SELECT 1 FROM t", ["Col_1"]),
+                        ("SELECT G, gcount() FROM t GROUP BY G", ["G", "Col_2"]), ("SELECT A AS X, B*2 FROM t", ["X", "Col_2"]))
+        p = joinpath(mktempdir(), "o"); taql(d, cmd * " INTO '$p'")
+        @test names(p) == want
+        if _HAVE_TAQL
+            pr = joinpath(mktempdir(), "r"); _taqlcmd(replace(cmd, " t" => " \$1"; count=1) * " GIVING '$pr'", CCT.Table(d))
+            @test names(pr) == want
+        end
+    end
+    @test column(readtable((p = joinpath(mktempdir(), "o"); taql(d, "SELECT A+1 FROM t INTO '$p'"); p)), "Col_1")[:] == [6, 4, 10]
+end

@@ -166,10 +166,10 @@ end
     g2 = query(r, "K >= 2"; select=["K" => "K", "X4" => "X2 * 2.0"])
     @test collect(g2.X4) == 4 .* X[3:6]
 
-    # taql string form: computed column needs AS; bare column doesn't
+    # taql string form: a computed column without AS is named Col_<position> (Phase 492); a bare column keeps its name
     tq = taql(t, "SELECT K, X * 3.0 AS X3 WHERE K >= 3")
     @test collect(tq.X3) == 3 .* X[4:6]
-    @test_throws ArgumentError taql(t, "SELECT X + 1 WHERE K >= 0")
+    @test collect(taql(t, "SELECT K, X + 1 WHERE K >= 3").Col_2) == X[4:6] .+ 1
 end
 
 @testset "TaQL-lite query — closure form" begin

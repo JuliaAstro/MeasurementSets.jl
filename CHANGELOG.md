@@ -11712,3 +11712,12 @@ tables, real TaQL against `taql()`, agree except `LIMIT`: in real TaQL (the SELE
 `LIMIT -n` all but the last `n` rows, where we had "no row" and "the last `n`". Fixed for the string forms and for the
 `limit=` keyword of `update!` / `delete!`. Two leniencies stay (an alias qualifier `SET t.A = 1`, `INSERT ... SET ... LIMIT`).
 Test in `taql_command_tests.jl`, cross-checked on twin tables.
+
+### Phase 492 — unnamed computed SELECT columns are `Col_<position>`
+
+61 `SELECT` output forms (column lists, `AS` aliases with or without quotes, expressions, array columns, `DISTINCT`, `ORDER BY` /
+`LIMIT` / `OFFSET`, `t.A` / `t.*`, aggregates, `GROUP BY` / `HAVING`) against real TaQL, comparing the persisted result's
+column names and values. One gap: an expression without `AS` is called `Col_<position>` in real TaQL (`SELECT A, B*2` ->
+`A`, `Col_2`; `SELECT 1` -> `Col_1`); it was an error, or for a literal named `1`. Not matched: real TaQL's persisted result of
+`GROUP BY ... ORDER BY` is not sorted (and with `LIMIT` has odd counts), where ours is sorted as intended. Tests in
+`taql_command_tests.jl` (cross-checked) and `taql_query_tests.jl`.
