@@ -57,6 +57,14 @@ too — `BFloat16` has `Float32`'s exponent range (overflow-safe) and a
 7-bit mantissa that matches 8-bit-derived data; `DATA` then comes back
 as `Complex{BFloat16}` and `WEIGHT` as `BFloat16`.
 
+!!! warning "What the default `ComplexF16` `DATA` can and cannot hold"
+    `Float16` has an 11-bit mantissa (relative error ≤ 2⁻¹¹ ≈ 5·10⁻⁴ per real / imaginary part) and a range of about
+    6·10⁻⁸ … 65504. A part above 65504 reads back as `Inf` **without a warning**, and a part below 6·10⁻⁸ as `0`;
+    parts below 6·10⁻⁵ keep only a few bits. Calibrated visibilities in Jy sit far inside this range (on the sample
+    ALMA MS the mean error is 2·10⁻⁴ and the largest amplitude 175), but uncalibrated correlator output can leave it:
+    read such data with `precision=BFloat16` (same 16 bits, `Float32`'s range, 3 significant digits) or
+    `precision=:full`.
+
 `Float64` (`TIME`, `UVW`), `ComplexF64` and `Bool` are never narrowed.
 Non-MAIN tables default to `:full`. `copyms` / `copytable` / `edit`
 always read at full precision, so copies and in-place edits stay

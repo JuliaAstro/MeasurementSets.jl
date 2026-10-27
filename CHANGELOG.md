@@ -11664,3 +11664,11 @@ The read side of Phase 484: `e[:V][i]` returned the session's own array when the
 a loaded StandardStMan / IncrementalStMan column, so changing the returned array edited the session behind its back —
 and whether it was written depended on which flush path ran (a tiled column's untouched cells, read from the file,
 were safe). Arrays read from a session are now copies. Test in `edit_tests.jl`.
+
+### Phase 486 — the limits of the default half-precision `DATA`, documented and pinned
+
+Quantifying the default `ComplexF16` MAIN `DATA` on the real MS (30,000 rows, 7.7 M values): largest amplitude 175, mean
+relative error 2·10⁻⁴, 99th percentile 4·10⁻⁴; 22,728 values lie below `Float16`'s normal range and keep fewer bits.
+The behaviour outside that range was undocumented: a part above 65504 reads back as `Inf` and one below 6·10⁻⁸ as `0`,
+without a warning. `docs/src/guide.md` now says so (with `BFloat16` / `:full` for uncalibrated data) and
+`precision_tests.jl` pins the stated overflow, underflow and error bound. No behaviour change.

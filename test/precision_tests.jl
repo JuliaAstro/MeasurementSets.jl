@@ -233,3 +233,27 @@ end
     @test column(r, "XB")[:] == Float32[1, 2, 3]
     @test column(r, "ZB")[:] == ComplexF32[1+0im, 2-1im, 0+3im]
 end
+
+# Phase 486: the documented limits of the default `ComplexF16` MAIN `DATA` (docs/src/guide.md): parts above 65504 read back
+# as Inf, parts below ~6e-8 as 0, everything between within 2^-11 relative (or 6e-8 absolute below 6e-5); BFloat16 and
+# :full keep the range.
+@testset "half-precision DATA: documented range and error (Phase 486)" begin
+    d = joinpath(mktempdir(), "ms"); create_ms(d; nrow=2, nchan=2, ncorr=2, nant=3)
+    v1 = ComplexF32[7f4+0im 1f-5+1f-8im; 0.5f0+0.25f0im 3f-8+0im]
+    v2 = ComplexF32[1f5+0im 2f-7+0im; 1f0+1f0im 6f-5+0im]
+    edit(d) do e; e[:DATA][1] = v1; e[:DATA][2] = v2; end
+    h = column(readtable(d), "DATA")[1]; h2 = column(readtable(d), "DATA")[2]
+    @test h isa Matrix{ComplexF16}
+    @test isinf(real(h[1, 1])) && isinf(real(h2[1, 1]))                 # above 65504: Inf, silently
+    @test imag(h[1, 2]) == 0                                            # 1e-8 is below the smallest Float16
+    for (x, y) in zip(vcat(vec(v1), vec(v2)), vcat(vec(h), vec(h2)))
+        for (a, b) in ((real(x), real(y)), (imag(x), imag(y)))
+            isinf(b) && continue
+            @test abs(Float32(b) - a) <= max(abs(a) * 2.0f0^-10, 6.0f-8)
+        end
+    end
+    for p in (BFloat16, :full)
+        w = column(readtable(d), "DATA"; precision=p)[1]
+        @test isapprox(Float32(real(w[1, 1])), 7f4; rtol = 0.01)
+    end
+end
