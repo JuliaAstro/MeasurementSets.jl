@@ -221,11 +221,14 @@ Base.IndexStyle(::Type{<:EditColumn}) = IndexLinear()
 function Base.getindex(c::EditColumn, i::Int)
     @boundscheck 1 <= i <= length(c.tab.rowmap) || throw(BoundsError(c, i))
     t = c.tab; n = c.desc.name
-    haskey(t.override, n) && return t.override[n][i]
+    # Phase 485: arrays handed out are copies, so changing one never edits the session behind its back (before, a cell read
+    # from a loaded SSM / ISM column or a set / added cell was the session's own array and the change was written
+    # or not depending on which flush path ran)
+    haskey(t.override, n) && return _own(t.override[n][i])
     e = get(t.tsmedit, n, nothing)
-    e !== nothing && haskey(e, i) && return e[i]
+    e !== nothing && haskey(e, i) && return _own(e[i])
     a = _added(t, n)
-    a !== nothing && return a[3][i]
+    a !== nothing && return _own(a[3][i])
     src = t.rowmap[i]
     src > 0 && return column(t.reader, n)[src]
     return _default_cell(c.desc, t)

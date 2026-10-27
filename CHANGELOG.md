@@ -11657,3 +11657,10 @@ what was written — `e[:V][2] = v; v .= -1` wrote -1, the same array assigned t
 mutation, and so did a column given to `addcolumn!`. `t[name][i] = array`, `t[name][:] = arrays` and the data of
 `addcolumn!` (also through a `RefTable` view) now store a copy. `insert!` and `write_table` were already safe. Test in
 `edit_tests.jl`.
+
+### Phase 485 — edit sessions hand out copies of arrays
+
+The read side of Phase 484: `e[:V][i]` returned the session's own array when the cell had been set or added, or came from
+a loaded StandardStMan / IncrementalStMan column, so changing the returned array edited the session behind its back —
+and whether it was written depended on which flush path ran (a tiled column's untouched cells, read from the file,
+were safe). Arrays read from a session are now copies. Test in `edit_tests.jl`.

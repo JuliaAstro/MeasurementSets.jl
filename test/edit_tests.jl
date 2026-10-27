@@ -1269,3 +1269,22 @@ end
         @test collect(column(readtable(d), "V")[:])[1] == fill(2.0, 3)
     end
 end
+
+# Phase 485: an array READ from an edit session is a copy too -- before, changing a cell read from a loaded SSM / ISM
+# column, or from a cell that was set or added, edited the session behind its back (written or not by flush path).
+@testset "edit sessions hand out copies of arrays (Phase 485)" begin
+    for (nm, kw) in (("ssm", (;)), ("ism", (; ism=["V"])), ("tsm", (; tsm=[["V"]])), ("tcm", (; tcm=[["V"]])))
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["V" => [fill(1.0, 3) for _ in 1:4]]; nrow=4, kw...)
+        edit(d) do e
+            e[:V][2] = [5.0, 6.0, 7.0]
+            x = e[:V][2]; x .= 0.0
+            y = e[:V][3]; y .= 0.0
+            addcolumn!(e, "X", [fill(3.0, 3) for _ in 1:4])
+            z = e[:X][1]; z .= 0.0
+            @test e[:V][2] == [5.0, 6.0, 7.0] && e[:V][3] == fill(1.0, 3) && e[:X][1] == fill(3.0, 3)
+        end
+        got = collect(column(readtable(d), "V")[:]); gx = collect(column(readtable(d), "X")[:])
+        @test got[2] == [5.0, 6.0, 7.0] && got[3] == fill(1.0, 3) && gx[1] == fill(3.0, 3)
+    end
+end
