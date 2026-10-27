@@ -5980,3 +5980,18 @@ end
     @test Int32.(sort(column(taql(d, "SELECT K ORDER BY K DESC # c"), "K")[:])) == [1, 2, 3]
     @test column(taql(d, "select S from $d where S == 'a#b' # not here"), "S")[:] == ["a#b"]
 end
+
+# Phase 490 (97 expression-syntax forms vs real TaQL: signs, nesting, precedence, literal forms, function-name case, ...):
+# the only gap was a run of operator characters that is not one operator -- `!!(K == 2)` was rejected as a whole.
+@testset "operator runs split at the longest known operator (Phase 490)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["K" => Int32.(1:4), "B" => [true, false, true, false]]; nrow=4)
+    t = readtable(d)
+    ks(f) = Int32.(sort(column(query(t, f), "K")[:]))
+    @test ks("!!(K == 2)") == [2] && ks("!!!(K == 2)") == [1, 3, 4] && ks("K == 2 || !!(K == 3)") == [2, 3]
+    @test ks("B == !B") == Int32[] && ks("B != !B") == [1, 2, 3, 4] && ks("B == NOT B") == Int32[]   # NOT is also an operand
+    @test ks("NOT K == 2") == [1, 3, 4]                                                              # a leading NOT still takes the whole comparison
+    @test ks("K!=2 && K<>3") == [1, 4] && ks("K>=2&&K<=3") == [2, 3] && ks("~K == -3") == [2]
+    toks(s) = [x.text for x in MSv2._taqllite_tokenize(s) if x.kind === :op]
+    @test toks("!!K") == ["!", "!"] && toks("K<=!B") == ["<=", "!"] && toks("a!~=b") == ["!~="]
+end

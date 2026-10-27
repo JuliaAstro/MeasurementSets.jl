@@ -11696,3 +11696,11 @@ A probe of 48 command-syntax variants against real TaQL found four gaps. `# ...`
 keywords in mixed or lower case (`select from t where ..`) were not recognised in `SELECT` and `INSERT ... SELECT`: a
 case-insensitive regex built by concatenating regex literals keeps only the first literal's flags, so the `i` flag was
 lost (now built once by `_rxis`). The one remaining difference is the known leniency `NOT K==3`. Tests in `taql_query_tests.jl`.
+
+### Phase 490 — expression syntax: operator runs, `NOT` as an operand
+
+97 expression-syntax variants against real TaQL (signs and double signs, nesting, precedence and associativity, literal forms
+`2.` `.2e1` `0X2`, function-name case, `rownumber()`, `LIKE` / `~` / `IN` forms, ...) agree except two gaps. A run of operator
+characters that is not one operator (`!!(K == 2)`, `K==!B`) was rejected as a whole; it is now split at the longest known
+operator. `NOT` / `!` is also an operand (`B != !B`, `K == NOT B`: real TaQL binds it tighter than `==`); a leading
+`NOT K == 3` still negates the whole comparison (real TaQL calls it an error; kept as a convenience). Test in `taql_query_tests.jl`.

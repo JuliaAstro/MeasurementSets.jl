@@ -15,6 +15,8 @@ end
 # `!~`, ...). Bare `&`/`|` are bitwise; `~` is bitwise-not or (before a
 # `p/m/f` pattern literal) the glob/regex match operator.
 const _TQL_OPCHARS = "=!<>&|~"
+const _TQL_OPS = ("==", "=", "!=", "<>", "<=", ">=", "<", ">", "&&", "||", "&", "|", "!", "~", "!~", "~=", "!~=")
+const _TQL_OPS_BY_LEN = Tuple(sort(collect(_TQL_OPS); by = length, rev = true))
 # `~ <flavor><delim>pattern<delim>[i]` literal delimiters / flavors.
 const _TQL_PAT_DELIMS = "/%@"
 const _TQL_PAT_FLAVORS = Dict{Char,Symbol}('p' => :glob, 'm' => :partial, 'f' => :full)
@@ -167,6 +169,12 @@ function _taqllite_tokenize(s::AbstractString)
                 j += 1
             end
             optext = join(cs[i:j-1])
+            # Phase 489+: a run of operator characters that is not one operator (`!!`, `K==!F`) is split at the longest
+            # known prefix instead of being rejected as a whole
+            if !(optext in _TQL_OPS)
+                k = findfirst(p -> startswith(optext, p), _TQL_OPS_BY_LEN)
+                k === nothing || (optext = _TQL_OPS_BY_LEN[k]; j = i + length(optext))
+            end
             push!(toks, TQLToken(:op, optext, nothing))
             i = j
             # `!~` is always a pattern match. Bare `~` is a pattern match
@@ -582,6 +590,14 @@ function _parse_unary!(p::TQLParser)
     elseif t.kind === :op && t.text == "~"          # unary bitwise NOT
         _advance!(p)
         return TQLBitNot(_parse_unary!(p))
+    elseif _iskw(t, "NOT") || (t.kind === :op && t.text == "!")
+        # Phase 490: logical NOT is also an operand (`B != !B`, `K == NOT B` -- real TaQL binds it tighter than `==`);
+        # at the start of a condition `_parse_not!` still takes it first, so `NOT K == 3` keeps meaning NOT (K == 3)
+        _advance!(p)
+        _tql_descend!(p)
+        e = TQLNot(_parse_unary!(p))
+        p.depth -= 1
+        return e
     end
     return _parse_power!(p)
 end
