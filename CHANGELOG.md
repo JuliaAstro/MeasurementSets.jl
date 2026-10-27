@@ -11634,3 +11634,11 @@ After Phase 480's find, every other column kind was probed for the same defect: 
 ragged arrays, the three tiled managers, ScaledArray / CompressFloat / BitFlags engines, VirtualTaQL, a forwarded
 column, a RefTable repeating rows and a ConcatTable. No two cells of one `col[:]` or selection share memory, and
 changing a returned cell never changes a later read. The test (`api_tests.jl`) fails on the Phase 479 code.
+
+### Phase 482 — `keywords(t)` and `stdcolumns(name)` return copies
+
+Probing the metadata accessors for leaks: `columnnames`, `subtables` and `columndesc(...).keywords` are safe, but
+`keywords(t)` returned the table's own record, so changing an array or nested record inside it silently changed the
+table (and what a later `copytable` would write), and `stdcolumns(name)` returned the global MS schema's own vector, so
+changing it changed the schema for the whole process. Both now return copies. Tests in `api_tests.jl`,
+`schema_tests.jl` (the old test asserted identity).

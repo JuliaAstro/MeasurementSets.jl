@@ -225,3 +225,18 @@ end
 
     @test isempty(bad)
 end
+
+# Phase 482: `keywords(t)` and `stdcolumns(name)` returned the table's / the global schema's own containers, so changing an
+# array inside a keyword (or the returned vector) silently changed the table (or the MS schema for the whole process).
+@testset "keywords() and stdcolumns() return copies (Phase 482)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => Int32.(1:3)]; nrow=3,
+                keywords=Dict{String,Any}("KA" => [1, 2, 3], "KS" => ["x", "y"], "KR" => Dict("a" => [1.0, 2.0])))
+    t = readtable(d)
+    keywords(t)["KA"][1] = 99; keywords(t)["KS"][1] = "zz"; keywords(t)["KR"]["a"][1] = 99.0
+    @test keywords(t)["KA"] == [1, 2, 3] && keywords(t)["KS"] == ["x", "y"] && keywords(t)["KR"]["a"] == [1.0, 2.0]
+    @test keywords(query(t, "A > 1"))["KA"] == [1, 2, 3]
+    n = length(stdcolumns("MAIN")); first = stdcolumns("MAIN")[1].name
+    v = stdcolumns("MAIN"); push!(v, v[1]); v[1] = v[2]
+    @test length(stdcolumns("MAIN")) == n && stdcolumns("MAIN")[1].name == first
+end

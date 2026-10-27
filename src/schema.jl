@@ -309,9 +309,9 @@ stdtable(name::AbstractString) = SCHEMAVER2[uppercase(name)]
     stdcolumns(name) -> Vector{StdColumn}
 
 The standard-schema columns of MS v2 table `name` — shorthand for
-`stdtable(name).columns`.
+`stdtable(name).columns` (a copy, so the schema cannot be changed through it).
 """
-stdcolumns(name::AbstractString) = stdtable(name).columns
+stdcolumns(name::AbstractString) = copy(stdtable(name).columns)
 
 """
     validate(t::AbstractTable; table="MAIN") -> Vector{String}

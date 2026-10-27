@@ -291,9 +291,10 @@ end
 
 The table-level keyword set of `t` as a [`Record`](@ref) (`MS_VERSION`,
 `MEASURE_REFERENCE`, subtable references, …). Per-column keywords live on
-[`columndesc`](@ref)`(t, name).keywords`.
+[`columndesc`](@ref)`(t, name).keywords`. The result is a copy: changing an array inside it does
+not change the table.
 """
-keywords(t::Table) = t.desc.public
+keywords(t::Table) = deepcopy(t.desc.public)
 
 function Base.show(io::IO, t::Table)
     print(io, "Table(\"", basename(t.path), "\", ", t.rows, " rows, ",
