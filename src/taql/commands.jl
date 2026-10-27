@@ -6,11 +6,11 @@
 # the WHERE / SET expressions.  `taql(target, "...")` is a string-command
 # dispatcher on top of the Julia functions.
 
-# `limit >= 0` -> the first `limit` rows; `limit < 0` -> the last
-# `|limit|` rows (TaQL's UPDATE/DELETE `ORDER BY ... LIMIT n` form).
+# TaQL's UPDATE/DELETE `LIMIT n` (live-checked vs real TaQL in Phase 491, the same convention as SELECT's): `n > 0` the
+# first `n` rows, `n == 0` NO limit, `n < 0` all but the last `|n|` rows.
 function _apply_limit(rows::Vector{Int}, limit::Integer)
     n = length(rows)
-    limit >= 0 ? rows[1:min(limit, n)] : rows[max(1, n + limit + 1):n]
+    limit == 0 ? rows : limit > 0 ? rows[1:min(limit, n)] : rows[1:max(0, n + limit)]
 end
 
 # Phase 489: `r"a" * r"b"is` keeps the flags of the FIRST regex only, so a case-insensitive pattern built by
@@ -69,8 +69,8 @@ to `M` instead. Either name may be a slice / mask target.
 `nothing` (every row). `orderby` (like [`query`](@ref)'s — a bare
 column name/`Symbol`, ascending, or a `name => :asc`/`name => :desc`
 pair) sorts the matched rows before `limit` (an `Integer`) keeps only
-the first `limit` of them (`limit < 0` keeps the *last* `|limit|`
-instead) — "update the N oldest/newest rows matching a condition", e.g.
+the first `limit` of them (`limit == 0` keeps all, `limit < 0` all
+but the last `|limit|` -- real TaQL's `LIMIT` convention) — "update the N oldest/newest rows matching a condition", e.g.
 `update!(t; set=[...], where="...", orderby=["TIME"], limit=10)`.
 **A deliberate MeasurementSets extension, not a port of real TaQL's own
 `UPDATE ... ORDER BY ... LIMIT n`**: real casacore's `UPDATE`/`DELETE`
@@ -353,7 +353,7 @@ Remove rows from the CTDS table at `target` (a path or an open `Table`). On a pe
 `where` is a TaQL-lite WHERE string, a `row -> Bool` closure, or
 `nothing` (**every row** — leaves a 0-row table). `orderby`/`limit` — see
 [`update!`](@ref) — sort the matched rows then keep only `limit` of them
-(`limit < 0` keeps the *last* `|limit|`) before deleting, e.g. "delete
+(`limit == 0` keeps all, `limit < 0` all but the last `|limit|`) before deleting, e.g. "delete
 the 10 oldest rows matching a condition":
 `delete!(t; where="...", orderby=["TIME"], limit=10)`. Returns the
 number of rows removed. Extends `Base.delete!`.

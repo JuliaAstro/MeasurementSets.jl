@@ -11704,3 +11704,11 @@ lost (now built once by `_rxis`). The one remaining difference is the known leni
 characters that is not one operator (`!!(K == 2)`, `K==!B`) was rejected as a whole; it is now split at the longest known
 operator. `NOT` / `!` is also an operand (`B != !B`, `K == NOT B`: real TaQL binds it tighter than `==`); a leading
 `NOT K == 3` still negates the whole comparison (real TaQL calls it an error; kept as a convenience). Test in `taql_query_tests.jl`.
+
+### Phase 491 — UPDATE / DELETE `LIMIT` follows real TaQL's convention
+
+62 write-command syntax variants (case, newlines, `#` comments, `;`, aliases, quoting, `VALUES` forms, `LIMIT`) applied to twin
+tables, real TaQL against `taql()`, agree except `LIMIT`: in real TaQL (the SELECT convention) `LIMIT 0` means no limit and
+`LIMIT -n` all but the last `n` rows, where we had "no row" and "the last `n`". Fixed for the string forms and for the
+`limit=` keyword of `update!` / `delete!`. Two leniencies stay (an alias qualifier `SET t.A = 1`, `INSERT ... SET ... LIMIT`).
+Test in `taql_command_tests.jl`, cross-checked on twin tables.

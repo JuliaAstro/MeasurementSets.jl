@@ -118,12 +118,14 @@ end
     a2 = column(readtable(p2), "A")[:]
     @test a2 == Int32[1, 2, 3, 104, 105, 6, 7, 8, 9, 10]
 
-    # negative limit -> the LAST |limit| of the ordered set; with no WHERE,
-    # ascending-T order is rows [10,9,...,1] (T is the exact row-reverse
-    # here), so the last 3 of that order are rows 3,2,1 (A=3,2,1)
+    # negative limit -> ALL BUT the last |limit| of the ordered set (real TaQL's convention, Phase 491); with no WHERE,
+    # ascending-T order is rows [10,9,...,1] (T is the exact row-reverse here), so the first 7 of that order are
+    # rows 10..4 (A=104..110); limit 0 = no limit
     p3 = mk("u3")
-    @test update!(p3; set=["A" => "A + 100"], orderby=["T"], limit=-3) == 3
-    @test column(readtable(p3), "A")[:] == Int32[101, 102, 103, 4, 5, 6, 7, 8, 9, 10]
+    @test update!(p3; set=["A" => "A + 100"], orderby=["T"], limit=-3) == 7
+    @test column(readtable(p3), "A")[:] == Int32[1, 2, 3, 104, 105, 106, 107, 108, 109, 110]
+    p3z = mk("u3z")
+    @test update!(p3z; set=["A" => "A + 100"], orderby=["T"], limit=0) == 10
 
     # delete! -- the 2 matched rows with the largest T ("newest"); same
     # A>3 / T-decreasing-with-A geometry as p2 above -> A=4,5 removed
@@ -2115,4 +2117,26 @@ end
     @test column(readtable(d), "S")[:] == ["u,v", "y", "w[1"] && column(readtable(d), "K")[:] == Int32[1, 2, 9]
     @test MSv2._split_commas("'a,b', (1,2), \"c,d\"") == ["'a,b'", "(1,2)", "\"c,d\""]
     @test MSv2._paren_groups("('p)q', 6), ('r]s', 7)") == ["'p)q', 6", "'r]s', 7"]
+end
+
+# Phase 491: UPDATE / DELETE `LIMIT n` follows the SELECT convention of real TaQL (live-checked on twin tables): n > 0 the
+# first n rows, n == 0 NO limit (it was "no row"), n < 0 all but the last |n| (it was "the last |n|").  62 other
+# write-command syntax variants (case, newlines, comments, `;`, aliases, quoting, VALUES forms) already agreed.
+@testset "UPDATE / DELETE LIMIT: 0 = none, negative = all but the last (Phase 491)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["A" => Int32[5, 3, 9, 1, 7, 3]]; nrow=6); d)
+    col(d) = collect(column(readtable(d), "A")[:])
+    for (cmd, want) in (("UPDATE t SET A = 1 LIMIT 0", Int32[1, 1, 1, 1, 1, 1]), ("UPDATE t SET A = 1 LIMIT 2", Int32[1, 1, 9, 1, 7, 3]),
+                        ("UPDATE t SET A = 1 LIMIT -2", Int32[1, 1, 1, 1, 7, 3]), ("DELETE FROM t LIMIT 0", Int32[]),
+                        ("DELETE FROM t LIMIT 2", Int32[9, 1, 7, 3]), ("DELETE FROM t LIMIT -2", Int32[7, 3]),
+                        ("DELETE FROM t WHERE A > 0 LIMIT 0", Int32[]))
+        d = mk(); taql(d, cmd)
+        @test col(d) == want
+        if _HAVE_TAQL
+            dr = mk(); _taqlcmd(replace(cmd, " t " => " \$1 ", "FROM t" => "FROM \$1", "UPDATE t" => "UPDATE \$1"), dr)
+            @test col(dr) == want
+        end
+    end
+    d = mk(); @test update!(d; set=["A" => "A + 1"], limit=0) == 6
+    d = mk(); @test update!(d; set=["A" => "A + 1"], limit=-2) == 4
 end
