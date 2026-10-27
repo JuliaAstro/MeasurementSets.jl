@@ -2188,3 +2188,21 @@ end
         end
     end
 end
+
+# Phase 494: ALTER TABLE (39 variants: ADD/DROP/RENAME COLUMN and KEYWORD, lists, case, `;`, comments, newlines, failing
+# clauses) and CREATE TABLE (24 variants) against real TaQL.  CREATE accepted only `[..]` column lists and needed one:
+# `CREATE TABLE p (A I4, B R8)` and a column-less `CREATE TABLE p` (an empty table) are fine in real TaQL.
+# (RENAME KEYWORD onto an EXISTING name is a silent no-op in real TaQL; ours is an error, kept.)
+@testset "CREATE TABLE (..) column list and column-less form (Phase 494)" begin
+    names(p) = (t = readtable(p); (MSv2.columnnames(t), MSv2.nrow(t)))
+    for (cmd, want) in (("CREATE TABLE 'P' (A I4, B R8)", (["A", "B"], 0)), ("create table 'P' (A I4 [NDIM=1]) limit 3", (["A"], 3)),
+                        ("CREATE TABLE 'P'", (String[], 0)), ("CREATE TABLE 'P' LIMIT 2", (String[], 2)), ("CREATE TABLE 'P' [A I4, B R8] # c\n", (["A", "B"], 0)),
+                        ("CREATE TABLE 'P' [A I4];", (["A"], 0)))
+        p = joinpath(mktempdir(), "o"); taql(replace(cmd, "'P'" => "'$p'"))
+        @test names(p) == want
+        if _HAVE_TAQL
+            pr = joinpath(mktempdir(), "r"); tc = _taql_create(replace(cmd, "'P'" => "'$pr'")); CCT.flush(tc); tc = nothing; GC.gc(); GC.gc()
+            @test names(pr) == want
+        end
+    end
+end

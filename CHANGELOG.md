@@ -11731,3 +11731,10 @@ column, prefixed); `FROM $2` without a JOIN queries the second table (it used th
 matched: real TaQL's `SELECT DISTINCT` over a join does not de-duplicate, its `ORDER BY` puts NaN (an unmatched float) mid-sequence, and it rejects
 `a.*, b.Y`; the Phase 492 note on `GROUP BY ... ORDER BY` was a misreading of the saved result (the table real TaQL returns IS sorted; the
 persisted file is the unsorted aggregate). Test in `taql_command_tests.jl`, cross-checked.
+
+### Phase 494 — ALTER TABLE / CREATE TABLE syntax variants
+
+39 `ALTER TABLE` variants (add / drop / rename column and keyword, lists, case, `;`, comments, newlines, failing clauses) agree with
+real TaQL except `RENAME KEYWORD K1 TO K2` onto an existing name, a silent no-op there and an error here (kept). 24 `CREATE TABLE` variants
+agree once two forms are accepted: a parenthesised column list `CREATE TABLE p (A I4, B R8)` and no column list at all (an empty table,
+optionally `LIMIT n`). (`LIMIT -1` crashes real casacore.) Test in `taql_command_tests.jl`.

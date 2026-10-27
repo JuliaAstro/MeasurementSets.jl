@@ -998,14 +998,14 @@ function _bracket_group(s::AbstractString, i::Int)       # s[i] == '[' -> (inner
             c == q && (q = '\0')
         elseif c == '\'' || c == '"'
             q = c
-        elseif c == '['
+        elseif c == '[' || c == '('        # Phase 494: `CREATE TABLE p (A I4, B R8)` is a column list too
             depth += 1
-        elseif c == ']'
+        elseif c == ']' || c == ')'
             depth -= 1
             depth == 0 && return (s[nextind(s, i):prevind(s, k)], nextind(s, k))
         end
     end
-    throw(ArgumentError("taql: unbalanced '[' in \"$s\""))
+    throw(ArgumentError("taql: unbalanced '$(s[i])' in \"$s\""))
 end
 
 function _taql_table_path(tok::AbstractString)
@@ -1039,9 +1039,13 @@ function _taql_create(command::AbstractString)
         end
     end
     i += ncodeunits(s[i:end]) - ncodeunits(rest(i))
-    (i <= lastindex(s) && s[i] == '[') || throw(ArgumentError("taql: CREATE TABLE needs a column list [name type, ...]"))
-    colstr, i = _bracket_group(s, i)
-    tail = String(strip(s[i:end]))
+    if i <= lastindex(s) && (s[i] == '[' || s[i] == '(')
+        colstr, i = _bracket_group(s, i)
+        tail = String(strip(s[i:end]))
+    else                                  # no column list: an empty table (real TaQL), possibly `LIMIT n` / `DMINFO`
+        colstr = ""
+        tail = i <= lastindex(s) ? String(strip(s[i:end])) : ""
+    end
     nrows = 0; dminfo = nothing
     lm = match(r"^LIMIT\s+(.+?)(?=\s+DMINFO\b|$)"is, tail)
     if lm !== nothing
