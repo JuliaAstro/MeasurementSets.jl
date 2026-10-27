@@ -11649,3 +11649,11 @@ The last metadata accessor that handed out the table's own state: changing the `
 `columndesc(t, name).keywords` changed the table's units for every later read. The keyword record of the result is now a
 copy (a column without keywords costs nothing). One internal comparison in `_dm_local` relied on the identity of the
 descriptor and now compares names. Test in `api_tests.jl`.
+
+### Phase 484 — edit sessions copy the arrays assigned to them
+
+The reverse of Phases 480-483: an edit session kept the CALLER's array, so reusing the buffer before the flush changed
+what was written — `e[:V][2] = v; v .= -1` wrote -1, the same array assigned to two cells and then mutated wrote the
+mutation, and so did a column given to `addcolumn!`. `t[name][i] = array`, `t[name][:] = arrays` and the data of
+`addcolumn!` (also through a `RefTable` view) now store a copy. `insert!` and `write_table` were already safe. Test in
+`edit_tests.jl`.

@@ -1249,3 +1249,23 @@ for iter in 1:_fz(24)
     end
     end
 end
+
+# Phase 484: an edit session kept the CALLER's array, so reusing the buffer before the flush changed what was written
+# (`e[:V][2] = v; v .= -1` wrote -1; the same array in two cells and then mutated wrote the mutation).
+@testset "edit sessions copy assigned arrays (Phase 484)" begin
+    for (nm, kw) in (("ssm", (;)), ("ism", (; ism=["V"])), ("tsm", (; tsm=[["V"]])), ("tcm", (; tcm=[["V"]])))
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["V" => [fill(1.0, 3) for _ in 1:4]]; nrow=4, kw...)
+        v = [5.0, 6.0, 7.0]; w = [8.0, 9.0, 10.0]; vals = [fill(2.0, 3) for _ in 1:4]; col = [fill(3.0, 3) for _ in 1:4]
+        edit(d) do e
+            e[:V][2] = v; v .= -1.0
+            e[:V][3] = w; e[:V][4] = w; w .= 0.0
+            addcolumn!(e, "X", col); col[1] .= 99.0
+        end
+        got = collect(column(readtable(d), "V")[:])
+        @test got[2] == [5.0, 6.0, 7.0] && got[3] == [8.0, 9.0, 10.0] && got[4] == [8.0, 9.0, 10.0]
+        @test collect(column(readtable(d), "X")[:])[1] == fill(3.0, 3)
+        edit(d) do e; e[:V][:] = vals; vals[1] .= 99.0; end
+        @test collect(column(readtable(d), "V")[:])[1] == fill(2.0, 3)
+    end
+end

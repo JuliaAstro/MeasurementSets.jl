@@ -203,7 +203,7 @@ function addcolumn!(t::RefEditTable, name::AbstractString, data::AbstractVector;
     desc, vals = _addcol_desc(name, data; type, shape)
     full = Any[_default_cell(desc, t.parent) for _ in 1:length(t.parent.rowmap)]
     for (i, r) in enumerate(t.rows)
-        full[r] = vals[i]
+        full[r] = _own(vals[i])
     end
     push!(t.parent.addcols, (desc, kind, full))
     t.namemap[name] = name
