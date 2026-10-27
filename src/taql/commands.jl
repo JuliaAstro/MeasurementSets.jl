@@ -21,6 +21,9 @@ function _cmd_path(t::AbstractTable)
     return t.path
 end
 
+# Phase 475 (JET): anything else used as a table argument (`nothing`, a number, ...) was a bare MethodError
+_cmd_path(x) = throw(ArgumentError("expected a table path or a table, got $(x === nothing ? "nothing" : typeof(x))"))
+
 # Writing a floating value into an integer column (Phase 247, live-verified vs
 # real TaQL): truncate toward zero, saturate at the type's limits (`1e12` ->
 # typemax, `Inf` -> typemax), `NaN` -> 0. Anything else is unchanged.
@@ -1159,6 +1162,9 @@ function taql(target, command::AbstractString, others...)
     isempty(cmd) && throw(ArgumentError("taql: empty command"))
     _taql_check_tablerefs(cmd, (target === nothing ? 0 : 1) + length(others))
     kw = uppercase(String(first(split(cmd; limit=2))))
+    target isa Union{Nothing,AbstractString,AbstractTable,MeasurementSet} || _cmd_path(target)
+    target === nothing && !(kw in ("CREATE", "DROP")) &&
+        throw(ArgumentError("taql: $kw needs a table path or table as its first argument"))
     if kw == "UPDATE" || kw == "DELETE"
         cmd = _taql_preprocess_write(target isa AbstractTable ? target : readtable(_cmd_path(target)), cmd)
     end

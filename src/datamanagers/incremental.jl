@@ -326,7 +326,7 @@ function getcolumn(ism::IncrementalStMan, colnr::Int, c::ColumnDesc,
             _ism_fill!(out, r0, r1, v)
         end
     end
-    astype === nothing && return out
+    astype === nothing && return identity.(out)      # concrete element type, as StandardStMan gives (Phase 480)
     return [astype.(x) for x in out]         # array-valued ISM column: post-convert
 end
 
@@ -353,6 +353,18 @@ end
         error("IncrementalStMan: corrupt index (rows $r0:$(r1 - 1) outside 1:$(length(out)))")
     @inbounds for r in r0:r1-1
         out[r] = v
+    end
+    return nothing
+end
+
+# Phase 480: the cells of one stored run must not share one array (mutating a returned cell changed its neighbours)
+@inline function _ism_fill!(out, r0::Int, r1::Int, v::AbstractArray)
+    (r0 >= 1 && r1 - 1 <= length(out)) ||
+        error("IncrementalStMan: corrupt index (rows $r0:$(r1 - 1) outside 1:$(length(out)))")
+    r0 <= r1 - 1 || return nothing
+    @inbounds out[r0] = v
+    @inbounds for r in r0+1:r1-1
+        out[r] = copy(v)
     end
     return nothing
 end

@@ -11586,3 +11586,66 @@ result and no `.tmp` file is left (4 and 8 threads x 4 rounds, 16 threads x 10).
 600 random tables (1-600 rows, 1-3 axis cells of seven element types, undefined cells, shared/single tiled-shape,
 `TiledColumnStMan` and scalar columns) copied whole and by random row range under random streaming thresholds (chunks of
 one tile up to the whole column) equal the selected source rows in every column. Seeded test in `tsm_multicol_tests.jl`.
+
+### Phase 475 — static analysis (JET) pass; junk `taql` target
+
+`JET.report_package` gives 283 reports (251 in Phase 399); the growth is `match(...)` results used without a `nothing`
+check in the `taql()` command parser, which cannot fail because the regex has just matched. One report was real:
+`taql(nothing, "UPDATE ...")` (or a number as the target) raised a bare `MethodError` deep inside; it is now an
+`ArgumentError` naming the problem. Test in `taql_command_tests.jl`.
+
+### Phase 476 — chained SSM index buckets: boundary sweep (no bug found)
+
+The index of a long `StandardStMan` table is chained over several index buckets (Phase 451); a one-Bool-column table has
+512-byte buckets, so the chain starts near 60,000 rows. 408 tables of 5-140 x 1024 rows (+-1), both byte orders, read by
+us and (every seventh, with 100,000 rows) by Casacore.jl, and 10 tables edited in place (cell patches, `addrows!`) all
+agree. Seeded test in `ssm_tests.jl`.
+
+### Phase 477 — IncrementalStMan multi-bucket boundary sweep (no bug found)
+
+803 tables of 2,500-8,200 rows with columns that change on every row (3 to 10 buckets, buckets filled by size), read by us
+and (every 13th) Casacore.jl, and every 7th edited in place and extended with `addrows!` (also read by Casacore.jl): all
+agree. Seeded test in `ism_writer_tests.jl`.
+
+### Phase 478 — tiled tables: tile-boundary sweep with edits (no bug found)
+
+220 tables (shared hypercube and `TiledColumnStMan`, 1000-element Float32 + Bool cells, 1-1050 rows around the 254- and
+262-row tile boundaries) read back, edited in place, extended with `addrows!` and shortened with `removerows!`; the
+shared-hypercube ones are also read by Casacore.jl: all agree. Seeded test in `tsm_multicol_tests.jl`.
+
+### Phase 479 — SSM string boundaries (no bug found)
+
+610 tables with `String` cells around the inline limit (8 bytes) and the 512-byte string-bucket size (with and without
+extra numeric columns, 1 to 300 strings), then one string grown by 700 bytes in an edit session: our reader and
+Casacore.jl (a third of the tables) agree and the other cells are unchanged. Seeded test in `ssm_tests.jl`.
+
+### Phase 480 — array-valued IncrementalStMan columns: concrete element type, independent cells
+
+A random edit fuzz of ragged array columns (180 tables: five element types, StandardStMan or IncrementalStMan indirect
+arrays, both byte orders, one to three sessions of cell sets, `addrows!`, `removerows!`; every fourth read by Casacore.jl)
+found no storage bug, but a whole-column read of an array-valued IncrementalStMan column returned a `Vector{Any}`
+(StandardStMan gives a concrete element type) and the cells of one stored run were the SAME array object, so changing
+one returned cell changed its neighbours. Both fixed; a stored run now yields one array per row. Tests in
+`ism_writer_tests.jl` (including a seeded copy of the fuzz).
+
+### Phase 481 — returned cells are independent in every column kind (no bug found)
+
+After Phase 480's find, every other column kind was probed for the same defect: identical cells in SSM / ISM fixed and
+ragged arrays, the three tiled managers, ScaledArray / CompressFloat / BitFlags engines, VirtualTaQL, a forwarded
+column, a RefTable repeating rows and a ConcatTable. No two cells of one `col[:]` or selection share memory, and
+changing a returned cell never changes a later read. The test (`api_tests.jl`) fails on the Phase 479 code.
+
+### Phase 482 — `keywords(t)` and `stdcolumns(name)` return copies
+
+Probing the metadata accessors for leaks: `columnnames`, `subtables` and `columndesc(...).keywords` are safe, but
+`keywords(t)` returned the table's own record, so changing an array or nested record inside it silently changed the
+table (and what a later `copytable` would write), and `stdcolumns(name)` returned the global MS schema's own vector, so
+changing it changed the schema for the whole process. Both now return copies. Tests in `api_tests.jl`,
+`schema_tests.jl` (the old test asserted identity).
+
+### Phase 483 — `columndesc(t, name)` returns a copy of the column keywords
+
+The last metadata accessor that handed out the table's own state: changing the `QuantumUnits` array in
+`columndesc(t, name).keywords` changed the table's units for every later read. The keyword record of the result is now a
+copy (a column without keywords costs nothing). One internal comparison in `_dm_local` relied on the identity of the
+descriptor and now compares names. Test in `api_tests.jl`.

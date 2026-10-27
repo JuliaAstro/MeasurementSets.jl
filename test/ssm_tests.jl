@@ -184,3 +184,51 @@ end
         @test column(readtable(d), "A")[:] == cells
     end
 end
+
+# Phase 476: the index of a long StandardStMan table is chained over several index buckets (Phase 451).  A one-Bool-column
+# table has 512-byte buckets, so the chain grows from ~60,000 rows; sweep row counts around the points where the number of
+# index buckets changes (and around bucket multiples), read by us and Casacore.jl, then edit in place and add rows.
+@testset "SSM chained index buckets: boundary sweep and edits (Phase 476)" begin
+    rng = MersenneTwister(476)
+    for N in vcat([k * 1024 + dlt for k in 58:64 for dlt in (-1, 0, 1)], [100_000]), endian in (:little, :big)
+        d = joinpath(mktempdir(), "t")
+        B = rand(rng, Bool, N); I = Int32.(rand(rng, 1:1000, N)); S = [i % 50 == 0 ? "long"^20 : "s$i" for i in 1:N]
+        write_table(d, "T", Pair{String,Any}["B" => B, "I" => I, "S" => S]; nrow=N, endian)
+        t = readtable(d)
+        @test column(t, "B")[:] == B && column(t, "I")[:] == I && column(t, "S")[:] == S
+        idx = sort(unique(vcat(rand(rng, 1:N, 20), N)))
+        edit(d) do e; for i in idx; e[:B][i] = !B[i]; e[:I][i] = Int32(-i); end; end
+        for i in idx; B[i] = !B[i]; I[i] = Int32(-i); end
+        edit(d) do e; addrows!(e, 3); e[:I][N+1] = Int32(7); end
+        t = readtable(d)
+        @test MSv2.nrow(t) == N + 3 && column(t, "B")[1:N] == B && column(t, "I")[1:N] == I && column(t, "S")[1:N] == S
+        if _HAVE_CASACORE && endian === :little
+            c = joinpath(mktempdir(), "c"); cp(d, c); u = CCT.Table(c)
+            @test collect(u[:I][1:N]) == I && collect(u[:B][1:N]) == B
+        end
+    end
+end
+
+# Phase 479: String cells around the inline limit (8 bytes) and the string-bucket size (512-byte buckets, with and without
+# extra numeric columns), one or many strings, then a string grown to hundreds of bytes in an edit session: our reader
+# and Casacore.jl agree and the other cells are untouched.
+@testset "SSM strings: inline limit, bucket boundaries, growing a string (Phase 479)" begin
+    rng = MersenneTwister(479)
+    mk(len) = String(rand(rng, 'a':'z', len))
+    for extra in (0, 3), (L, N) in vcat([(l, n) for l in vcat(0:2, 7:10) for n in (1, 4, 100)], [(l, 20) for l in vcat(496:500, 504:508, 1016:1020)])
+        d = joinpath(mktempdir(), "t")
+        S = [mk(L + (i - 1) % 3) for i in 1:N]
+        cols = Pair{String,Any}["S" => S, "K" => Int32.(1:N)]
+        for e in 1:extra; push!(cols, "X$e" => rand(rng, N)); end
+        write_table(d, "T", cols; nrow=N)
+        @test column(readtable(d), "S")[:] == S
+        big = mk(L + 700)
+        edit(d) do e; e[:S][1] = big; end
+        t = readtable(d)
+        @test column(t, "S")[1] == big && column(t, "S")[2:end] == S[2:end] && column(t, "K")[:] == Int32.(1:N)
+        if _HAVE_CASACORE
+            c = joinpath(mktempdir(), "c"); cp(d, c)
+            @test collect(CCT.Table(c)[:S][:]) == vcat(big, S[2:end])
+        end
+    end
+end

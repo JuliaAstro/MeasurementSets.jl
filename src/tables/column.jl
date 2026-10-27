@@ -56,7 +56,7 @@ function _dm_local(t::Table, c::ColumnDesc)
     for x in t.desc.columns
         if x.sequ == c.sequ
             n += 1
-            x === c && (idx = n)
+            x.name == c.name && (idx = n)
         end
     end
     idx == 0 && error("column not found")

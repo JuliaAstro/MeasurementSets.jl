@@ -32,7 +32,7 @@
 
     # keyword-value mismatch / missing-keyword / missing-subtable (Phase 288
     # — a real, previously-untested-but-correct set of `validate` branches)
-    @test stdcolumns("MAIN") === stdtable("MAIN").columns
+    @test stdcolumns("MAIN") == stdtable("MAIN").columns && !(stdcolumns("MAIN") === stdtable("MAIN").columns)   # a copy (Phase 482)
 
     m = readtable(SAMPLE_MS)   # a fresh MAIN
     _rebuild(desc) = MSv2.Table(m.path, m.type, m.subtype, m.readme, m.version,
