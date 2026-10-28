@@ -18,9 +18,8 @@
 # `ORDER BY`, all case-insensitive keyword forms). Supports quantity
 # literals + date/time/angle functions (Phase 69), computed output
 # columns (Phase 57), and -- with `import SOFA` -- `mscal.*` derived-MS
-# functions (Phase 77). Not supported: a read of `V[boolmask]` in a
-# WHERE/SELECT expression (it is valid only as an `update!` SET
-# target -- Phase 55).
+# functions (Phase 77). A read `V[boolmask]` is a masked array (Phase 60);
+# as an `update!` SET target it assigns where the mask is true (Phase 55).
 # (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
 # 1-based, with negative-from-end and `end` -- landed in Phase 42/44;
 # `BETWEEN` / `NOT BETWEEN` in Phase 43; bitwise ops -- `^` is xor, use
@@ -53,9 +52,10 @@
 # literals, and date/time + angle functions (`datetime`, `mjd`, `date`,
 # `year`/`month`/`day`, `hms`/`dms`, `normangle`, `angdist` -- dates are
 # an MJD `Float64`).
-# Not supported: `mscal.*` / measures-frame functions,
-# sliding-window (`running*`/`boxed*`) ops, rand, array reshaping,
-# rowid(), substr, type conversions, UDFs, aggregates over row groups.
+# (Since then: `mscal.*` / `meas.*` functions, sliding-window `running*` /
+# `boxed*` ops, array reshaping, rowid(), substr, string/bool conversions,
+# group aggregates and unquoted date literals -- see CHANGELOG.md.)
+# Not supported: rand, UDFs, `regex`-style pattern objects in `IN` lists.
 
 import Statistics
 import Tables

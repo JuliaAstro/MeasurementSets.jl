@@ -1170,32 +1170,28 @@ end
 
 
 """
-    taql(target, command::AbstractString)
+    taql(target, command::AbstractString, others...)
 
-Run one TaQL-lite write / select command against `target` (a path or an
-open `Table`):
+Run one TaQL-lite command against `target` (a path or an open table); extra tables are `\$2`, `\$3`, … in the command:
 
-* `UPDATE [t] SET c1 = e1, c2 = e2 [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
+* `UPDATE [t [AS a]] SET c1 = e1, c2 = e2 [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
   → [`update!`](@ref), returns `Int`
-* `DELETE [FROM t] [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
+* `DELETE [FROM t [AS a]] [WHERE cond] [ORDER BY k [ASC|DESC], …] [LIMIT n]`
   → [`delete!`](@ref), returns `Int`
-* `SELECT [DISTINCT] [*|col [AS a], …] [FROM t] [WHERE cond] [GROUP BY k, …] [HAVING cond] [ORDER BY k] [LIMIT n [OFFSET m]] [(INTO|GIVING) 'path']`  → [`copytable`](@ref), returns the path
-* `SELECT …` with no `INTO`/`GIVING`              → [`query`](@ref), returns the result
-* `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…) [LIMIT n]`  → [`insert!`](@ref), returns `Int`
-* `INSERT [LIMIT n] INTO t SET c1 = v1, c2 = v2`   → [`insert!`](@ref), returns `Int`
-* `INSERT INTO t SELECT col [AS a], … FROM 'path' [WHERE cond] [LIMIT n]`
-  → [`insert!`](@ref) from a query of the table at `'path'`, returns `Int`
+* `SELECT [DISTINCT|ALL] [*|expr [AS a], …] [FROM t [AS a] | (SELECT …) | \$2] [JOIN \$2 b ON a.K == b.K] [WHERE cond]
+  [GROUP BY k, …] [HAVING cond] [ORDER BY k] [LIMIT n [OFFSET m]] [(INTO|GIVING) 'path']` → the result table, or
+  with `INTO` / `GIVING` the saved path ([`copytable`](@ref))
+* `INSERT INTO t [(c1, c2)] VALUES (v1, v2), (…) [LIMIT n]`, `INSERT [LIMIT n] INTO t SET c1 = v1, c2 = v2`,
+  `INSERT INTO t [(c1, c2)] SELECT … FROM 'path' [WHERE cond] [LIMIT n]` → [`insert!`](@ref), returns `Int`
+* `ALTER TABLE t ADD|DROP|RENAME COLUMN …`, `… SET|DROP|RENAME KEYWORD …`; `CREATE TABLE 'p' [name type, …] [LIMIT n]
+  [DMINFO …]`; `DROP TABLE 'p'`
 
-`INSERT … VALUES`/`SET` values must be constant expressions (no column
-references) — `INSERT … SELECT … FROM 'path'` is the row-copying form,
-its `col`s (and `WHERE`) are ordinary expressions over the *source*
-table (`*` selects every source column as-is; `AS a` renames a column
-to match `t`'s own column name). Clause keywords (`SET` / `WHERE` /
-`INTO` / `GIVING` / `FROM` / `SELECT`) are found by a case-insensitive
-split; a quoted literal containing one of them is not supported — use
-the Julia functions for that. `GROUP BY` / aggregates in a `SELECT`
-string are not supported (use `copytable(dst, groupby(…))`, or
-`insert!(t, groupby(…))`).
+The syntax follows real TaQL (checked command by command against casacore): keywords in any case, `# …` comments to the end
+of the line, a trailing `;`, `K IN [1, 2]` / `K IN (1, 2)` / `K IN (SELECT …)`, `EXISTS (SELECT …)`, unquoted date literals
+(`2020-02-12`, `12Feb2020`), unit literals (`1.4GHz`), string literals that touch concatenate (`'a''b'` is `ab`), an unnamed computed
+column is called `Col_<position>`, and `LIMIT 0` means no limit. `INSERT … VALUES`/`SET` values must be constant. Clause keywords
+(`SET` / `WHERE` / `INTO` / `GIVING` / `FROM` / `SELECT`) are found by a case-insensitive split; a quoted literal containing one
+of them is not supported — use the Julia functions for that.
 """
 taql(command::AbstractString) = taql(nothing, command)    # target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
 

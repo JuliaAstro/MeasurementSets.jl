@@ -11769,3 +11769,10 @@ fractional seconds of `12h30m15.5s` are literals. Real TaQL's `D BETWEEN <date> 
 `sums` / `mins` / `means`, masked selections) against real TaQL: 66 select exactly the same rows and are now a permanent cross-check
 (`taql_query_tests.jl`, runs where the real-TaQL tooling is present). The other five are leniency on our side (real TaQL rejects `V[1]` on a 2-D cell,
 a float subscript, `ndim(V[1,:])`, and has no value for `mean(V[V > 2])`).
+
+### Phase 499 — the `taql` docstring and the engine's header comments describe the current surface
+
+The `taql` docstring still said `GROUP BY` / aggregates in a `SELECT` are not supported and omitted `JOIN`, sub-queries, `ALTER` /
+`CREATE` / `DROP`, extra tables (`$2`) and the syntax points checked against real TaQL in Phases 488-498; the header comments of
+`src/taql/ast.jl` listed as unsupported what Phases 60-256 added (masked arrays, `mscal.*`, `running*`, reshaping, `rowid()`,
+`substr`, aggregates). Rewritten; no behaviour change.
