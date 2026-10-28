@@ -11747,3 +11747,9 @@ all of them, `gvariance` the variance over all of them); ours returned an elemen
 `gmedian` / `gvariance` / ..., and raised errors for `grms`, `gproduct`, `gany(V > 5)`, `gntrue`, `gnfalse`. These aggregates now form a pooled
 mode (`gcount`, `gfirst`, `glast`, `gaggr`, `ghist` and the per-element `gs*` forms are unchanged). Not matched (real TaQL quirks):
 `HAVING` that selects nothing, `CUBE` (real rejects it; ours works), `gfirst` / `glast` (real rejects). Test in `taql_query_tests.jl`.
+
+### Phase 496 — sub-query variants
+
+28 sub-query variants against real TaQL (`IN` / `NOT IN` / `EXISTS` / `NOT EXISTS` with `DISTINCT`, `ORDER BY`, `LIMIT`, aggregates, expressions and a second
+table; scalar sub-queries; nested, aliased and `*` forms of `FROM (SELECT ..)`) agree except `x IN [SELECT ..]` (brackets), which is now
+recognised like the parenthesised form. Real TaQL cannot select FROM a grouped sub-query, ours can. Test in `taql_command_tests.jl`.

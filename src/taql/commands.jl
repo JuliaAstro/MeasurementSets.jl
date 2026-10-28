@@ -736,11 +736,30 @@ _sub_literal(x::Bool) = x ? "TRUE" : "FALSE"
 _sub_literal(x) = repr(x)
 
 # `x [NOT] IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` -> literals (evaluated on `target`)
+function _matching_bracket(s::AbstractString, i::Int)
+    depth = 0; q = '\0'
+    for j in eachindex(s)
+        j < i && continue
+        c = s[j]
+        if q != '\0'
+            c == q && (q = '\0')
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '['
+            depth += 1
+        elseif c == ']'
+            depth -= 1
+            depth == 0 && return j
+        end
+    end
+    throw(ArgumentError("taql: unbalanced '[' in \"$s\""))
+end
+
 function _taql_subst_subqueries(target, body::AbstractString, others=())
     body = String(body)
-    while (m = match(r"\b(NOT\s+)?(IN|EXISTS)\s*\(\s*SELECT\b"i, body)) !== nothing
-        open = findnext('(', body, m.offset)
-        close = _matching_paren(body, open)
+    while (m = match(r"\b(NOT\s+)?(IN|EXISTS)\s*[(\[]\s*SELECT\b"i, body)) !== nothing
+        open = findnext(c -> c == '(' || c == '[', body, m.offset + ncodeunits(m.captures[2]))   # `IN [SELECT ..]` too (Phase 496)
+        close = body[open] == '(' ? _matching_paren(body, open) : _matching_bracket(body, open)
         inner = String(strip(body[open+1:close-1]))
         r = taql(target, inner, others...)
         r isa AbstractTable || throw(ArgumentError("a sub-query must be a SELECT that returns rows (got $(typeof(r))): $inner"))

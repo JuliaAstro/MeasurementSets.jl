@@ -2206,3 +2206,18 @@ end
         end
     end
 end
+
+# Phase 496: 28 sub-query variants vs real TaQL (IN / NOT IN / EXISTS / NOT EXISTS with DISTINCT, ORDER BY, LIMIT, aggregates,
+# expressions, a second table; scalar sub-queries; FROM (SELECT ..) nested, aliased, with `*`, ORDER BY, LIMIT) agree except that
+# `x IN [SELECT ..]` (brackets) was not recognised.  (Real TaQL cannot select FROM a grouped sub-query; ours can.)
+@testset "IN [SELECT ..] sub-query (Phase 496)" begin
+    d1 = joinpath(mktempdir(), "l"); d2 = joinpath(mktempdir(), "r")
+    write_table(d1, "L", Pair{String,Any}["K" => Int32[1, 2, 3, 2, 9]]; nrow=5)
+    write_table(d2, "R", Pair{String,Any}["K" => Int32[1, 2, 3, 4], "Z" => [10.0, 20.0, 30.0, 40.0]]; nrow=4)
+    ks(cmd) = (r = taql(d1, cmd, d2); collect(column(r, "K")[:]))
+    @test ks("SELECT K FROM \$1 WHERE K IN [SELECT K FROM \$2]") == [1, 2, 3, 2]
+    @test ks("SELECT K FROM \$1 WHERE K NOT IN [SELECT K FROM \$2]") == [9]
+    @test ks("SELECT K FROM \$1 WHERE K IN [SELECT K FROM \$2 WHERE Z > 15]") == [2, 3, 2]
+    @test ks("SELECT K FROM \$1 WHERE K IN (SELECT K FROM \$2 WHERE Z > 15)") == [2, 3, 2]
+    @test ks("SELECT K FROM \$1 WHERE K IN [1, 2] AND K IN [SELECT K FROM \$2 WHERE Z > 15]") == [2, 2]
+end
