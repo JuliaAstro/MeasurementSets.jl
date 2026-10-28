@@ -11785,3 +11785,13 @@ whole columns (`TIME` 0.28, `ANTENNA1` 0.66, `FLAG_ROW` 0.68, `UVW` 0.91 of the 
 `POINTING.NAME` 0.16, `POINTING.TIME` 0.05). Geomean 0.17 over 15 lines, every line faster than C++; nothing to fix. (Table open is
 not comparable: Casacore.jl reuses a cached handle.) Casacore.jl indexes array columns by the trailing axis (`col[:, :, a:b]`), so a
 plain `col[:]` on a 2-D / 3-D column is a DimensionMismatch there; the scratch script handles that. No code change.
+
+### Phase 501 — GROUP BY syntax variants vs real TaQL (no bug found)
+
+41 `GROUP BY` variants (several and expression keys, `WHERE` / `HAVING` / `ORDER BY` / `LIMIT` / `OFFSET`, keyword case, aggregate
+expressions, aggregates without `GROUP BY`, `iif` over aggregates) against real TaQL, comparing the persisted columns. 32 agree
+exactly (a few because both engines reject the form, e.g. lower-case column names) and are now a permanent cross-check
+(`taql_command_tests.jl`). The other nine are real-TaQL quirks, not divergences to copy: `GIVING` of a grouped result keeps the
+unsorted / unfiltered aggregate (`ORDER BY`, `LIMIT`, `HAVING G`), `HAVING NOT agg > x`, `GROUP BY 1` and `GROUP BY G, G` are errors there,
+`gfirst` / `glast` of an integer column is rejected there, and `AS T` fails because `T` is the boolean literal. A grouped select's
+returned (non-persisted) real table carries no columns, so `GIVING` is the only oracle.
