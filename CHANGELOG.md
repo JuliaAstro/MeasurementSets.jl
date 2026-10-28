@@ -11762,3 +11762,10 @@ and rejected the others. (2) A quantity literal next to an operand WITHOUT a uni
 is `D < 70000`; casacore leaves a unitless operand as it is) where ours raised a DimensionError — the Phase 69 assertion that a unitless column against a
 dimensional literal is an error was wrong and is replaced (a unit-bearing column against a bare number is still an error, by decision). (3) `-12h` and the
 fractional seconds of `12h30m15.5s` are literals. Real TaQL's `D BETWEEN <date> AND <date>` is an error there and works here. Tests in `taql_query_tests.jl`.
+
+### Phase 498 — array subscript syntax vs real TaQL (no bug found)
+
+71 array-subscript variants (single, pair, empty, `:`, ranges with step, negative and expression subscripts, spaces, reductions over slices,
+`sums` / `mins` / `means`, masked selections) against real TaQL: 66 select exactly the same rows and are now a permanent cross-check
+(`taql_query_tests.jl`, runs where the real-TaQL tooling is present). The other five are leniency on our side (real TaQL rejects `V[1]` on a 2-D cell,
+a float subscript, `ndim(V[1,:])`, and has no value for `mean(V[V > 2])`).

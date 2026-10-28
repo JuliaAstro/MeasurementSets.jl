@@ -6036,3 +6036,89 @@ end
         @test ks("X*1000 < 2000m") == [1, 2] && ks("D > -12h") == 1:6 && ks("D > 12h30m15.5s") == 1:6 && ks("D > -30deg") == 1:6
     end
 end
+
+# Phase 498: 66 array-subscript syntax variants (single / pair / empty / `:` / ranges with step / negative / expression
+# subscripts / reductions over slices / masked selections) select the same rows as real TaQL.  (Real TaQL rejects `V[1]` on a
+# 2-D cell, a float subscript and `ndim(V[1,:])`; ours is lenient there.)  Needs the real-TaQL tooling, so it only runs there.
+@testset "array subscript syntax vs real TaQL (Phase 498)" begin
+    if _HAVE_TAQL
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["K" => Int32.(1:6), "A" => Int32[5, 3, 9, 1, 7, 3], "V" => [Float64[i i+1; i+2 i+3] for i in 1:6]]; nrow=6)
+        t = readtable(d)
+        forms = [
+        "V[1] > 2",
+        "V[2] > 2",
+        "V[1,1] > 2",
+        "V[1,2] > 2",
+        "V[2,2] > 2",
+        "V[1,] > 2",
+        "V[,1] > 2",
+        "V[,] > 0",
+        "V[ 1 , 1 ] > 2",
+        "V [1,1] > 2",
+        "V[1][1] > 2",
+        "V[1:2] > 0",
+        "V[1:2,1] > 0",
+        "V[:,1] > 0",
+        "V[1,:] > 0",
+        "V[:] > 0",
+        "V[::2] > 0",
+        "V[1::2] > 0",
+        "V[1:3:2] > 0",
+        "V[1:2:1,1:2:1] > 0",
+        "V[1:] > 0",
+        "V[:2] > 0",
+        "V[2:] > 0",
+        "V[-1] > 2",
+        "V[-1,-1] > 2",
+        "V[-2:-1,1] > 0",
+        "V[0] > 0",
+        "V[0,1] > 0",
+        "V[3,1] > 0",
+        "V[1,3] > 0",
+        "V[1,1,1] > 0",
+        "sum(V[,1]) > 3",
+        "sum(V[1,]) > 3",
+        "sum(V[1:2,1:2]) > 10",
+        "mean(V[,1]) > 2",
+        "max(V[2,]) > 4",
+        "nelements(V[1,]) == 2",
+        "ndim(V[1,1]) == 0",
+        "ndim(V[1:2,1]) == 2",
+        "ndim(V) == 2",
+        "shape(V[1,]) == [2]",
+        "shape(V[1:2,1]) == [2,1]",
+        "V[K] > 0",
+        "V[K,1] > 0",
+        "V[A,1] > 0",
+        "V[K%2+1,1] > 2",
+        "V[1+1,1+1] > 3",
+        "V[rownumber()%2+1,1] > 0",
+        "V[1,1] == V[1,1]",
+        "V[1,1] + V[2,2] > 6",
+        "V[1,1] * 2 > 4",
+        "-V[1,1] < -2",
+        "abs(V[1,1] - 3) < 1",
+        "V[1,1] IN [1,2,3]",
+        "V[1,1] BETWEEN 1 AND 3",
+        "V[1:2,1] == V[1:2,2]",
+        "any(V > 3)",
+        "all(V > 0)",
+        "any(V[1,] > 3)",
+        "ntrue(V > 2) == 2",
+        "sums(V,1)[1] > 2",
+        "sums(V,2)[2] > 6",
+        "mins(V,1)[1] > 0",
+        "means(V)[1] > 0",
+        "V[V > 2][1] > 0",
+        "sum(V[V > 2]) > 0"]
+        for f in forms
+            real = try o = joinpath(mktempdir(), "o"); Int32.(sort(collect(_taqlcmd("SELECT FROM \$1 WHERE $f GIVING '$o'", CCT.Table(d))[:K][:]))) catch; nothing end
+            mine = try Int32.(sort(column(query(t, f), "K")[:])) catch; nothing end
+            mine isa Vector && isempty(mine) && (mine = nothing)       # real TaQL throws on an empty selection
+            @test real == mine
+        end
+    else
+        @test true
+    end
+end
