@@ -221,11 +221,14 @@ Base.IndexStyle(::Type{<:EditColumn}) = IndexLinear()
 function Base.getindex(c::EditColumn, i::Int)
     @boundscheck 1 <= i <= length(c.tab.rowmap) || throw(BoundsError(c, i))
     t = c.tab; n = c.desc.name
-    haskey(t.override, n) && return t.override[n][i]
+    # Phase 485: arrays handed out are copies, so changing one never edits the session behind its back (before, a cell read
+    # from a loaded SSM / ISM column or a set / added cell was the session's own array and the change was written
+    # or not depending on which flush path ran)
+    haskey(t.override, n) && return _own(t.override[n][i])
     e = get(t.tsmedit, n, nothing)
-    e !== nothing && haskey(e, i) && return e[i]
+    e !== nothing && haskey(e, i) && return _own(e[i])
     a = _added(t, n)
-    a !== nothing && return a[3][i]
+    a !== nothing && return _own(a[3][i])
     src = t.rowmap[i]
     src > 0 && return column(t.reader, n)[src]
     return _default_cell(c.desc, t)
@@ -262,11 +265,16 @@ function _check_scalar_cell(desc::ColumnDesc, v)
     return nothing
 end
 
+# Phase 484: the session keeps its OWN copy of an assigned array (the caller may reuse its buffer before the flush)
+_own(v::AbstractArray) = copy(v)
+_own(v) = v
+
 function Base.setindex!(c::EditColumn, v, i::Int)
     _check_open(c.tab, "setindex!")
     @boundscheck 1 <= i <= length(c.tab.rowmap) || throw(BoundsError(c, i))
     t = c.tab; n = c.desc.name
     _check_scalar_cell(c.desc, v)
+    v = _own(v)
     a = _added(t, n)
     if a !== nothing
         a[3][i] = v
@@ -298,7 +306,7 @@ function Base.setindex!(c::EditColumn, vals, ::Colon)
         for v in vals
             _check_scalar_cell(c.desc, v)
         end
-        t.override[n] = Any[v for v in vals]
+        t.override[n] = Any[_own(v) for v in vals]
         t.touched[n] = nothing
         return vals
     end
@@ -628,7 +636,7 @@ function addcolumn!(t::EditTable, name::AbstractString, data::AbstractVector;
     length(data) == length(t.rowmap) ||
         error("addcolumn!: expected $(length(t.rowmap)) values, got $(length(data))")
     desc, vals = _addcol_desc(name, data; type, shape)
-    push!(t.addcols, (desc, kind, Any[v for v in vals]))
+    push!(t.addcols, (desc, kind, Any[_own(v) for v in vals]))
     return t
 end
 

@@ -166,10 +166,10 @@ end
     g2 = query(r, "K >= 2"; select=["K" => "K", "X4" => "X2 * 2.0"])
     @test collect(g2.X4) == 4 .* X[3:6]
 
-    # taql string form: computed column needs AS; bare column doesn't
+    # taql string form: a computed column without AS is named Col_<position> (Phase 492); a bare column keeps its name
     tq = taql(t, "SELECT K, X * 3.0 AS X3 WHERE K >= 3")
     @test collect(tq.X3) == 3 .* X[4:6]
-    @test_throws ArgumentError taql(t, "SELECT X + 1 WHERE K >= 0")
+    @test collect(taql(t, "SELECT K, X + 1 WHERE K >= 3").Col_2) == X[4:6] .+ 1
 end
 
 @testset "TaQL-lite query — closure form" begin
@@ -5935,4 +5935,82 @@ end
     # a group of one row and a table below the compile threshold
     r5 = groupby(t, "K"; where = "rownumber() <= 3", select = ["K" => :K, "m" => "gsum(X)"])
     @test sum(r5.m) ≈ sum(X[1:3])
+end
+
+# Phase 488: string literals that touch are ONE string in real TaQL ('a''b' == "ab", "a"'b', 'a''' == "a"); a space
+# between them is an error.  (Phase 244 had left this out.)
+@testset "adjacent string literals concatenate (Phase 488)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["S" => ["ab", "a'b", "plain", "a", "abc", "ab''"], "K" => Int32.(1:6)]; nrow=6)
+    t = readtable(d)
+    ks(f) = Int32.(sort(column(query(t, f), "K")[:]))
+    @test ks("S == 'a''b'") == [1] && ks("S == \"a\"\"b\"") == [1] && ks("S == 'a'\"b\"") == [1]
+    @test ks("S IN ['a''b','plain']") == [1, 3]
+    @test ks("S LIKE 'a''%'") == [1, 2, 4, 5, 6]
+    @test ks("S == 'a''b''c'") == [5] && ks("S == 'a''b' + 'c'") == [5]
+    @test ks("S == 'a'''") == [4] && ks("S == '''a'") == [4]
+    @test ks("strlength('a''bc') == 3") == 1:6
+    for bad in ("S == 'a' 'b'", "S == \"a\" 'b'", "S IN ['a' 'b','plain']", "S LIKE 'a' '%'", "S == 'ab' 'c' ")
+        @test_throws ArgumentError query(t, bad)
+    end
+    if _HAVE_TAQL
+        for f in ("S == 'a''b'", "S == \"a\"\"b\"", "S IN ['a''b','plain']", "S LIKE 'a''%'", "S == 'a''b''c'", "S == 'a'''", "S == '''a'")
+            o = joinpath(mktempdir(), "o")
+            real = sort(collect(_taqlcmd("SELECT FROM \$1 WHERE $f GIVING '$o'", CCT.Table(d))[:K][:]))
+            @test ks(f) == real
+        end
+    end
+end
+
+# Phase 489 (command-syntax probe vs real TaQL, 48 forms): `# ...` comments to the end of the line, a parenthesised set
+# `K IN (1,2)`, and keywords in mixed case (`SeLeCt FrOm .. WhErE`: a case-insensitive regex built by concatenating regex
+# literals silently kept only the first literal's flags).
+@testset "comments, IN (...) and keyword case (Phase 489)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["S" => ["a#b", "x", "y"], "K" => Int32.(1:3)]; nrow=3)
+    t = readtable(d)
+    ks(f) = Int32.(sort(column(query(t, f), "K")[:]))
+    @test ks("K > 1 # a comment") == [2, 3] && ks("K > 1 # c\n AND K < 3") == [2]
+    @test ks("S == 'a#b'") == [1]                                       # '#' inside a literal is text
+    @test ks("K IN (1,2)") == [1, 2] && ks("K NOT IN (1,2)") == [3] && ks("K IN ()") == Int32[]
+    for f in ("SeLeCt FrOm $d WhErE K > 1", "select from $d where K > 1 # c", "SELECT\tFROM\t$d\tWHERE\tK > 1 ;; ")
+        r = taql(d, f)
+        @test Int32.(sort(column(r, "K")[:])) == [2, 3]
+    end
+    @test Int32.(sort(column(taql(d, "SELECT K ORDER BY K DESC # c"), "K")[:])) == [1, 2, 3]
+    @test column(taql(d, "select S from $d where S == 'a#b' # not here"), "S")[:] == ["a#b"]
+end
+
+# Phase 490 (97 expression-syntax forms vs real TaQL: signs, nesting, precedence, literal forms, function-name case, ...):
+# the only gap was a run of operator characters that is not one operator -- `!!(K == 2)` was rejected as a whole.
+@testset "operator runs split at the longest known operator (Phase 490)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["K" => Int32.(1:4), "B" => [true, false, true, false]]; nrow=4)
+    t = readtable(d)
+    ks(f) = Int32.(sort(column(query(t, f), "K")[:]))
+    @test ks("!!(K == 2)") == [2] && ks("!!!(K == 2)") == [1, 3, 4] && ks("K == 2 || !!(K == 3)") == [2, 3]
+    @test ks("B == !B") == Int32[] && ks("B != !B") == [1, 2, 3, 4] && ks("B == NOT B") == Int32[]   # NOT is also an operand
+    @test ks("NOT K == 2") == [1, 3, 4]                                                              # a leading NOT still takes the whole comparison
+    @test ks("K!=2 && K<>3") == [1, 4] && ks("K>=2&&K<=3") == [2, 3] && ks("~K == -3") == [2]
+    toks(s) = [x.text for x in MSv2._taqllite_tokenize(s) if x.kind === :op]
+    @test toks("!!K") == ["!", "!"] && toks("K<=!B") == ["<=", "!"] && toks("a!~=b") == ["!~="]
+end
+
+# Phase 495 (56 + 20 GROUP BY variants vs real TaQL): a reducing group aggregate over ARRAY values pools every element of the
+# group into one scalar -- `gsum(V)` of 2-element cells is the sum of all of them (it was an element-wise array), and
+# `grms` / `gproduct` / `gany(V > 5)` / `gntrue` / `gnfalse` over arrays were errors.  `gs*` stay per-element.
+@testset "group aggregates pool the elements of array values (Phase 495)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["G" => Bool[1, 0, 1, 0, 1, 0], "A" => Int32[5, 3, 9, 1, 7, 3], "V" => [Float64[i, i + 1] for i in 1:6]]; nrow=6)
+    t = readtable(d)
+    gv(sel) = (r = groupby(t, "G"; select = ["G" => :G, "S" => sel]); Dict(zip(r.G, r.S)))
+    @test gv("gsum(V)") == Dict(true => 21.0, false => 27.0) && gv("gmean(V)") == Dict(true => 3.5, false => 4.5)
+    @test gv("gmin(V)") == Dict(true => 1.0, false => 2.0) && gv("gmax(V)") == Dict(true => 6.0, false => 7.0)
+    @test gv("gmedian(V)") == Dict(true => 3.0, false => 4.0) && gv("gproduct(V)") == Dict(true => 720.0, false => 5040.0)
+    @test all(isapprox.(values(gv("gvariance(V)")), 2.9166666666666665)) && all(isapprox.(values(gv("gsamplevariance(V)")), 3.5))
+    @test gv("grms(V)")[true] ≈ 3.8944404818493075 && gv("gany(V > 5)") == Dict(true => true, false => true) && gv("gall(V > 1)") == Dict(true => false, false => true)
+    @test gv("gntrue(V > 4)") == Dict(true => 2, false => 3) && gv("gnfalse(V > 4)") == Dict(true => 4, false => 3)
+    @test gv("gsum(V * 2)") == Dict(true => 42.0, false => 54.0) && gv("gmean(V + A)")[true] == 10.5
+    @test gv("gsums(V)") == Dict(true => [9.0, 12.0], false => [12.0, 15.0])                  # per-element stays
+    @test gv("gsum(A)") == Dict(true => 21, false => 7) && gv("gfirst(V)")[true] == [1.0, 2.0]
 end

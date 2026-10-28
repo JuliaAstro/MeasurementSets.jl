@@ -118,12 +118,14 @@ end
     a2 = column(readtable(p2), "A")[:]
     @test a2 == Int32[1, 2, 3, 104, 105, 6, 7, 8, 9, 10]
 
-    # negative limit -> the LAST |limit| of the ordered set; with no WHERE,
-    # ascending-T order is rows [10,9,...,1] (T is the exact row-reverse
-    # here), so the last 3 of that order are rows 3,2,1 (A=3,2,1)
+    # negative limit -> ALL BUT the last |limit| of the ordered set (real TaQL's convention, Phase 491); with no WHERE,
+    # ascending-T order is rows [10,9,...,1] (T is the exact row-reverse here), so the first 7 of that order are
+    # rows 10..4 (A=104..110); limit 0 = no limit
     p3 = mk("u3")
-    @test update!(p3; set=["A" => "A + 100"], orderby=["T"], limit=-3) == 3
-    @test column(readtable(p3), "A")[:] == Int32[101, 102, 103, 4, 5, 6, 7, 8, 9, 10]
+    @test update!(p3; set=["A" => "A + 100"], orderby=["T"], limit=-3) == 7
+    @test column(readtable(p3), "A")[:] == Int32[1, 2, 3, 104, 105, 106, 107, 108, 109, 110]
+    p3z = mk("u3z")
+    @test update!(p3z; set=["A" => "A + 100"], orderby=["T"], limit=0) == 10
 
     # delete! -- the 2 matched rows with the largest T ("newest"); same
     # A>3 / T-decreasing-with-A geometry as p2 above -> A=4,5 removed
@@ -2098,4 +2100,109 @@ end
     end
     d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["A" => Int32.(1:3)]; nrow=3)
     @test taql(d, "UPDATE t SET A = 9 WHERE A == 1") == 1                # real targets still work
+end
+
+# Phase 488: commas, brackets and parentheses INSIDE a string literal broke the INSERT / UPDATE splitters
+# (`VALUES ('a,b', 3)` counted three values, `SET S = 'u,v'` found a malformed assignment); touching literals concatenate.
+@testset "taql: separators inside string literals (Phase 488)" begin
+    mk() = (d = joinpath(mktempdir(), "t"); write_table(d, "T", Pair{String,Any}["S" => ["x", "y", "z"], "K" => Int32[1, 2, 3]]; nrow=3); d)
+    d = mk()
+    taql(d, "INSERT INTO t (S,K) VALUES ('a,b', 3)")
+    taql(d, "INSERT INTO t SET S = 'c,d', K = 4")
+    taql(d, "INSERT INTO t (S,K) VALUES ('f(x', 5), ('p)q', 6), ('r]s', 7), ('it''s', 8)")
+    @test column(readtable(d), "S")[:] == ["x", "y", "z", "a,b", "c,d", "f(x", "p)q", "r]s", "its"]
+    d = mk()
+    taql(d, "UPDATE t SET S = 'u,v' WHERE K == 1")
+    taql(d, "UPDATE t SET S = 'w[1' , K = 9 WHERE K == 3")
+    @test column(readtable(d), "S")[:] == ["u,v", "y", "w[1"] && column(readtable(d), "K")[:] == Int32[1, 2, 9]
+    @test MSv2._split_commas("'a,b', (1,2), \"c,d\"") == ["'a,b'", "(1,2)", "\"c,d\""]
+    @test MSv2._paren_groups("('p)q', 6), ('r]s', 7)") == ["'p)q', 6", "'r]s', 7"]
+end
+
+# Phase 491: UPDATE / DELETE `LIMIT n` follows the SELECT convention of real TaQL (live-checked on twin tables): n > 0 the
+# first n rows, n == 0 NO limit (it was "no row"), n < 0 all but the last |n| (it was "the last |n|").  62 other
+# write-command syntax variants (case, newlines, comments, `;`, aliases, quoting, VALUES forms) already agreed.
+@testset "UPDATE / DELETE LIMIT: 0 = none, negative = all but the last (Phase 491)" begin
+    mk() = (d = joinpath(mktempdir(), "t");
+            write_table(d, "T", Pair{String,Any}["A" => Int32[5, 3, 9, 1, 7, 3]]; nrow=6); d)
+    col(d) = collect(column(readtable(d), "A")[:])
+    for (cmd, want) in (("UPDATE t SET A = 1 LIMIT 0", Int32[1, 1, 1, 1, 1, 1]), ("UPDATE t SET A = 1 LIMIT 2", Int32[1, 1, 9, 1, 7, 3]),
+                        ("UPDATE t SET A = 1 LIMIT -2", Int32[1, 1, 1, 1, 7, 3]), ("DELETE FROM t LIMIT 0", Int32[]),
+                        ("DELETE FROM t LIMIT 2", Int32[9, 1, 7, 3]), ("DELETE FROM t LIMIT -2", Int32[7, 3]),
+                        ("DELETE FROM t WHERE A > 0 LIMIT 0", Int32[]))
+        d = mk(); taql(d, cmd)
+        @test col(d) == want
+        if _HAVE_TAQL
+            dr = mk(); _taqlcmd(replace(cmd, " t " => " \$1 ", "FROM t" => "FROM \$1", "UPDATE t" => "UPDATE \$1"), dr)
+            @test col(dr) == want
+        end
+    end
+    d = mk(); @test update!(d; set=["A" => "A + 1"], limit=0) == 6
+    d = mk(); @test update!(d; set=["A" => "A + 1"], limit=-2) == 4
+end
+
+# Phase 492: an unnamed computed SELECT column is called `Col_<position>` in real TaQL (`SELECT A, B*2` -> `A`, `Col_2`,
+# `SELECT 1` -> `Col_1`); it was an error ("needs an AS alias") or, for a literal, named "1".  61 more SELECT output forms
+# (aliases with `AS`/quotes, `DISTINCT`, `t.A`, `t.*`, aggregates, `HAVING`, ...) agree with real TaQL.
+@testset "unnamed computed SELECT columns are Col_<position> (Phase 492)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["A" => Int32[5, 3, 9], "B" => [1.5, 2.5, 0.5], "G" => Bool[1, 0, 1]]; nrow=3)
+    names(p) = MSv2.columnnames(readtable(p))
+    for (cmd, want) in (("SELECT A+1 FROM t", ["Col_1"]), ("SELECT A, B*2, sqrt(B) FROM t", ["A", "Col_2", "Col_3"]),
+                        ("SELECT A+1, A+2 FROM t", ["Col_1", "Col_2"]), ("SELECT 1 FROM t", ["Col_1"]),
+                        ("SELECT G, gcount() FROM t GROUP BY G", ["G", "Col_2"]), ("SELECT A AS X, B*2 FROM t", ["X", "Col_2"]))
+        p = joinpath(mktempdir(), "o"); taql(d, cmd * " INTO '$p'")
+        @test names(p) == want
+        if _HAVE_TAQL
+            pr = joinpath(mktempdir(), "r"); _taqlcmd(replace(cmd, " t" => " \$1"; count=1) * " GIVING '$pr'", CCT.Table(d))
+            @test names(pr) == want
+        end
+    end
+    @test column(readtable((p = joinpath(mktempdir(), "o"); taql(d, "SELECT A+1 FROM t INTO '$p'"); p)), "Col_1")[:] == [6, 4, 10]
+end
+
+# Phase 493: 32 JOIN command variants vs real TaQL (aliases with/without AS, case, newlines, `;`, comments, ON orders, `=`,
+# `IN`, rowid(), WHERE/ORDER BY/LIMIT/GROUP BY, sub-queries on a second table).  Found: a qualified projection `a.K` is the
+# column `K` (it was called `Col_1` after Phase 492 / an error before); `SELECT *` under a JOIN is the FIRST table's
+# columns and `alias.*` that table's; `FROM $2` (no JOIN) queries the second table; `IN (SELECT .. FROM $2)` sees it.
+@testset "taql JOIN output names, * expansion, FROM \$2 (Phase 493)" begin
+    d1 = joinpath(mktempdir(), "l"); d2 = joinpath(mktempdir(), "r")
+    write_table(d1, "L", Pair{String,Any}["K" => Int32[1, 2, 3, 2, 9], "X" => [1.5, 2.5, 3.5, 4.5, 5.5]]; nrow=5)
+    write_table(d2, "R", Pair{String,Any}["K" => Int32[1, 2, 3, 4], "Y" => ["a", "b", "c", "d"], "Z" => [10.0, 20.0, 30.0, 40.0]]; nrow=4)
+    rd(cmd) = (p = joinpath(mktempdir(), "o"); taql(d1, cmd * " INTO '$p'", d2); t = readtable(p); [(c, collect(column(t, c)[:])) for c in MSv2.columnnames(t)])
+    j = "FROM \$1 a JOIN \$2 b ON a.K == b.K"
+    @test rd("SELECT a.K, b.Y $j") == [("K", Int32[1, 2, 3, 2, 9]), ("Y", ["a", "b", "c", "b", "none"])]
+    @test rd("select a.K AS KK, upcase(b.Y) AS U $j")[2] == ("U", ["A", "B", "C", "B", "NONE"])
+    @test MSv2.columnnames(readtable((p = joinpath(mktempdir(), "o"); taql(d1, "SELECT * $j INTO '$p'", d2); p))) == ["K", "X"]
+    @test [c for (c, _) in rd("SELECT b.* $j")] == ["K", "Y", "Z"]
+    @test [c for (c, _) in rd("SELECT b.Y, gcount() AS N $j GROUP BY b.Y")] == ["Y", "N"]
+    @test rd("SELECT K FROM \$2") == [("K", Int32[1, 2, 3, 4])] && rd("SELECT K FROM \$2 WHERE Z > 15")[1][2] == Int32[2, 3, 4]
+    @test rd("SELECT a.K FROM \$1 a WHERE a.K IN (SELECT K FROM \$2 WHERE Z > 15)") == [("K", Int32[2, 3, 2])]
+    @test rd("SELECT K FROM \$1 WHERE K NOT IN (SELECT K FROM \$2)") == [("K", Int32[9])]
+    if _HAVE_TAQL
+        for cmd in ("SELECT a.K, b.Y $j", "SELECT * $j", "SELECT b.Y, gcount() AS N $j GROUP BY b.Y", "SELECT K FROM \$2 WHERE Z > 15",
+                    "SELECT a.K FROM \$1 a WHERE a.K IN (SELECT K FROM \$2 WHERE Z > 15)")
+            pr = joinpath(mktempdir(), "r"); _taqlcmd(cmd * " GIVING '$pr'", CCT.Table(d1), CCT.Table(d2))
+            tr = readtable(pr)
+            @test rd(cmd) == [(c, collect(column(tr, c)[:])) for c in MSv2.columnnames(tr)]
+        end
+    end
+end
+
+# Phase 494: ALTER TABLE (39 variants: ADD/DROP/RENAME COLUMN and KEYWORD, lists, case, `;`, comments, newlines, failing
+# clauses) and CREATE TABLE (24 variants) against real TaQL.  CREATE accepted only `[..]` column lists and needed one:
+# `CREATE TABLE p (A I4, B R8)` and a column-less `CREATE TABLE p` (an empty table) are fine in real TaQL.
+# (RENAME KEYWORD onto an EXISTING name is a silent no-op in real TaQL; ours is an error, kept.)
+@testset "CREATE TABLE (..) column list and column-less form (Phase 494)" begin
+    names(p) = (t = readtable(p); (MSv2.columnnames(t), MSv2.nrow(t)))
+    for (cmd, want) in (("CREATE TABLE 'P' (A I4, B R8)", (["A", "B"], 0)), ("create table 'P' (A I4 [NDIM=1]) limit 3", (["A"], 3)),
+                        ("CREATE TABLE 'P'", (String[], 0)), ("CREATE TABLE 'P' LIMIT 2", (String[], 2)), ("CREATE TABLE 'P' [A I4, B R8] # c\n", (["A", "B"], 0)),
+                        ("CREATE TABLE 'P' [A I4];", (["A"], 0)))
+        p = joinpath(mktempdir(), "o"); taql(replace(cmd, "'P'" => "'$p'"))
+        @test names(p) == want
+        if _HAVE_TAQL
+            pr = joinpath(mktempdir(), "r"); tc = _taql_create(replace(cmd, "'P'" => "'$pr'")); CCT.flush(tc); tc = nothing; GC.gc(); GC.gc()
+            @test names(pr) == want
+        end
+    end
 end

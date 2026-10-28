@@ -63,7 +63,9 @@ function _geval(e::TQLAggr, cols, g)
            (rv !== nothing && rv[1] === cols) ? [rv[2][i] for i in g] : _agg_vals(f, g)
     try
         e.mode === :perelem && return _perelem_reduce(e.fn, vals)
-        any(x -> x isa TQLMArray, vals) && return e.fn(_pool_masked(vals))
+        # Phase 495 (live-checked): a reducing g* over ARRAY values pools every element of the group (a masked array only its
+        # unmasked ones) into one scalar -- `gsum(V)` of a 2-element cell column is the sum of ALL elements; the `gs*` forms are per-element
+        (any(x -> x isa TQLMArray, vals) || (e.mode === :pool && any(x -> x isa AbstractArray, vals))) && return e.fn(_pool_masked(vals))
         return e.fn(vals)
     catch err
         # a group aggregate over values it cannot reduce (`gmean` of strings, `gall` of numbers) is an

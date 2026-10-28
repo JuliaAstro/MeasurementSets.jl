@@ -11649,3 +11649,101 @@ The last metadata accessor that handed out the table's own state: changing the `
 `columndesc(t, name).keywords` changed the table's units for every later read. The keyword record of the result is now a
 copy (a column without keywords costs nothing). One internal comparison in `_dm_local` relied on the identity of the
 descriptor and now compares names. Test in `api_tests.jl`.
+
+### Phase 484 — edit sessions copy the arrays assigned to them
+
+The reverse of Phases 480-483: an edit session kept the CALLER's array, so reusing the buffer before the flush changed
+what was written — `e[:V][2] = v; v .= -1` wrote -1, the same array assigned to two cells and then mutated wrote the
+mutation, and so did a column given to `addcolumn!`. `t[name][i] = array`, `t[name][:] = arrays` and the data of
+`addcolumn!` (also through a `RefTable` view) now store a copy. `insert!` and `write_table` were already safe. Test in
+`edit_tests.jl`.
+
+### Phase 485 — edit sessions hand out copies of arrays
+
+The read side of Phase 484: `e[:V][i]` returned the session's own array when the cell had been set or added, or came from
+a loaded StandardStMan / IncrementalStMan column, so changing the returned array edited the session behind its back —
+and whether it was written depended on which flush path ran (a tiled column's untouched cells, read from the file,
+were safe). Arrays read from a session are now copies. Test in `edit_tests.jl`.
+
+### Phase 486 — the limits of the default half-precision `DATA`, documented and pinned
+
+Quantifying the default `ComplexF16` MAIN `DATA` on the real MS (30,000 rows, 7.7 M values): largest amplitude 175, mean
+relative error 2·10⁻⁴, 99th percentile 4·10⁻⁴; 22,728 values lie below `Float16`'s normal range and keep fewer bits.
+The behaviour outside that range was undocumented: a part above 65504 reads back as `Inf` and one below 6·10⁻⁸ as `0`,
+without a warning. `docs/src/guide.md` now says so (with `BFloat16` / `:full` for uncalibrated data) and
+`precision_tests.jl` pins the stated overflow, underflow and error bound. No behaviour change.
+
+### Phase 487 — where the CI time goes (investigation only)
+
+Per-file times of the last green CI run (`TEST FILE` lines): Julia 1.12 takes 7,309 s of test files against 4,746 s on 1.10 (which also runs coverage and the
+full fuzz counts), a uniform ~1.5x with no single outlier — `taql_query_tests` 2,027 vs 1,224 s, `taql_command_tests` 1,532 vs 872,
+`corrupt_tests` 685 vs 376. These are the real-TaQL cross-checks (the same file runs in 88 s locally without Casacore). The
+job needs about 122 of its 180 minutes, so nothing was changed.
+
+### Phase 488 — string literals: adjacent literals concatenate; separators inside a literal
+
+Probing string literals against real TaQL (22 + 18 forms): (1) literals that touch — `'a''b'`, `"a"'b'`, `'a'''` — are ONE
+string in real TaQL (`"ab"`, `"a"`; a quote is written with the other quote type, a space between literals is an error);
+TaQL-lite raised a parse error, so `'it''s'` could not be used in a `WHERE`, an `IN [...]` list or a `LIKE` pattern. (2)
+The `INSERT` / `UPDATE` splitters were not quote-aware: `VALUES ('a,b', 3)` counted three values, `VALUES ('f(x', 5)` found no
+value tuple and `SET S = 'u,v'` a malformed assignment. Both fixed; the 18 forms agree with real TaQL. Tests in
+`taql_query_tests.jl` (with the real-TaQL cross-check) and `taql_command_tests.jl`.
+
+### Phase 489 — command syntax: comments, `IN (...)`, keyword case, trailing `;`
+
+A probe of 48 command-syntax variants against real TaQL found four gaps. `# ...` to the end of the line is a comment
+(ignored inside a string literal); `K IN (1,2)` is a set like `K IN [1,2]`; a trailing `;` ends a `taql()` command; and
+keywords in mixed or lower case (`select from t where ..`) were not recognised in `SELECT` and `INSERT ... SELECT`: a
+case-insensitive regex built by concatenating regex literals keeps only the first literal's flags, so the `i` flag was
+lost (now built once by `_rxis`). The one remaining difference is the known leniency `NOT K==3`. Tests in `taql_query_tests.jl`.
+
+### Phase 490 — expression syntax: operator runs, `NOT` as an operand
+
+97 expression-syntax variants against real TaQL (signs and double signs, nesting, precedence and associativity, literal forms
+`2.` `.2e1` `0X2`, function-name case, `rownumber()`, `LIKE` / `~` / `IN` forms, ...) agree except two gaps. A run of operator
+characters that is not one operator (`!!(K == 2)`, `K==!B`) was rejected as a whole; it is now split at the longest known
+operator. `NOT` / `!` is also an operand (`B != !B`, `K == NOT B`: real TaQL binds it tighter than `==`); a leading
+`NOT K == 3` still negates the whole comparison (real TaQL calls it an error; kept as a convenience). Test in `taql_query_tests.jl`.
+
+### Phase 491 — UPDATE / DELETE `LIMIT` follows real TaQL's convention
+
+62 write-command syntax variants (case, newlines, `#` comments, `;`, aliases, quoting, `VALUES` forms, `LIMIT`) applied to twin
+tables, real TaQL against `taql()`, agree except `LIMIT`: in real TaQL (the SELECT convention) `LIMIT 0` means no limit and
+`LIMIT -n` all but the last `n` rows, where we had "no row" and "the last `n`". Fixed for the string forms and for the
+`limit=` keyword of `update!` / `delete!`. Two leniencies stay (an alias qualifier `SET t.A = 1`, `INSERT ... SET ... LIMIT`).
+Test in `taql_command_tests.jl`, cross-checked on twin tables.
+
+### Phase 492 — unnamed computed SELECT columns are `Col_<position>`
+
+61 `SELECT` output forms (column lists, `AS` aliases with or without quotes, expressions, array columns, `DISTINCT`, `ORDER BY` /
+`LIMIT` / `OFFSET`, `t.A` / `t.*`, aggregates, `GROUP BY` / `HAVING`) against real TaQL, comparing the persisted result's
+column names and values. One gap: an expression without `AS` is called `Col_<position>` in real TaQL (`SELECT A, B*2` ->
+`A`, `Col_2`; `SELECT 1` -> `Col_1`); it was an error, or for a literal named `1`. Not matched: real TaQL's persisted result of
+`GROUP BY ... ORDER BY` is not sorted (and with `LIMIT` has odd counts), where ours is sorted as intended. Tests in
+`taql_command_tests.jl` (cross-checked) and `taql_query_tests.jl`.
+
+### Phase 493 — JOIN output names, `*` under a JOIN, `FROM $2`
+
+32 JOIN command variants against real TaQL (aliases with or without `AS`, case, newlines, `;`, comments, the order of the two sides in `ON`, `=` / `==` / `IN`, `rowid()`,
+`WHERE` / `ORDER BY` / `LIMIT` / `GROUP BY`, sub-queries on a second table). Fixed: a qualified projection `a.K` is the column `K` (it
+became `Col_1` after Phase 492); `SELECT *` under a JOIN is the columns of the FIRST table and `alias.*` those of that table (we returned every
+column, prefixed); `FROM $2` without a JOIN queries the second table (it used the first), so `x IN (SELECT .. FROM $2)` now works. Not
+matched: real TaQL's `SELECT DISTINCT` over a join does not de-duplicate, its `ORDER BY` puts NaN (an unmatched float) mid-sequence, and it rejects
+`a.*, b.Y`; the Phase 492 note on `GROUP BY ... ORDER BY` was a misreading of the saved result (the table real TaQL returns IS sorted; the
+persisted file is the unsorted aggregate). Test in `taql_command_tests.jl`, cross-checked.
+
+### Phase 494 — ALTER TABLE / CREATE TABLE syntax variants
+
+39 `ALTER TABLE` variants (add / drop / rename column and keyword, lists, case, `;`, comments, newlines, failing clauses) agree with
+real TaQL except `RENAME KEYWORD K1 TO K2` onto an existing name, a silent no-op there and an error here (kept). 24 `CREATE TABLE` variants
+agree once two forms are accepted: a parenthesised column list `CREATE TABLE p (A I4, B R8)` and no column list at all (an empty table,
+optionally `LIMIT n`). (`LIMIT -1` crashes real casacore.) Test in `taql_command_tests.jl`.
+
+### Phase 495 — group aggregates over array values pool the elements
+
+56 `GROUP BY` / `HAVING` / aggregate variants plus 20 aggregates over array columns against real TaQL. The main gap: a reducing
+group aggregate over ARRAY values flattens every element of the group into one scalar in real TaQL (`gsum(V)` of 2-element cells is the sum of
+all of them, `gvariance` the variance over all of them); ours returned an element-wise array for `gsum` / `gmean` / `gmin` / `gmax` /
+`gmedian` / `gvariance` / ..., and raised errors for `grms`, `gproduct`, `gany(V > 5)`, `gntrue`, `gnfalse`. These aggregates now form a pooled
+mode (`gcount`, `gfirst`, `glast`, `gaggr`, `ghist` and the per-element `gs*` forms are unchanged). Not matched (real TaQL quirks):
+`HAVING` that selects nothing, `CUBE` (real rejects it; ours works), `gfirst` / `glast` (real rejects). Test in `taql_query_tests.jl`.

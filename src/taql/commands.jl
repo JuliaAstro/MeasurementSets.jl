@@ -6,12 +6,16 @@
 # the WHERE / SET expressions.  `taql(target, "...")` is a string-command
 # dispatcher on top of the Julia functions.
 
-# `limit >= 0` -> the first `limit` rows; `limit < 0` -> the last
-# `|limit|` rows (TaQL's UPDATE/DELETE `ORDER BY ... LIMIT n` form).
+# TaQL's UPDATE/DELETE `LIMIT n` (live-checked vs real TaQL in Phase 491, the same convention as SELECT's): `n > 0` the
+# first `n` rows, `n == 0` NO limit, `n < 0` all but the last `|n|` rows.
 function _apply_limit(rows::Vector{Int}, limit::Integer)
     n = length(rows)
-    limit >= 0 ? rows[1:min(limit, n)] : rows[max(1, n + limit + 1):n]
+    limit == 0 ? rows : limit > 0 ? rows[1:min(limit, n)] : rows[1:max(0, n + limit)]
 end
+
+# Phase 489: `r"a" * r"b"is` keeps the flags of the FIRST regex only, so a case-insensitive pattern built by
+# concatenating literals silently became case-sensitive; join the sources and set the flags once
+_rxis(parts::Regex...) = Regex(join((p.pattern for p in parts), ""), "is")
 
 _cmd_path(x::AbstractString) = String(rstrip(x, '/'))
 function _cmd_path(t::AbstractTable)
@@ -65,8 +69,8 @@ to `M` instead. Either name may be a slice / mask target.
 `nothing` (every row). `orderby` (like [`query`](@ref)'s — a bare
 column name/`Symbol`, ascending, or a `name => :asc`/`name => :desc`
 pair) sorts the matched rows before `limit` (an `Integer`) keeps only
-the first `limit` of them (`limit < 0` keeps the *last* `|limit|`
-instead) — "update the N oldest/newest rows matching a condition", e.g.
+the first `limit` of them (`limit == 0` keeps all, `limit < 0` all
+but the last `|limit|` -- real TaQL's `LIMIT` convention) — "update the N oldest/newest rows matching a condition", e.g.
 `update!(t; set=[...], where="...", orderby=["TIME"], limit=10)`.
 **A deliberate MeasurementSets extension, not a port of real TaQL's own
 `UPDATE ... ORDER BY ... LIMIT n`**: real casacore's `UPDATE`/`DELETE`
@@ -349,7 +353,7 @@ Remove rows from the CTDS table at `target` (a path or an open `Table`). On a pe
 `where` is a TaQL-lite WHERE string, a `row -> Bool` closure, or
 `nothing` (**every row** — leaves a 0-row table). `orderby`/`limit` — see
 [`update!`](@ref) — sort the matched rows then keep only `limit` of them
-(`limit < 0` keeps the *last* `|limit|`) before deleting, e.g. "delete
+(`limit == 0` keeps all, `limit < 0` all but the last `|limit|`) before deleting, e.g. "delete
 the 10 oldest rows matching a condition":
 `delete!(t; where="...", orderby=["TIME"], limit=10)`. Returns the
 number of rows removed. Extends `Base.delete!`.
@@ -521,11 +525,15 @@ end
 # paren-aware comma split (so `iif(a, b, c)` survives)
 function _split_commas(s::AbstractString)
     out = String[]
-    depth = 0
+    depth = 0; q = '\0'
     start = firstindex(s)
     for i in eachindex(s)
         c = s[i]
-        if c == '(' || c == '['
+        if q != '\0'                      # Phase 488: inside a string literal nothing counts
+            c == q && (q = '\0')
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '(' || c == '['
             depth += 1
         elseif c == ')' || c == ']'
             depth -= 1
@@ -629,17 +637,23 @@ end
 const _JOIN_SIDE = raw"(\w+)\.(\w+(?:\(\))?)"
 function _taql_join_from(target, body::AbstractString, others)
     m = match(Regex("\\bFROM\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+JOIN\\b", "i"), body)
-    m === nothing && return target, body
     tab(k) = (i = parse(Int, k);
               i == 1 ? (target isa AbstractTable ? target : readtable(_cmd_path(target))) :
               (i - 1 <= length(others) ? (o = others[i-1]; o isa AbstractTable ? o : readtable(_cmd_path(o))) :
                throw(ArgumentError("taql: no table \$$i (pass it as an extra argument)"))))
+    if m === nothing
+        # Phase 493: `FROM $2` (no JOIN) queries the second table, not the first
+        fm = match(r"\bFROM\s+\$(\d+)\b"i, body)
+        fm !== nothing && fm.captures[1] != "1" && return tab(fm.captures[1]), body
+        return target, body
+    end
     left = tab(m.captures[1]); la = String(m.captures[2])
     names = String[la * "." * n for n in columnnames(left)]
     cols = AbstractVector[collect(column(left, n)[:]) for n in columnnames(left)]
     jun = Dict{Symbol,Vector{String}}(); jep = Set{Symbol}()
     for n in columnnames(left); _join_meta!(jun, jep, left, n, la * "." * n); end
     push!(names, la * ".__rowid"); push!(cols, collect(0:nrow(left)-1))
+    aliascols = Pair{String,Vector{String}}[la => columnnames(left)]            # for `*` / `alias.*` (Phase 493)
     pos = m.offset + ncodeunits(m.match) - length("JOIN")       # start of the first JOIN
     jre = Regex("^JOIN\\s+\\\$(\\d+)\\s+(?:AS\\s+)?(\\w+)\\s+ON\\s+" * _JOIN_SIDE *
                 "\\s*(?:==|=|\\bIN\\b)\\s*" * _JOIN_SIDE * "\\s*", "i")
@@ -678,12 +692,17 @@ function _taql_join_from(target, body::AbstractString, others)
                         _taql_sentinel(Union{T,Missing}[r == 0 ? missing : rcx[r] for r in mr]) : T[rcx[r] for r in mr])
         end
         push!(names, ra * ".__rowid")
+        push!(aliascols, ra => columnnames(right))
         push!(cols, Int64[r == 0 ? typemax(Int64) : Int64(r - 1) for r in mr])
         rest = rest[ncodeunits(jm.match)+1:end]
     end
     joined = GroupedTable(Symbol.(names), cols, jun, jep)
     body = body[1:m.offset-1] * "FROM __join " * rest
     body = replace(body, r"\b(\w+)\.rowid\(\)" => s"\1.__rowid")
+    # `SELECT *` is the columns of the FIRST table, `alias.*` those of that table (real TaQL; Phase 493)
+    expand(a) = join(("$a.$n AS $n" for n in last(aliascols[findfirst(p -> first(p) == a, aliascols)])), ", ")
+    body = replace(body, r"\b(\w+)\.\*" => (x -> (a = x[1:findfirst('.', x)-1]; any(p -> first(p) == a, aliascols) ? expand(a) : x)))
+    body = replace(body, r"^(SELECT\s+(?:DISTINCT\s+|ALL\s+)?)\*(?=\s|,|$)"i => (x -> x[1:end-1] * expand(first(first(aliascols)))))
     return joined, body
 end
 
@@ -717,20 +736,20 @@ _sub_literal(x::Bool) = x ? "TRUE" : "FALSE"
 _sub_literal(x) = repr(x)
 
 # `x [NOT] IN (SELECT ...)` / `[NOT] EXISTS (SELECT ...)` -> literals (evaluated on `target`)
-function _taql_subst_subqueries(target, body::AbstractString)
+function _taql_subst_subqueries(target, body::AbstractString, others=())
     body = String(body)
     while (m = match(r"\b(NOT\s+)?(IN|EXISTS)\s*\(\s*SELECT\b"i, body)) !== nothing
         open = findnext('(', body, m.offset)
         close = _matching_paren(body, open)
         inner = String(strip(body[open+1:close-1]))
-        r = taql(target, inner)
+        r = taql(target, inner, others...)
         r isa AbstractTable || throw(ArgumentError("a sub-query must be a SELECT that returns rows (got $(typeof(r))): $inner"))
         neg = m.captures[1] !== nothing
         if uppercase(m.captures[2]) == "EXISTS"
             v = nrow(r) > 0
             # real TaQL treats `EXISTS (... LIMIT n)` as empty when fewer than n rows match (a positive one errors)
             lm = match(r"^(.*)\bLIMIT\s+(\d+)\s*$"is, inner)
-            lm !== nothing && nrow(taql(target, String(lm.captures[1]))) < parse(Int, lm.captures[2]) && (v = false)
+            lm !== nothing && nrow(taql(target, String(lm.captures[1]), others...)) < parse(Int, lm.captures[2]) && (v = false)
             body = body[1:m.offset-1] * (xor(v, neg) ? "TRUE" : "FALSE") * body[close+1:end]
         else
             names = columnnames(r)
@@ -757,7 +776,7 @@ function _taql_preprocess_write(target, cmd::AbstractString)
     return cmd
 end
 
-function _taql_preprocess_select(target, body::AbstractString)
+function _taql_preprocess_select(target, body::AbstractString, others=())
     body = String(body)
     # `SELECT FROM t ...` / `SELECT WHERE ...` (no column list) = `SELECT *`
     body = replace(body, r"^SELECT\s+(?=(?:FROM|WHERE|ORDER|LIMIT|OFFSET|GROUP|HAVING)\b)"i => "SELECT * ")
@@ -774,7 +793,7 @@ function _taql_preprocess_select(target, body::AbstractString)
         target = taql(target, inner)
         body = body[1:m.offset-1] * "FROM __sub" * body[close+1:end]
     end
-    body = _taql_subst_subqueries(orig, body)
+    body = _taql_subst_subqueries(orig, body, others)
     # `FROM name [AS] alias` -> drop the alias and its `alias.` qualifiers
     am = match(r"\bFROM\s+\S+\s+(?:AS\s+)?(?!(?:WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|INTO|GIVING)\b)(\w+)"i, body)
     if am !== nothing
@@ -979,14 +998,14 @@ function _bracket_group(s::AbstractString, i::Int)       # s[i] == '[' -> (inner
             c == q && (q = '\0')
         elseif c == '\'' || c == '"'
             q = c
-        elseif c == '['
+        elseif c == '[' || c == '('        # Phase 494: `CREATE TABLE p (A I4, B R8)` is a column list too
             depth += 1
-        elseif c == ']'
+        elseif c == ']' || c == ')'
             depth -= 1
             depth == 0 && return (s[nextind(s, i):prevind(s, k)], nextind(s, k))
         end
     end
-    throw(ArgumentError("taql: unbalanced '[' in \"$s\""))
+    throw(ArgumentError("taql: unbalanced '$(s[i])' in \"$s\""))
 end
 
 function _taql_table_path(tok::AbstractString)
@@ -1020,9 +1039,13 @@ function _taql_create(command::AbstractString)
         end
     end
     i += ncodeunits(s[i:end]) - ncodeunits(rest(i))
-    (i <= lastindex(s) && s[i] == '[') || throw(ArgumentError("taql: CREATE TABLE needs a column list [name type, ...]"))
-    colstr, i = _bracket_group(s, i)
-    tail = String(strip(s[i:end]))
+    if i <= lastindex(s) && (s[i] == '[' || s[i] == '(')
+        colstr, i = _bracket_group(s, i)
+        tail = String(strip(s[i:end]))
+    else                                  # no column list: an empty table (real TaQL), possibly `LIMIT n` / `DMINFO`
+        colstr = ""
+        tail = i <= lastindex(s) ? String(strip(s[i:end])) : ""
+    end
     nrows = 0; dminfo = nothing
     lm = match(r"^LIMIT\s+(.+?)(?=\s+DMINFO\b|$)"is, tail)
     if lm !== nothing
@@ -1157,8 +1180,29 @@ string are not supported (use `copytable(dst, groupby(…))`, or
 """
 taql(command::AbstractString) = taql(nothing, command)    # target-less commands: `taql("CREATE TABLE ...")` / `taql("DROP TABLE 'path'")`
 
+# `# ...` to the end of the line is a comment in TaQL (Phase 489); one inside a string literal is text
+function _tql_strip_comments(s::AbstractString)
+    occursin('#', s) || return s
+    io = IOBuffer(); q = '\0'; skipping = false
+    for c in s
+        if skipping
+            c == '\n' || continue
+            skipping = false
+        end
+        if q != '\0'
+            c == q && (q = '\0')
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '#'
+            skipping = true; continue
+        end
+        print(io, c)
+    end
+    return String(take!(io))
+end
+
 function taql(target, command::AbstractString, others...)
-    cmd = strip(command)
+    cmd = strip(rstrip(strip(_tql_strip_comments(command)), ';'))      # a trailing `;` ends the command (real TaQL accepts it after GIVING)
     isempty(cmd) && throw(ArgumentError("taql: empty command"))
     _taql_check_tablerefs(cmd, (target === nothing ? 0 : 1) + length(others))
     kw = uppercase(String(first(split(cmd; limit=2))))
@@ -1204,13 +1248,13 @@ function taql(target, command::AbstractString, others...)
         body = into === nothing ? cmd : String(strip(into.captures[1]))
         dst = into === nothing ? nothing : String(into.captures[2])
         target, body = _taql_join_from(target, body, others)
-        target, body = _taql_preprocess_select(target, body)
+        target, body = _taql_preprocess_select(target, body, others)
         # Phase 242: SELECT [DISTINCT] cols [FROM t] [WHERE c] [ORDER BY k] [LIMIT n]
         # (was `cols [WHERE c]` only: `ORDER BY`/`LIMIT` without a WHERE, `FROM`,
         # and `DISTINCT` all mis-parsed or errored).
-        bm = match(r"^SELECT\s+(DISTINCT\s+)?(.*?)(?:\s+FROM\s+\S+)?(?:\s+WHERE\s+(.+?))?" *
-                   r"(?:\s+GROUP\s+BY\s+(.+?))?(?:\s+HAVING\s+(.+?))?" *
-                   r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+((?:LIMIT|OFFSET)\s+.+?))?\s*$"is, body)
+        bm = match(_rxis(r"^SELECT\s+(DISTINCT\s+)?(.*?)(?:\s+FROM\s+\S+)?(?:\s+WHERE\s+(.+?))?",
+                         r"(?:\s+GROUP\s+BY\s+(.+?))?(?:\s+HAVING\s+(.+?))?",
+                         r"(?:\s+ORDER\s+BY\s+(.+?))?(?:\s+((?:LIMIT|OFFSET)\s+.+?))?\s*$"), body)
         bm === nothing && throw(ArgumentError("taql: malformed SELECT command"))
         distinct = bm.captures[1] !== nothing
         groupstr = bm.captures[4] === nothing ? nothing : String(strip(bm.captures[4]))
@@ -1225,7 +1269,7 @@ function taql(target, command::AbstractString, others...)
             select = [n => n for n in columnnames(t)]
         else
             select = Pair{String,String}[]
-            for piece in _split_commas(collist)
+            for (ci, piece) in enumerate(_split_commas(collist))
                 mp = match(r"^(.+?)\s+AS\s+\(\s*(\w+)\s*,\s*(\w+)\s*\)$"is, piece)
                 if mp !== nothing              # expr AS (valname, maskname)
                     push!(select, "($(mp.captures[2]), $(mp.captures[3]))" =>
@@ -1237,9 +1281,14 @@ function taql(target, command::AbstractString, others...)
                 src = String(strip(cm.captures[1]))
                 alias = cm.captures[2]
                 if alias === nothing
-                    occursin(_TAQL_NAME_RE, src) ||
-                        throw(ArgumentError("taql: computed SELECT column \"$src\" needs an AS alias"))
-                    push!(select, _taql_unescape(src) => src)
+                    # a bare column keeps its name; any other expression is named `Col_<position>` like real TaQL (Phase 492)
+                    if occursin(_TAQL_NAME_RE, src) && !occursin(r"^\d", src)
+                        push!(select, _taql_unescape(src) => src)
+                    elseif (qm = match(r"^\w+\.(\w+)$", src)) !== nothing        # `a.K` is the column K (real TaQL)
+                        push!(select, String(qm.captures[1]) => src)
+                    else
+                        push!(select, "Col_$ci" => src)
+                    end
                 else
                     push!(select, String(alias) => src)
                 end
@@ -1357,10 +1406,16 @@ end
 # inside of each top-level (…) / […] group, in order
 function _paren_groups(s::AbstractString)
     out = String[]
-    depth = 0
+    depth = 0; q = '\0'
     buf = IOBuffer()
     for c in s
-        if c == '(' || c == '['
+        if q != '\0'                      # Phase 488: brackets inside a string literal are text
+            c == q && (q = '\0')
+            depth >= 1 && print(buf, c)
+            continue
+        elseif c == '\'' || c == '"'
+            q = c
+        elseif c == '(' || c == '['
             depth += 1
             depth == 1 && continue
         elseif c == ')' || c == ']'
@@ -1422,8 +1477,8 @@ function _taql_insert(target, cmd::AbstractString)
         limit = Int(_taql_const(tm.captures[2]))
         cmd = String(tm.captures[1])
     end
-    msel = match(r"^INSERT\s+INTO\s+\S+\s*(?:\(([^)]*)\)\s*)?SELECT(?:\s+(.*?))?\s+FROM\s+(?:'([^']+)'|(\w+))\s*" *
-                r"(?:WHERE\s+(.+))?\s*$"is, cmd)
+    msel = match(_rxis(r"^INSERT\s+INTO\s+\S+\s*(?:\(([^)]*)\)\s*)?SELECT(?:\s+(.*?))?\s+FROM\s+(?:'([^']+)'|(\w+))\s*",
+                       r"(?:WHERE\s+(.+))?\s*$"), cmd)
     if msel !== nothing
         tcols = msel.captures[1] === nothing ? nothing : _taql_unescape.(strip.(split(msel.captures[1], ',')))
         collist = msel.captures[2] === nothing ? "*" : String(strip(msel.captures[2]))     # `SELECT FROM 'p'`: every column

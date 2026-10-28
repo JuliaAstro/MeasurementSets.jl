@@ -168,7 +168,7 @@ struct TQLRowNum <: TQLExpr end     # rownumber() / rownr() -- the 1-based row i
 struct TQLAggr <: TQLExpr           # g*(arg) -- reduces over a group's rows (groupby only)
     fn::Base.Callable               # a scalar reducer (Vector -> scalar)
     arg::Union{Nothing,TQLExpr}     # nothing only for gcount()
-    mode::Symbol                    # :scalar (g*) or :perelem (gs*)
+    mode::Symbol                    # :scalar (gcount, gfirst, ..), :pool (reducers that flatten array values) or :perelem (gs*)
     compiled::Base.RefValue{Any}    # `(cols, closure)` of the compiled argument, kept with the node (Phase 417/429)
     rowvals::Base.RefValue{Any}     # `(cols, values by row)` of a scalar argument evaluated once in row order (Phase 465)
 end

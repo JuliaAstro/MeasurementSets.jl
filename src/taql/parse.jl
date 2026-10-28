@@ -15,6 +15,8 @@ end
 # `!~`, ...). Bare `&`/`|` are bitwise; `~` is bitwise-not or (before a
 # `p/m/f` pattern literal) the glob/regex match operator.
 const _TQL_OPCHARS = "=!<>&|~"
+const _TQL_OPS = ("==", "=", "!=", "<>", "<=", ">=", "<", ">", "&&", "||", "&", "|", "!", "~", "!~", "~=", "!~=")
+const _TQL_OPS_BY_LEN = Tuple(sort(collect(_TQL_OPS); by = length, rev = true))
 # `~ <flavor><delim>pattern<delim>[i]` literal delimiters / flavors.
 const _TQL_PAT_DELIMS = "/%@"
 const _TQL_PAT_FLAVORS = Dict{Char,Symbol}('p' => :glob, 'm' => :partial, 'f' => :full)
@@ -67,6 +69,9 @@ function _taqllite_tokenize(s::AbstractString)
             twochar = i < n && cs[i+1] == '/'
             push!(toks, TQLToken(:arithop, twochar ? "//" : "/", nothing))
             i += twochar ? 2 : 1
+        elseif c == '#'
+            # a comment runs to the end of the line (real TaQL; Phase 489)
+            while i <= n && cs[i] != '\n'; i += 1; end
         elseif c == '\'' || c == '"'
             q = c
             j = i + 1
@@ -75,7 +80,16 @@ function _taqllite_tokenize(s::AbstractString)
             end
             j > n && throw(ArgumentError("TaQL-lite: unterminated string literal in \"$s\""))
             val = join(cs[i+1:j-1])
-            push!(toks, TQLToken(:str, join(cs[i:j]), val))
+            k0 = i
+            # Phase 488 (live-checked vs real TaQL): string literals that touch ('a''b', "a"'b', 'a''') are one
+            # string, "ab" -- a quote is written with the other quote type; a space between them is an error
+            while j < n && (cs[j+1] == '\'' || cs[j+1] == '"')
+                q2 = cs[j+1]; j2 = j + 2
+                while j2 <= n && cs[j2] != q2; j2 += 1; end
+                j2 > n && throw(ArgumentError("TaQL-lite: unterminated string literal in \"$s\""))
+                val *= join(cs[j+2:j2-1]); j = j2
+            end
+            push!(toks, TQLToken(:str, join(cs[k0:j]), val))
             i = j + 1
         elseif c == '0' && i + 2 <= n && (cs[i+1] == 'x' || cs[i+1] == 'X') && isxdigit(cs[i+2])
             # hex integer literal `0x1F` (real TaQL accepts it; Phase 244)
@@ -155,6 +169,12 @@ function _taqllite_tokenize(s::AbstractString)
                 j += 1
             end
             optext = join(cs[i:j-1])
+            # Phase 489+: a run of operator characters that is not one operator (`!!`, `K==!F`) is split at the longest
+            # known prefix instead of being rejected as a whole
+            if !(optext in _TQL_OPS)
+                k = findfirst(p -> startswith(optext, p), _TQL_OPS_BY_LEN)
+                k === nothing || (optext = _TQL_OPS_BY_LEN[k]; j = i + length(optext))
+            end
             push!(toks, TQLToken(:op, optext, nothing))
             i = j
             # `!~` is always a pattern match. Bare `~` is a pattern match
@@ -472,13 +492,16 @@ function _parse_in_element!(p::TQLParser)
 end
 
 function _parse_in_list!(p::TQLParser, lhs::TQLExpr, negate::Bool)
-    _expect_kind!(p, :lbracket, "'['")
-    vals = _peek(p).kind === :rbracket ? Any[] : Any[_parse_in_element!(p)]   # `IN []` matches nothing
+    # Phase 489: real TaQL also takes a parenthesised set, `K IN (1,2)` (a sub-query `IN (SELECT ..)` is replaced earlier)
+    paren = _peek(p).kind === :lparen
+    paren ? _advance!(p) : _expect_kind!(p, :lbracket, "'['")
+    close = paren ? :rparen : :rbracket
+    vals = _peek(p).kind === close ? Any[] : Any[_parse_in_element!(p)]   # `IN []` matches nothing
     while _peek(p).kind === :comma
         _advance!(p)
         push!(vals, _parse_in_element!(p))
     end
-    _expect_kind!(p, :rbracket, "']'")
+    _expect_kind!(p, close, paren ? "')'" : "']'")
     e = TQLIn(lhs, vals)
     return negate ? TQLNot(e) : e
 end
@@ -567,6 +590,14 @@ function _parse_unary!(p::TQLParser)
     elseif t.kind === :op && t.text == "~"          # unary bitwise NOT
         _advance!(p)
         return TQLBitNot(_parse_unary!(p))
+    elseif _iskw(t, "NOT") || (t.kind === :op && t.text == "!")
+        # Phase 490: logical NOT is also an operand (`B != !B`, `K == NOT B` -- real TaQL binds it tighter than `==`);
+        # at the start of a condition `_parse_not!` still takes it first, so `NOT K == 3` keeps meaning NOT (K == 3)
+        _advance!(p)
+        _tql_descend!(p)
+        e = TQLNot(_parse_unary!(p))
+        p.depth -= 1
+        return e
     end
     return _parse_power!(p)
 end
