@@ -5995,3 +5995,22 @@ end
     toks(s) = [x.text for x in MSv2._taqllite_tokenize(s) if x.kind === :op]
     @test toks("!!K") == ["!", "!"] && toks("K<=!B") == ["<=", "!"] && toks("a!~=b") == ["!~="]
 end
+
+# Phase 495 (56 + 20 GROUP BY variants vs real TaQL): a reducing group aggregate over ARRAY values pools every element of the
+# group into one scalar -- `gsum(V)` of 2-element cells is the sum of all of them (it was an element-wise array), and
+# `grms` / `gproduct` / `gany(V > 5)` / `gntrue` / `gnfalse` over arrays were errors.  `gs*` stay per-element.
+@testset "group aggregates pool the elements of array values (Phase 495)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["G" => Bool[1, 0, 1, 0, 1, 0], "A" => Int32[5, 3, 9, 1, 7, 3], "V" => [Float64[i, i + 1] for i in 1:6]]; nrow=6)
+    t = readtable(d)
+    gv(sel) = (r = groupby(t, "G"; select = ["G" => :G, "S" => sel]); Dict(zip(r.G, r.S)))
+    @test gv("gsum(V)") == Dict(true => 21.0, false => 27.0) && gv("gmean(V)") == Dict(true => 3.5, false => 4.5)
+    @test gv("gmin(V)") == Dict(true => 1.0, false => 2.0) && gv("gmax(V)") == Dict(true => 6.0, false => 7.0)
+    @test gv("gmedian(V)") == Dict(true => 3.0, false => 4.0) && gv("gproduct(V)") == Dict(true => 720.0, false => 5040.0)
+    @test all(isapprox.(values(gv("gvariance(V)")), 2.9166666666666665)) && all(isapprox.(values(gv("gsamplevariance(V)")), 3.5))
+    @test gv("grms(V)")[true] ≈ 3.8944404818493075 && gv("gany(V > 5)") == Dict(true => true, false => true) && gv("gall(V > 1)") == Dict(true => false, false => true)
+    @test gv("gntrue(V > 4)") == Dict(true => 2, false => 3) && gv("gnfalse(V > 4)") == Dict(true => 4, false => 3)
+    @test gv("gsum(V * 2)") == Dict(true => 42.0, false => 54.0) && gv("gmean(V + A)")[true] == 10.5
+    @test gv("gsums(V)") == Dict(true => [9.0, 12.0], false => [12.0, 15.0])                  # per-element stays
+    @test gv("gsum(A)") == Dict(true => 21, false => 7) && gv("gfirst(V)")[true] == [1.0, 2.0]
+end

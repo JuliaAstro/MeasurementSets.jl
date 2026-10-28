@@ -11738,3 +11738,12 @@ persisted file is the unsorted aggregate). Test in `taql_command_tests.jl`, cros
 real TaQL except `RENAME KEYWORD K1 TO K2` onto an existing name, a silent no-op there and an error here (kept). 24 `CREATE TABLE` variants
 agree once two forms are accepted: a parenthesised column list `CREATE TABLE p (A I4, B R8)` and no column list at all (an empty table,
 optionally `LIMIT n`). (`LIMIT -1` crashes real casacore.) Test in `taql_command_tests.jl`.
+
+### Phase 495 — group aggregates over array values pool the elements
+
+56 `GROUP BY` / `HAVING` / aggregate variants plus 20 aggregates over array columns against real TaQL. The main gap: a reducing
+group aggregate over ARRAY values flattens every element of the group into one scalar in real TaQL (`gsum(V)` of 2-element cells is the sum of
+all of them, `gvariance` the variance over all of them); ours returned an element-wise array for `gsum` / `gmean` / `gmin` / `gmax` /
+`gmedian` / `gvariance` / ..., and raised errors for `grms`, `gproduct`, `gany(V > 5)`, `gntrue`, `gnfalse`. These aggregates now form a pooled
+mode (`gcount`, `gfirst`, `glast`, `gaggr`, `ghist` and the per-element `gs*` forms are unchanged). Not matched (real TaQL quirks):
+`HAVING` that selects nothing, `CUBE` (real rejects it; ours works), `gfirst` / `glast` (real rejects). Test in `taql_query_tests.jl`.
