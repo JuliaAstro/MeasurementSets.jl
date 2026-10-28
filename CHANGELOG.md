@@ -11776,3 +11776,12 @@ The `taql` docstring still said `GROUP BY` / aggregates in a `SELECT` are not su
 `CREATE` / `DROP`, extra tables (`$2`) and the syntax points checked against real TaQL in Phases 488-498; the header comments of
 `src/taql/ast.jl` listed as unsupported what Phases 60-256 added (masked arrays, `mscal.*`, `running*`, reshaping, `rowid()`,
 `substr`, aggregates). Rewritten; no behaviour change.
+
+### Phase 500 — Julia vs C++ comparison re-run on the real MS (no outlier)
+
+Milestone re-run of the Phase 400 / 450 comparison on the 9,817,600-row ALMA MAIN against real casacore through Casacore.jl:
+whole columns (`TIME` 0.28, `ANTENNA1` 0.66, `FLAG_ROW` 0.68, `UVW` 0.91 of the C++ time), row ranges (`DATA` 0.30, `FLAG` 0.21),
+20,000 random cells (`TIME` 0.02, `ANTENNA1` 0.07, `FLAG` 0.06, `DATA` 0.004), subtables (`CHAN_FREQ` 0.65, `POINTING.DIRECTION` 0.53,
+`POINTING.NAME` 0.16, `POINTING.TIME` 0.05). Geomean 0.17 over 15 lines, every line faster than C++; nothing to fix. (Table open is
+not comparable: Casacore.jl reuses a cached handle.) Casacore.jl indexes array columns by the trailing axis (`col[:, :, a:b]`), so a
+plain `col[:]` on a 2-D / 3-D column is a DimensionMismatch there; the scratch script handles that. No code change.
