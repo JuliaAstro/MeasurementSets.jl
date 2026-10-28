@@ -2914,8 +2914,8 @@ end
     @test query(t, "CHAN_FREQ > 200MHz AND CHAN_FREQ < 2GHz").rows == [1, 2, 3]
     @test query(t, "CHAN_FREQ BETWEEN 1.35GHz AND 1.6GHz").rows == [2, 3]
 
-    # a unitless column vs a dimensional unit literal -> DimensionError
-    @test_throws _U69.DimensionError query(t, "W > 1Hz")
+    # a unitless column vs a unit literal: the literal contributes its raw value, like real TaQL (Phase 497; was a DimensionError)
+    @test query(t, "W > 1Hz").rows == query(t, "W > 1").rows
 
     # computed select: dimensionless result is stripped to a plain number
     gt = query(t, "CHAN_FREQ > 0"; select = ["fghz" => "CHAN_FREQ / 1GHz"])
@@ -6013,4 +6013,26 @@ end
     @test gv("gsum(V * 2)") == Dict(true => 42.0, false => 54.0) && gv("gmean(V + A)")[true] == 10.5
     @test gv("gsums(V)") == Dict(true => [9.0, 12.0], false => [12.0, 15.0])                  # per-element stays
     @test gv("gsum(A)") == Dict(true => 21, false => 7) && gv("gfirst(V)")[true] == [1.0, 2.0]
+end
+
+# Phase 497 (38 + 15 date / time / unit literal forms vs real TaQL): unquoted DATE literals are numbers (MJD days) --
+# `2020-02-12`, `2020/02/12`, `12Feb2020`, `12-Feb-2020`, `2020-02-12T10:00:00`, `2020/02/12/10:00:00` (`2020-02-12` was the
+# subtraction 2006); a quantity literal next to an operand WITHOUT a unit contributes its raw value (`X < 3deg` is `X < 3`);
+# `-12h` and `12h30m15.5s` are literals.
+@testset "date literals, raw unit literals (Phase 497)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["D" => [58889.0, 58890.5, 58891.0, 58891.25, 58891.75, 58893.0], "X" => [0.5, 1.5, 2.5, 3.5, 4.5, 5.5],
+                                        "K" => Int32.(1:6)]; nrow=6)
+    t = readtable(d)
+    ks(f) = Int32.(sort(column(query(t, f), "K")[:]))
+    @test ks("D > 2020-02-12") == [4, 5, 6] && ks("D > 2020/02/12") == [4, 5, 6] && ks("D > 12Feb2020") == [4, 5, 6] && ks("D > 12-Feb-2020") == [4, 5, 6]
+    @test ks("D > 2020-02-12T10:00:00") == [5, 6] && ks("D > 2020/02/12/10:00:00") == [5, 6] && ks("D > 2020-02-12/10:00") == [5, 6]
+    @test ks("D > 2020-02-12 + 1") == [6] && ks("D < 2020-02-12 - 1") == [1]
+    @test MSv2._date_literal_at(collect("2020-02-12"), 1, 10) == ("2020-02-12", 58891.0, 11)
+    @test MSv2._date_literal_at(collect("2020-02-12.5"), 1, 12) === nothing && MSv2._date_literal_at(collect("12Febx"), 1, 6) === nothing
+    @test ks("K-1-1 == 1") == [3]                                           # arithmetic, not a date
+    if Base.get_extension(MSv2, :UnitfulExt) !== nothing
+        @test ks("X < 3deg") == [1, 2, 3] && ks("X < 3m") == [1, 2, 3] && ks("X < 1rad") == [1] && ks("D < 70000s") == 1:6
+        @test ks("X*1000 < 2000m") == [1, 2] && ks("D > -12h") == 1:6 && ks("D > 12h30m15.5s") == 1:6 && ks("D > -30deg") == 1:6
+    end
 end

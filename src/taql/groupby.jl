@@ -112,8 +112,8 @@ _geval(e::TQLCol, cols, g) = cols[e.name][g[end]]   # real TaQL: the group's LAS
 _geval(e::TQLLit, cols, g) = e.value
 _geval(e::TQLQuantityLit, cols, g) = e.value
 _geval(e::TQLArrayLit, cols, g) = [_geval(x, cols, g) for x in e.elems]
-_geval(e::TQLCmp, cols, g) = _tql_cmp(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
-_geval(e::TQLArith, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
+_geval(e::TQLCmp, cols, g) = (p = _litfix(e.lhs, e.rhs, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g)); _tql_cmp(e.op, p[1], p[2]))
+_geval(e::TQLArith, cols, g) = (p = _litfix(e.lhs, e.rhs, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g)); _bcast(e.op, p[1], p[2]))
 _geval(e::TQLNeg, cols, g) = _bcast(-, _geval(e.a, cols, g))
 _geval(e::TQLBitNot, cols, g) = _bcast((~), _geval(e.a, cols, g))
 _geval(e::TQLMaskOf, cols, g) = (v = _geval(e.e, cols, g);

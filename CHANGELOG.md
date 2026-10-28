@@ -11753,3 +11753,12 @@ mode (`gcount`, `gfirst`, `glast`, `gaggr`, `ghist` and the per-element `gs*` fo
 28 sub-query variants against real TaQL (`IN` / `NOT IN` / `EXISTS` / `NOT EXISTS` with `DISTINCT`, `ORDER BY`, `LIMIT`, aggregates, expressions and a second
 table; scalar sub-queries; nested, aliased and `*` forms of `FROM (SELECT ..)`) agree except `x IN [SELECT ..]` (brackets), which is now
 recognised like the parenthesised form. Real TaQL cannot select FROM a grouped sub-query, ours can. Test in `taql_command_tests.jl`.
+
+### Phase 497 — date literals; quantity literals next to a unitless operand
+
+38 date / time-literal forms and 15 unit-literal forms against real TaQL. (1) Unquoted DATE literals are numbers (MJD days) in real TaQL:
+`2020-02-12`, `2020/02/12`, `12Feb2020`, `12-Feb-2020`, `2020-02-12T10:00:00`, `2020/02/12/10:00:00`; ours read `2020-02-12` as the subtraction 2006
+and rejected the others. (2) A quantity literal next to an operand WITHOUT a unit contributes its raw value (`X < 3deg` is `X < 3`, `D < 70000s`
+is `D < 70000`; casacore leaves a unitless operand as it is) where ours raised a DimensionError — the Phase 69 assertion that a unitless column against a
+dimensional literal is an error was wrong and is replaced (a unit-bearing column against a bare number is still an error, by decision). (3) `-12h` and the
+fractional seconds of `12h30m15.5s` are literals. Real TaQL's `D BETWEEN <date> AND <date>` is an error there and works here. Tests in `taql_query_tests.jl`.

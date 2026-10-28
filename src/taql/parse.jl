@@ -14,6 +14,26 @@ end
 # one token (`==`, `!=`, `<>`, `<=`, `>=`, `&&`, `||`, `&`, `|`, `~`,
 # `!~`, ...). Bare `&`/`|` are bitwise; `~` is bitwise-not or (before a
 # `p/m/f` pattern literal) the glob/regex match operator.
+# Phase 497 (live-checked vs real TaQL): date literals are numbers (MJD days).  `Y-M-D` / `Y/M/D` with an optional time (`T` or `/`
+# then `h:m[:s[.f]]`), `D[-]Mon[-]Y` with an optional `/h:m:s` -- starting at a digit, so a column name never matches.
+const _DATE_LIT_RES = (r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[T/]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?",
+                       r"^\d{1,2}-?[A-Za-z]{3}-?\d{4}(?:/\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?")
+function _date_literal_at(cs, i::Int, n::Int)
+    s = String(cs[i:min(n, i + 40)])
+    for re in _DATE_LIT_RES
+        m = match(re, s)
+        m === nothing && continue
+        txt = m.match
+        # not the start of a longer identifier / number (`12Feb2020abc`, `2020-02-12.5`)
+        nx = i + length(txt)
+        (nx <= n && (isletter(cs[nx]) || isdigit(cs[nx]) || cs[nx] == '_' || cs[nx] == '.')) && continue
+        v = try _tql_parse_datetime(String(txt)) catch; nothing end
+        v === nothing && continue
+        return (String(txt), Float64(v), nx)
+    end
+    return nothing
+end
+
 const _TQL_OPCHARS = "=!<>&|~"
 const _TQL_OPS = ("==", "=", "!=", "<>", "<=", ">=", "<", ">", "&&", "||", "&", "|", "!", "~", "!~", "~=", "!~=")
 const _TQL_OPS_BY_LEN = Tuple(sort(collect(_TQL_OPS); by = length, rev = true))
@@ -97,6 +117,9 @@ function _taqllite_tokenize(s::AbstractString)
             while j <= n && isxdigit(cs[j]); j += 1; end
             push!(toks, TQLToken(:num, join(cs[i:j-1]), _tql_parse_int(join(cs[i+2:j-1]), 16)))
             i = j
+        elseif isdigit(c) && (dl = _date_literal_at(cs, i, n)) !== nothing
+            # an unquoted date literal (`2020-02-12`, `2020/02/12/10:00:00`, `12Feb2020`, `2020-02-12T10:00`): its MJD in days
+            push!(toks, TQLToken(:num, dl[1], dl[2])); i = dl[3]
         elseif isdigit(c) || (c == '.' && _isdigit_at(cs, i + 1, n))
             j = i
             sawdot = false
@@ -124,7 +147,9 @@ function _taqllite_tokenize(s::AbstractString)
             # compound like `km/s` is not a literal, compare a column).
             if j <= n && (isletter(cs[j]) || cs[j] == '°')
                 u0 = j
-                while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '°' || cs[j] == 'µ')
+                while j <= n && (isletter(cs[j]) || isdigit(cs[j]) || cs[j] == '°' || cs[j] == 'µ' ||
+                                 # fractional seconds of a sexagesimal `12h30m15.5s` / `30d15m10.25s` (Phase 497)
+                                 (cs[j] == '.' && cs[u0] in ('h', 'd') && j < n && isdigit(cs[j-1]) && isdigit(cs[j+1])))
                     j += 1
                 end
                 unit = join(cs[u0:j-1])
@@ -583,6 +608,7 @@ function _parse_unary!(p::TQLParser)
         # constant-fold `-<number literal>` so `A > -5` keeps a plain
         # `TQLLit(-5)` rhs (matches pre-Phase-24 AST shape, and lets a
         # negative literal appear anywhere an atom can).
+        inner isa TQLQuantityLit && return TQLQuantityLit(-inner.value)          # `-12h` is one quantity literal
         return inner isa TQLLit && inner.value isa Number ? TQLLit(-inner.value) : TQLNeg(inner)
     elseif t.kind === :arithop && t.text == "+"
         _advance!(p)
