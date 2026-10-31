@@ -72,13 +72,14 @@ function _nonmissing_column(cn::AbstractString, vals::AbstractVector, what::Abst
 end
 
 # a table-keyword value -> (casacore type, stored value): scalars, arrays of every
-# numeric type / Bool / String, and (nested) records from a `Record` or a Dict
+# numeric type / Bool / String, (nested) records from a `Record` or a Dict, and `SubTable` references
 const _KW_ARRAY_TYPE = Dict{DataType,CasaType}(
     Bool => TpArrayBool, UInt8 => TpArrayUChar, Int16 => TpArrayShort, UInt16 => TpArrayUShort,
     Int32 => TpArrayInt, UInt32 => TpArrayUInt, Int64 => TpArrayInt64, Float32 => TpArrayFloat,
     Float64 => TpArrayDouble, ComplexF32 => TpArrayComplex, ComplexF64 => TpArrayDComplex)
 function _kw_value(v)
     v isa Record && return (TpRecord, v)
+    v isa SubTable && return (TpTable, v)     # a subtable reference (`SubTable("././ANTENNA")`): links a pre-existing subtable
     if v isa AbstractDict
         r = Record()
         for (k, x) in v
@@ -658,6 +659,10 @@ so `write_table` -> `readtable` -> `qcolumn` / `measure` round-trips.
 `measures = Dict(col => (; kind, ref[, varrefcol, units]))` and
 `units = Dict(col => "Hz" | ["rad","rad"])` stamp those keywords
 explicitly and override the auto-detection for that column.
+
+A table keyword (`keywords = Dict(name => value)`) may be a number, string, array, `Dict` / `Record`, or
+`MeasurementSets.SubTable("././ANTENNA")`, a link to a subtable directory (relative to this table's directory), so a MAIN
+written into a directory that already holds the subtables becomes a Measurement Set.
 """
 function write_table(dir::AbstractString, name::AbstractString, columns;
                      nrow::Union{Nothing,Integer}=nothing, endian::Symbol=:little,

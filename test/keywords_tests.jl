@@ -213,3 +213,24 @@ end
         @test nbad == 0
     end
 end
+
+# Phase 503: a `SubTable` value is a table keyword (TpTable), so `write_table(...; keywords=...)` and `setkeyword!` can link subtables
+# that already exist -- a MAIN written into a directory of subtables becomes a Measurement Set (reported by a user working with LOFAR data).
+@testset "SubTable keyword links existing subtables (Phase 503)" begin
+    d = joinpath(mktempdir(), "new.ms"); mkpath(d)
+    for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW")
+        cp(joinpath(SAMPLE_MS, nm), joinpath(d, nm))
+    end
+    n = 5
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => collect(1.0:n), "ANTENNA1" => Int32.(0:n-1)]; nrow=n, type="Measurement Set",
+        keywords=Dict("MS_VERSION" => 2.0f0, "ANTENNA" => MSv2.SubTable("././ANTENNA"), "FIELD" => MSv2.SubTable("././FIELD")))
+    ms = MeasurementSet(d)
+    @test sort(first.(MSv2.subtables(readtable(d)))) == ["ANTENNA", "FIELD"]
+    @test nrow(subtable(ms, "ANTENNA")) == nrow(readtable(joinpath(SAMPLE_MS, "ANTENNA"))) && nrow(ms) == n
+    MSv2.setkeyword!(d, "SPECTRAL_WINDOW", MSv2.SubTable("././SPECTRAL_WINDOW"))
+    @test nrow(subtable(MeasurementSet(d), "SPECTRAL_WINDOW")) == nrow(readtable(joinpath(SAMPLE_MS, "SPECTRAL_WINDOW")))
+    @test_throws ArgumentError MSv2.setkeyword!(d, "SPECTRAL_WINDOW", 3.0)      # a table keyword cannot become a number
+    if _HAVE_CASACORE
+        @test size(CCT.Table(d)[:TIME]) == (n,) && size(CCT.Table(joinpath(d, "ANTENNA"))[:NAME]) == (26,)
+    end
+end

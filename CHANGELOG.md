@@ -11810,3 +11810,11 @@ All six `GROUP BY` queries on the real MS give the same columns as real TaQL.
 the seeded Phase 354 fuzz: Unitful turns `rad - arcmin` (both dimensionless with `UnitfulAngles`) into a plain number, after which the Phase 497
 rule stripped the other literal (`(A - 0.37arcmin) > 2.5deg` was compared as `0.2 > 2.5`); `+` / `-` of two dimensionless quantities now keeps the
 left unit (`UnitfulExt`).
+
+### Phase 503 — `SubTable` keyword values: link pre-existing subtables
+
+Reported by a user working with LOFAR data: `write_table` of a new MAIN into a directory that already holds the subtables did not produce a readable
+Measurement Set, because a keyword value could not be a table reference (`copyms` and `create_ms` build the links themselves). `_kw_value` now accepts
+`MeasurementSets.SubTable("././ANTENNA")` as a `TpTable` keyword, so `write_table(...; keywords=Dict("ANTENNA" => SubTable(...)))` links the subtable
+and `setkeyword!` can add or replace such a link (a table keyword still cannot become a number). One-line fix suggested by the user; the table
+is readable by `MeasurementSet` and by Casacore.jl. Test in `keywords_tests.jl`.
