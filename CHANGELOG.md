@@ -11830,3 +11830,10 @@ The keywords equal `create_ms`'s (test in `keywords_tests.jl`).
 
 Note on Phase 502: on Julia 1.10 the precompile workload raises the allocation of a ragged SSM-indirect `getcolumn` from 1.6x to 2.3x the payload (about 370 B per cell,
 found by the x86-64 Docker run); the Phase 239 guard's bound is now 3x (the bug it was written for added many times the payload).
+
+### Phase 505 — an MS assembled from `write_table` pieces is valid (end-to-end check of Phases 503–504)
+
+Every table of a `create_ms` MS rewritten with `write_table` under its standard name and MAIN linked to the subtables with `SubTable` keywords
+gives a `validate`-clean MeasurementSet whose column keywords (`QuantumUnits` / `MEASINFO` / `CATEGORY`) equal `create_ms`'s on every column of every
+table, and Casacore.jl reads it. Permanent test in `keywords_tests.jl`. (The CASA `ms.open` check of the same MS could not be run this session: the
+CASA disk image was not mounted and attaching it asks to accept a license agreement.) No code change.

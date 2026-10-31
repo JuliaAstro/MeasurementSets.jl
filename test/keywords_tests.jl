@@ -266,3 +266,34 @@ end
     write_table(u, "MYTABLE", Pair{String,Any}["POSITION" => [[1.0, 2, 3]]]; nrow=1)
     @test isempty(columndesc(readtable(u), "POSITION").keywords)
 end
+
+# Phase 505: the whole piecewise workflow of Phases 503-504 -- every table of a `create_ms` MS rewritten with `write_table` (standard names, so the
+# standard keywords are stamped) and MAIN linked to the subtables with `SubTable` keywords -- gives a `validate`-clean MS whose column keywords
+# equal `create_ms`'s on every column of every table.
+@testset "an MS assembled from write_table pieces is valid (Phase 505)" begin
+    ref = joinpath(mktempdir(), "ref.ms"); create_ms(ref; nrow=6, nchan=3, ncorr=2, nant=3)
+    rms = MeasurementSet(ref)
+    new = joinpath(mktempdir(), "new.ms"); mkpath(new)
+    subs = String[]
+    for nm in MSv2.subtablenames(rms)
+        st = subtable(rms, nm)
+        write_table(joinpath(new, nm), nm, Pair{String,Any}[c => collect(column(st, c)[:]) for c in columnnames(st)]; nrow=nrow(st))
+        push!(subs, nm)
+    end
+    main = readtable(ref)
+    kw = Dict{String,Any}("MS_VERSION" => 2.0f0)
+    for nm in subs; kw[nm] = MSv2.SubTable("././" * nm); end
+    write_table(new, "MAIN", Pair{String,Any}[c => collect(column(main, c)[:]) for c in columnnames(main)]; nrow=nrow(main),
+                type="Measurement Set", keywords=kw)
+    @test isempty(validate(MeasurementSet(new)))
+    nbad = 0
+    for nm in vcat(["MAIN"], subs)
+        a = nm == "MAIN" ? readtable(new) : readtable(joinpath(new, nm)); b = nm == "MAIN" ? main : readtable(joinpath(ref, nm))
+        for c in columnnames(a)
+            nbad += repr(columndesc(a, c).keywords) != repr(columndesc(b, c).keywords)
+        end
+    end
+    @test nbad == 0
+    @test length(subs) >= 10
+    _HAVE_CASACORE && @test size(CCT.Table(new)[:TIME]) == (6,)
+end
