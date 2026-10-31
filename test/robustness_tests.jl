@@ -571,3 +571,27 @@ end
     @test_throws ErrorException write_table(joinpath(d, "empty"), "T", ["A" => [9]]; nrow = 1)
     @test column(readtable(joinpath(d, "empty")), "A")[:] == [1, 2]
 end
+
+# Phase 502: the package image carries a precompile workload (src/precompile.jl).  Without it the first `taql(..., "... GROUP BY
+# ... INTO ...")` of a session compiled for 19 s and the first `query` for 2.6 s.  A fresh process must find the lock registry
+# and the pattern cache empty (the workload's file descriptors and temporary paths are not part of the image) and the first
+# TaQL command must not compile for seconds.
+@testset "precompile workload: clean image, no first-call compile stall (Phase 502)" begin
+    code = """
+        using MeasurementSets
+        const MS = MeasurementSets
+        @assert isempty(MS._HELD_LOCKS) && isempty(MS._TQL_PATTERN_CACHE)
+        d = mktempdir(); p = joinpath(d, "t")
+        write_table(p, "T", Pair{String,Any}["A" => Int32[1, 2, 2, 3], "B" => [1.0, 2.0, 3.0, 4.0]]; nrow=4)
+        t1 = @elapsed taql(p, "SELECT A, gcount() AS N, gsum(B) AS S GROUP BY A HAVING gcount() > 0 INTO '" * joinpath(d, "g") * "'")
+        t2 = @elapsed query(readtable(p), "A > 1 AND B < 4 ORDER BY B")
+        println("FIRST ", t1, " ", t2)
+        @assert t1 < 6 && t2 < 3 "first-call latency \$t1 \$t2"
+        println("OK")
+    """
+    out = IOBuffer()
+    r = run(pipeline(ignorestatus(`$(Base.julia_cmd()) --project=$(dirname(@__DIR__)) --startup-file=no -e $code`); stdout=out, stderr=out))
+    s = String(take!(out))
+    @test r.exitcode == 0
+    @test occursin("OK", s)
+end

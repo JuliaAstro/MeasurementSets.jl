@@ -112,8 +112,8 @@ _geval(e::TQLCol, cols, g) = cols[e.name][g[end]]   # real TaQL: the group's LAS
 _geval(e::TQLLit, cols, g) = e.value
 _geval(e::TQLQuantityLit, cols, g) = e.value
 _geval(e::TQLArrayLit, cols, g) = [_geval(x, cols, g) for x in e.elems]
-_geval(e::TQLCmp, cols, g) = _tql_cmp(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
-_geval(e::TQLArith, cols, g) = _bcast(e.op, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g))
+_geval(e::TQLCmp, cols, g) = (p = _litfix(e.lhs, e.rhs, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g)); _tql_cmp(e.op, p[1], p[2]))
+_geval(e::TQLArith, cols, g) = (p = _litfix(e.lhs, e.rhs, _geval(e.lhs, cols, g), _geval(e.rhs, cols, g)); _bcast(e.op, p[1], p[2]))
 _geval(e::TQLNeg, cols, g) = _bcast(-, _geval(e.a, cols, g))
 _geval(e::TQLBitNot, cols, g) = _bcast((~), _geval(e.a, cols, g))
 _geval(e::TQLMaskOf, cols, g) = (v = _geval(e.e, cols, g);
@@ -333,11 +333,19 @@ function _gb_keys(t::AbstractTable, groupcols)
     return ks
 end
 
+# Phase 502: the key columns go through a function barrier so the group dictionary is keyed by a concrete tuple type
+# (the loop was a `Dict{Any,..}` with a freshly boxed tuple per row: 9.8M rows took 4 s, now ~1 s).
 function _group_rows(keys::Vector{String}, loaded, rows)
-    groups = Dict{Any,Vector{Int}}()
-    seen = Any[]
+    cols = ntuple(j -> loaded[keys[j]], length(keys))
+    return _group_rows_t(cols, rows)
+end
+
+function _group_rows_t(cols::Tuple, rows)
+    K = Tuple{map(eltype, cols)...}
+    groups = Dict{K,Vector{Int}}()
+    seen = K[]
     for i in rows
-        key = ntuple(j -> loaded[keys[j]][i], length(keys))
+        key = map(c -> c[i], cols)::K
         g = get(groups, key, nothing)
         if g === nothing
             groups[key] = Int[i]
