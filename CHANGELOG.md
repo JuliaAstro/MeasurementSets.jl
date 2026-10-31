@@ -11795,3 +11795,18 @@ exactly (a few because both engines reject the form, e.g. lower-case column name
 unsorted / unfiltered aggregate (`ORDER BY`, `LIMIT`, `HAVING G`), `HAVING NOT agg > x`, `GROUP BY 1` and `GROUP BY G, G` are errors there,
 `gfirst` / `glast` of an integer column is rejected there, and `AS T` fails because `T` is the boolean literal. A grouped select's
 returned (non-persisted) real table carries no columns, so `GIVING` is the only oracle.
+
+### Phase 502 — precompile workload; typed GROUP BY keys; unit arithmetic of angles
+
+(1) The first `taql(..., "... GROUP BY ... INTO ...")` of a session compiled for 19 s (7.5 s for a plain `SELECT ... INTO`, 2.6 s for the first
+`query`, 1.5 s for `copyms`): the package had no precompile workload. `src/precompile.jl` (new dependency `PrecompileTools`) writes a small
+table in a temporary directory and runs write / read / query / groupby / join / `taql` SELECT, UPDATE, INSERT, DELETE / edit / copytable /
+`create_ms` / `validate` / `copyms` while the package is precompiled; the lock registry and the pattern cache it fills are emptied again so no
+file descriptor or temporary path ends up in the image. First calls drop to 0.01–0.3 s. A fresh-process test checks this (`robustness_tests.jl`).
+(2) `GROUP BY` on the 9.8M-row MAIN used a `Dict{Any,..}` with a boxed tuple per row (`_group_rows`); the key columns now go through a function
+barrier and the dictionary is keyed by a concrete tuple type: one `Int` key 0.59 s → 0.06 s, two keys 0.88 s → 0.17 s (real TaQL: 0.39 / 0.68 s).
+All six `GROUP BY` queries on the real MS give the same columns as real TaQL.
+(3) Two assertions left over from Phase 497 were stale (`X > 1h` on a unitless column now compares with 1, as in real TaQL). A real bug found by
+the seeded Phase 354 fuzz: Unitful turns `rad - arcmin` (both dimensionless with `UnitfulAngles`) into a plain number, after which the Phase 497
+rule stripped the other literal (`(A - 0.37arcmin) > 2.5deg` was compared as `0.2 > 2.5`); `+` / `-` of two dimensionless quantities now keeps the
+left unit (`UnitfulExt`).

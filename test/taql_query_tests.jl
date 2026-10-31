@@ -4753,8 +4753,9 @@ if _HAVE_TAQL && _HAVE_UNITFUL
     @test ours("TM > 0.5d") == ours("TM > 43200")
     # time -> angle coercion: 24 h = 2 pi rad
     @test ours("A > 12h") == ours("A > $(Float64(pi))")
-    # a time quantity against a unitless column is a unit mismatch, not an RA reading
-    @test_throws Exception query(readtable(let p = joinpath(mktempdir(), "u"); write_table(p, "U", Pair{String,Any}["X" => [1.0, 2.0]]; nrow=2); p end), "X > 1h")
+    # a time quantity against a unitless column contributes its raw value (Phase 497), it is not an RA reading
+    ut = readtable(let p = joinpath(mktempdir(), "u"); write_table(p, "U", Pair{String,Any}["X" => [1.0, 2.0]]; nrow=2); p end)
+    @test collect(column(query(ut, "X > 1h"), "X")[:]) == [2.0]
 end
 end
 
@@ -5327,6 +5328,9 @@ end
     t = readtable(dir)
     @test collect(column(query(t, "L > 1.5km"), "K")[:]) == 7:10 && collect(column(query(t, "L BETWEEN 30000mm AND 1km"), "K")[:]) == 1:4
     @test collect(column(query(t, "A < 30deg"), "K")[:]) == 1:2 && collect(column(query(t, "KM * 3 > 2000m"), "K")[:]) == 3:10
+    # Phase 502: Unitful turns `rad - arcmin` (both dimensionless) into a plain number; the result must keep the left unit
+    @test collect(column(query(t, "(A - 0.37arcmin) > 2.5deg"), "K")[:]) == 1:10 && collect(column(query(t, "(A + 100.0deg) > 5.0arcsec"), "K")[:]) == 1:10
+    @test collect(column(query(t, "(A + 1deg) < 150deg"), "K")[:]) == 1:10 && collect(column(query(t, "(A + 1deg) > 100deg"), "K")[:]) == 9:10
     if _HAVE_TAQL
         rng = MersenneTwister(354)
         ln = ["m", "km", "cm", "mm"]; an = ["rad", "deg", "arcmin", "arcsec"]

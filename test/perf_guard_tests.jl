@@ -358,3 +358,22 @@ end
     @test column(r, "I")[:] == want_i
     @test all(column(r, "B")[:][K .== 4] .== 12.5) && column(r, "B")[:][K .!= 4] == B[K .!= 4]
 end
+
+# Phase 502: the group dictionary is keyed by a concrete tuple type.  It was a `Dict{Any,..}` with a boxed tuple per row, which made
+# GROUP BY on the 9.8M-row MAIN 10x slower than needed (0.59 s -> 0.06 s for one Int key); a time bound would be flaky, so the
+# key type is checked (a regression to `Any` is exactly what costs the time) along with the grouping itself.
+@testset "group dictionary has a concrete key type (Phase 502)" begin
+    n = 5000
+    k1 = Int32.(mod.(1:n, 7)); k2 = mod.(1:n, 3) .== 0; ks = ["s$(i % 5)" for i in 1:n]
+    cols = Dict{String,AbstractVector}("A" => k1, "B" => k2, "S" => ks)
+    g, seen = MeasurementSets._group_rows(["A"], cols, 1:n)
+    @test g isa Dict{Tuple{Int32},Vector{Int}} && seen isa Vector{Tuple{Int32}}
+    @test length(seen) == 7 && sum(length, values(g)) == n && g[(Int32(3),)] == findall(==(3), k1)
+    g2, seen2 = MeasurementSets._group_rows(["A", "B", "S"], cols, 1:n)
+    @test g2 isa Dict{Tuple{Int32,Bool,String},Vector{Int}} && sum(length, values(g2)) == n
+    @test seen2[1] == (k1[1], k2[1], ks[1])                       # first-seen order
+    g0, seen0 = MeasurementSets._group_rows(String[], cols, 1:n)   # no key: one group
+    @test length(seen0) == 1 && g0[()] == collect(1:n)
+    g3, _ = MeasurementSets._group_rows(["A"], cols, [2, 4, 9])    # a row selection
+    @test sort(collect(keys(g3))) == sort(unique([(k1[i],) for i in (2, 4, 9)]))
+end

@@ -333,11 +333,19 @@ function _gb_keys(t::AbstractTable, groupcols)
     return ks
 end
 
+# Phase 502: the key columns go through a function barrier so the group dictionary is keyed by a concrete tuple type
+# (the loop was a `Dict{Any,..}` with a freshly boxed tuple per row: 9.8M rows took 4 s, now ~1 s).
 function _group_rows(keys::Vector{String}, loaded, rows)
-    groups = Dict{Any,Vector{Int}}()
-    seen = Any[]
+    cols = ntuple(j -> loaded[keys[j]], length(keys))
+    return _group_rows_t(cols, rows)
+end
+
+function _group_rows_t(cols::Tuple, rows)
+    K = Tuple{map(eltype, cols)...}
+    groups = Dict{K,Vector{Int}}()
+    seen = K[]
     for i in rows
-        key = ntuple(j -> loaded[keys[j]][i], length(keys))
+        key = map(c -> c[i], cols)::K
         g = get(groups, key, nothing)
         if g === nothing
             groups[key] = Int[i]

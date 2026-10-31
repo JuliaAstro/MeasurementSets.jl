@@ -118,4 +118,6 @@ export update!, taql
 # `delete!` extends `Base.delete!` and `insert!` extends `Base.insert!`
 # (DELETE FROM / INSERT INTO, see taql/commands.jl) -- none is exported.
 
+include("precompile.jl")
+
 end
