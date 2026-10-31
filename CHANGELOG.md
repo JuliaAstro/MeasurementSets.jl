@@ -11841,3 +11841,9 @@ CASA disk image was not mounted and attaching it asks to accept a license agreem
 CI follow-up to Phase 502 (Julia 1.10 job of PR #143): the Phase 413 `readtable` allocation bound is 100 KB (92.3 KB with the workload on 1.10), and the
 fresh-process first-call latency assertion is skipped when Julia runs with `--code-coverage` (the 1.10 job does): a package image's compiled code is not used
 then, so the first `taql` took 20 s there.
+
+### Phase 506 — allocation guards under `--code-coverage` (no bug found)
+
+The Julia 1.10 CI job runs with coverage, which the earlier local and Docker runs did not. The allocation / latency guard files (`perf_guard`, `blockcolumn`,
+`indirect`, `ssm`, `tsm`, `ism_writer`) now pass with `--code-coverage=user` on Julia 1.13 (arm64) and on Julia 1.10 x86-64 (Docker), after the Phase 502
+follow-up. No code change.
