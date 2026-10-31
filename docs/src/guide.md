@@ -159,6 +159,32 @@ column(readtable("/tmp/ab"), "X")[:]                                   # [1.0, 2
 `write_ms(dst, ms; rows, subtables, subtable_rows)` is the general form of
 `copyms` (it takes an opened `MeasurementSet`; `copyms` takes either).
 
+### Assembling a Measurement Set from pieces
+
+A Measurement Set is a MAIN table whose keywords point at its subtables. Writing a table under a
+standard name (`"MAIN"`, `"ANTENNA"`, `"FIELD"`, ...) gives its columns the standard `QuantumUnits`,
+`MEASINFO` and `CATEGORY` keywords casacore requires of an MS (`standard=false` turns that off), and a
+`MeasurementSets.SubTable` keyword value links a subtable directory that already exists, so a MAIN written
+into a directory of subtables becomes a valid MS:
+
+```julia
+mkpath("/tmp/new.ms")
+for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW")
+    cp("/path/to/my.ms/" * nm, "/tmp/new.ms/" * nm)          # subtables you already have
+end
+links = Dict{String,Any}("MS_VERSION" => 2.0f0)
+for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW")
+    links[nm] = MeasurementSets.SubTable("././" * nm)          # relative to the MAIN directory
+end
+write_table("/tmp/new.ms", "MAIN",
+            ["TIME" => collect(1.0:5.0), "ANTENNA1" => Int32.(0:4)];
+            nrow = 5, type = "Measurement Set", keywords = links)
+new = MeasurementSet("/tmp/new.ms")
+nrow(subtable(new, "ANTENNA"))                                 # the linked subtable
+```
+
+[`setkeyword!`](@ref) adds or replaces such a link on a table that is already written.
+
 Any [Tables.jl](https://tables.juliadata.org) source can be written:
 `write_table(dir, "T", df)` takes a DataFrame, a `Vector{NamedTuple}` or a
 dictionary of vectors, and `nrow` is the first column's length. A

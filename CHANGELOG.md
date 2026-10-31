@@ -11847,3 +11847,9 @@ then, so the first `taql` took 20 s there.
 The Julia 1.10 CI job runs with coverage, which the earlier local and Docker runs did not. The allocation / latency guard files (`perf_guard`, `blockcolumn`,
 `indirect`, `ssm`, `tsm`, `ism_writer`) now pass with `--code-coverage=user` on Julia 1.13 (arm64) and on Julia 1.10 x86-64 (Docker), after the Phase 502
 follow-up. No code change.
+
+### Phase 507 — guide: assembling a Measurement Set from pieces
+
+`docs/src/guide.md` gets a section for the workflow of Phases 503–505: write a MAIN under its standard name (standard column keywords stamped), link
+pre-existing subtables with `MeasurementSets.SubTable` keyword values, open the result as a `MeasurementSet`. The example is run by the docs-examples test; the
+docs build has no warnings or errors. No code change.
