@@ -660,6 +660,10 @@ so `write_table` -> `readtable` -> `qcolumn` / `measure` round-trips.
 `units = Dict(col => "Hz" | ["rad","rad"])` stamp those keywords
 explicitly and override the auto-detection for that column.
 
+When `name` is a standard Measurement Set table (`"MAIN"`, `"ANTENNA"`, `"FIELD"`, ...) its columns also get the standard
+`QuantumUnits` / `MEASINFO` / `CATEGORY` keywords casacore requires of an MS (`standard=false` turns that off), so a table
+written piece by piece is a valid MS.
+
 A table keyword (`keywords = Dict(name => value)`) may be a number, string, array, `Dict` / `Record`, or
 `MeasurementSets.SubTable("././ANTENNA")`, a link to a subtable directory (relative to this table's directory), so a MAIN
 written into a directory that already holds the subtables becomes a Measurement Set.
@@ -674,7 +678,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                      units::AbstractDict=Dict{String,Any}(),
                      keywords::AbstractDict=Dict{String,Any}(),
                      shapes::AbstractDict=Dict{String,Any}(), comments::AbstractDict=Dict{String,String}(),
-                     storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE,
+                     storage::Symbol=:sepfile, blocksize::Integer=DEFAULT_MF_BLOCKSIZE, standard::Bool=true,
                      type::AbstractString="", subtype::AbstractString="",
                      readme::AbstractString="")
     nrow === nothing || nrow >= 0 || throw(ArgumentError("write_table: nrow must be >= 0, got $nrow"))
@@ -747,9 +751,12 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         sc = stdcol(cn)
         ct = sc === nothing ? et : sc.type
         arr = _is_tsm(shp) || (shp isa Dims && !isempty(shp))
-        push!(descs, ColumnDesc(cn, haskey(comments, cn) ? String(comments[cn]) : sc === nothing ? "" : sc.comment,
+        d0 = ColumnDesc(cn, haskey(comments, cn) ? String(comments[cn]) : sc === nothing ? "" : sc.comment,
             "", "", ct, _classname(ct, arr), shp, Int32(0), UInt32(0),
-            Record(), nothing, nothing))
+            Record(), nothing, nothing)
+        # the standard unit / MEASINFO / CATEGORY keywords of a column of a standard table (explicit measures= / units=
+        # entries, applied later, replace them)
+        push!(descs, standard && std !== nothing && sc !== nothing ? _stamp_standard(d0, std.name, sc, names) : d0)
         push!(data, vals)
     end
 
@@ -1331,6 +1338,19 @@ const _MS_MEASINFO = Dict{Tuple{String,String},NamedTuple}(
     ("SPECTRAL_WINDOW", "CHAN_FREQ")    => (; kind=:frequency, varrefcol="MEAS_FREQ_REF", _MS_FREQ_TABREF..., units=["Hz"]),
     ("SPECTRAL_WINDOW", "REF_FREQUENCY") => (; kind=:frequency, varrefcol="MEAS_FREQ_REF", _MS_FREQ_TABREF..., units=["Hz"]))
 
+# Phase 504: the standard keywords of one column of standard table `tbl` -- its `MEASINFO` / `QuantumUnits` (or just the
+# unit), and FLAG_CATEGORY's `CATEGORY` list.  A VarRefCol spec (SPECTRAL_WINDOW.CHAN_FREQ) needs its reference column
+# (`MEAS_FREQ_REF`) in the table: `have` lists the table's column names (`nothing` = all present).
+function _stamp_standard(d::ColumnDesc, tbl::AbstractString, sc, have=nothing)
+    d.name == "FLAG_CATEGORY" && (d = ColumnDesc(d.name, d.comment, d.manager, d.group, d.type, d.classname, d.shape, d.option,
+                                                 d.maxlength, _flag_category_kw(), d.default, d.sequ))
+    spec = get(_MS_MEASINFO, (String(tbl), d.name), nothing)
+    if spec !== nothing && !(haskey(spec, :varrefcol) && have !== nothing && !(spec.varrefcol in have))
+        return _stamp_measinfo(d, spec)
+    end
+    return sc === nothing || isempty(sc.unit) ? d : _stamp_quantum_units(d, [sc.unit])
+end
+
 # build (descs, data) for one standard table
 function _synth_table(tbl, nrows, nchan, ncorr, nrec)
     std = SCHEMAVER2[tbl]
@@ -1342,11 +1362,7 @@ function _synth_table(tbl, nrows, nchan, ncorr, nrec)
         shape = sc.shape isa Dims ? sc.shape :
                 sc.shape isa VariableDims ? VariableDims() :
                 VariableShape()
-        kw = sc.name == "FLAG_CATEGORY" ? _flag_category_kw() : Record()
-        d = _mkdesc(sc.name, sc.type, shape; keywords = kw)
-        spec = get(_MS_MEASINFO, (tbl, sc.name), nothing)
-        d = spec !== nothing ? _stamp_measinfo(d, spec) :
-            isempty(sc.unit) ? d : _stamp_quantum_units(d, [sc.unit])
+        d = _stamp_standard(_mkdesc(sc.name, sc.type, shape), tbl, sc)
         push!(descs, d)
         push!(data, vals)
     end

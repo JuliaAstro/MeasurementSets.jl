@@ -11818,3 +11818,12 @@ Measurement Set, because a keyword value could not be a table reference (`copyms
 `MeasurementSets.SubTable("././ANTENNA")` as a `TpTable` keyword, so `write_table(...; keywords=Dict("ANTENNA" => SubTable(...)))` links the subtable
 and `setkeyword!` can add or replace such a link (a table keyword still cannot become a number). One-line fix suggested by the user; the table
 is readable by `MeasurementSet` and by Casacore.jl. Test in `keywords_tests.jl`.
+
+### Phase 504 — `write_table` stamps the standard MS column keywords
+
+Following the Phase 503 report (assembling a Measurement Set from pieces): `write_table` already took column types and comments from the standard schema
+when the table is named `"MAIN"`, `"ANTENNA"`, ... but not the `QuantumUnits` / `MEASINFO` / `CATEGORY` keywords that casacore requires of an MS
+(Phase 271: it refuses a table without them), so only `create_ms` / `copyms` produced a table casacore accepts. `write_table` now stamps them on a
+standard table's columns (the same helper as `create_ms`, `_stamp_standard`); explicit `measures=` / `units=` still override, `standard=false` turns it off,
+and a variable-reference column (`SPECTRAL_WINDOW.CHAN_FREQ`) gets its `MEASINFO` only when `MEAS_FREQ_REF` is in the table (otherwise just the unit).
+The keywords equal `create_ms`'s (test in `keywords_tests.jl`).
