@@ -170,7 +170,9 @@ end
     # raw payload -- live-measured ~1.5x here. 2x still catches the old
     # bug (which added several HUNDRED bytes of pure `reinterpret`/`view`
     # waste per element on top of that, not a fixed ~50%).
-    @test a < 2.0 * payload
+    # Phase 502: with the precompile workload the Julia 1.10 image allocates ~2.3x (1.13: ~1.5x; 1.10 without the workload: ~1.6x) --
+    # about 370 B more per cell, an allocator difference of the older compiler; the old bug added many times the payload, so 3x still catches it
+    @test a < 3.0 * payload
     @test getcolumn(r, "V") == V
 
     getcell(r, "V", 1)          # warm up

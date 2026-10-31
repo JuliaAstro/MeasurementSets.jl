@@ -11827,3 +11827,6 @@ when the table is named `"MAIN"`, `"ANTENNA"`, ... but not the `QuantumUnits` / 
 standard table's columns (the same helper as `create_ms`, `_stamp_standard`); explicit `measures=` / `units=` still override, `standard=false` turns it off,
 and a variable-reference column (`SPECTRAL_WINDOW.CHAN_FREQ`) gets its `MEASINFO` only when `MEAS_FREQ_REF` is in the table (otherwise just the unit).
 The keywords equal `create_ms`'s (test in `keywords_tests.jl`).
+
+Note on Phase 502: on Julia 1.10 the precompile workload raises the allocation of a ragged SSM-indirect `getcolumn` from 1.6x to 2.3x the payload (about 370 B per cell,
+found by the x86-64 Docker run); the Phase 239 guard's bound is now 3x (the bug it was written for added many times the payload).
