@@ -11837,3 +11837,7 @@ Every table of a `create_ms` MS rewritten with `write_table` under its standard 
 gives a `validate`-clean MeasurementSet whose column keywords (`QuantumUnits` / `MEASINFO` / `CATEGORY`) equal `create_ms`'s on every column of every
 table, and Casacore.jl reads it. Permanent test in `keywords_tests.jl`. (The CASA `ms.open` check of the same MS could not be run this session: the
 CASA disk image was not mounted and attaching it asks to accept a license agreement.) No code change.
+
+CI follow-up to Phase 502 (Julia 1.10 job of PR #143): the Phase 413 `readtable` allocation bound is 100 KB (92.3 KB with the workload on 1.10), and the
+fresh-process first-call latency assertion is skipped when Julia runs with `--code-coverage` (the 1.10 job does): a package image's compiled code is not used
+then, so the first `taql` took 20 s there.
