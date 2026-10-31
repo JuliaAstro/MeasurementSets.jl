@@ -213,3 +213,56 @@ end
         @test nbad == 0
     end
 end
+
+# Phase 503: a `SubTable` value is a table keyword (TpTable), so `write_table(...; keywords=...)` and `setkeyword!` can link subtables
+# that already exist -- a MAIN written into a directory of subtables becomes a Measurement Set (reported by a user working with LOFAR data).
+@testset "SubTable keyword links existing subtables (Phase 503)" begin
+    d = joinpath(mktempdir(), "new.ms"); mkpath(d)
+    for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW")
+        cp(joinpath(SAMPLE_MS, nm), joinpath(d, nm))
+    end
+    n = 5
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => collect(1.0:n), "ANTENNA1" => Int32.(0:n-1)]; nrow=n, type="Measurement Set",
+        keywords=Dict("MS_VERSION" => 2.0f0, "ANTENNA" => MSv2.SubTable("././ANTENNA"), "FIELD" => MSv2.SubTable("././FIELD")))
+    ms = MeasurementSet(d)
+    @test sort(first.(MSv2.subtables(readtable(d)))) == ["ANTENNA", "FIELD"]
+    @test nrow(subtable(ms, "ANTENNA")) == nrow(readtable(joinpath(SAMPLE_MS, "ANTENNA"))) && nrow(ms) == n
+    MSv2.setkeyword!(d, "SPECTRAL_WINDOW", MSv2.SubTable("././SPECTRAL_WINDOW"))
+    @test nrow(subtable(MeasurementSet(d), "SPECTRAL_WINDOW")) == nrow(readtable(joinpath(SAMPLE_MS, "SPECTRAL_WINDOW")))
+    @test_throws ArgumentError MSv2.setkeyword!(d, "SPECTRAL_WINDOW", 3.0)      # a table keyword cannot become a number
+    if _HAVE_CASACORE
+        @test size(CCT.Table(d)[:TIME]) == (n,) && size(CCT.Table(joinpath(d, "ANTENNA"))[:NAME]) == (26,)
+    end
+end
+
+# Phase 504: `write_table` of a standard MS table gives its columns the standard `QuantumUnits` / `MEASINFO` / `CATEGORY` keywords
+# (casacore refuses an MS whose columns lack them -- Phase 271); only `create_ms` / `copyms` used to.  Compared with `create_ms`.
+@testset "write_table stamps the standard MS column keywords (Phase 504)" begin
+    ref = joinpath(mktempdir(), "ref.ms"); create_ms(ref; nrow=3, nant=2)
+    kws(path, cols) = (t = readtable(path); Dict(c => repr(columndesc(t, c).keywords) for c in cols))
+    d = joinpath(mktempdir(), "ant")
+    write_table(d, "ANTENNA", Pair{String,Any}["NAME" => ["A", "B"], "POSITION" => [[1.0, 2, 3], [4.0, 5, 6]], "DISH_DIAMETER" => [25.0, 25.0],
+                                              "OFFSET" => [[0.0, 0, 0], [0.0, 0, 0]]]; nrow=2)
+    want = kws(joinpath(ref, "ANTENNA"), ["POSITION", "OFFSET", "DISH_DIAMETER"])
+    @test kws(d, ["POSITION", "OFFSET", "DISH_DIAMETER"]) == want
+    @test occursin("MEASINFO", want["POSITION"]) && occursin("QuantumUnits", want["DISH_DIAMETER"])
+    # a MAIN: TIME / UVW measures, FLAG_CATEGORY's CATEGORY
+    m = joinpath(mktempdir(), "main")
+    write_table(m, "MAIN", Pair{String,Any}["TIME" => [1.0, 2], "UVW" => [[1.0, 2, 3], [4.0, 5, 6]], "FLAG_CATEGORY" => [zeros(Bool, 2, 2, 1), zeros(Bool, 2, 2, 1)]]; nrow=2)
+    @test kws(m, ["TIME", "UVW"]) == kws(joinpath(ref), ["TIME", "UVW"])
+    @test haskey(columndesc(readtable(m), "FLAG_CATEGORY").keywords, "CATEGORY")
+    # a variable-reference column needs its reference column in the table; without it only the unit is stamped
+    s = joinpath(mktempdir(), "spw")
+    write_table(s, "SPECTRAL_WINDOW", Pair{String,Any}["CHAN_FREQ" => [[1e9, 2e9]]]; nrow=1)
+    @test columndesc(readtable(s), "CHAN_FREQ").keywords["QuantumUnits"] == ["Hz"] && !haskey(columndesc(readtable(s), "CHAN_FREQ").keywords, "MEASINFO")
+    s2 = joinpath(mktempdir(), "spw2")
+    write_table(s2, "SPECTRAL_WINDOW", Pair{String,Any}["CHAN_FREQ" => [[1e9, 2e9]], "MEAS_FREQ_REF" => Int32[5]]; nrow=1)
+    @test haskey(columndesc(readtable(s2), "CHAN_FREQ").keywords, "MEASINFO")
+    # opt out, and an unrelated table name is untouched
+    o = joinpath(mktempdir(), "o")
+    write_table(o, "ANTENNA", Pair{String,Any}["POSITION" => [[1.0, 2, 3]]]; nrow=1, standard=false)
+    @test isempty(columndesc(readtable(o), "POSITION").keywords)
+    u = joinpath(mktempdir(), "u")
+    write_table(u, "MYTABLE", Pair{String,Any}["POSITION" => [[1.0, 2, 3]]]; nrow=1)
+    @test isempty(columndesc(readtable(u), "POSITION").keywords)
+end

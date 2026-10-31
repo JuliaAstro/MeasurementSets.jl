@@ -2206,3 +2206,76 @@ end
         end
     end
 end
+
+# Phase 496: 28 sub-query variants vs real TaQL (IN / NOT IN / EXISTS / NOT EXISTS with DISTINCT, ORDER BY, LIMIT, aggregates,
+# expressions, a second table; scalar sub-queries; FROM (SELECT ..) nested, aliased, with `*`, ORDER BY, LIMIT) agree except that
+# `x IN [SELECT ..]` (brackets) was not recognised.  (Real TaQL cannot select FROM a grouped sub-query; ours can.)
+@testset "IN [SELECT ..] sub-query (Phase 496)" begin
+    d1 = joinpath(mktempdir(), "l"); d2 = joinpath(mktempdir(), "r")
+    write_table(d1, "L", Pair{String,Any}["K" => Int32[1, 2, 3, 2, 9]]; nrow=5)
+    write_table(d2, "R", Pair{String,Any}["K" => Int32[1, 2, 3, 4], "Z" => [10.0, 20.0, 30.0, 40.0]]; nrow=4)
+    ks(cmd) = (r = taql(d1, cmd, d2); collect(column(r, "K")[:]))
+    @test ks("SELECT K FROM \$1 WHERE K IN [SELECT K FROM \$2]") == [1, 2, 3, 2]
+    @test ks("SELECT K FROM \$1 WHERE K NOT IN [SELECT K FROM \$2]") == [9]
+    @test ks("SELECT K FROM \$1 WHERE K IN [SELECT K FROM \$2 WHERE Z > 15]") == [2, 3, 2]
+    @test ks("SELECT K FROM \$1 WHERE K IN (SELECT K FROM \$2 WHERE Z > 15)") == [2, 3, 2]
+    @test ks("SELECT K FROM \$1 WHERE K IN [1, 2] AND K IN [SELECT K FROM \$2 WHERE Z > 15]") == [2, 2]
+end
+
+# Phase 501: 41 GROUP BY syntax variants vs real TaQL (several keys, expression keys, WHERE / HAVING / ORDER BY / LIMIT / OFFSET, case,
+# aggregate expressions, aggregates without GROUP BY).  32 persist the same columns; the others are real-TaQL quirks (GIVING of a
+# grouped result keeps the unsorted / unfiltered aggregate; `AS T` is the boolean literal; `HAVING NOT agg > x`, `GROUP BY 1`,
+# `GROUP BY G, G` are errors there) or leniency here.
+@testset "GROUP BY syntax variants vs real TaQL (Phase 501)" begin
+    d = joinpath(mktempdir(), "base")
+    write_table(d, "T", Pair{String,Any}["A" => Int32[5, 3, 9, 1, 7, 3], "B" => [1.5, 2.5, 0.5, 4.5, 3.5, 2.0], "S" => ["ab", "cd", "", "x y", "Q", "zz"],
+                                         "G" => Bool[1, 0, 1, 0, 1, 0], "V" => [Float32[i, i + 1] for i in 1:6]]; nrow=6)
+    rd(p) = (t = readtable(p); [(c, collect(column(t, c)[:])) for c in MSv2.columnnames(t)])
+    forms = String[
+        "SELECT A, gcount() AS N FROM \$1 GROUP BY A",
+        "SELECT G, A, gcount() AS N FROM \$1 GROUP BY G, A",
+        "SELECT G, A, gcount() AS N FROM \$1 GROUP BY A, G",
+        "SELECT S, gsum(B) AS TT FROM \$1 GROUP BY S",
+        "SELECT G, gsum(B) AS TT FROM \$1 GROUP BY G HAVING gsum(B) > 6",
+        "SELECT G, gsum(B) AS TT FROM \$1 GROUP BY G HAVING gcount() = 3 AND gsum(B) > 1",
+        "SELECT G, gsum(B) AS TT FROM \$1 GROUP BY G ORDER BY TT",
+        "SELECT G, gsum(B) AS TT FROM \$1 WHERE A > 2 GROUP BY G",
+        "SELECT G, gsum(B) AS TT FROM \$1 WHERE A > 2 GROUP BY G HAVING gcount() > 1",
+        "select g, gsum(b) as t from \$1 group by g",
+        "SELECT G, GSUM(B) AS TT FROM \$1 GROUP BY G",
+        "SELECT A % 2 AS P, gcount() AS N FROM \$1 GROUP BY A % 2",
+        "SELECT A % 2 AS P, gcount() AS N FROM \$1 GROUP BY P",
+        "SELECT G, gsum(B) AS TT, gmean(B) AS M, gmax(A) AS X FROM \$1 GROUP BY G",
+        "SELECT G, gsum(B) + 1 AS TT FROM \$1 GROUP BY G",
+        "SELECT G, gsum(B) / gcount() AS TT FROM \$1 GROUP BY G",
+        "SELECT G, iif(gsum(B) > 6, 1, 0) AS TT FROM \$1 GROUP BY G",
+        "SELECT gsum(B) AS TT FROM \$1 GROUP BY G",
+        "SELECT gsum(B) AS TT FROM \$1",
+        "SELECT gsum(B) AS TT, gcount() AS N FROM \$1 HAVING gcount() > 3",
+        "SELECT gsum(B) AS TT FROM \$1 HAVING gcount() > 30",
+        "SELECT DISTINCT G FROM \$1 GROUP BY G",
+        "SELECT G, gsum(B) AS TT FROM \$1 GROUP BY G, G",
+        "SELECT G, gsum(B) AS TT FROM \$1 GROUP BY 1",
+        "SELECT G, gsum(B) FROM \$1 GROUP BY G",
+        "SELECT G, gcountall() AS N FROM \$1 GROUP BY G",
+        "SELECT G, gcount(A) AS N FROM \$1 GROUP BY G",
+        "SELECT G, gsum(B) AS TT FROM \$1 GROUP BY G LIMIT 1 OFFSET 1",
+        "SELECT B > 2 AS H, gcount() AS N FROM \$1 GROUP BY B > 2",
+        "SELECT G, gsum(B) AS TT FROM \$1 WHERE G GROUP BY G",
+        "SELECT G, gsum(B) AS TT FROM \$1 GROUP BY G HAVING gmax(A) BETWEEN 5 AND 9",
+        "SELECT G, gsum(B) AS TT FROM \$1 GROUP BY G HAVING gmax(A) IN [9,7]",
+    ]
+    @test length(forms) == 32
+    nerr = 0
+    for f in forms
+        pm = joinpath(mktempdir(), "m")
+        mine = try taql(d, f * " INTO '$pm'"); rd(pm) catch; :err end
+        nerr += mine === :err
+        if _HAVE_TAQL
+            pr = joinpath(mktempdir(), "r")
+            real = try _taqlcmd(f * " GIVING '$pr'", CCT.Table(d)); GC.gc(); rd(pr) catch; :err end
+            @test real == mine
+        end
+    end
+    @test nerr <= 6    # forms real TaQL rejects too (lower-case column names, unnamed aggregate column, ...)
+end

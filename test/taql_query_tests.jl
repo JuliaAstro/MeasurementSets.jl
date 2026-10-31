@@ -2914,8 +2914,8 @@ end
     @test query(t, "CHAN_FREQ > 200MHz AND CHAN_FREQ < 2GHz").rows == [1, 2, 3]
     @test query(t, "CHAN_FREQ BETWEEN 1.35GHz AND 1.6GHz").rows == [2, 3]
 
-    # a unitless column vs a dimensional unit literal -> DimensionError
-    @test_throws _U69.DimensionError query(t, "W > 1Hz")
+    # a unitless column vs a unit literal: the literal contributes its raw value, like real TaQL (Phase 497; was a DimensionError)
+    @test query(t, "W > 1Hz").rows == query(t, "W > 1").rows
 
     # computed select: dimensionless result is stripped to a plain number
     gt = query(t, "CHAN_FREQ > 0"; select = ["fghz" => "CHAN_FREQ / 1GHz"])
@@ -4753,8 +4753,9 @@ if _HAVE_TAQL && _HAVE_UNITFUL
     @test ours("TM > 0.5d") == ours("TM > 43200")
     # time -> angle coercion: 24 h = 2 pi rad
     @test ours("A > 12h") == ours("A > $(Float64(pi))")
-    # a time quantity against a unitless column is a unit mismatch, not an RA reading
-    @test_throws Exception query(readtable(let p = joinpath(mktempdir(), "u"); write_table(p, "U", Pair{String,Any}["X" => [1.0, 2.0]]; nrow=2); p end), "X > 1h")
+    # a time quantity against a unitless column contributes its raw value (Phase 497), it is not an RA reading
+    ut = readtable(let p = joinpath(mktempdir(), "u"); write_table(p, "U", Pair{String,Any}["X" => [1.0, 2.0]]; nrow=2); p end)
+    @test collect(column(query(ut, "X > 1h"), "X")[:]) == [2.0]
 end
 end
 
@@ -5327,6 +5328,9 @@ end
     t = readtable(dir)
     @test collect(column(query(t, "L > 1.5km"), "K")[:]) == 7:10 && collect(column(query(t, "L BETWEEN 30000mm AND 1km"), "K")[:]) == 1:4
     @test collect(column(query(t, "A < 30deg"), "K")[:]) == 1:2 && collect(column(query(t, "KM * 3 > 2000m"), "K")[:]) == 3:10
+    # Phase 502: Unitful turns `rad - arcmin` (both dimensionless) into a plain number; the result must keep the left unit
+    @test collect(column(query(t, "(A - 0.37arcmin) > 2.5deg"), "K")[:]) == 1:10 && collect(column(query(t, "(A + 100.0deg) > 5.0arcsec"), "K")[:]) == 1:10
+    @test collect(column(query(t, "(A + 1deg) < 150deg"), "K")[:]) == 1:10 && collect(column(query(t, "(A + 1deg) > 100deg"), "K")[:]) == 9:10
     if _HAVE_TAQL
         rng = MersenneTwister(354)
         ln = ["m", "km", "cm", "mm"]; an = ["rad", "deg", "arcmin", "arcsec"]
@@ -6013,4 +6017,112 @@ end
     @test gv("gsum(V * 2)") == Dict(true => 42.0, false => 54.0) && gv("gmean(V + A)")[true] == 10.5
     @test gv("gsums(V)") == Dict(true => [9.0, 12.0], false => [12.0, 15.0])                  # per-element stays
     @test gv("gsum(A)") == Dict(true => 21, false => 7) && gv("gfirst(V)")[true] == [1.0, 2.0]
+end
+
+# Phase 497 (38 + 15 date / time / unit literal forms vs real TaQL): unquoted DATE literals are numbers (MJD days) --
+# `2020-02-12`, `2020/02/12`, `12Feb2020`, `12-Feb-2020`, `2020-02-12T10:00:00`, `2020/02/12/10:00:00` (`2020-02-12` was the
+# subtraction 2006); a quantity literal next to an operand WITHOUT a unit contributes its raw value (`X < 3deg` is `X < 3`);
+# `-12h` and `12h30m15.5s` are literals.
+@testset "date literals, raw unit literals (Phase 497)" begin
+    d = joinpath(mktempdir(), "t")
+    write_table(d, "T", Pair{String,Any}["D" => [58889.0, 58890.5, 58891.0, 58891.25, 58891.75, 58893.0], "X" => [0.5, 1.5, 2.5, 3.5, 4.5, 5.5],
+                                        "K" => Int32.(1:6)]; nrow=6)
+    t = readtable(d)
+    ks(f) = Int32.(sort(column(query(t, f), "K")[:]))
+    @test ks("D > 2020-02-12") == [4, 5, 6] && ks("D > 2020/02/12") == [4, 5, 6] && ks("D > 12Feb2020") == [4, 5, 6] && ks("D > 12-Feb-2020") == [4, 5, 6]
+    @test ks("D > 2020-02-12T10:00:00") == [5, 6] && ks("D > 2020/02/12/10:00:00") == [5, 6] && ks("D > 2020-02-12/10:00") == [5, 6]
+    @test ks("D > 2020-02-12 + 1") == [6] && ks("D < 2020-02-12 - 1") == [1]
+    @test MSv2._date_literal_at(collect("2020-02-12"), 1, 10) == ("2020-02-12", 58891.0, 11)
+    @test MSv2._date_literal_at(collect("2020-02-12.5"), 1, 12) === nothing && MSv2._date_literal_at(collect("12Febx"), 1, 6) === nothing
+    @test ks("K-1-1 == 1") == [3]                                           # arithmetic, not a date
+    if Base.get_extension(MSv2, :UnitfulExt) !== nothing
+        @test ks("X < 3deg") == [1, 2, 3] && ks("X < 3m") == [1, 2, 3] && ks("X < 1rad") == [1] && ks("D < 70000s") == 1:6
+        @test ks("X*1000 < 2000m") == [1, 2] && ks("D > -12h") == 1:6 && ks("D > 12h30m15.5s") == 1:6 && ks("D > -30deg") == 1:6
+    end
+end
+
+# Phase 498: 66 array-subscript syntax variants (single / pair / empty / `:` / ranges with step / negative / expression
+# subscripts / reductions over slices / masked selections) select the same rows as real TaQL.  (Real TaQL rejects `V[1]` on a
+# 2-D cell, a float subscript and `ndim(V[1,:])`; ours is lenient there.)  Needs the real-TaQL tooling, so it only runs there.
+@testset "array subscript syntax vs real TaQL (Phase 498)" begin
+    if _HAVE_TAQL
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", Pair{String,Any}["K" => Int32.(1:6), "A" => Int32[5, 3, 9, 1, 7, 3], "V" => [Float64[i i+1; i+2 i+3] for i in 1:6]]; nrow=6)
+        t = readtable(d)
+        forms = [
+        "V[1] > 2",
+        "V[2] > 2",
+        "V[1,1] > 2",
+        "V[1,2] > 2",
+        "V[2,2] > 2",
+        "V[1,] > 2",
+        "V[,1] > 2",
+        "V[,] > 0",
+        "V[ 1 , 1 ] > 2",
+        "V [1,1] > 2",
+        "V[1][1] > 2",
+        "V[1:2] > 0",
+        "V[1:2,1] > 0",
+        "V[:,1] > 0",
+        "V[1,:] > 0",
+        "V[:] > 0",
+        "V[::2] > 0",
+        "V[1::2] > 0",
+        "V[1:3:2] > 0",
+        "V[1:2:1,1:2:1] > 0",
+        "V[1:] > 0",
+        "V[:2] > 0",
+        "V[2:] > 0",
+        "V[-1] > 2",
+        "V[-1,-1] > 2",
+        "V[-2:-1,1] > 0",
+        "V[0] > 0",
+        "V[0,1] > 0",
+        "V[3,1] > 0",
+        "V[1,3] > 0",
+        "V[1,1,1] > 0",
+        "sum(V[,1]) > 3",
+        "sum(V[1,]) > 3",
+        "sum(V[1:2,1:2]) > 10",
+        "mean(V[,1]) > 2",
+        "max(V[2,]) > 4",
+        "nelements(V[1,]) == 2",
+        "ndim(V[1,1]) == 0",
+        "ndim(V[1:2,1]) == 2",
+        "ndim(V) == 2",
+        "shape(V[1,]) == [2]",
+        "shape(V[1:2,1]) == [2,1]",
+        "V[K] > 0",
+        "V[K,1] > 0",
+        "V[A,1] > 0",
+        "V[K%2+1,1] > 2",
+        "V[1+1,1+1] > 3",
+        "V[rownumber()%2+1,1] > 0",
+        "V[1,1] == V[1,1]",
+        "V[1,1] + V[2,2] > 6",
+        "V[1,1] * 2 > 4",
+        "-V[1,1] < -2",
+        "abs(V[1,1] - 3) < 1",
+        "V[1,1] IN [1,2,3]",
+        "V[1,1] BETWEEN 1 AND 3",
+        "V[1:2,1] == V[1:2,2]",
+        "any(V > 3)",
+        "all(V > 0)",
+        "any(V[1,] > 3)",
+        "ntrue(V > 2) == 2",
+        "sums(V,1)[1] > 2",
+        "sums(V,2)[2] > 6",
+        "mins(V,1)[1] > 0",
+        "means(V)[1] > 0",
+        "V[V > 2][1] > 0",
+        "sum(V[V > 2]) > 0"]
+        for f in forms
+            real = try o = joinpath(mktempdir(), "o"); Int32.(sort(collect(_taqlcmd("SELECT FROM \$1 WHERE $f GIVING '$o'", CCT.Table(d))[:K][:]))) catch; nothing end
+            mine = try Int32.(sort(column(query(t, f), "K")[:])) catch; nothing end
+            mine isa Vector && isempty(mine) && (mine = nothing)       # real TaQL throws on an empty selection
+            @test real == mine
+        end
+    else
+        @test true
+    end
 end

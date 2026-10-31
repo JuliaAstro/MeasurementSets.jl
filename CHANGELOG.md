@@ -11747,3 +11747,86 @@ all of them, `gvariance` the variance over all of them); ours returned an elemen
 `gmedian` / `gvariance` / ..., and raised errors for `grms`, `gproduct`, `gany(V > 5)`, `gntrue`, `gnfalse`. These aggregates now form a pooled
 mode (`gcount`, `gfirst`, `glast`, `gaggr`, `ghist` and the per-element `gs*` forms are unchanged). Not matched (real TaQL quirks):
 `HAVING` that selects nothing, `CUBE` (real rejects it; ours works), `gfirst` / `glast` (real rejects). Test in `taql_query_tests.jl`.
+
+### Phase 496 — sub-query variants
+
+28 sub-query variants against real TaQL (`IN` / `NOT IN` / `EXISTS` / `NOT EXISTS` with `DISTINCT`, `ORDER BY`, `LIMIT`, aggregates, expressions and a second
+table; scalar sub-queries; nested, aliased and `*` forms of `FROM (SELECT ..)`) agree except `x IN [SELECT ..]` (brackets), which is now
+recognised like the parenthesised form. Real TaQL cannot select FROM a grouped sub-query, ours can. Test in `taql_command_tests.jl`.
+
+### Phase 497 — date literals; quantity literals next to a unitless operand
+
+38 date / time-literal forms and 15 unit-literal forms against real TaQL. (1) Unquoted DATE literals are numbers (MJD days) in real TaQL:
+`2020-02-12`, `2020/02/12`, `12Feb2020`, `12-Feb-2020`, `2020-02-12T10:00:00`, `2020/02/12/10:00:00`; ours read `2020-02-12` as the subtraction 2006
+and rejected the others. (2) A quantity literal next to an operand WITHOUT a unit contributes its raw value (`X < 3deg` is `X < 3`, `D < 70000s`
+is `D < 70000`; casacore leaves a unitless operand as it is) where ours raised a DimensionError — the Phase 69 assertion that a unitless column against a
+dimensional literal is an error was wrong and is replaced (a unit-bearing column against a bare number is still an error, by decision). (3) `-12h` and the
+fractional seconds of `12h30m15.5s` are literals. Real TaQL's `D BETWEEN <date> AND <date>` is an error there and works here. Tests in `taql_query_tests.jl`.
+
+### Phase 498 — array subscript syntax vs real TaQL (no bug found)
+
+71 array-subscript variants (single, pair, empty, `:`, ranges with step, negative and expression subscripts, spaces, reductions over slices,
+`sums` / `mins` / `means`, masked selections) against real TaQL: 66 select exactly the same rows and are now a permanent cross-check
+(`taql_query_tests.jl`, runs where the real-TaQL tooling is present). The other five are leniency on our side (real TaQL rejects `V[1]` on a 2-D cell,
+a float subscript, `ndim(V[1,:])`, and has no value for `mean(V[V > 2])`).
+
+### Phase 499 — the `taql` docstring and the engine's header comments describe the current surface
+
+The `taql` docstring still said `GROUP BY` / aggregates in a `SELECT` are not supported and omitted `JOIN`, sub-queries, `ALTER` /
+`CREATE` / `DROP`, extra tables (`$2`) and the syntax points checked against real TaQL in Phases 488-498; the header comments of
+`src/taql/ast.jl` listed as unsupported what Phases 60-256 added (masked arrays, `mscal.*`, `running*`, reshaping, `rowid()`,
+`substr`, aggregates). Rewritten; no behaviour change.
+
+### Phase 500 — Julia vs C++ comparison re-run on the real MS (no outlier)
+
+Milestone re-run of the Phase 400 / 450 comparison on the 9,817,600-row ALMA MAIN against real casacore through Casacore.jl:
+whole columns (`TIME` 0.28, `ANTENNA1` 0.66, `FLAG_ROW` 0.68, `UVW` 0.91 of the C++ time), row ranges (`DATA` 0.30, `FLAG` 0.21),
+20,000 random cells (`TIME` 0.02, `ANTENNA1` 0.07, `FLAG` 0.06, `DATA` 0.004), subtables (`CHAN_FREQ` 0.65, `POINTING.DIRECTION` 0.53,
+`POINTING.NAME` 0.16, `POINTING.TIME` 0.05). Geomean 0.17 over 15 lines, every line faster than C++; nothing to fix. (Table open is
+not comparable: Casacore.jl reuses a cached handle.) Casacore.jl indexes array columns by the trailing axis (`col[:, :, a:b]`), so a
+plain `col[:]` on a 2-D / 3-D column is a DimensionMismatch there; the scratch script handles that. No code change.
+
+### Phase 501 — GROUP BY syntax variants vs real TaQL (no bug found)
+
+41 `GROUP BY` variants (several and expression keys, `WHERE` / `HAVING` / `ORDER BY` / `LIMIT` / `OFFSET`, keyword case, aggregate
+expressions, aggregates without `GROUP BY`, `iif` over aggregates) against real TaQL, comparing the persisted columns. 32 agree
+exactly (a few because both engines reject the form, e.g. lower-case column names) and are now a permanent cross-check
+(`taql_command_tests.jl`). The other nine are real-TaQL quirks, not divergences to copy: `GIVING` of a grouped result keeps the
+unsorted / unfiltered aggregate (`ORDER BY`, `LIMIT`, `HAVING G`), `HAVING NOT agg > x`, `GROUP BY 1` and `GROUP BY G, G` are errors there,
+`gfirst` / `glast` of an integer column is rejected there, and `AS T` fails because `T` is the boolean literal. A grouped select's
+returned (non-persisted) real table carries no columns, so `GIVING` is the only oracle.
+
+### Phase 502 — precompile workload; typed GROUP BY keys; unit arithmetic of angles
+
+(1) The first `taql(..., "... GROUP BY ... INTO ...")` of a session compiled for 19 s (7.5 s for a plain `SELECT ... INTO`, 2.6 s for the first
+`query`, 1.5 s for `copyms`): the package had no precompile workload. `src/precompile.jl` (new dependency `PrecompileTools`) writes a small
+table in a temporary directory and runs write / read / query / groupby / join / `taql` SELECT, UPDATE, INSERT, DELETE / edit / copytable /
+`create_ms` / `validate` / `copyms` while the package is precompiled; the lock registry and the pattern cache it fills are emptied again so no
+file descriptor or temporary path ends up in the image. First calls drop to 0.01–0.3 s. A fresh-process test checks this (`robustness_tests.jl`).
+(2) `GROUP BY` on the 9.8M-row MAIN used a `Dict{Any,..}` with a boxed tuple per row (`_group_rows`); the key columns now go through a function
+barrier and the dictionary is keyed by a concrete tuple type: one `Int` key 0.59 s → 0.06 s, two keys 0.88 s → 0.17 s (real TaQL: 0.39 / 0.68 s).
+All six `GROUP BY` queries on the real MS give the same columns as real TaQL.
+(3) Two assertions left over from Phase 497 were stale (`X > 1h` on a unitless column now compares with 1, as in real TaQL). A real bug found by
+the seeded Phase 354 fuzz: Unitful turns `rad - arcmin` (both dimensionless with `UnitfulAngles`) into a plain number, after which the Phase 497
+rule stripped the other literal (`(A - 0.37arcmin) > 2.5deg` was compared as `0.2 > 2.5`); `+` / `-` of two dimensionless quantities now keeps the
+left unit (`UnitfulExt`).
+
+### Phase 503 — `SubTable` keyword values: link pre-existing subtables
+
+Reported by a user working with LOFAR data: `write_table` of a new MAIN into a directory that already holds the subtables did not produce a readable
+Measurement Set, because a keyword value could not be a table reference (`copyms` and `create_ms` build the links themselves). `_kw_value` now accepts
+`MeasurementSets.SubTable("././ANTENNA")` as a `TpTable` keyword, so `write_table(...; keywords=Dict("ANTENNA" => SubTable(...)))` links the subtable
+and `setkeyword!` can add or replace such a link (a table keyword still cannot become a number). One-line fix suggested by the user; the table
+is readable by `MeasurementSet` and by Casacore.jl. Test in `keywords_tests.jl`.
+
+### Phase 504 — `write_table` stamps the standard MS column keywords
+
+Following the Phase 503 report (assembling a Measurement Set from pieces): `write_table` already took column types and comments from the standard schema
+when the table is named `"MAIN"`, `"ANTENNA"`, ... but not the `QuantumUnits` / `MEASINFO` / `CATEGORY` keywords that casacore requires of an MS
+(Phase 271: it refuses a table without them), so only `create_ms` / `copyms` produced a table casacore accepts. `write_table` now stamps them on a
+standard table's columns (the same helper as `create_ms`, `_stamp_standard`); explicit `measures=` / `units=` still override, `standard=false` turns it off,
+and a variable-reference column (`SPECTRAL_WINDOW.CHAN_FREQ`) gets its `MEASINFO` only when `MEAS_FREQ_REF` is in the table (otherwise just the unit).
+The keywords equal `create_ms`'s (test in `keywords_tests.jl`).
+
+Note on Phase 502: on Julia 1.10 the precompile workload raises the allocation of a ragged SSM-indirect `getcolumn` from 1.6x to 2.3x the payload (about 370 B per cell,
+found by the x86-64 Docker run); the Phase 239 guard's bound is now 3x (the bug it was written for added many times the payload).

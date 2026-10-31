@@ -18,9 +18,8 @@
 # `ORDER BY`, all case-insensitive keyword forms). Supports quantity
 # literals + date/time/angle functions (Phase 69), computed output
 # columns (Phase 57), and -- with `import SOFA` -- `mscal.*` derived-MS
-# functions (Phase 77). Not supported: a read of `V[boolmask]` in a
-# WHERE/SELECT expression (it is valid only as an `update!` SET
-# target -- Phase 55).
+# functions (Phase 77). A read `V[boolmask]` is a masked array (Phase 60);
+# as an `update!` SET target it assigns where the mask is true (Phase 55).
 # (Array element/slice indexing -- `DATA[1,1]`, `UVW[3]`, `V[1:4,1]`,
 # 1-based, with negative-from-end and `end` -- landed in Phase 42/44;
 # `BETWEEN` / `NOT BETWEEN` in Phase 43; bitwise ops -- `^` is xor, use
@@ -53,9 +52,10 @@
 # literals, and date/time + angle functions (`datetime`, `mjd`, `date`,
 # `year`/`month`/`day`, `hms`/`dms`, `normangle`, `angdist` -- dates are
 # an MJD `Float64`).
-# Not supported: `mscal.*` / measures-frame functions,
-# sliding-window (`running*`/`boxed*`) ops, rand, array reshaping,
-# rowid(), substr, type conversions, UDFs, aggregates over row groups.
+# (Since then: `mscal.*` / `meas.*` functions, sliding-window `running*` /
+# `boxed*` ops, array reshaping, rowid(), substr, string/bool conversions,
+# group aggregates and unquoted date literals -- see CHANGELOG.md.)
+# Not supported: rand, UDFs, `regex`-style pattern objects in `IN` lists.
 
 import Statistics
 import Tables
@@ -400,12 +400,19 @@ function _tql_cmp(op, a, b)
     return _bcast(op, a, b)
 end
 
-_tqleval(e::TQLCmp, cols, i) = _tql_cmp(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
+# Phase 497 (live-checked vs real TaQL): a quantity LITERAL next to an operand without a unit contributes its raw value
+# (`X < 3deg` is `X < 3`, `D < 70000s` is `D < 70000`) -- casacore leaves the unitless operand as it is.
+_tql_isquantity(x) = false
+_tql_strip_unit(x) = x
+_litfix(el::TQLExpr, er::TQLExpr, lv, rv) =
+    el isa TQLQuantityLit && !_tql_isquantity(rv) ? (_tql_strip_unit(lv), rv) :
+    er isa TQLQuantityLit && !_tql_isquantity(lv) ? (lv, _tql_strip_unit(rv)) : (lv, rv)
+_tqleval(e::TQLCmp, cols, i) = (p = _litfix(e.lhs, e.rhs, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i)); _tql_cmp(e.op, p[1], p[2]))
 _tqleval(e::TQLAnd, cols, i) = _tql_and(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLOr, cols, i) = _tql_or(_tqleval(e.a, cols, i), _tqleval(e.b, cols, i))
 _tqleval(e::TQLNot, cols, i) = _bcast(!, _tqleval(e.a, cols, i))
 _tqleval(e::TQLIn, cols, i) = _tql_in(_tqleval(e.lhs, cols, i), _in_resolve(e.vals, x -> _tqleval(x, cols, i)))
-_tqleval(e::TQLArith, cols, i) = _bcast(e.op, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i))
+_tqleval(e::TQLArith, cols, i) = (p = _litfix(e.lhs, e.rhs, _tqleval(e.lhs, cols, i), _tqleval(e.rhs, cols, i)); _bcast(e.op, p[1], p[2]))
 _tqleval(e::TQLNeg, cols, i) = _bcast(-, _tqleval(e.a, cols, i))
 _tqleval(e::TQLBitNot, cols, i) = _bcast((~), _tqleval(e.a, cols, i))
 _tqleval(e::TQLMaskOf, cols, i) = (v = _tqleval(e.e, cols, i);
@@ -776,10 +783,14 @@ function _compile(e::TQLCol, cols)
 end
 function _compile(e::TQLCmp, cols)
     op = e.op; fl = _compile(e.lhs, cols); fr = _compile(e.rhs, cols)
+    (e.lhs isa TQLQuantityLit || e.rhs isa TQLQuantityLit) &&
+        return (el = e.lhs; er = e.rhs; i -> (p = _litfix(el, er, fl(i), fr(i)); _tql_cmp(op, p[1], p[2])))
     return i -> _tql_cmp(op, fl(i), fr(i))
 end
 function _compile(e::TQLArith, cols)
     op = e.op; fl = _compile(e.lhs, cols); fr = _compile(e.rhs, cols)
+    (e.lhs isa TQLQuantityLit || e.rhs isa TQLQuantityLit) &&
+        return (el = e.lhs; er = e.rhs; i -> (p = _litfix(el, er, fl(i), fr(i)); _bcast(op, p[1], p[2])))
     return i -> _bcast(op, fl(i), fr(i))
 end
 function _compile(e::TQLAnd, cols)

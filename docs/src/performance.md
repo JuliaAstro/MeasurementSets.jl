@@ -119,3 +119,11 @@ columns (`TIME`, `ANTENNA1`, ... about 0.4 KB per row) are still held whole. Col
 100,000 rows or more and the table is written to plain files (not `storage=:multifile`). Julia's garbage collector
 lets the heap grow well past what is live; starting Julia with `--heap-size-hint=2G` keeps a long copy near the live
 size (1.5 GB in the same test) at some cost in time.
+
+## First call in a session
+
+The package image carries a precompile workload (a small table is written, queried, grouped, joined, updated, edited and
+copied while the package is precompiled), so the first `query`, `groupby` or `taql` call of a session takes a few
+hundredths of a second. Before the workload the first `taql("... GROUP BY ... INTO ...")` compiled for 19 s and the first
+`query` for 2.6 s. Loading the package takes about half a second; the extensions (`SOFA`, `Unitful`, ...) compile the first
+time a conversion or a unit literal is used.

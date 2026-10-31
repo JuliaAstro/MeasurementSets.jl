@@ -173,6 +173,17 @@ _first_q(x) = x isa Unitful.AbstractQuantity ? x : (x isa AbstractArray && !isem
 _is_time(q) = q !== nothing && Unitful.dimension(q) == Unitful.dimension(Unitful.u"s")
 _is_angle(q) = q !== nothing && Unitful.dimension(q) == Unitful.NoDims
 _time_to_angle(x) = Unitful.ustrip(Unitful.u"d", x) * (2pi) * Unitful.u"rad"
+MS._tql_isquantity(x::Unitful.AbstractQuantity) = true
+MS._tql_isquantity(x::AbstractArray{<:Unitful.AbstractQuantity}) = true
+MS._tql_strip_unit(x::Unitful.AbstractQuantity) = Unitful.ustrip(x)
+MS._tql_strip_unit(x::AbstractArray{<:Unitful.AbstractQuantity}) = Unitful.ustrip.(x)
+
+# Phase 502: `UnitfulAngles` angles are dimensionless, and Unitful turns the sum / difference of two dimensionless quantities
+# in different units (`rad - arcmin`) into a plain number -- after which `(A - 0.37arcmin) > 2.5deg` looked like a comparison of a
+# unitless value with a quantity (the Phase 497 rule strips the literal: 0.2 > 2.5).  Real TaQL keeps the left operand's unit.
+MS._bcast(f::Union{typeof(MS._tql_add),typeof(-)}, x::Unitful.Quantity{<:Any,Unitful.NoDims}, y::Unitful.Quantity{<:Any,Unitful.NoDims}) =
+    f(x, Unitful.uconvert(Unitful.unit(x), y))
+
 function MS._tql_dim_coerce(x, y)
     qx, qy = _first_q(x), _first_q(y)
     _is_time(qx) && _is_angle(qy) && return (_time_to_angle.(x), y)
