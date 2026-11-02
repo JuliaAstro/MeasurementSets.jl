@@ -11853,3 +11853,12 @@ follow-up. No code change.
 `docs/src/guide.md` gets a section for the workflow of Phases 503–505: write a MAIN under its standard name (standard column keywords stamped), link
 pre-existing subtables with `MeasurementSets.SubTable` keyword values, open the result as a `MeasurementSet`. The example is run by the docs-examples test; the
 docs build has no warnings or errors. No code change.
+
+### Phase 508 — `SubTable` links are stored and read the way casacore resolves them
+
+Probing the slips a user makes with the Phase 503 `SubTable` keyword: real Measurement Sets store a subtable inside the MS directory as `"././NAME"`, but
+`"./NAME"` is a *sibling* directory to casacore and a bare `"NAME"` is relative to the working directory, while our reader resolved every relative form inside the
+table directory — so a sloppy link read back fine here and not in casacore — and `SubTable("")` linked the table to itself. `write_table(...; keywords)` and
+`setkeyword!` now store a plain relative name that exists inside the directory as `"././NAME"` (a real sibling keeps `"./NAME"`, an absolute path is kept), warn when
+the target does not exist (it may be written afterwards) and reject an empty name; and the reader resolves a stored `"./NAME"` as a sibling like `RefTable` /
+`ConcatTable` paths already did (`"././NAME"`, absolute paths and names without `./` read as before). Tests in `keywords_tests.jl`; guide updated.

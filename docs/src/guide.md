@@ -183,7 +183,10 @@ new = MeasurementSet("/tmp/new.ms")
 nrow(subtable(new, "ANTENNA"))                                 # the linked subtable
 ```
 
-[`setkeyword!`](@ref) adds or replaces such a link on a table that is already written.
+[`setkeyword!`](@ref) adds or replaces such a link on a table that is already written. A link is stored the way
+casacore reads it: `"././NAME"` is a subtable inside the table's directory (what a Measurement Set stores), `"./NAME"` a sibling
+directory, and a name given without the `./` that exists inside the directory is stored as `"././NAME"`. A link to a table that does
+not exist yet is kept, with a warning.
 
 Any [Tables.jl](https://tables.juliadata.org) source can be written:
 `write_table(dir, "T", df)` takes a DataFrame, a `Vector{NamedTuple}` or a

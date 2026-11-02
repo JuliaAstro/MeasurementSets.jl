@@ -97,6 +97,29 @@ function _kw_value(v)
     return (_casatype_of(typeof(v)), v)
 end
 
+# Phase 508: a `SubTable` link as casacore resolves it.  Real Measurement Sets store a subtable inside the table's directory as
+# "././NAME"; "./NAME" means a SIBLING directory to casacore, and a bare "NAME" is relative to the working directory -- our reader was
+# lenient about both, so such a link read back fine here but not in casacore (and `SubTable("")` linked the table to itself).
+# A plain relative name that exists inside `dir` is stored as "././NAME"; a link whose target does not exist (yet) is kept and warned about.
+function _canon_subtable(v, dir::AbstractString)
+    v isa SubTable || return v
+    s = strip(v.name)
+    startswith(s, "Table:") && (s = strip(s[7:end]))
+    isempty(s) && throw(ArgumentError("SubTable: the subtable name is empty"))
+    isabspath(s) && return SubTable(String(s))
+    n = 0
+    while startswith(s[n+1:end], "./"); n += 2; end
+    rest = rstrip(s[n+1:end], '/')
+    isempty(rest) && throw(ArgumentError("SubTable(\"$(v.name)\"): no subtable name"))
+    istable(p) = isfile(joinpath(p, "table.dat"))
+    istable(joinpath(dir, rest)) && return SubTable("././" * rest)
+    if n == 2 && istable(joinpath(dirname(abspath(dir)), rest))     # a real sibling reference: keep it
+        return SubTable("./" * rest)
+    end
+    @warn "SubTable link \"$(v.name)\": there is no table at $(joinpath(dir, rest)) (yet); the link is stored as \"././$rest\""
+    return SubTable("././" * rest)
+end
+
 # infer a CellShape from a column of values
 function _infer_shape(vals)
     eltype(vals) <: AbstractArray || return ()
@@ -762,7 +785,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
 
     public = Record()
     for (k, v) in keywords
-        ct, val = _kw_value(v)
+        ct, val = _kw_value(_canon_subtable(v, dir))
         public = _set_kw(public, String(k), ct, val)
     end
 

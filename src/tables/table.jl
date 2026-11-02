@@ -372,7 +372,14 @@ end
 function _subtable_path(parent::String, stored::String)
     s = strip(stored)
     startswith(s, "Table:") && (s = strip(s[7:end]))
-    normpath(isabspath(s) ? _expandpath(String(s)) : joinpath(parent, s))
+    isabspath(s) && return normpath(_expandpath(String(s)))
+    # Phase 508: casacore strips every leading "./" pair (Path::stripDirectory): two characters = a sibling of the table's directory,
+    # four or more ("././NAME", what a Measurement Set stores) = inside it.  A name without "./" stays relative to the table's directory.
+    n = 0
+    while startswith(s[n+1:end], "./"); n += 2; end
+    n == 2 && return normpath(joinpath(dirname(rstrip(abspath(parent), '/')), s[3:end]))
+    n >= 4 && return normpath(joinpath(parent, s[n+1:end]))
+    normpath(joinpath(parent, s))
 end
 
 # casacore expands `~` and `$VAR` in a stored table name (Path::expandedName).

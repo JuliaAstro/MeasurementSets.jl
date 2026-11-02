@@ -82,7 +82,7 @@ function setkeyword!(path::AbstractString, name::AbstractString, value; column::
         i = findfirst(==(String(name)), r.names)
         val = value   # a one-element array replacing an existing scalar keyword is that scalar (real TaQL)
         i !== nothing && !startswith(_kw_class(r.types[i]), "array") && val isa AbstractVector && length(val) == 1 && (val = val[1])
-        t, v = _kw_value(_kw_normalize(val))
+        t, v = _kw_value(_kw_normalize(_canon_subtable(val, path)))
         i !== nothing && _kw_class(r.types[i]) != _kw_class(t) && throw(ArgumentError(
             "setkeyword!: keyword \"$name\" holds a $(_kw_class(r.types[i])) value; cannot replace it by a $(_kw_class(t)) one"))
         _set_kw(r, String(name), t, v)     # an existing keyword is replaced in place, a new one appended

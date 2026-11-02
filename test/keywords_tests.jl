@@ -297,3 +297,36 @@ end
     @test length(subs) >= 10
     _HAVE_CASACORE && @test size(CCT.Table(new)[:TIME]) == (6,)
 end
+
+# Phase 508: a `SubTable` link is stored the way casacore resolves it ("././NAME" = inside the table's directory).  "./NAME" is a SIBLING to casacore and
+# a bare "NAME" is relative to the working directory, but our reader accepted both, so a sloppy link read back here and not in casacore; `SubTable("")`
+# linked the table to itself.
+@testset "SubTable links are stored in casacore's form (Phase 508)" begin
+    stored(d, nm) = (kw = keywords(readtable(d)); kw.values[findfirst(==(nm), kw.names)].name)
+    function mk(link; into=true)
+        d = joinpath(mktempdir(), "n.ms"); mkpath(d)
+        into && cp(joinpath(SAMPLE_MS, "ANTENNA"), joinpath(d, "ANTENNA"))
+        write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0, 2.0]]; nrow=2, keywords=Dict("ANTENNA" => link))
+        return d
+    end
+    for link in ("././ANTENNA", "./ANTENNA", "ANTENNA", "Table: ./ANTENNA", "././ANTENNA/", "  ANTENNA ")
+        d = mk(MSv2.SubTable(link))
+        @test stored(d, "ANTENNA") == "././ANTENNA"
+        @test nrow(subtable(MeasurementSet(d), "ANTENNA")) == 26
+    end
+    # a genuine sibling directory keeps its "./" form; an absolute path is kept
+    base = mktempdir(); main = joinpath(base, "main"); mkpath(main); cp(joinpath(SAMPLE_MS, "ANTENNA"), joinpath(base, "ANTENNA"))
+    write_table(main, "MAIN", Pair{String,Any}["TIME" => [1.0]]; nrow=1, keywords=Dict("ANTENNA" => MSv2.SubTable("./ANTENNA")))
+    @test stored(main, "ANTENNA") == "./ANTENNA" && nrow(subtable(MeasurementSet(main), "ANTENNA")) == 26
+    ab = joinpath(base, "ANTENNA"); d = joinpath(mktempdir(), "m"); mkpath(d)
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0]]; nrow=1, keywords=Dict("ANTENNA" => MSv2.SubTable(ab)))
+    @test stored(d, "ANTENNA") == ab
+    # a link to nothing warns (the subtable may be written afterwards) and an empty one is an error
+    @test_logs (:warn, r"there is no table at") mk(MSv2.SubTable("NOPE"); into=false)
+    @test_throws ArgumentError mk(MSv2.SubTable(""))
+    @test_throws ArgumentError mk(MSv2.SubTable("./"))
+    # setkeyword! canonicalises too
+    d = mk(MSv2.SubTable("././ANTENNA")); cp(joinpath(SAMPLE_MS, "FIELD"), joinpath(d, "FIELD"))
+    MSv2.setkeyword!(d, "FIELD", MSv2.SubTable("FIELD"))
+    @test stored(d, "FIELD") == "././FIELD" && nrow(subtable(MeasurementSet(d), "FIELD")) == 3
+end
