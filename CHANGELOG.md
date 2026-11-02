@@ -11862,3 +11862,11 @@ table directory — so a sloppy link read back fine here and not in casacore —
 `setkeyword!` now store a plain relative name that exists inside the directory as `"././NAME"` (a real sibling keeps `"./NAME"`, an absolute path is kept), warn when
 the target does not exist (it may be written afterwards) and reject an empty name; and the reader resolves a stored `"./NAME"` as a sibling like `RefTable` /
 `ConcatTable` paths already did (`"././NAME"`, absolute paths and names without `./` read as before). Tests in `keywords_tests.jl`; guide updated.
+
+### Phase 509 — standard-table columns are checked against the standard type and shape
+
+Another slip with the piecewise workflow: `write_table` of `"MAIN"`, `"ANTENNA"`, ... converts a column to the standard type, but data of another type died in the
+writer with a bare `MethodError: no method matching Float64(::String)` (or a `TypeError` for `FLAG` given doubles), and cells of another shape were written as they were
+(a 2-vector `ANTENNA.POSITION`, which casacore reads as an invalid MS). `_fit_standard` converts exactly-convertible values (integers to doubles, `Float32` to
+`ComplexF32`, `1.0` to `true`) and raises an `ArgumentError` naming the column, the standard type and the row for anything else; a fixed standard cell shape is enforced
+unless `standard=false`. Other table names are untouched. Test in `keywords_tests.jl`; guide updated.

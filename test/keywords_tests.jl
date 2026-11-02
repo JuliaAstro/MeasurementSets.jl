@@ -330,3 +330,27 @@ end
     MSv2.setkeyword!(d, "FIELD", MSv2.SubTable("FIELD"))
     @test stored(d, "FIELD") == "././FIELD" && nrow(subtable(MeasurementSet(d), "FIELD")) == 3
 end
+
+# Phase 509: data given to a column of a standard table is checked against the standard type and (fixed) shape; it used to be converted by the writer or die there
+# with a bare MethodError / TypeError, and a 2-vector POSITION was written as it came (an invalid MS to casacore).
+@testset "standard-table columns are checked against the standard type and shape (Phase 509)" begin
+    w(name, cols; kw...) = (d = joinpath(mktempdir(), "t"); write_table(d, name, Pair{String,Any}[cols...]; nrow=length(last(first(cols))), kw...); readtable(d))
+    # exact conversions are made
+    t = w("MAIN", ["TIME" => [1, 2, 3], "ANTENNA1" => [0.0, 1.0, 2.0], "FLAG" => [[1.0 0.0], [0.0 1.0], [0.0 0.0]], "DATA" => [Float32[1 2; 3 4], Float32[1 2; 3 4], Float32[1 2; 3 4]]])
+    @test eltype(column(t, "TIME")) == Float64 && column(t, "TIME")[:] == [1.0, 2.0, 3.0]
+    @test eltype(column(t, "ANTENNA1")) == Int32 && column(t, "FLAG")[1] == [true false]
+    @test eltype(first(column(t, "DATA"))) == ComplexF32 && column(t, "DATA")[2] == ComplexF32[1 2; 3 4]
+    # anything else is an ArgumentError naming the column, the standard type and the row
+    for (nm, col, want) in (("MAIN", "TIME" => ["a", "b"], "TIME"), ("ANTENNA", "NAME" => [1, 2], "NAME"), ("MAIN", "ANTENNA1" => [0.5, 1.0], "ANTENNA1"),
+                            ("MAIN", "FLAG" => [[2.0 0.0]], "FLAG"), ("MAIN", "TIME" => [[1.0, 2.0]], "TIME"), ("ANTENNA", "POSITION" => [1.0, 2.0], "POSITION"))
+        e = try w(nm, [col]); nothing catch err; err end
+        @test e isa ArgumentError && occursin("\"$want\"", e.msg) && occursin("standard table \"$nm\"", e.msg)
+    end
+    # a fixed standard shape is enforced (the `standard` option); `standard=false` leaves the data alone
+    e = try w("ANTENNA", ["POSITION" => [[1.0, 2.0], [3.0, 4.0]]]); nothing catch err; err end
+    @test e isa ArgumentError && occursin("shape (3,)", e.msg) && occursin("row 1", e.msg)
+    @test size(column(w("ANTENNA", ["POSITION" => [[1.0, 2.0]]]; standard=false), "POSITION")[1]) == (2,)
+    @test size(column(w("ANTENNA", ["POSITION" => [[1.0, 2.0, 3.0]]]), "POSITION")[1]) == (3,)
+    # other table names are not touched
+    @test column(w("MYTABLE", ["TIME" => ["a", "b"]]), "TIME")[:] == ["a", "b"]
+end

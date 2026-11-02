@@ -120,6 +120,39 @@ function _canon_subtable(v, dir::AbstractString)
     return SubTable("././" * rest)
 end
 
+# Phase 509: a column of a standard Measurement Set table is stored with the standard type (`TIME` is a double, `ANTENNA1` an int, `NAME` a string) and,
+# when the standard shape is fixed (`POSITION` is 3 doubles), that shape.  Data of another type was converted by the writer -- or died there with a bare
+# `MethodError: no method matching Float64(::String)` / `TypeError` -- and cells of another shape were written as they were, so a 2-vector `POSITION`
+# gave a table casacore reads as an invalid MS.  Values are now converted here when that is exact (integers to doubles, real to complex, Float32 to
+# Float64, ...) and anything else is an ArgumentError naming the column, the standard type and the row.  `shapecheck` (the `standard` option) also checks the shape.
+function _fit_standard(cn::AbstractString, vals::AbstractVector, sc, tbl::AbstractString, shapecheck::Bool)
+    isempty(vals) && return vals
+    J = juliatype(sc.type)
+    scalarcol = sc.shape isa Tuple && isempty(sc.shape)
+    bad(r, why) = throw(ArgumentError("write_table: column \"$cn\" of the standard table \"$tbl\" must hold $(sc.type) values$(sc.shape isa Dims && !isempty(sc.shape) ? " in cells of shape $(sc.shape)" : ""); row $r: $why"))
+    if scalarcol
+        for (r, v) in enumerate(vals)
+            v isa AbstractArray && bad(r, "found an array of size $(size(v)), expected a scalar")
+        end
+    else
+        for (r, v) in enumerate(vals)
+            v isa AbstractArray || bad(r, "found a scalar of type $(typeof(v)), expected an array")
+            shapecheck && sc.shape isa Dims && size(v) != sc.shape && bad(r, "found a cell of size $(size(v))")
+        end
+    end
+    el = scalarcol ? eltype(vals) : (eltype(vals) <: AbstractArray ? eltype(eltype(vals)) : Any)
+    el === J && return vals
+    out = Vector{scalarcol ? J : Array{J}}(undef, length(vals))
+    for (r, v) in enumerate(vals)
+        out[r] = try
+            scalarcol ? convert(J, v) : convert(Array{J,ndims(v)}, v)
+        catch
+            bad(r, scalarcol ? "$(typeof(v)) cannot be converted to $J" : "$(typeof(v)) cannot be converted to an array of $J")
+        end
+    end
+    return scalarcol ? identity.(out) : out
+end
+
 # infer a CellShape from a column of values
 function _infer_shape(vals)
     eltype(vals) <: AbstractArray || return ()
@@ -767,11 +800,12 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
             end
         end
         length(vals) == nrow || error("column $cn: $(length(vals)) values, expected $nrow")
+        sc = stdcol(cn)
+        sc === nothing || (vals = _fit_standard(cn, vals, sc, std.name, standard))
         et = _casatype_of(eltype(vals))
         shp = get(shapes, cn, _infer_shape(vals))      # `shapes=` forces a cell shape (e.g. `VariableShape(2)` for empty cells)
         haskey(shapes, cn) && !(isempty(vals) || first(vals) isa AbstractArray) && throw(ArgumentError(
             "write_table: shapes= names column \"$cn\", whose cells are scalars, not arrays"))
-        sc = stdcol(cn)
         ct = sc === nothing ? et : sc.type
         arr = _is_tsm(shp) || (shp isa Dims && !isempty(shp))
         d0 = ColumnDesc(cn, haskey(comments, cn) ? String(comments[cn]) : sc === nothing ? "" : sc.comment,

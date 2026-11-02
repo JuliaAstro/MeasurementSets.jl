@@ -188,6 +188,10 @@ casacore reads it: `"././NAME"` is a subtable inside the table's directory (what
 directory, and a name given without the `./` that exists inside the directory is stored as `"././NAME"`. A link to a table that does
 not exist yet is kept, with a warning.
 
+The columns of a standard table are also checked: values are converted to the standard type when that is exact (integers to doubles,
+`Float32` to `ComplexF32`, `1.0` to `true`), anything else is an `ArgumentError` naming the column and the row, and a column whose standard
+cell shape is fixed (`ANTENNA.POSITION` is three doubles) must have that shape. `standard=false` turns the shape check off.
+
 Any [Tables.jl](https://tables.juliadata.org) source can be written:
 `write_table(dir, "T", df)` takes a DataFrame, a `Vector{NamedTuple}` or a
 dictionary of vectors, and `nrow` is the first column's length. A
