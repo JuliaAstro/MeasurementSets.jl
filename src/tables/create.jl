@@ -153,6 +153,12 @@ function _fit_standard(cn::AbstractString, vals::AbstractVector, sc, tbl::Abstra
     return scalarcol ? identity.(out) : out
 end
 
+# Phase 512: a column of array cells given as ONE array whose last axis is the rows -- the shape `rawblock` returns, `(cellshape..., nrow)` -- is the
+# vector of its slices along that axis (each a copy).  `write_table` and `addcolumn!` took only a vector of cells, so a block read from a table could not be
+# written back without splitting it by hand.  Vectors (and anything that is not an array of two or more dimensions) are returned unchanged.
+_rows_of(v) = v
+_rows_of(v::AbstractArray) = ndims(v) >= 2 ? [copy(selectdim(v, ndims(v), i)) for i in 1:size(v, ndims(v))] : v
+
 # infer a CellShape from a column of values
 function _infer_shape(vals)
     eltype(vals) <: AbstractArray || return ()
@@ -720,6 +726,8 @@ When `name` is a standard Measurement Set table (`"MAIN"`, `"ANTENNA"`, `"FIELD"
 `QuantumUnits` / `MEASINFO` / `CATEGORY` keywords casacore requires of an MS (`standard=false` turns that off), so a table
 written piece by piece is a valid MS.
 
+A column of array cells may also be given as one array with the rows on its last axis -- the `(cellshape..., nrow)` block `rawblock` returns.
+
 A table keyword (`keywords = Dict(name => value)`) may be a number, string, array, `Dict` / `Record`, or
 `MeasurementSets.SubTable("././ANTENNA")`, a link to a subtable directory (relative to this table's directory), so a MAIN
 written into a directory that already holds the subtables becomes a Measurement Set.
@@ -750,6 +758,8 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         (p isa Pair || (p isa Tuple && length(p) == 2)) || throw(ArgumentError(
             "write_table: `columns` must be a Tables.jl table, a Dict, or a collection of name => vector pairs; found an element of type $(typeof(p))"))
     end
+    blocks = Dict(String(first(p)) => size(last(p)) for p in pairs if last(p) isa AbstractArray && ndims(last(p)) >= 2)   # columns given as one block
+    pairs = [first(p) => _rows_of(last(p)) for p in pairs]
     names = [String(first(p)) for p in pairs]
     any(isempty, names) && throw(ArgumentError("write_table: a column name cannot be empty"))
     allunique(names) || throw(ArgumentError("write_table: duplicate column name \"$(names[findfirst(n -> count(==(n), names) > 1, names)])\""))
@@ -799,7 +809,9 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                 explicit || (units = merge(units, Dict{String,Any}(cn => qsp.units)))
             end
         end
-        length(vals) == nrow || error("column $cn: $(length(vals)) values, expected $nrow")
+        length(vals) == nrow || (haskey(blocks, cn) ?
+            throw(ArgumentError("write_table: column \"$cn\" is an array of size $(blocks[cn]); its last axis is the rows, $(length(vals)), but nrow is $nrow")) :
+            error("column $cn: $(length(vals)) values, expected $nrow"))
         sc = stdcol(cn)
         sc === nothing || (vals = _fit_standard(cn, vals, sc, std.name, standard))
         et = _casatype_of(eltype(vals))

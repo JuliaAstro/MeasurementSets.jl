@@ -518,3 +518,39 @@ end
     # the source's own copy: MeasurementSet subtables are untouched
     @test nrow(readtable(joinpath(d, "ANTENNA"))) == nant
 end
+
+# Phase 512: a column of array cells may be given as one array with the rows on its last axis -- the `(cellshape..., nrow)` block `rawblock` returns -- in
+# `write_table` and `addcolumn!`; reading a block and writing it back needed a hand-made vector of slices before.
+@testset "an N-d block is a column of array cells (Phase 512)" begin
+    ms = MeasurementSet(SAMPLE_MS; precision=:full)
+    for col in ("UVW", "FLAG", "DATA", "WEIGHT")
+        blk = rawblock(ms, col)
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", ["$col" => blk]; nrow=size(blk, ndims(blk)))
+        t = readtable(d; precision=:full)
+        @test nrow(t) == size(blk, ndims(blk))
+        @test rawblock(t, col) == blk && eltype(rawblock(t, col)) == eltype(blk)
+        @test column(t, col)[2] == selectdim(blk, ndims(blk), 2)
+    end
+    # the number of rows follows from the block, and a mismatch is an error
+    blk = rawblock(ms, "UVW")
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", ["UVW" => blk, "A" => collect(1:size(blk, 2))])
+    @test nrow(readtable(d)) == size(blk, 2)
+    @test_throws ArgumentError write_table(joinpath(mktempdir(), "t"), "T", ["UVW" => blk]; nrow=size(blk, 2) - 1)
+    # a Vector of cells is unchanged, and the cells of a block are copies
+    cells = [[1.0, 2.0], [3.0, 4.0]]; m = [1.0 3.0; 2.0 4.0]
+    a = joinpath(mktempdir(), "a"); write_table(a, "T", ["X" => cells]; nrow=2)
+    b = joinpath(mktempdir(), "b"); write_table(b, "T", ["X" => m]; nrow=2)
+    @test column(readtable(a), "X")[:] == column(readtable(b), "X")[:] == cells
+    m[1, 1] = 99.0
+    @test column(readtable(b), "X")[1] == [1.0, 2.0]
+    # addcolumn! takes a block too
+    p = joinpath(mktempdir(), "p"); write_table(p, "T", ["A" => [1, 2, 3]]; nrow=3)
+    edit(p) do e; addcolumn!(e, "V", [1.0 2.0 3.0; 4.0 5.0 6.0]); end
+    @test column(readtable(p), "V")[3] == [3.0, 6.0]
+    # ... also through a RefTable view and a ConcatTable view
+    q = joinpath(mktempdir(), "q"); write_table(q, "T", ["A" => [1, 2, 3, 4]]; nrow=4)
+    rv = query(readtable(q), "A > 2")
+    edit(rv) do e; addcolumn!(e, "V", [1.0 2.0; 3.0 4.0]); end
+    @test column(readtable(q), "V")[3] == [1.0, 3.0] && column(readtable(q), "V")[4] == [2.0, 4.0]
+end

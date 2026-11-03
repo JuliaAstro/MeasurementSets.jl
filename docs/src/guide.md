@@ -192,6 +192,10 @@ The columns of a standard table are also checked: values are converted to the st
 `Float32` to `ComplexF32`, `1.0` to `true`), anything else is an `ArgumentError` naming the column and the row, and a column whose standard
 cell shape is fixed (`ANTENNA.POSITION` is three doubles) must have that shape. `standard=false` turns the shape check off.
 
+A column of array cells can also be given as one array whose last axis is the rows -- the `(cellshape..., nrow)` block that
+[`rawblock`](@ref) returns -- so a block read from a table can be written back directly:
+`write_table(dir, "T", ["UVW" => rawblock(ms, "UVW")])`; [`addcolumn!`](@ref) takes a block the same way.
+
 Any [Tables.jl](https://tables.juliadata.org) source can be written:
 `write_table(dir, "T", df)` takes a DataFrame, a `Vector{NamedTuple}` or a
 dictionary of vectors, and `nrow` is the first column's length. A

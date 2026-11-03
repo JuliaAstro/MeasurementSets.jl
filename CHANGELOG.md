@@ -11883,3 +11883,9 @@ Probing a partly assembled MS: `copytable(dst, t)` of a table with subtable keyw
 pointed at directories that did not exist (also for a query result, a `RefTable` of such a MAIN and a `MeasurementSet`; `SELECT ... INTO` goes through it). Like casacore's deep copy
 (`TableCopy::copySubTables`) the referenced tables are now copied whole into `dst` and linked as `././NAME`; a link whose target cannot be read is dropped with a warning; the
 destination is removed again if anything fails. `copyms` / `write_ms` are unchanged (they copy their subtables themselves). Tests in `writer_tests.jl`.
+
+### Phase 512 — a block is a column: `write_table` / `addcolumn!` take the `rawblock` shape
+
+A column of array cells can be given as one array whose last axis is the rows -- the `(cellshape..., nrow)` block `rawblock` returns -- in `write_table` and in
+`addcolumn!` (also through `RefTable` / `ConcatTable` views): `write_table(dir, "T", ["DATA" => rawblock(t, "DATA")])`. Each cell is a copy of its slice; before, a block
+had to be split into a vector of slices by hand ("must be a vector with one entry per row"). Vectors are unchanged. Tests in `writer_tests.jl`; guide updated.
