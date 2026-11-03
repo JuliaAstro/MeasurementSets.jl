@@ -363,9 +363,30 @@ function validate(ms::MeasurementSet)
     issues = validate(getfield(ms, :data); table="MAIN")
     for name in subtablenames(ms)
         haskey(SCHEMAVER2, name) || continue
-        for i in validate(subtable(ms, name); table=name)
+        # Phase 510: a link to a missing / unreadable table is a problem to report, not an exception (`validate` never throws)
+        st = try
+            subtable(ms, name)
+        catch e
+            push!(issues, "$name: the subtable cannot be opened ($(first(split(sprint(showerror, e), '\n'))))")
+            continue
+        end
+        for i in validate(st; table=name)
             push!(issues, "$name: $i")
         end
     end
     return issues
+end
+
+"""
+    validate(path::AbstractString) -> Vector{String}
+
+`validate(MeasurementSet(path))`: validate the Measurement Set in directory `path`. An unreadable MAIN is reported as a problem.
+"""
+function validate(path::AbstractString)
+    ms = try
+        MeasurementSet(path)
+    catch e
+        return ["cannot open \"$path\" ($(first(split(sprint(showerror, e), '\n'))))"]
+    end
+    return validate(ms)
 end

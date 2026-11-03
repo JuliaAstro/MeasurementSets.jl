@@ -11870,3 +11870,9 @@ writer with a bare `MethodError: no method matching Float64(::String)` (or a `Ty
 (a 2-vector `ANTENNA.POSITION`, which casacore reads as an invalid MS). `_fit_standard` converts exactly-convertible values (integers to doubles, `Float32` to
 `ComplexF32`, `1.0` to `true`) and raises an `ArgumentError` naming the column, the standard type and the row for anything else; a fixed standard cell shape is enforced
 unless `standard=false`. Other table names are untouched. Test in `keywords_tests.jl`; guide updated.
+
+### Phase 510 — `validate` reports a dangling subtable link and accepts a path
+
+Probing a partly assembled Measurement Set: `validate(ms)` is documented never to throw, but a subtable link whose target is gone raised "not a table directory" from
+inside it; it now reports `FIELD: the subtable cannot be opened (...)` and goes on. `validate(path)` (a directory) is new and reports an unreadable MAIN as a problem.
+(`subtable(ms, "ABSENT")` keeps its `KeyError`.) Tests in `schema_tests.jl`.

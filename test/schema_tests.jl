@@ -227,3 +227,23 @@ const _CASACORE_SIM_COLUMNS = [
         @test all(c.name in have for c in stdtable(tab).columns if c.required)
     end
 end
+
+# Phase 510: `validate` never throws.  A subtable link to a table that is gone used to raise from `validate(ms)`; and `validate(path)` did not exist.
+@testset "validate: dangling subtable links and a path argument (Phase 510)" begin
+    d = joinpath(mktempdir(), "n.ms"); mkpath(d)
+    for nm in ("ANTENNA", "FIELD"); cp(joinpath(SAMPLE_MS, nm), joinpath(d, nm)); end
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0, 2.0]]; nrow=2, type="Measurement Set",
+                keywords=Dict{String,Any}("MS_VERSION" => 2.0f0, "ANTENNA" => MSv2.SubTable("././ANTENNA"), "FIELD" => MSv2.SubTable("././FIELD")))
+    ok = validate(MeasurementSet(d))
+    @test !any(i -> occursin("cannot be opened", i), ok)
+    @test validate(d) == ok                                   # the path form
+    rm(joinpath(d, "FIELD"); recursive=true)                  # the link now points at nothing
+    bad = validate(MeasurementSet(d))
+    @test any(i -> startswith(i, "FIELD: the subtable cannot be opened"), bad)
+    @test validate(d) == bad
+    r = validate(joinpath(mktempdir(), "nothing.ms"))
+    @test length(r) == 1 && startswith(r[1], "cannot open")
+    # a complete MS is still clean
+    c = joinpath(mktempdir(), "c.ms"); create_ms(c; nrow=3)
+    @test isempty(validate(c))
+end
