@@ -11894,3 +11894,8 @@ had to be split into a vector of slices by hand ("must be a vector with one entr
 
 A LOFAR-style `LOFAR_ANTENNA_FIELD` subtable (ragged array columns) linked into a hand-assembled Measurement Set is carried by `copyms` (also with `rows=` and `subtables=`) and
 `copytable` (Phase 511), is reachable as `ms.LOFAR_ANTENNA_FIELD`, joins and queries like a standard one, and `validate` leaves it alone. Permanent test in `keywords_tests.jl`; no code change.
+
+### Phase 514 — README / docs index mention the piecewise-assembly features
+
+The "Write" paragraphs of `README.md` and `docs/src/index.md` now mention standard-name keyword stamping and schema checks (Phases 504, 509), `SubTable` keyword values (503, 508)
+and `rawblock`-shaped columns (512). Docs only; the docs build has no warnings.

@@ -49,8 +49,12 @@ compression kind (or choosing one via `tsm=` / `ism=` / `engines=` /
 quantity or a `Measure` (`MEpoch{UTC}`, `MDirection{J2000}`, …) is
 stored as plain numbers with its `QuantumUnits` / `MEASINFO` keyword
 stamped automatically.  `reference_copy` makes a `ForwardColumnEngine`
-reference copy (casacore's `referenceCopy`).  Verified byte-for-byte
-against casacore.
+reference copy (casacore's `referenceCopy`).  A table written under a
+standard name (`"MAIN"`, `"ANTENNA"`, …) gets the standard unit / `MEASINFO`
+keywords and its columns are checked against the schema, and `SubTable`
+keyword values link existing subtables, so a Measurement Set can be
+assembled from pieces (see the guide); a column of array cells may be one
+`rawblock`-shaped array.  Verified byte-for-byte against casacore.
 
 **Edit in place** — `edit(path) do t … end`: overwrite cells / whole
 columns, `addrows!`, `removerows!`, `addcolumn!`, `removecolumn!`.  Tiled
