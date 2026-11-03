@@ -11876,3 +11876,10 @@ unless `standard=false`. Other table names are untouched. Test in `keywords_test
 Probing a partly assembled Measurement Set: `validate(ms)` is documented never to throw, but a subtable link whose target is gone raised "not a table directory" from
 inside it; it now reports `FIELD: the subtable cannot be opened (...)` and goes on. `validate(path)` (a directory) is new and reports an unreadable MAIN as a problem.
 (`subtable(ms, "ABSENT")` keeps its `KeyError`.) Tests in `schema_tests.jl`.
+
+### Phase 511 — `copytable` carries the subtables its source's keywords name
+
+Probing a partly assembled MS: `copytable(dst, t)` of a table with subtable keywords (a MAIN) copied the keywords but not the tables, so the copy's `ANTENNA` / `FIELD` links
+pointed at directories that did not exist (also for a query result, a `RefTable` of such a MAIN and a `MeasurementSet`; `SELECT ... INTO` goes through it). Like casacore's deep copy
+(`TableCopy::copySubTables`) the referenced tables are now copied whole into `dst` and linked as `././NAME`; a link whose target cannot be read is dropped with a warning; the
+destination is removed again if anything fails. `copyms` / `write_ms` are unchanged (they copy their subtables themselves). Tests in `writer_tests.jl`.

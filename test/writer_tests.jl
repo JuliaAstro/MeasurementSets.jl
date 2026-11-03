@@ -488,3 +488,33 @@ end
     r1 = readtable(d1); r2 = readtable(d2)
     @test all(column(r1, c)[:] == column(r2, c)[:] for c in ("I", "X", "S", "B", "U")) && column(r1, "I")[:] == cols[1][2][1:1500]
 end
+
+# Phase 511: `copytable` of a table with subtable keywords (a MAIN) copied the keywords but not the tables they name, so the copy's `ANTENNA` / `FIELD` links
+# pointed at directories that did not exist.  The referenced tables are copied too, whole, and linked as "././NAME" (casacore's deep copy does the same).
+@testset "copytable carries the subtables of its source (Phase 511)" begin
+    d = joinpath(mktempdir(), "n.ms"); mkpath(d)
+    for nm in ("ANTENNA", "FIELD"); cp(joinpath(SAMPLE_MS, nm), joinpath(d, nm)); end
+    kws = Dict{String,Any}("MS_VERSION" => 2.0f0, "ANTENNA" => MSv2.SubTable("././ANTENNA"), "FIELD" => MSv2.SubTable("././FIELD"))
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0, 2.0, 3.0], "ANTENNA1" => Int32[0, 1, 2]]; nrow=3, type="Measurement Set", keywords=kws)
+    nant = nrow(readtable(joinpath(SAMPLE_MS, "ANTENNA")))
+    for (label, src, rows) in (("table", readtable(d), Colon()), ("rows", readtable(d), 2:3), ("query", query(readtable(d), "ANTENNA1 > 0"), Colon()),
+                               ("ms", MeasurementSet(d), Colon()))
+        o = joinpath(mktempdir(), "o")
+        copytable(o, src; rows)
+        @test sort(first.(MSv2.subtables(readtable(o)))) == ["ANTENNA", "FIELD"]
+        @test isdir(joinpath(o, "ANTENNA")) && isdir(joinpath(o, "FIELD"))
+        @test nrow(subtable(MeasurementSet(o), "ANTENNA")) == nant
+        @test isempty(filter(i -> occursin("cannot be opened", i), validate(MeasurementSet(o))))
+    end
+    # a link whose target is gone is dropped (with a warning), not copied as a dangling link
+    rm(joinpath(d, "FIELD"); recursive=true)
+    o = joinpath(mktempdir(), "o")
+    @test_logs (:warn, r"cannot be read") copytable(o, readtable(d))
+    @test first.(MSv2.subtables(readtable(o))) == ["ANTENNA"]
+    # tables without subtable keywords copy as before, and copytable still refuses an existing destination
+    p = joinpath(mktempdir(), "plain"); write_table(p, "T", Pair{String,Any}["A" => [1, 2]]; nrow=2)
+    q = joinpath(mktempdir(), "q"); copytable(q, readtable(p)); @test column(readtable(q), "A")[:] == [1, 2]
+    @test_throws ErrorException copytable(q, readtable(p))
+    # the source's own copy: MeasurementSet subtables are untouched
+    @test nrow(readtable(joinpath(d, "ANTENNA"))) == nant
+end

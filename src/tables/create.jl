@@ -1071,7 +1071,9 @@ _source_paths(::AbstractTable) = String[]
 
 Deep-copy `t` into a fresh plain table at `dst`.  For a `Table` /
 `RefTable` / `ConcatTable` each column's storage-manager / virtual-engine
-kind is preserved (casacore's `GIVING ... AS PLAIN`); for a
+kind is preserved (casacore's `GIVING ... AS PLAIN`), and the tables its subtable
+keywords refer to (a MAIN's `ANTENNA`, `FIELD`, ...) are copied whole and linked
+inside `dst`; for a
 `GroupedTable` the columns are materialised (`name` sets the table's
 schema name).  `rows` selects/reorders rows (1-based into `t`);
 `storage`/`blocksize` pack the destination into one `table.mf` /
@@ -1086,7 +1088,42 @@ function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
     ispath(dst) && error("$dst already exists")
     r = rows === Colon() ? (1:nrow(t)) : _check_copy_rows(rows, nrow(t), "copytable")
     t isa GroupedTable ? _copy_table(dst, t, r; name) :
-        _copy_table(dst, t, r; storage, blocksize)
+        _copy_table_with_subtables(dst, t, r, storage, blocksize, 0)
+    return dst
+end
+
+# Phase 511: the subtable keywords of a table (a MAIN's `ANTENNA`, `FIELD`, ...) named directories next to the SOURCE, so a plain copy of the keywords left a table
+# whose links pointed at nothing.  Like casacore's deep copy (TableCopy::copySubTables) the referenced tables are copied too -- whole, whatever `rows` selects
+# in `t` -- and linked as "././NAME"; a link whose target cannot be read is dropped with a warning.  The destination is removed again if anything fails.
+function _copy_table_with_subtables(dst, t, r, storage, blocksize, depth)
+    links = depth < 4 ? subtables(t) : Pair{String,String}[]
+    isempty(links) && return _copy_table(dst, t, r; storage, blocksize)
+    kept = Pair{String,Table}[]
+    for (nm, path) in links
+        st = try readtable(path) catch e
+            @warn "copytable: the subtable \"$nm\" ($path) cannot be read ($(first(split(sprint(showerror, e), '\n')))); its link is dropped"
+            nothing
+        end
+        st === nothing || push!(kept, nm => st)
+    end
+    kw = keywords(t); pub = Record()
+    for i in 1:length(kw)
+        v = kw.values[i]
+        if v isa SubTable
+            any(==(kw.names[i]) ∘ first, kept) || continue
+            v = SubTable("././" * kw.names[i])
+        end
+        push!(pub.names, kw.names[i]); push!(pub.types, kw.types[i]); push!(pub.values, v); push!(pub.comments, kw.comments[i])
+    end
+    try
+        _copy_table(dst, t, r; public=pub, storage, blocksize)
+        for (nm, st) in kept
+            _copy_table_with_subtables(joinpath(dst, nm), st, 1:nrow(st), storage, blocksize, depth + 1)
+        end
+    catch
+        rm(dst; recursive=true, force=true)
+        rethrow()
+    end
     return dst
 end
 
