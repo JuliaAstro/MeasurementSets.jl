@@ -354,3 +354,29 @@ end
     # other table names are not touched
     @test column(w("MYTABLE", ["TIME" => ["a", "b"]]), "TIME")[:] == ["a", "b"]
 end
+
+# Phase 513: a non-standard subtable (LOFAR's `LOFAR_ANTENNA_FIELD`, with ragged array columns) linked into a hand-assembled MS is carried by `copyms`, `copytable` and
+# the query verbs like a standard one, and `validate` leaves it alone (no standard schema).
+@testset "a non-standard subtable survives the whole pipeline (Phase 513)" begin
+    d = joinpath(mktempdir(), "n.ms"); mkpath(d)
+    for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW"); cp(joinpath(SAMPLE_MS, nm), joinpath(d, nm)); end
+    off = [Float64.(reshape(1:12, 3, 4)), Float64.(reshape(1:18, 3, 6))]
+    write_table(joinpath(d, "LOFAR_ANTENNA_FIELD"), "LOFAR_ANTENNA_FIELD",
+                ["ANTENNA_ID" => Int32[0, 1], "NAME" => ["LBA", "HBA"], "ELEMENT_OFFSET" => off]; nrow=2)
+    links = Dict{String,Any}(nm => MSv2.SubTable("././" * nm) for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW", "LOFAR_ANTENNA_FIELD")); links["MS_VERSION"] = 2.0f0
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0, 2.0], "ANTENNA1" => Int32[0, 1], "ANTENNA2" => Int32[1, 0]]; nrow=2, type="Measurement Set", keywords=links)
+    ms = MeasurementSet(d)
+    @test "LOFAR_ANTENNA_FIELD" in MSv2.subtablenames(ms) && nrow(ms.LOFAR_ANTENNA_FIELD) == 2
+    @test !any(i -> occursin("LOFAR", i), validate(ms))
+    o = joinpath(mktempdir(), "o.ms"); copyms(d, o; rows=1:1)
+    mo = MeasurementSet(o)
+    @test nrow(mo) == 1 && "LOFAR_ANTENNA_FIELD" in MSv2.subtablenames(mo)
+    @test column(mo.LOFAR_ANTENNA_FIELD, "ELEMENT_OFFSET")[2] == off[2]
+    c = joinpath(mktempdir(), "c"); copytable(c, ms)
+    @test column(readtable(joinpath(c, "LOFAR_ANTENNA_FIELD")), "ELEMENT_OFFSET")[1] == off[1]
+    s = joinpath(mktempdir(), "s.ms"); copyms(d, s; subtables=["LOFAR_ANTENNA_FIELD"])
+    @test MSv2.subtablenames(MeasurementSet(s)) == ["LOFAR_ANTENNA_FIELD"]
+    j = join(ms, ms.ANTENNA; on="ANTENNA1", rightcols=["NAME"])
+    @test length(column(j, "NAME")[:]) == 2
+    @test nrow(query(ms, "ANTENNA1 == 0")) == 1
+end

@@ -11889,3 +11889,8 @@ destination is removed again if anything fails. `copyms` / `write_ms` are unchan
 A column of array cells can be given as one array whose last axis is the rows -- the `(cellshape..., nrow)` block `rawblock` returns -- in `write_table` and in
 `addcolumn!` (also through `RefTable` / `ConcatTable` views): `write_table(dir, "T", ["DATA" => rawblock(t, "DATA")])`. Each cell is a copy of its slice; before, a block
 had to be split into a vector of slices by hand ("must be a vector with one entry per row"). Vectors are unchanged. Tests in `writer_tests.jl`; guide updated.
+
+### Phase 513 — a non-standard subtable survives the whole pipeline (no bug found)
+
+A LOFAR-style `LOFAR_ANTENNA_FIELD` subtable (ragged array columns) linked into a hand-assembled Measurement Set is carried by `copyms` (also with `rows=` and `subtables=`) and
+`copytable` (Phase 511), is reachable as `ms.LOFAR_ANTENNA_FIELD`, joins and queries like a standard one, and `validate` leaves it alone. Permanent test in `keywords_tests.jl`; no code change.
