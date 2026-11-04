@@ -97,6 +97,68 @@ function _kw_value(v)
     return (_casatype_of(typeof(v)), v)
 end
 
+# Phase 508: a `SubTable` link as casacore resolves it.  Real Measurement Sets store a subtable inside the table's directory as
+# "././NAME"; "./NAME" means a SIBLING directory to casacore, and a bare "NAME" is relative to the working directory -- our reader was
+# lenient about both, so such a link read back fine here but not in casacore (and `SubTable("")` linked the table to itself).
+# A plain relative name that exists inside `dir` is stored as "././NAME"; a link whose target does not exist (yet) is kept and warned about.
+function _canon_subtable(v, dir::AbstractString)
+    v isa SubTable || return v
+    s = strip(v.name)
+    startswith(s, "Table:") && (s = strip(s[7:end]))
+    isempty(s) && throw(ArgumentError("SubTable: the subtable name is empty"))
+    isabspath(s) && return SubTable(String(s))
+    n = 0
+    while startswith(s[n+1:end], "./"); n += 2; end
+    rest = rstrip(s[n+1:end], '/')
+    isempty(rest) && throw(ArgumentError("SubTable(\"$(v.name)\"): no subtable name"))
+    istable(p) = isfile(joinpath(p, "table.dat"))
+    istable(joinpath(dir, rest)) && return SubTable("././" * rest)
+    if n == 2 && istable(joinpath(dirname(abspath(dir)), rest))     # a real sibling reference: keep it
+        return SubTable("./" * rest)
+    end
+    @warn "SubTable link \"$(v.name)\": there is no table at $(joinpath(dir, rest)) (yet); the link is stored as \"././$rest\""
+    return SubTable("././" * rest)
+end
+
+# Phase 509: a column of a standard Measurement Set table is stored with the standard type (`TIME` is a double, `ANTENNA1` an int, `NAME` a string) and,
+# when the standard shape is fixed (`POSITION` is 3 doubles), that shape.  Data of another type was converted by the writer -- or died there with a bare
+# `MethodError: no method matching Float64(::String)` / `TypeError` -- and cells of another shape were written as they were, so a 2-vector `POSITION`
+# gave a table casacore reads as an invalid MS.  Values are now converted here when that is exact (integers to doubles, real to complex, Float32 to
+# Float64, ...) and anything else is an ArgumentError naming the column, the standard type and the row.  `shapecheck` (the `standard` option) also checks the shape.
+function _fit_standard(cn::AbstractString, vals::AbstractVector, sc, tbl::AbstractString, shapecheck::Bool)
+    isempty(vals) && return vals
+    J = juliatype(sc.type)
+    scalarcol = sc.shape isa Tuple && isempty(sc.shape)
+    bad(r, why) = throw(ArgumentError("write_table: column \"$cn\" of the standard table \"$tbl\" must hold $(sc.type) values$(sc.shape isa Dims && !isempty(sc.shape) ? " in cells of shape $(sc.shape)" : ""); row $r: $why"))
+    if scalarcol
+        for (r, v) in enumerate(vals)
+            v isa AbstractArray && bad(r, "found an array of size $(size(v)), expected a scalar")
+        end
+    else
+        for (r, v) in enumerate(vals)
+            v isa AbstractArray || bad(r, "found a scalar of type $(typeof(v)), expected an array")
+            shapecheck && sc.shape isa Dims && size(v) != sc.shape && bad(r, "found a cell of size $(size(v))")
+        end
+    end
+    el = scalarcol ? eltype(vals) : (eltype(vals) <: AbstractArray ? eltype(eltype(vals)) : Any)
+    el === J && return vals
+    out = Vector{scalarcol ? J : Array{J}}(undef, length(vals))
+    for (r, v) in enumerate(vals)
+        out[r] = try
+            scalarcol ? convert(J, v) : convert(Array{J,ndims(v)}, v)
+        catch
+            bad(r, scalarcol ? "$(typeof(v)) cannot be converted to $J" : "$(typeof(v)) cannot be converted to an array of $J")
+        end
+    end
+    return scalarcol ? identity.(out) : out
+end
+
+# Phase 512: a column of array cells given as ONE array whose last axis is the rows -- the shape `rawblock` returns, `(cellshape..., nrow)` -- is the
+# vector of its slices along that axis (each a copy).  `write_table` and `addcolumn!` took only a vector of cells, so a block read from a table could not be
+# written back without splitting it by hand.  Vectors (and anything that is not an array of two or more dimensions) are returned unchanged.
+_rows_of(v) = v
+_rows_of(v::AbstractArray) = ndims(v) >= 2 ? [copy(selectdim(v, ndims(v), i)) for i in 1:size(v, ndims(v))] : v
+
 # infer a CellShape from a column of values
 function _infer_shape(vals)
     eltype(vals) <: AbstractArray || return ()
@@ -664,6 +726,8 @@ When `name` is a standard Measurement Set table (`"MAIN"`, `"ANTENNA"`, `"FIELD"
 `QuantumUnits` / `MEASINFO` / `CATEGORY` keywords casacore requires of an MS (`standard=false` turns that off), so a table
 written piece by piece is a valid MS.
 
+A column of array cells may also be given as one array with the rows on its last axis -- the `(cellshape..., nrow)` block `rawblock` returns.
+
 A table keyword (`keywords = Dict(name => value)`) may be a number, string, array, `Dict` / `Record`, or
 `MeasurementSets.SubTable("././ANTENNA")`, a link to a subtable directory (relative to this table's directory), so a MAIN
 written into a directory that already holds the subtables becomes a Measurement Set.
@@ -694,6 +758,8 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
         (p isa Pair || (p isa Tuple && length(p) == 2)) || throw(ArgumentError(
             "write_table: `columns` must be a Tables.jl table, a Dict, or a collection of name => vector pairs; found an element of type $(typeof(p))"))
     end
+    blocks = Dict(String(first(p)) => size(last(p)) for p in pairs if last(p) isa AbstractArray && ndims(last(p)) >= 2)   # columns given as one block
+    pairs = [first(p) => _rows_of(last(p)) for p in pairs]
     names = [String(first(p)) for p in pairs]
     any(isempty, names) && throw(ArgumentError("write_table: a column name cannot be empty"))
     allunique(names) || throw(ArgumentError("write_table: duplicate column name \"$(names[findfirst(n -> count(==(n), names) > 1, names)])\""))
@@ -743,12 +809,15 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
                 explicit || (units = merge(units, Dict{String,Any}(cn => qsp.units)))
             end
         end
-        length(vals) == nrow || error("column $cn: $(length(vals)) values, expected $nrow")
+        length(vals) == nrow || (haskey(blocks, cn) ?
+            throw(ArgumentError("write_table: column \"$cn\" is an array of size $(blocks[cn]); its last axis is the rows, $(length(vals)), but nrow is $nrow")) :
+            error("column $cn: $(length(vals)) values, expected $nrow"))
+        sc = stdcol(cn)
+        sc === nothing || (vals = _fit_standard(cn, vals, sc, std.name, standard))
         et = _casatype_of(eltype(vals))
         shp = get(shapes, cn, _infer_shape(vals))      # `shapes=` forces a cell shape (e.g. `VariableShape(2)` for empty cells)
         haskey(shapes, cn) && !(isempty(vals) || first(vals) isa AbstractArray) && throw(ArgumentError(
             "write_table: shapes= names column \"$cn\", whose cells are scalars, not arrays"))
-        sc = stdcol(cn)
         ct = sc === nothing ? et : sc.type
         arr = _is_tsm(shp) || (shp isa Dims && !isempty(shp))
         d0 = ColumnDesc(cn, haskey(comments, cn) ? String(comments[cn]) : sc === nothing ? "" : sc.comment,
@@ -762,7 +831,7 @@ function write_table(dir::AbstractString, name::AbstractString, columns;
 
     public = Record()
     for (k, v) in keywords
-        ct, val = _kw_value(v)
+        ct, val = _kw_value(_canon_subtable(v, dir))
         public = _set_kw(public, String(k), ct, val)
     end
 
@@ -1014,7 +1083,9 @@ _source_paths(::AbstractTable) = String[]
 
 Deep-copy `t` into a fresh plain table at `dst`.  For a `Table` /
 `RefTable` / `ConcatTable` each column's storage-manager / virtual-engine
-kind is preserved (casacore's `GIVING ... AS PLAIN`); for a
+kind is preserved (casacore's `GIVING ... AS PLAIN`), and the tables its subtable
+keywords refer to (a MAIN's `ANTENNA`, `FIELD`, ...) are copied whole and linked
+inside `dst`; for a
 `GroupedTable` the columns are materialised (`name` sets the table's
 schema name).  `rows` selects/reorders rows (1-based into `t`);
 `storage`/`blocksize` pack the destination into one `table.mf` /
@@ -1029,7 +1100,42 @@ function copytable(dst::AbstractString, t::AbstractTable; rows=Colon(),
     ispath(dst) && error("$dst already exists")
     r = rows === Colon() ? (1:nrow(t)) : _check_copy_rows(rows, nrow(t), "copytable")
     t isa GroupedTable ? _copy_table(dst, t, r; name) :
-        _copy_table(dst, t, r; storage, blocksize)
+        _copy_table_with_subtables(dst, t, r, storage, blocksize, 0)
+    return dst
+end
+
+# Phase 511: the subtable keywords of a table (a MAIN's `ANTENNA`, `FIELD`, ...) named directories next to the SOURCE, so a plain copy of the keywords left a table
+# whose links pointed at nothing.  Like casacore's deep copy (TableCopy::copySubTables) the referenced tables are copied too -- whole, whatever `rows` selects
+# in `t` -- and linked as "././NAME"; a link whose target cannot be read is dropped with a warning.  The destination is removed again if anything fails.
+function _copy_table_with_subtables(dst, t, r, storage, blocksize, depth)
+    links = depth < 4 ? subtables(t) : Pair{String,String}[]
+    isempty(links) && return _copy_table(dst, t, r; storage, blocksize)
+    kept = Pair{String,Table}[]
+    for (nm, path) in links
+        st = try readtable(path) catch e
+            @warn "copytable: the subtable \"$nm\" ($path) cannot be read ($(first(split(sprint(showerror, e), '\n')))); its link is dropped"
+            nothing
+        end
+        st === nothing || push!(kept, nm => st)
+    end
+    kw = keywords(t); pub = Record()
+    for i in 1:length(kw)
+        v = kw.values[i]
+        if v isa SubTable
+            any(==(kw.names[i]) ∘ first, kept) || continue
+            v = SubTable("././" * kw.names[i])
+        end
+        push!(pub.names, kw.names[i]); push!(pub.types, kw.types[i]); push!(pub.values, v); push!(pub.comments, kw.comments[i])
+    end
+    try
+        _copy_table(dst, t, r; public=pub, storage, blocksize)
+        for (nm, st) in kept
+            _copy_table_with_subtables(joinpath(dst, nm), st, 1:nrow(st), storage, blocksize, depth + 1)
+        end
+    catch
+        rm(dst; recursive=true, force=true)
+        rethrow()
+    end
     return dst
 end
 

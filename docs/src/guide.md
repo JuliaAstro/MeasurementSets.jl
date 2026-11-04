@@ -159,6 +159,43 @@ column(readtable("/tmp/ab"), "X")[:]                                   # [1.0, 2
 `write_ms(dst, ms; rows, subtables, subtable_rows)` is the general form of
 `copyms` (it takes an opened `MeasurementSet`; `copyms` takes either).
 
+### Assembling a Measurement Set from pieces
+
+A Measurement Set is a MAIN table whose keywords point at its subtables. Writing a table under a
+standard name (`"MAIN"`, `"ANTENNA"`, `"FIELD"`, ...) gives its columns the standard `QuantumUnits`,
+`MEASINFO` and `CATEGORY` keywords casacore requires of an MS (`standard=false` turns that off), and a
+`MeasurementSets.SubTable` keyword value links a subtable directory that already exists, so a MAIN written
+into a directory of subtables becomes a valid MS:
+
+```julia
+mkpath("/tmp/new.ms")
+for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW")
+    cp("/path/to/my.ms/" * nm, "/tmp/new.ms/" * nm)          # subtables you already have
+end
+links = Dict{String,Any}("MS_VERSION" => 2.0f0)
+for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW")
+    links[nm] = MeasurementSets.SubTable("././" * nm)          # relative to the MAIN directory
+end
+write_table("/tmp/new.ms", "MAIN",
+            ["TIME" => collect(1.0:5.0), "ANTENNA1" => Int32.(0:4)];
+            nrow = 5, type = "Measurement Set", keywords = links)
+new = MeasurementSet("/tmp/new.ms")
+nrow(subtable(new, "ANTENNA"))                                 # the linked subtable
+```
+
+[`setkeyword!`](@ref) adds or replaces such a link on a table that is already written. A link is stored the way
+casacore reads it: `"././NAME"` is a subtable inside the table's directory (what a Measurement Set stores), `"./NAME"` a sibling
+directory, and a name given without the `./` that exists inside the directory is stored as `"././NAME"`. A link to a table that does
+not exist yet is kept, with a warning.
+
+The columns of a standard table are also checked: values are converted to the standard type when that is exact (integers to doubles,
+`Float32` to `ComplexF32`, `1.0` to `true`), anything else is an `ArgumentError` naming the column and the row, and a column whose standard
+cell shape is fixed (`ANTENNA.POSITION` is three doubles) must have that shape. `standard=false` turns the shape check off.
+
+A column of array cells can also be given as one array whose last axis is the rows -- the `(cellshape..., nrow)` block that
+[`rawblock`](@ref) returns -- so a block read from a table can be written back directly:
+`write_table(dir, "T", ["UVW" => rawblock(ms, "UVW")])`; [`addcolumn!`](@ref) takes a block the same way.
+
 Any [Tables.jl](https://tables.juliadata.org) source can be written:
 `write_table(dir, "T", df)` takes a DataFrame, a `Vector{NamedTuple}` or a
 dictionary of vectors, and `nrow` is the first column's length. A

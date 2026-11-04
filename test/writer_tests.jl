@@ -488,3 +488,69 @@ end
     r1 = readtable(d1); r2 = readtable(d2)
     @test all(column(r1, c)[:] == column(r2, c)[:] for c in ("I", "X", "S", "B", "U")) && column(r1, "I")[:] == cols[1][2][1:1500]
 end
+
+# Phase 511: `copytable` of a table with subtable keywords (a MAIN) copied the keywords but not the tables they name, so the copy's `ANTENNA` / `FIELD` links
+# pointed at directories that did not exist.  The referenced tables are copied too, whole, and linked as "././NAME" (casacore's deep copy does the same).
+@testset "copytable carries the subtables of its source (Phase 511)" begin
+    d = joinpath(mktempdir(), "n.ms"); mkpath(d)
+    for nm in ("ANTENNA", "FIELD"); cp(joinpath(SAMPLE_MS, nm), joinpath(d, nm)); end
+    kws = Dict{String,Any}("MS_VERSION" => 2.0f0, "ANTENNA" => MSv2.SubTable("././ANTENNA"), "FIELD" => MSv2.SubTable("././FIELD"))
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0, 2.0, 3.0], "ANTENNA1" => Int32[0, 1, 2]]; nrow=3, type="Measurement Set", keywords=kws)
+    nant = nrow(readtable(joinpath(SAMPLE_MS, "ANTENNA")))
+    for (label, src, rows) in (("table", readtable(d), Colon()), ("rows", readtable(d), 2:3), ("query", query(readtable(d), "ANTENNA1 > 0"), Colon()),
+                               ("ms", MeasurementSet(d), Colon()))
+        o = joinpath(mktempdir(), "o")
+        copytable(o, src; rows)
+        @test sort(first.(MSv2.subtables(readtable(o)))) == ["ANTENNA", "FIELD"]
+        @test isdir(joinpath(o, "ANTENNA")) && isdir(joinpath(o, "FIELD"))
+        @test nrow(subtable(MeasurementSet(o), "ANTENNA")) == nant
+        @test isempty(filter(i -> occursin("cannot be opened", i), validate(MeasurementSet(o))))
+    end
+    # a link whose target is gone is dropped (with a warning), not copied as a dangling link
+    rm(joinpath(d, "FIELD"); recursive=true)
+    o = joinpath(mktempdir(), "o")
+    @test_logs (:warn, r"cannot be read") copytable(o, readtable(d))
+    @test first.(MSv2.subtables(readtable(o))) == ["ANTENNA"]
+    # tables without subtable keywords copy as before, and copytable still refuses an existing destination
+    p = joinpath(mktempdir(), "plain"); write_table(p, "T", Pair{String,Any}["A" => [1, 2]]; nrow=2)
+    q = joinpath(mktempdir(), "q"); copytable(q, readtable(p)); @test column(readtable(q), "A")[:] == [1, 2]
+    @test_throws ErrorException copytable(q, readtable(p))
+    # the source's own copy: MeasurementSet subtables are untouched
+    @test nrow(readtable(joinpath(d, "ANTENNA"))) == nant
+end
+
+# Phase 512: a column of array cells may be given as one array with the rows on its last axis -- the `(cellshape..., nrow)` block `rawblock` returns -- in
+# `write_table` and `addcolumn!`; reading a block and writing it back needed a hand-made vector of slices before.
+@testset "an N-d block is a column of array cells (Phase 512)" begin
+    ms = MeasurementSet(SAMPLE_MS; precision=:full)
+    for col in ("UVW", "FLAG", "DATA", "WEIGHT")
+        blk = rawblock(ms, col)
+        d = joinpath(mktempdir(), "t")
+        write_table(d, "T", ["$col" => blk]; nrow=size(blk, ndims(blk)))
+        t = readtable(d; precision=:full)
+        @test nrow(t) == size(blk, ndims(blk))
+        @test rawblock(t, col) == blk && eltype(rawblock(t, col)) == eltype(blk)
+        @test column(t, col)[2] == selectdim(blk, ndims(blk), 2)
+    end
+    # the number of rows follows from the block, and a mismatch is an error
+    blk = rawblock(ms, "UVW")
+    d = joinpath(mktempdir(), "t"); write_table(d, "T", ["UVW" => blk, "A" => collect(1:size(blk, 2))])
+    @test nrow(readtable(d)) == size(blk, 2)
+    @test_throws ArgumentError write_table(joinpath(mktempdir(), "t"), "T", ["UVW" => blk]; nrow=size(blk, 2) - 1)
+    # a Vector of cells is unchanged, and the cells of a block are copies
+    cells = [[1.0, 2.0], [3.0, 4.0]]; m = [1.0 3.0; 2.0 4.0]
+    a = joinpath(mktempdir(), "a"); write_table(a, "T", ["X" => cells]; nrow=2)
+    b = joinpath(mktempdir(), "b"); write_table(b, "T", ["X" => m]; nrow=2)
+    @test column(readtable(a), "X")[:] == column(readtable(b), "X")[:] == cells
+    m[1, 1] = 99.0
+    @test column(readtable(b), "X")[1] == [1.0, 2.0]
+    # addcolumn! takes a block too
+    p = joinpath(mktempdir(), "p"); write_table(p, "T", ["A" => [1, 2, 3]]; nrow=3)
+    edit(p) do e; addcolumn!(e, "V", [1.0 2.0 3.0; 4.0 5.0 6.0]); end
+    @test column(readtable(p), "V")[3] == [3.0, 6.0]
+    # ... also through a RefTable view and a ConcatTable view
+    q = joinpath(mktempdir(), "q"); write_table(q, "T", ["A" => [1, 2, 3, 4]]; nrow=4)
+    rv = query(readtable(q), "A > 2")
+    edit(rv) do e; addcolumn!(e, "V", [1.0 2.0; 3.0 4.0]); end
+    @test column(readtable(q), "V")[3] == [1.0, 3.0] && column(readtable(q), "V")[4] == [2.0, 4.0]
+end

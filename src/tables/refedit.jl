@@ -242,3 +242,7 @@ removerows!(::RefEditTable, rows) = error(
     "(`RefTable::removeRow` only shrinks the in-memory selection, never " *
     "touching the parent — there is no I/O for this to do) — build a " *
     "new RefTable via `query` instead")
+
+# Phase 512: an array with the rows on its last axis (a `rawblock`) is the vector of its slices.
+addcolumn!(t::RefEditTable, name::AbstractString, data::AbstractArray; kwargs...) =
+    addcolumn!(t, name, _rows_of(data); kwargs...)

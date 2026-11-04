@@ -586,7 +586,8 @@ end
         t1 = @elapsed taql(p, "SELECT A, gcount() AS N, gsum(B) AS S GROUP BY A HAVING gcount() > 0 INTO '" * joinpath(d, "g") * "'")
         t2 = @elapsed query(readtable(p), "A > 1 AND B < 4 ORDER BY B")
         println("FIRST ", t1, " ", t2)
-        @assert t1 < 6 && t2 < 3 "first-call latency \$t1 \$t2"
+        # compiled code of a package image is not used under --code-coverage (the Julia 1.10 CI job): latency is only asserted without it
+        Base.JLOptions().code_coverage == 0 && @assert t1 < 6 && t2 < 3 "first-call latency \$t1 \$t2"
         println("OK")
     """
     out = IOBuffer()

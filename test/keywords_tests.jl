@@ -266,3 +266,117 @@ end
     write_table(u, "MYTABLE", Pair{String,Any}["POSITION" => [[1.0, 2, 3]]]; nrow=1)
     @test isempty(columndesc(readtable(u), "POSITION").keywords)
 end
+
+# Phase 505: the whole piecewise workflow of Phases 503-504 -- every table of a `create_ms` MS rewritten with `write_table` (standard names, so the
+# standard keywords are stamped) and MAIN linked to the subtables with `SubTable` keywords -- gives a `validate`-clean MS whose column keywords
+# equal `create_ms`'s on every column of every table.
+@testset "an MS assembled from write_table pieces is valid (Phase 505)" begin
+    ref = joinpath(mktempdir(), "ref.ms"); create_ms(ref; nrow=6, nchan=3, ncorr=2, nant=3)
+    rms = MeasurementSet(ref)
+    new = joinpath(mktempdir(), "new.ms"); mkpath(new)
+    subs = String[]
+    for nm in MSv2.subtablenames(rms)
+        st = subtable(rms, nm)
+        write_table(joinpath(new, nm), nm, Pair{String,Any}[c => collect(column(st, c)[:]) for c in columnnames(st)]; nrow=nrow(st))
+        push!(subs, nm)
+    end
+    main = readtable(ref)
+    kw = Dict{String,Any}("MS_VERSION" => 2.0f0)
+    for nm in subs; kw[nm] = MSv2.SubTable("././" * nm); end
+    write_table(new, "MAIN", Pair{String,Any}[c => collect(column(main, c)[:]) for c in columnnames(main)]; nrow=nrow(main),
+                type="Measurement Set", keywords=kw)
+    @test isempty(validate(MeasurementSet(new)))
+    nbad = 0
+    for nm in vcat(["MAIN"], subs)
+        a = nm == "MAIN" ? readtable(new) : readtable(joinpath(new, nm)); b = nm == "MAIN" ? main : readtable(joinpath(ref, nm))
+        for c in columnnames(a)
+            nbad += repr(columndesc(a, c).keywords) != repr(columndesc(b, c).keywords)
+        end
+    end
+    @test nbad == 0
+    @test length(subs) >= 10
+    _HAVE_CASACORE && @test size(CCT.Table(new)[:TIME]) == (6,)
+end
+
+# Phase 508: a `SubTable` link is stored the way casacore resolves it ("././NAME" = inside the table's directory).  "./NAME" is a SIBLING to casacore and
+# a bare "NAME" is relative to the working directory, but our reader accepted both, so a sloppy link read back here and not in casacore; `SubTable("")`
+# linked the table to itself.
+@testset "SubTable links are stored in casacore's form (Phase 508)" begin
+    stored(d, nm) = (kw = keywords(readtable(d)); kw.values[findfirst(==(nm), kw.names)].name)
+    function mk(link; into=true)
+        d = joinpath(mktempdir(), "n.ms"); mkpath(d)
+        into && cp(joinpath(SAMPLE_MS, "ANTENNA"), joinpath(d, "ANTENNA"))
+        write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0, 2.0]]; nrow=2, keywords=Dict("ANTENNA" => link))
+        return d
+    end
+    for link in ("././ANTENNA", "./ANTENNA", "ANTENNA", "Table: ./ANTENNA", "././ANTENNA/", "  ANTENNA ")
+        d = mk(MSv2.SubTable(link))
+        @test stored(d, "ANTENNA") == "././ANTENNA"
+        @test nrow(subtable(MeasurementSet(d), "ANTENNA")) == 26
+    end
+    # a genuine sibling directory keeps its "./" form; an absolute path is kept
+    base = mktempdir(); main = joinpath(base, "main"); mkpath(main); cp(joinpath(SAMPLE_MS, "ANTENNA"), joinpath(base, "ANTENNA"))
+    write_table(main, "MAIN", Pair{String,Any}["TIME" => [1.0]]; nrow=1, keywords=Dict("ANTENNA" => MSv2.SubTable("./ANTENNA")))
+    @test stored(main, "ANTENNA") == "./ANTENNA" && nrow(subtable(MeasurementSet(main), "ANTENNA")) == 26
+    ab = joinpath(base, "ANTENNA"); d = joinpath(mktempdir(), "m"); mkpath(d)
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0]]; nrow=1, keywords=Dict("ANTENNA" => MSv2.SubTable(ab)))
+    @test stored(d, "ANTENNA") == ab
+    # a link to nothing warns (the subtable may be written afterwards) and an empty one is an error
+    @test_logs (:warn, r"there is no table at") mk(MSv2.SubTable("NOPE"); into=false)
+    @test_throws ArgumentError mk(MSv2.SubTable(""))
+    @test_throws ArgumentError mk(MSv2.SubTable("./"))
+    # setkeyword! canonicalises too
+    d = mk(MSv2.SubTable("././ANTENNA")); cp(joinpath(SAMPLE_MS, "FIELD"), joinpath(d, "FIELD"))
+    MSv2.setkeyword!(d, "FIELD", MSv2.SubTable("FIELD"))
+    @test stored(d, "FIELD") == "././FIELD" && nrow(subtable(MeasurementSet(d), "FIELD")) == 3
+end
+
+# Phase 509: data given to a column of a standard table is checked against the standard type and (fixed) shape; it used to be converted by the writer or die there
+# with a bare MethodError / TypeError, and a 2-vector POSITION was written as it came (an invalid MS to casacore).
+@testset "standard-table columns are checked against the standard type and shape (Phase 509)" begin
+    w(name, cols; kw...) = (d = joinpath(mktempdir(), "t"); write_table(d, name, Pair{String,Any}[cols...]; nrow=length(last(first(cols))), kw...); readtable(d))
+    # exact conversions are made
+    t = w("MAIN", ["TIME" => [1, 2, 3], "ANTENNA1" => [0.0, 1.0, 2.0], "FLAG" => [[1.0 0.0], [0.0 1.0], [0.0 0.0]], "DATA" => [Float32[1 2; 3 4], Float32[1 2; 3 4], Float32[1 2; 3 4]]])
+    @test eltype(column(t, "TIME")) == Float64 && column(t, "TIME")[:] == [1.0, 2.0, 3.0]
+    @test eltype(column(t, "ANTENNA1")) == Int32 && column(t, "FLAG")[1] == [true false]
+    @test eltype(first(column(t, "DATA"))) == ComplexF32 && column(t, "DATA")[2] == ComplexF32[1 2; 3 4]
+    # anything else is an ArgumentError naming the column, the standard type and the row
+    for (nm, col, want) in (("MAIN", "TIME" => ["a", "b"], "TIME"), ("ANTENNA", "NAME" => [1, 2], "NAME"), ("MAIN", "ANTENNA1" => [0.5, 1.0], "ANTENNA1"),
+                            ("MAIN", "FLAG" => [[2.0 0.0]], "FLAG"), ("MAIN", "TIME" => [[1.0, 2.0]], "TIME"), ("ANTENNA", "POSITION" => [1.0, 2.0], "POSITION"))
+        e = try w(nm, [col]); nothing catch err; err end
+        @test e isa ArgumentError && occursin("\"$want\"", e.msg) && occursin("standard table \"$nm\"", e.msg)
+    end
+    # a fixed standard shape is enforced (the `standard` option); `standard=false` leaves the data alone
+    e = try w("ANTENNA", ["POSITION" => [[1.0, 2.0], [3.0, 4.0]]]); nothing catch err; err end
+    @test e isa ArgumentError && occursin("shape (3,)", e.msg) && occursin("row 1", e.msg)
+    @test size(column(w("ANTENNA", ["POSITION" => [[1.0, 2.0]]]; standard=false), "POSITION")[1]) == (2,)
+    @test size(column(w("ANTENNA", ["POSITION" => [[1.0, 2.0, 3.0]]]), "POSITION")[1]) == (3,)
+    # other table names are not touched
+    @test column(w("MYTABLE", ["TIME" => ["a", "b"]]), "TIME")[:] == ["a", "b"]
+end
+
+# Phase 513: a non-standard subtable (LOFAR's `LOFAR_ANTENNA_FIELD`, with ragged array columns) linked into a hand-assembled MS is carried by `copyms`, `copytable` and
+# the query verbs like a standard one, and `validate` leaves it alone (no standard schema).
+@testset "a non-standard subtable survives the whole pipeline (Phase 513)" begin
+    d = joinpath(mktempdir(), "n.ms"); mkpath(d)
+    for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW"); cp(joinpath(SAMPLE_MS, nm), joinpath(d, nm)); end
+    off = [Float64.(reshape(1:12, 3, 4)), Float64.(reshape(1:18, 3, 6))]
+    write_table(joinpath(d, "LOFAR_ANTENNA_FIELD"), "LOFAR_ANTENNA_FIELD",
+                ["ANTENNA_ID" => Int32[0, 1], "NAME" => ["LBA", "HBA"], "ELEMENT_OFFSET" => off]; nrow=2)
+    links = Dict{String,Any}(nm => MSv2.SubTable("././" * nm) for nm in ("ANTENNA", "FIELD", "SPECTRAL_WINDOW", "LOFAR_ANTENNA_FIELD")); links["MS_VERSION"] = 2.0f0
+    write_table(d, "MAIN", Pair{String,Any}["TIME" => [1.0, 2.0], "ANTENNA1" => Int32[0, 1], "ANTENNA2" => Int32[1, 0]]; nrow=2, type="Measurement Set", keywords=links)
+    ms = MeasurementSet(d)
+    @test "LOFAR_ANTENNA_FIELD" in MSv2.subtablenames(ms) && nrow(ms.LOFAR_ANTENNA_FIELD) == 2
+    @test !any(i -> occursin("LOFAR", i), validate(ms))
+    o = joinpath(mktempdir(), "o.ms"); copyms(d, o; rows=1:1)
+    mo = MeasurementSet(o)
+    @test nrow(mo) == 1 && "LOFAR_ANTENNA_FIELD" in MSv2.subtablenames(mo)
+    @test column(mo.LOFAR_ANTENNA_FIELD, "ELEMENT_OFFSET")[2] == off[2]
+    c = joinpath(mktempdir(), "c"); copytable(c, ms)
+    @test column(readtable(joinpath(c, "LOFAR_ANTENNA_FIELD")), "ELEMENT_OFFSET")[1] == off[1]
+    s = joinpath(mktempdir(), "s.ms"); copyms(d, s; subtables=["LOFAR_ANTENNA_FIELD"])
+    @test MSv2.subtablenames(MeasurementSet(s)) == ["LOFAR_ANTENNA_FIELD"]
+    j = join(ms, ms.ANTENNA; on="ANTENNA1", rightcols=["NAME"])
+    @test length(column(j, "NAME")[:]) == 2
+    @test nrow(query(ms, "ANTENNA1 == 0")) == 1
+end

@@ -1134,3 +1134,7 @@ Base.show(io::IO, t::EditTable) =
           isempty(t.addcols) ? "" : ", +$(length(t.addcols)) col",
           isempty(t.dropcols) ? "" : ", -$(length(t.dropcols)) col",
           t.flushed ? ", flushed" : "", ")")
+
+# Phase 512: an array with the rows on its last axis (a `rawblock`) is the vector of its slices.
+addcolumn!(t::EditTable, name::AbstractString, data::AbstractArray; kwargs...) =
+    addcolumn!(t, name, _rows_of(data); kwargs...)

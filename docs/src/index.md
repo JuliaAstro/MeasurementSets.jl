@@ -38,8 +38,13 @@ sources (`DataFrame(subtable(ms, "ANTENNA"))`).
 **Write** — [`write_table`](@ref) / [`create_ms`](@ref) / [`copyms`](@ref)
 / [`copytable`](@ref) create conformant tables, preserving each column's
 storage-manager / engine / compression kind (or choosing one via `tsm=` /
-`ism=` / `engines=` / `dysco=` / `storage=` kwargs). Verified
-byte-for-byte against casacore.
+`ism=` / `engines=` / `dysco=` / `storage=` kwargs). A table written under
+a standard name (`"MAIN"`, `"ANTENNA"`, …) gets the standard unit / `MEASINFO`
+keywords and its columns are checked against the schema, and `SubTable`
+keyword values link existing subtables, so a Measurement Set can be
+assembled from pieces (see the [guide](guide.md)); a column of array cells
+may be one [`rawblock`](@ref)-shaped array. Verified byte-for-byte against
+casacore.
 
 **Edit in place** — [`edit`](@ref)`(path) do t … end`: overwrite cells /
 whole columns, [`addrows!`](@ref), [`removerows!`](@ref),

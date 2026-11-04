@@ -234,3 +234,7 @@ removecolumn!(::ConcatEditTable, name::AbstractString) = error(
     "(ConcatTable::removeColumn throws unconditionally — unlike " *
     "RefTable, there's no view-level-hide analogue) — remove the " *
     "column from each part directly instead")
+
+# Phase 512: an array with the rows on its last axis (a `rawblock`) is the vector of its slices.
+addcolumn!(t::ConcatEditTable, name::AbstractString, data::AbstractArray; kwargs...) =
+    addcolumn!(t, name, _rows_of(data); kwargs...)

@@ -11830,3 +11830,72 @@ The keywords equal `create_ms`'s (test in `keywords_tests.jl`).
 
 Note on Phase 502: on Julia 1.10 the precompile workload raises the allocation of a ragged SSM-indirect `getcolumn` from 1.6x to 2.3x the payload (about 370 B per cell,
 found by the x86-64 Docker run); the Phase 239 guard's bound is now 3x (the bug it was written for added many times the payload).
+
+### Phase 505 — an MS assembled from `write_table` pieces is valid (end-to-end check of Phases 503–504)
+
+Every table of a `create_ms` MS rewritten with `write_table` under its standard name and MAIN linked to the subtables with `SubTable` keywords
+gives a `validate`-clean MeasurementSet whose column keywords (`QuantumUnits` / `MEASINFO` / `CATEGORY`) equal `create_ms`'s on every column of every
+table, and Casacore.jl reads it. Permanent test in `keywords_tests.jl`. (The CASA `ms.open` check of the same MS could not be run this session: the
+CASA disk image was not mounted and attaching it asks to accept a license agreement.) No code change.
+
+CI follow-up to Phase 502 (Julia 1.10 job of PR #143): the Phase 413 `readtable` allocation bound is 100 KB (92.3 KB with the workload on 1.10), and the
+fresh-process first-call latency assertion is skipped when Julia runs with `--code-coverage` (the 1.10 job does): a package image's compiled code is not used
+then, so the first `taql` took 20 s there.
+
+### Phase 506 — allocation guards under `--code-coverage` (no bug found)
+
+The Julia 1.10 CI job runs with coverage, which the earlier local and Docker runs did not. The allocation / latency guard files (`perf_guard`, `blockcolumn`,
+`indirect`, `ssm`, `tsm`, `ism_writer`) now pass with `--code-coverage=user` on Julia 1.13 (arm64) and on Julia 1.10 x86-64 (Docker), after the Phase 502
+follow-up. No code change.
+
+### Phase 507 — guide: assembling a Measurement Set from pieces
+
+`docs/src/guide.md` gets a section for the workflow of Phases 503–505: write a MAIN under its standard name (standard column keywords stamped), link
+pre-existing subtables with `MeasurementSets.SubTable` keyword values, open the result as a `MeasurementSet`. The example is run by the docs-examples test; the
+docs build has no warnings or errors. No code change.
+
+### Phase 508 — `SubTable` links are stored and read the way casacore resolves them
+
+Probing the slips a user makes with the Phase 503 `SubTable` keyword: real Measurement Sets store a subtable inside the MS directory as `"././NAME"`, but
+`"./NAME"` is a *sibling* directory to casacore and a bare `"NAME"` is relative to the working directory, while our reader resolved every relative form inside the
+table directory — so a sloppy link read back fine here and not in casacore — and `SubTable("")` linked the table to itself. `write_table(...; keywords)` and
+`setkeyword!` now store a plain relative name that exists inside the directory as `"././NAME"` (a real sibling keeps `"./NAME"`, an absolute path is kept), warn when
+the target does not exist (it may be written afterwards) and reject an empty name; and the reader resolves a stored `"./NAME"` as a sibling like `RefTable` /
+`ConcatTable` paths already did (`"././NAME"`, absolute paths and names without `./` read as before). Tests in `keywords_tests.jl`; guide updated.
+
+### Phase 509 — standard-table columns are checked against the standard type and shape
+
+Another slip with the piecewise workflow: `write_table` of `"MAIN"`, `"ANTENNA"`, ... converts a column to the standard type, but data of another type died in the
+writer with a bare `MethodError: no method matching Float64(::String)` (or a `TypeError` for `FLAG` given doubles), and cells of another shape were written as they were
+(a 2-vector `ANTENNA.POSITION`, which casacore reads as an invalid MS). `_fit_standard` converts exactly-convertible values (integers to doubles, `Float32` to
+`ComplexF32`, `1.0` to `true`) and raises an `ArgumentError` naming the column, the standard type and the row for anything else; a fixed standard cell shape is enforced
+unless `standard=false`. Other table names are untouched. Test in `keywords_tests.jl`; guide updated.
+
+### Phase 510 — `validate` reports a dangling subtable link and accepts a path
+
+Probing a partly assembled Measurement Set: `validate(ms)` is documented never to throw, but a subtable link whose target is gone raised "not a table directory" from
+inside it; it now reports `FIELD: the subtable cannot be opened (...)` and goes on. `validate(path)` (a directory) is new and reports an unreadable MAIN as a problem.
+(`subtable(ms, "ABSENT")` keeps its `KeyError`.) Tests in `schema_tests.jl`.
+
+### Phase 511 — `copytable` carries the subtables its source's keywords name
+
+Probing a partly assembled MS: `copytable(dst, t)` of a table with subtable keywords (a MAIN) copied the keywords but not the tables, so the copy's `ANTENNA` / `FIELD` links
+pointed at directories that did not exist (also for a query result, a `RefTable` of such a MAIN and a `MeasurementSet`; `SELECT ... INTO` goes through it). Like casacore's deep copy
+(`TableCopy::copySubTables`) the referenced tables are now copied whole into `dst` and linked as `././NAME`; a link whose target cannot be read is dropped with a warning; the
+destination is removed again if anything fails. `copyms` / `write_ms` are unchanged (they copy their subtables themselves). Tests in `writer_tests.jl`.
+
+### Phase 512 — a block is a column: `write_table` / `addcolumn!` take the `rawblock` shape
+
+A column of array cells can be given as one array whose last axis is the rows -- the `(cellshape..., nrow)` block `rawblock` returns -- in `write_table` and in
+`addcolumn!` (also through `RefTable` / `ConcatTable` views): `write_table(dir, "T", ["DATA" => rawblock(t, "DATA")])`. Each cell is a copy of its slice; before, a block
+had to be split into a vector of slices by hand ("must be a vector with one entry per row"). Vectors are unchanged. Tests in `writer_tests.jl`; guide updated.
+
+### Phase 513 — a non-standard subtable survives the whole pipeline (no bug found)
+
+A LOFAR-style `LOFAR_ANTENNA_FIELD` subtable (ragged array columns) linked into a hand-assembled Measurement Set is carried by `copyms` (also with `rows=` and `subtables=`) and
+`copytable` (Phase 511), is reachable as `ms.LOFAR_ANTENNA_FIELD`, joins and queries like a standard one, and `validate` leaves it alone. Permanent test in `keywords_tests.jl`; no code change.
+
+### Phase 514 — README / docs index mention the piecewise-assembly features
+
+The "Write" paragraphs of `README.md` and `docs/src/index.md` now mention standard-name keyword stamping and schema checks (Phases 504, 509), `SubTable` keyword values (503, 508)
+and `rawblock`-shaped columns (512). Docs only; the docs build has no warnings.
