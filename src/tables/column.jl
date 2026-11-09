@@ -361,6 +361,34 @@ function rawblock(t::AbstractTable, name::AbstractString;
     return reshape(c.backing, c.cellshape..., c.n)
 end
 
+"""
+    rawblock(t, name, rows::AbstractUnitRange; precision=nothing) -> Array
+
+Alternate rawblock for streaming large data. Should also handle tiled columns.
+"""
+function rawblock(t::AbstractTable, name::AbstractString, rows::AbstractUnitRange{<:Integer};
+                  precision::Union{Nothing,Symbol,Type}=nothing)
+    col = _pcolumn(t, name, precision)
+    n = length(rows)
+    (isempty(rows) || (first(rows) >= 1 && last(rows) <= length(col))) || throw(BoundsError(col, rows))
+    if col isa Column && col.inst isa TiledStMan && n > 0
+        astype = col.target === nothing ? nothing : _narrowtype(juliatype(col.desc.type), col.target)
+        blk = getrows(col.inst, col.index, col.desc, length(col), first(rows), n, typemax(Int); astype)
+        blk === nothing || blk.n != n || return reshape(blk.backing, blk.cellshape..., n)
+    end
+    shp = columndesc(t, name).shape
+    if !(shp isa Dims) && eltype(col) <: AbstractArray && length(col) > 0
+        shp = size(col[isempty(rows) ? 1 : first(rows)])  # a variable-shape column whose cells share one shape
+    end
+    shp isa Dims && !isempty(shp) || throw(ArgumentError(
+        "rawblock: column \"$name\" is not a fixed-shape array column"))
+    out = Array{eltype(eltype(col))}(undef, shp..., n)
+    for (j, r) in enumerate(rows)
+        selectdim(out, length(shp) + 1, j) .= col[r]
+    end
+    return out
+end
+     
 # --- reference / concatenation views --------------------------------
 
 "A column of a [`RefTable`](@ref): row `i` reads parent row `rows[i]`."
