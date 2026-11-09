@@ -414,7 +414,6 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
     Tout = astype === nothing ? T : astype   # astype never narrows Bool (Phase 34/35)
     nd = length(cube.cubeshape)
     cs, ts = cube.cubeshape, cube.tileshape
-    all(cld(cs[d], ts[d]) == 1 for d in 1:nd-1) || return nothing
 
     planeshape = ntuple(d -> cs[d], nd - 1)
     planelen = prod(planeshape)
@@ -426,6 +425,11 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
 
     backing = Vector{Tout}(undef, nrow * planelen)
     nrow == 0 && return BlockColumn(backing, planeshape, nrow)
+    if !all(cld(cs[d], ts[d]) == 1 for d in 1:nd-1)
+        # For tiled leading axes
+        _read_cube_bulk_tiled!(backing, cube, rowpos(1) - 1, nrow, T, bytes, bbytes, coloff, big, Val(nd - 1))
+        return BlockColumn(backing, planeshape, nrow)
+    end
 
     # `rowpos` (both forms `getcolumn` ever passes -- `identity`, or a
     # single-interval `TiledShapeStMan`'s `r -> pos - (lastrow - r)`) is
@@ -464,6 +468,46 @@ function _read_cube_bulk(tsm::TiledStMan, cube::TSMCube, rowpos::Function,
         end
     end
     return BlockColumn(backing, planeshape, nrow)
+end
+
+# `_read_cube_bulk` for a cube where the leading axes are tiled.
+function _read_cube_bulk_tiled!(backing::Vector, cube::TSMCube, p0::Int, nrow::Int, ::Type{T},
+                                bytes, bbytes::Int, coloff::Int, big::Bool, ::Val{NL}) where {T,NL}
+    cs = ntuple(d -> cube.cubeshape[d], Val(NL))
+    ts = ntuple(d -> cube.tileshape[d], Val(NL))
+    tpd = ntuple(d -> cld(cs[d], ts[d]), Val(NL))
+    rpt = cube.tileshape[NL+1]
+    planelen = prod(cs)
+    tileplane = prod(ts)                         # elements of one row's slice of a tile
+    ntl = prod(tpd)                              # tiles per row-tile
+    esz = T === Bool ? 0 : sizeof(T)
+    merge = NL >= 2 && ts[1] == cs[1]            # axes 1 and 2 are contiguous in tile and cell
+    for k in (p0 ÷ rpt):((p0 + nrow - 1) ÷ rpt)
+        plo = max(p0, k * rpt)
+        phi = min(p0 + nrow - 1, (k + 1) * rpt - 1)
+        for lt in CartesianIndices(ntuple(d -> 0:tpd[d]-1, Val(NL)))
+            base = cube.offset + (_colmajor_offset(Tuple(lt), tpd) + ntl * k) * bbytes + coloff
+            los = ntuple(d -> lt[d] * ts[d], Val(NL))
+            ext = ntuple(d -> min(ts[d], cs[d] - los[d]), Val(NL))
+            run = merge ? ext[1] * ext[2] : ext[1]
+            inner = ntuple(d -> d == 1 || (merge && d == 2) ? (0:0) : (0:ext[d]-1), Val(NL))
+            for p in plo:phi
+                srow = (p - k * rpt) * tileplane
+                drow = (p - p0) * planelen
+                for J in CartesianIndices(inner)
+                    j = Tuple(J)
+                    s = srow + _colmajor_offset(j, ts)
+                    doff = drow + _colmajor_offset(ntuple(d -> los[d] + j[d], Val(NL)), cs)
+                    if T === Bool
+                        _rd_bits!(backing, doff, bytes, base, s, run)
+                    else
+                        _rd_run!(backing, doff, T, bytes, base + s * esz, run, big)
+                    end
+                end
+            end
+        end
+    end
+    return backing
 end
 
 """
